@@ -769,55 +769,6 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    for &sq in white_knights.as_slice() {
-        let r = sq / 8;
-        if r >= 3 && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank) {
-            mg_score += 18;
-            eg_score += 8;
-        }
-    }
-    for &sq in black_knights.as_slice() {
-        let r = sq / 8;
-        if r <= 4 && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank) {
-            mg_score -= 18;
-            eg_score -= 8;
-        }
-    }
-    for &sq in white_bishop_sqs.as_slice() {
-        let r = sq / 8;
-        if r >= 3 && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank) {
-            mg_score += 10;
-            eg_score += 6;
-        }
-        let scope = mobility_count(
-            board,
-            sq,
-            Piece {
-                color: Color::White,
-                kind: PieceType::Bishop,
-            },
-        );
-        mg_score += scope * 2;
-        eg_score += scope;
-    }
-    for &sq in black_bishop_sqs.as_slice() {
-        let r = sq / 8;
-        if r <= 4 && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank) {
-            mg_score -= 10;
-            eg_score -= 6;
-        }
-        let scope = mobility_count(
-            board,
-            sq,
-            Piece {
-                color: Color::Black,
-                kind: PieceType::Bishop,
-            },
-        );
-        mg_score -= scope * 2;
-        eg_score -= scope;
-    }
-
     for &sq in white_pawns.as_slice() {
         let f = (sq % 8) as i32;
         let r = (sq / 8) as i32;
@@ -893,10 +844,56 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut white_mob = 0;
     let mut black_mob = 0;
     for &(sq, piece) in white_pieces.as_slice() {
-        white_mob += mobility_count(board, sq, piece);
+        let mobility = mobility_count(board, sq, piece);
+        white_mob += mobility;
+        let r = sq / 8;
+        match piece.kind {
+            PieceType::Knight => {
+                if r >= 3
+                    && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
+                {
+                    mg_score += 18;
+                    eg_score += 8;
+                }
+            }
+            PieceType::Bishop => {
+                if r >= 3
+                    && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
+                {
+                    mg_score += 10;
+                    eg_score += 6;
+                }
+                mg_score += mobility * 2;
+                eg_score += mobility;
+            }
+            _ => {}
+        }
     }
     for &(sq, piece) in black_pieces.as_slice() {
-        black_mob += mobility_count(board, sq, piece);
+        let mobility = mobility_count(board, sq, piece);
+        black_mob += mobility;
+        let r = sq / 8;
+        match piece.kind {
+            PieceType::Knight => {
+                if r <= 4
+                    && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
+                {
+                    mg_score -= 18;
+                    eg_score -= 8;
+                }
+            }
+            PieceType::Bishop => {
+                if r <= 4
+                    && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
+                {
+                    mg_score -= 10;
+                    eg_score -= 6;
+                }
+                mg_score -= mobility * 2;
+                eg_score -= mobility;
+            }
+            _ => {}
+        }
     }
     let mobility_delta = white_mob - black_mob;
     mg_score += mobility_delta * 2;
