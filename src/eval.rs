@@ -9,22 +9,6 @@ pub(crate) fn eval_for_side(board: &Board) -> i32 {
     }
 }
 
-fn king_zone_squares(ksq: u8) -> Vec<u8> {
-    let kf = (ksq % 8) as i8;
-    let kr = (ksq / 8) as i8;
-    let mut out = Vec::with_capacity(9);
-    for df in -1..=1 {
-        for dr in -1..=1 {
-            let nf = kf + df;
-            let nr = kr + dr;
-            if in_bounds(nf, nr) {
-                out.push((nr as u8) * 8 + (nf as u8));
-            }
-        }
-    }
-    out
-}
-
 fn attack_unit_weight(kind: PieceType) -> i32 {
     match kind {
         PieceType::Pawn => 1,
@@ -36,8 +20,9 @@ fn attack_unit_weight(kind: PieceType) -> i32 {
 }
 
 fn king_attack_units(board: &Board, attacker: Color, king_sq: u8) -> i32 {
-    let zone = king_zone_squares(king_sq);
     let mut units = 0;
+    let kf = (king_sq % 8) as i8;
+    let kr = (king_sq / 8) as i8;
 
     for from in 0..64u8 {
         let Some(piece) = board.squares[from as usize] else {
@@ -48,9 +33,17 @@ fn king_attack_units(board: &Board, attacker: Color, king_sq: u8) -> i32 {
         }
 
         let mut hits = 0;
-        for &target in &zone {
-            if piece_attacks_square(&board.squares, from, piece, target) {
-                hits += 1;
+        for df in -1..=1 {
+            for dr in -1..=1 {
+                let nf = kf + df;
+                let nr = kr + dr;
+                if !in_bounds(nf, nr) {
+                    continue;
+                }
+                let target = (nr as u8) * 8 + (nf as u8);
+                if piece_attacks_square(&board.squares, from, piece, target) {
+                    hits += 1;
+                }
             }
         }
         if hits > 0 {
@@ -153,9 +146,19 @@ fn king_safety(
 
     let enemy = color.opposite();
     let mut attacked = 0;
-    for sq in king_zone_squares(ksq) {
-        if is_square_attacked(board, sq, enemy) {
-            attacked += 1;
+    let kf = (ksq % 8) as i8;
+    let kr = (ksq / 8) as i8;
+    for df in -1..=1 {
+        for dr in -1..=1 {
+            let nf = kf + df;
+            let nr = kr + dr;
+            if !in_bounds(nf, nr) {
+                continue;
+            }
+            let sq = (nr as u8) * 8 + (nf as u8);
+            if is_square_attacked(board, sq, enemy) {
+                attacked += 1;
+            }
         }
     }
     score -= attacked * 6;
@@ -790,7 +793,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut black_mob = 0;
     for sq in 0..64_usize {
         if let Some(p) = board.squares[sq] {
-            let m = mobility_from(board, sq as u8, p).len() as i32;
+            let m = mobility_count(board, sq as u8, p);
             if p.color == Color::White {
                 white_mob += m;
             } else {

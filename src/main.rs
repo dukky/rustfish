@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use book::{build_opening_book, try_book_move, BookEntry};
 use eval::eval_for_side;
-use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, mobility_from, move_to_uci, parse_square, parse_uci_move};
+use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, mobility_count, move_to_uci, parse_square, parse_uci_move};
 use search::{handle_go, piece_attacks_square, piece_value};
-use tt::{board_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
+use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_divide, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 
 const MATE_SCORE: i32 = 30_000;
@@ -87,6 +87,8 @@ struct Board {
     en_passant: Option<u8>,
     halfmove_clock: u32,
     fullmove_number: u32,
+    white_king_sq: Option<u8>,
+    black_king_sq: Option<u8>,
 }
 
 impl Board {
@@ -98,6 +100,8 @@ impl Board {
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
+            white_king_sq: None,
+            black_king_sq: None,
         };
         b.set_startpos();
         b
@@ -113,6 +117,8 @@ impl Board {
         self.en_passant = None;
         self.halfmove_clock = 0;
         self.fullmove_number = 1;
+        self.white_king_sq = None;
+        self.black_king_sq = None;
 
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
@@ -149,6 +155,13 @@ impl Board {
             if rank >= 0 && rank < 8 && file >= 0 && file < 8 {
                 let sq = (rank * 8 + file) as usize;
                 self.squares[sq] = Some(Piece { color, kind });
+                if kind == PieceType::King {
+                    if color == Color::White {
+                        self.white_king_sq = Some(sq as u8);
+                    } else {
+                        self.black_king_sq = Some(sq as u8);
+                    }
+                }
             }
             file += 1;
         }
@@ -185,14 +198,10 @@ impl Board {
     }
 
     fn king_square(&self, color: Color) -> Option<u8> {
-        for i in 0..64 {
-            if let Some(p) = self.squares[i] {
-                if p.color == color && p.kind == PieceType::King {
-                    return Some(i as u8);
-                }
-            }
+        match color {
+            Color::White => self.white_king_sq,
+            Color::Black => self.black_king_sq,
         }
-        None
     }
 
     fn is_in_check(&self, color: Color) -> bool {
@@ -242,6 +251,13 @@ impl Board {
             placed.kind = promo;
         }
         self.squares[mv.to as usize] = Some(placed);
+        if moving_piece.kind == PieceType::King {
+            if moving_piece.color == Color::White {
+                self.white_king_sq = Some(mv.to);
+            } else {
+                self.black_king_sq = Some(mv.to);
+            }
+        }
 
         if mv.is_castle {
             match mv.to {
@@ -359,6 +375,13 @@ impl Board {
 
         self.squares[mv.to as usize] = None;
         self.squares[mv.from as usize] = Some(undo.moved_piece);
+        if undo.moved_piece.kind == PieceType::King {
+            if undo.moved_piece.color == Color::White {
+                self.white_king_sq = Some(mv.from);
+            } else {
+                self.black_king_sq = Some(mv.from);
+            }
+        }
 
         if mv.is_castle {
             match mv.to {

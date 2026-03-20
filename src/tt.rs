@@ -174,6 +174,67 @@ pub(crate) fn board_hash(board: &Board, zobrist: &Zobrist) -> u64 {
     key
 }
 
+pub(crate) fn child_hash(key: u64, board_after: &Board, mv: Move, undo: Undo, zobrist: &Zobrist) -> u64 {
+    let mut next = key;
+    next ^= zobrist.side;
+    next ^= zobrist.castling[undo.castling as usize];
+    next ^= zobrist.castling[board_after.castling as usize];
+
+    if let Some(ep) = undo.en_passant {
+        next ^= zobrist.ep_file[(ep % 8) as usize];
+    }
+    if let Some(ep) = board_after.en_passant {
+        next ^= zobrist.ep_file[(ep % 8) as usize];
+    }
+
+    next ^= zobrist.piece[piece_index(undo.moved_piece)][mv.from as usize];
+
+    let mut placed = undo.moved_piece;
+    if let Some(promo) = mv.promotion {
+        placed.kind = promo;
+    }
+    next ^= zobrist.piece[piece_index(placed)][mv.to as usize];
+
+    if let Some(captured) = undo.captured {
+        let capture_sq = if mv.is_en_passant {
+            if undo.moved_piece.color == Color::White {
+                mv.to - 8
+            } else {
+                mv.to + 8
+            }
+        } else {
+            undo.captured_sq.unwrap_or(mv.to)
+        };
+        next ^= zobrist.piece[piece_index(captured)][capture_sq as usize];
+    }
+
+    if mv.is_castle {
+        let rook = Piece {
+            color: undo.moved_piece.color,
+            kind: PieceType::Rook,
+        };
+        let (rook_from, rook_to) = match mv.to {
+            6 => (7usize, 5usize),
+            2 => (0usize, 3usize),
+            62 => (63usize, 61usize),
+            58 => (56usize, 59usize),
+            _ => (0usize, 0usize),
+        };
+        next ^= zobrist.piece[piece_index(rook)][rook_from];
+        next ^= zobrist.piece[piece_index(rook)][rook_to];
+    }
+
+    next
+}
+
+pub(crate) fn null_move_hash(key: u64, ep_before: Option<u8>, zobrist: &Zobrist) -> u64 {
+    let mut next = key ^ zobrist.side;
+    if let Some(ep) = ep_before {
+        next ^= zobrist.ep_file[(ep % 8) as usize];
+    }
+    next
+}
+
 pub(crate) fn score_to_tt(score: i32, ply: usize) -> i32 {
     if score >= MATE_SCORE - 1000 {
         score + ply as i32

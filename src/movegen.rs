@@ -273,10 +273,10 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool) -> Vec<M
     moves
 }
 
-pub(crate) fn mobility_from(board: &Board, sq: u8, piece: Piece) -> Vec<u8> {
+pub(crate) fn mobility_count(board: &Board, sq: u8, piece: Piece) -> i32 {
     let f = (sq % 8) as i8;
     let r = (sq / 8) as i8;
-    let mut out = Vec::new();
+    let mut count = 0i32;
 
     match piece.kind {
         PieceType::Pawn => {
@@ -286,8 +286,11 @@ pub(crate) fn mobility_from(board: &Board, sq: u8, piece: Piece) -> Vec<u8> {
                 let nr = r + dir;
                 if in_bounds(nf, nr) {
                     let to = (nr as u8) * 8 + (nf as u8);
-                    if board.squares[to as usize].map(|p| p.color != piece.color).unwrap_or(true) {
-                        out.push(to);
+                    if board.squares[to as usize]
+                        .map(|p| p.color != piece.color)
+                        .unwrap_or(true)
+                    {
+                        count += 1;
                     }
                 }
             }
@@ -300,8 +303,11 @@ pub(crate) fn mobility_from(board: &Board, sq: u8, piece: Piece) -> Vec<u8> {
                 let nr = r + dr;
                 if in_bounds(nf, nr) {
                     let to = (nr as u8) * 8 + (nf as u8);
-                    if board.squares[to as usize].map(|p| p.color != piece.color).unwrap_or(true) {
-                        out.push(to);
+                    if board.squares[to as usize]
+                        .map(|p| p.color != piece.color)
+                        .unwrap_or(true)
+                    {
+                        count += 1;
                     }
                 }
             }
@@ -319,11 +325,11 @@ pub(crate) fn mobility_from(board: &Board, sq: u8, piece: Piece) -> Vec<u8> {
                     let to = (nr as u8) * 8 + (nf as u8);
                     if let Some(p) = board.squares[to as usize] {
                         if p.color != piece.color {
-                            out.push(to);
+                            count += 1;
                         }
                         break;
                     }
-                    out.push(to);
+                    count += 1;
                     nf += *df;
                     nr += *dr;
                 }
@@ -339,15 +345,19 @@ pub(crate) fn mobility_from(board: &Board, sq: u8, piece: Piece) -> Vec<u8> {
                     let nr = r + dr;
                     if in_bounds(nf, nr) {
                         let to = (nr as u8) * 8 + (nf as u8);
-                        if board.squares[to as usize].map(|p| p.color != piece.color).unwrap_or(true) {
-                            out.push(to);
+                        if board.squares[to as usize]
+                            .map(|p| p.color != piece.color)
+                            .unwrap_or(true)
+                        {
+                            count += 1;
                         }
                     }
                 }
             }
         }
     }
-    out
+
+    count
 }
 
 fn gen_sliders(

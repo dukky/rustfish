@@ -156,6 +156,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 d,
                 alpha,
                 beta,
+                hash,
                 &mut search,
                 engine,
                 &mut root_moves,
@@ -199,13 +200,13 @@ fn search_root(
     depth: i32,
     mut alpha: i32,
     beta: i32,
+    key: u64,
     search: &mut Search,
     engine: &mut EngineState,
     root_moves: &mut Vec<Move>,
     rep_stack: &mut Vec<u64>,
 ) -> (i32, Option<Move>, bool) {
     let alpha_orig = alpha;
-    let key = board_hash(board, &engine.zobrist);
     let tt_move = engine.tt.get(key).and_then(|e| e.best);
     order_moves(
         board,
@@ -225,7 +226,7 @@ fn search_root(
         }
 
         let undo = board.make_move(mv);
-        let child_key = board_hash(board, &engine.zobrist);
+        let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
 
         let mut score;
@@ -239,6 +240,7 @@ fn search_root(
                 search,
                 engine,
                 rep_stack,
+                child_key,
                 Some(mv),
                 true,
                 true,
@@ -253,6 +255,7 @@ fn search_root(
                 search,
                 engine,
                 rep_stack,
+                child_key,
                 Some(mv),
                 true,
                 true,
@@ -267,6 +270,7 @@ fn search_root(
                     search,
                     engine,
                     rep_stack,
+                    child_key,
                     Some(mv),
                     true,
                     true,
@@ -344,6 +348,7 @@ fn negamax(
     search: &mut Search,
     engine: &mut EngineState,
     rep_stack: &mut Vec<u64>,
+    key: u64,
     prev_move: Option<Move>,
     allow_null: bool,
     allow_iid: bool,
@@ -357,7 +362,6 @@ fn negamax(
         return eval_for_side(board);
     }
 
-    let key = board_hash(board, &engine.zobrist);
     if board.halfmove_clock >= 100 {
         return 0;
     }
@@ -383,7 +387,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack);
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key);
     }
 
     let static_eval = if in_check { None } else { Some(eval_for_side(board)) };
@@ -392,7 +396,7 @@ fn negamax(
         if beta - alpha <= 1 && depth <= 2 {
             let margin = if depth == 1 { 120 } else { 220 };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack);
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key);
             }
         }
 
@@ -439,7 +443,7 @@ fn negamax(
             let mut best_iid_score = -INF;
             for mv in iid_moves.into_iter().take(8) {
                 let undo = board.make_move(mv);
-                let child_key = board_hash(board, &engine.zobrist);
+                let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
                 rep_stack.push(child_key);
                 let s = -negamax(
                     board,
@@ -450,6 +454,7 @@ fn negamax(
                     search,
                     engine,
                     rep_stack,
+                    child_key,
                     Some(mv),
                     true,
                     false,
@@ -492,7 +497,7 @@ fn negamax(
                 board.fullmove_number = board.fullmove_number.saturating_add(1);
             }
 
-            let child_key = board_hash(board, &engine.zobrist);
+            let child_key = null_move_hash(key, old_ep, &engine.zobrist);
             rep_stack.push(child_key);
             let reduction = 2 + depth / 4;
             let score = -negamax(
@@ -504,6 +509,7 @@ fn negamax(
                 search,
                 engine,
                 rep_stack,
+                child_key,
                 None,
                 false,
                 false,
@@ -565,7 +571,7 @@ fn negamax(
         }
 
         let undo = board.make_move(mv);
-        let child_key = board_hash(board, &engine.zobrist);
+        let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
 
         let mut score;
@@ -579,6 +585,7 @@ fn negamax(
                 search,
                 engine,
                 rep_stack,
+                child_key,
                 Some(mv),
                 true,
                 true,
@@ -601,6 +608,7 @@ fn negamax(
                 search,
                 engine,
                 rep_stack,
+                child_key,
                 Some(mv),
                 true,
                 true,
@@ -616,6 +624,7 @@ fn negamax(
                     search,
                     engine,
                     rep_stack,
+                    child_key,
                     Some(mv),
                     true,
                     true,
@@ -632,6 +641,7 @@ fn negamax(
                     search,
                     engine,
                     rep_stack,
+                    child_key,
                     Some(mv),
                     true,
                     true,
@@ -697,6 +707,7 @@ fn quiescence(
     search: &mut Search,
     engine: &mut EngineState,
     rep_stack: &mut Vec<u64>,
+    key: u64,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -707,7 +718,6 @@ fn quiescence(
         return 0;
     }
 
-    let key = board_hash(board, &engine.zobrist);
     if rep_stack.iter().rev().skip(1).any(|k| *k == key) {
         return 0;
     }
@@ -779,9 +789,9 @@ fn quiescence(
         }
 
         let undo = board.make_move(mv);
-        let child_key = board_hash(board, &engine.zobrist);
+        let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
-        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack);
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key);
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -812,7 +822,7 @@ fn order_moves(
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) {
-    moves.sort_by_key(|m| {
+    moves.sort_by_cached_key(|m| {
         Reverse(move_order_score(
             board,
             *m,
