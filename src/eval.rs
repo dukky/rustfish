@@ -1,5 +1,57 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct SqList {
+    data: [u8; 16],
+    len: usize,
+}
+
+impl SqList {
+    fn new() -> Self {
+        Self {
+            data: [0; 16],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, sq: u8) {
+        if self.len < self.data.len() {
+            self.data[self.len] = sq;
+            self.len += 1;
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PieceList {
+    data: [(u8, Piece); 16],
+    len: usize,
+}
+
+impl PieceList {
+    fn new() -> Self {
+        Self {
+            data: [(0, Piece { color: Color::White, kind: PieceType::Pawn }); 16],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, sq: u8, piece: Piece) {
+        if self.len < self.data.len() {
+            self.data[self.len] = (sq, piece);
+            self.len += 1;
+        }
+    }
+
+    fn as_slice(&self) -> &[(u8, Piece)] {
+        &self.data[..self.len]
+    }
+}
+
 pub(crate) fn eval_for_side(board: &Board) -> i32 {
     let s = evaluate(board);
     if board.side_to_move == Color::White {
@@ -173,31 +225,8 @@ fn king_safety(
     score
 }
 
-fn is_connected_pawn(pawns: &[u8], sq: u8, color: Color) -> bool {
-    let f = (sq % 8) as i32;
-    let r = (sq / 8) as i32;
-    for &p in pawns {
-        if p == sq {
-            continue;
-        }
-        let pf = (p % 8) as i32;
-        let pr = (p / 8) as i32;
-        if (pf - f).abs() == 1 {
-            match color {
-                Color::White => {
-                    if pr == r || pr == r - 1 {
-                        return true;
-                    }
-                }
-                Color::Black => {
-                    if pr == r || pr == r + 1 {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+fn has_pawn_bits(mask: &[u8; 8], file: usize, bits: u8) -> bool {
+    (mask[file] & bits) != 0
 }
 
 fn is_supported_by_pawn(board: &Board, sq: u8, color: Color) -> bool {
@@ -230,12 +259,25 @@ fn is_supported_by_pawn(board: &Board, sq: u8, color: Color) -> bool {
     false
 }
 
-fn is_backward_pawn(board: &Board, pawns: &[u8], sq: u8, color: Color, passed: bool) -> bool {
+fn is_connected_pawn(pawn_masks: &[u8; 8], sq: u8, color: Color) -> bool {
+    let f = (sq % 8) as usize;
+    let r = (sq / 8) as u8;
+    let mut rank_bits = 1u8 << r;
+    match color {
+        Color::White if r > 0 => rank_bits |= 1u8 << (r - 1),
+        Color::Black if r < 7 => rank_bits |= 1u8 << (r + 1),
+        _ => {}
+    }
+    (f > 0 && has_pawn_bits(pawn_masks, f - 1, rank_bits))
+        || (f < 7 && has_pawn_bits(pawn_masks, f + 1, rank_bits))
+}
+
+fn is_backward_pawn(board: &Board, pawn_masks: &[u8; 8], sq: u8, color: Color, passed: bool) -> bool {
     if passed {
         return false;
     }
 
-    let f = (sq % 8) as i32;
+    let f = (sq % 8) as usize;
     let r = (sq / 8) as i32;
     let advance_rank = match color {
         Color::White => r + 1,
@@ -245,35 +287,19 @@ fn is_backward_pawn(board: &Board, pawns: &[u8], sq: u8, color: Color, passed: b
         return false;
     }
 
-    let mut has_adjacent_support = false;
-    for &p in pawns {
-        if p == sq {
-            continue;
-        }
-        let pf = (p % 8) as i32;
-        let pr = (p / 8) as i32;
-        if (pf - f).abs() != 1 {
-            continue;
-        }
-        match color {
-            Color::White if pr <= r => {
-                has_adjacent_support = true;
-                break;
-            }
-            Color::Black if pr >= r => {
-                has_adjacent_support = true;
-                break;
-            }
-            _ => {}
-        }
-    }
+    let support_bits = match color {
+        Color::White => ((1u16 << (r as u32 + 1)) - 1) as u8,
+        Color::Black => !((1u8 << (r as u32)) - 1),
+    };
+    let has_adjacent_support = (f > 0 && has_pawn_bits(pawn_masks, f - 1, support_bits))
+        || (f < 7 && has_pawn_bits(pawn_masks, f + 1, support_bits));
     if has_adjacent_support {
         return false;
     }
 
     let enemy = color.opposite();
     for df in [-1, 1] {
-        let ef = f + df;
+        let ef = f as i32 + df;
         let er = match color {
             Color::White => advance_rank + 1,
             Color::Black => advance_rank - 1,
@@ -295,46 +321,27 @@ fn is_backward_pawn(board: &Board, pawns: &[u8], sq: u8, color: Color, passed: b
     false
 }
 
-fn is_outpost_square(board: &Board, sq: u8, color: Color) -> bool {
+fn is_outpost_square(
+    sq: u8,
+    color: Color,
+    white_min_pawn_rank: &[i8; 8],
+    black_max_pawn_rank: &[i8; 8],
+) -> bool {
     let f = (sq % 8) as i32;
-    let r = (sq / 8) as i32;
-    let enemy = color.opposite();
-
+    let r = (sq / 8) as i8;
     for df in [-1, 1] {
         let ef = f + df;
-        if ef < 0 || ef >= 8 {
+        if !(0..8).contains(&ef) {
             continue;
         }
-        match color {
-            Color::White => {
-                for er in (r + 1)..8 {
-                    let esq = (er as u8) * 8 + (ef as u8);
-                    if board.squares[esq as usize]
-                        == Some(Piece {
-                            color: enemy,
-                            kind: PieceType::Pawn,
-                        })
-                    {
-                        return false;
-                    }
-                }
-            }
-            Color::Black => {
-                for er in (0..r).rev() {
-                    let esq = (er as u8) * 8 + (ef as u8);
-                    if board.squares[esq as usize]
-                        == Some(Piece {
-                            color: enemy,
-                            kind: PieceType::Pawn,
-                        })
-                    {
-                        return false;
-                    }
-                }
-            }
+        let enemy_pawn_blocks = match color {
+            Color::White => black_max_pawn_rank[ef as usize] > r,
+            Color::Black => white_min_pawn_rank[ef as usize] < r,
+        };
+        if enemy_pawn_blocks {
+            return false;
         }
     }
-
     true
 }
 
@@ -524,20 +531,22 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut mg_score = 0;
     let mut eg_score = 0;
 
-    let mut white_pawns: Vec<u8> = Vec::new();
-    let mut black_pawns: Vec<u8> = Vec::new();
-    let mut white_pieces: Vec<(u8, Piece)> = Vec::new();
-    let mut black_pieces: Vec<(u8, Piece)> = Vec::new();
-    let mut white_rooks: Vec<u8> = Vec::new();
-    let mut black_rooks: Vec<u8> = Vec::new();
-    let mut white_knights: Vec<u8> = Vec::new();
-    let mut black_knights: Vec<u8> = Vec::new();
-    let mut white_bishop_sqs: Vec<u8> = Vec::new();
-    let mut black_bishop_sqs: Vec<u8> = Vec::new();
+    let mut white_pawns = SqList::new();
+    let mut black_pawns = SqList::new();
+    let mut white_pieces = PieceList::new();
+    let mut black_pieces = PieceList::new();
+    let mut white_rooks = SqList::new();
+    let mut black_rooks = SqList::new();
+    let mut white_knights = SqList::new();
+    let mut black_knights = SqList::new();
+    let mut white_bishop_sqs = SqList::new();
+    let mut black_bishop_sqs = SqList::new();
     let mut white_bishops = 0;
     let mut black_bishops = 0;
     let mut white_pawn_files = [0i32; 8];
     let mut black_pawn_files = [0i32; 8];
+    let mut white_pawn_masks = [0u8; 8];
+    let mut black_pawn_masks = [0u8; 8];
     let mut white_min_pawn_rank = [8i8; 8];
     let mut black_max_pawn_rank = [-1i8; 8];
     let mut white_non_pawn_material = 0i32;
@@ -547,12 +556,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut phase = 0i32;
 
     for sq in 0..64_usize {
-        if let Some(p) = board.squares[sq] {
-            if p.color == Color::White {
-                white_pieces.push((sq as u8, p));
-            } else {
-                black_pieces.push((sq as u8, p));
-            }
+            if let Some(p) = board.squares[sq] {
+                if p.color == Color::White {
+                    white_pieces.push(sq as u8, p);
+                } else {
+                    black_pieces.push(sq as u8, p);
+                }
             let (pst_mg, pst_eg) = pst_values(p.kind, p.color, sq as u8);
             let mut mg = piece_value(p.kind) + pst_mg;
             let mut eg = piece_value(p.kind) + pst_eg;
@@ -573,10 +582,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 if p.color == Color::White {
                     white_pawns.push(sq as u8);
                     white_pawn_files[f] += 1;
+                    white_pawn_masks[f] |= 1u8 << rank;
                     white_min_pawn_rank[f] = white_min_pawn_rank[f].min(rank);
                 } else {
                     black_pawns.push(sq as u8);
                     black_pawn_files[f] += 1;
+                    black_pawn_masks[f] |= 1u8 << rank;
                     black_max_pawn_rank[f] = black_max_pawn_rank[f].max(rank);
                 }
             }
@@ -635,7 +646,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         mg_score -= development_score(board, Color::Black);
     }
 
-    for &sq in &white_pawns {
+    for &sq in white_pawns.as_slice() {
         let f = (sq % 8) as usize;
         let r = (sq / 8) as i32;
 
@@ -667,12 +678,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
 
-        if is_connected_pawn(&white_pawns, sq, Color::White) {
+        if is_connected_pawn(&white_pawn_masks, sq, Color::White) {
             mg_score += 8;
             eg_score += 10;
         }
 
-        if is_backward_pawn(board, &white_pawns, sq, Color::White, passed) {
+        if is_backward_pawn(board, &white_pawn_masks, sq, Color::White, passed) {
             mg_score -= 12;
             eg_score -= 6;
         }
@@ -684,7 +695,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    for &sq in &black_pawns {
+    for &sq in black_pawns.as_slice() {
         let f = (sq % 8) as usize;
         let r = (sq / 8) as i32;
 
@@ -716,12 +727,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
 
-        if is_connected_pawn(&black_pawns, sq, Color::Black) {
+        if is_connected_pawn(&black_pawn_masks, sq, Color::Black) {
             mg_score -= 8;
             eg_score -= 10;
         }
 
-        if is_backward_pawn(board, &black_pawns, sq, Color::Black, passed) {
+        if is_backward_pawn(board, &black_pawn_masks, sq, Color::Black, passed) {
             mg_score += 12;
             eg_score += 6;
         }
@@ -733,7 +744,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    for &sq in &white_rooks {
+    for &sq in white_rooks.as_slice() {
         let f = (sq % 8) as usize;
         let r = sq / 8;
         if white_pawn_files[f] == 0 {
@@ -745,7 +756,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             eg_score += 24;
         }
     }
-    for &sq in &black_rooks {
+    for &sq in black_rooks.as_slice() {
         let f = (sq % 8) as usize;
         let r = sq / 8;
         if black_pawn_files[f] == 0 {
@@ -758,23 +769,23 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    for &sq in &white_knights {
+    for &sq in white_knights.as_slice() {
         let r = sq / 8;
-        if r >= 3 && is_outpost_square(board, sq, Color::White) {
+        if r >= 3 && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank) {
             mg_score += 18;
             eg_score += 8;
         }
     }
-    for &sq in &black_knights {
+    for &sq in black_knights.as_slice() {
         let r = sq / 8;
-        if r <= 4 && is_outpost_square(board, sq, Color::Black) {
+        if r <= 4 && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank) {
             mg_score -= 18;
             eg_score -= 8;
         }
     }
-    for &sq in &white_bishop_sqs {
+    for &sq in white_bishop_sqs.as_slice() {
         let r = sq / 8;
-        if r >= 3 && is_outpost_square(board, sq, Color::White) {
+        if r >= 3 && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank) {
             mg_score += 10;
             eg_score += 6;
         }
@@ -789,9 +800,9 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         mg_score += scope * 2;
         eg_score += scope;
     }
-    for &sq in &black_bishop_sqs {
+    for &sq in black_bishop_sqs.as_slice() {
         let r = sq / 8;
-        if r <= 4 && is_outpost_square(board, sq, Color::Black) {
+        if r <= 4 && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank) {
             mg_score -= 10;
             eg_score -= 6;
         }
@@ -807,7 +818,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         eg_score -= scope;
     }
 
-    for &sq in &white_pawns {
+    for &sq in white_pawns.as_slice() {
         let f = (sq % 8) as i32;
         let r = (sq / 8) as i32;
         for df in [-1, 1] {
@@ -823,7 +834,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
     }
-    for &sq in &black_pawns {
+    for &sq in black_pawns.as_slice() {
         let f = (sq % 8) as i32;
         let r = (sq / 8) as i32;
         for df in [-1, 1] {
@@ -848,7 +859,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         &black_pawn_files,
         black_non_pawn_material,
         black_has_queen,
-        &black_pieces,
+        black_pieces.as_slice(),
     ) - king_safety(
         board,
         Color::Black,
@@ -856,7 +867,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         &white_pawn_files,
         white_non_pawn_material,
         white_has_queen,
-        &white_pieces,
+        white_pieces.as_slice(),
     );
     mg_score += king_safety_score;
     eg_score += king_safety_score / 6;
@@ -881,10 +892,10 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
 
     let mut white_mob = 0;
     let mut black_mob = 0;
-    for &(sq, piece) in &white_pieces {
+    for &(sq, piece) in white_pieces.as_slice() {
         white_mob += mobility_count(board, sq, piece);
     }
-    for &(sq, piece) in &black_pieces {
+    for &(sq, piece) in black_pieces.as_slice() {
         black_mob += mobility_count(board, sq, piece);
     }
     let mobility_delta = white_mob - black_mob;
