@@ -78,7 +78,8 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 ## Phase 5 — Practical Strength Tooling
 - [x] Add basic built-in opening book support
 - [x] Add OwnBook UCI option
-- [ ] Add opening book expansion / external plain-text book support
+- [x] Expand built-in opening book depth
+- [ ] Add opening book external plain-text support
 - [ ] Add simple endgame tablebase probing (optional local files)
 - [ ] Add self-play tuning loop (no external crate dependency)
 - [x] Add basic gauntlet script vs fixed opponents (UCI, no deps)
