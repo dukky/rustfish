@@ -12,6 +12,7 @@ pub(crate) struct TTEntry {
     pub(crate) key: u64,
     pub(crate) depth: i16,
     pub(crate) score: i32,
+    pub(crate) static_eval: i16,
     pub(crate) bound: Bound,
     pub(crate) best: Option<Move>,
     pub(crate) age: u8,
@@ -23,9 +24,20 @@ impl Default for TTEntry {
             key: 0,
             depth: -1,
             score: 0,
+            static_eval: i16::MIN,
             bound: Bound::Exact,
             best: None,
             age: 0,
+        }
+    }
+}
+
+impl TTEntry {
+    pub(crate) fn static_eval(self) -> Option<i32> {
+        if self.static_eval == i16::MIN {
+            None
+        } else {
+            Some(self.static_eval as i32)
         }
     }
 }
@@ -74,6 +86,7 @@ impl TransTable {
         key: u64,
         depth: i32,
         score: i32,
+        static_eval: Option<i32>,
         bound: Bound,
         best: Option<Move>,
     ) {
@@ -93,6 +106,9 @@ impl TransTable {
                 key,
                 depth: new_depth,
                 score,
+                static_eval: static_eval
+                    .unwrap_or(i16::MIN as i32)
+                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16,
                 bound,
                 best,
                 age: self.current_age,

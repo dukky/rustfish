@@ -77,6 +77,19 @@ fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) 
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
 }
 
+fn tt_static_eval(entry: crate::tt::TTEntry, ply: usize) -> Option<i32> {
+    let mut se = entry.static_eval()?;
+    let tt_score = score_from_tt(entry.score, ply);
+    if tt_score.abs() < MATE_SCORE - 1000 {
+        match entry.bound {
+            Bound::Lower => se = se.max(tt_score),
+            Bound::Upper => se = se.min(tt_score),
+            Bound::Exact => se = tt_score,
+        }
+    }
+    Some(se)
+}
+
 struct RootWorkerResult {
     best_score: i32,
     best_move: Option<Move>,
@@ -384,7 +397,7 @@ fn search_root_parallel(
     if let Some(mv) = best_move {
         worker_engines[0]
             .tt
-            .store(hash, depth, score_to_tt(best_score, 0), bound, Some(mv));
+            .store(hash, depth, score_to_tt(best_score, 0), None, bound, Some(mv));
     }
 
     (best_score, best_move, completed, total_nodes)
@@ -571,7 +584,7 @@ fn search_root(
     };
     engine
         .tt
-        .store(key, depth, score_to_tt(best_score, 0), bound, best_move);
+        .store(key, depth, score_to_tt(best_score, 0), None, bound, best_move);
 
     (best_score, best_move, true)
 }
@@ -655,7 +668,33 @@ fn negamax(
         return quiescence(board, alpha, beta, search, engine, rep_stack, key);
     }
 
-    let static_eval = if in_check { None } else { Some(eval_for_side(board)) };
+    let alpha_orig = alpha;
+    let tt_entry = engine.tt.get(key);
+    let mut tt_move = None;
+
+    if let Some(entry) = tt_entry {
+        tt_move = entry.best;
+        if entry.depth as i32 >= depth {
+            let tt_score = score_from_tt(entry.score, ply);
+            match entry.bound {
+                Bound::Exact => return tt_score,
+                Bound::Lower if tt_score >= beta => return tt_score,
+                Bound::Upper if tt_score <= alpha => return tt_score,
+                _ => {}
+            }
+        }
+    }
+
+    let raw_static_eval = if in_check {
+        None
+    } else {
+        Some(
+            tt_entry
+                .and_then(|entry| tt_static_eval(entry, ply))
+                .unwrap_or_else(|| eval_for_side(board)),
+        )
+    };
+    let static_eval = raw_static_eval;
 
     let params = engine.search_params;
 
@@ -679,22 +718,6 @@ fn negamax(
             };
             if se - margin >= beta {
                 return se;
-            }
-        }
-    }
-
-    let alpha_orig = alpha;
-    let mut tt_move = None;
-
-    if let Some(entry) = engine.tt.get(key) {
-        tt_move = entry.best;
-        if entry.depth as i32 >= depth {
-            let tt_score = score_from_tt(entry.score, ply);
-            match entry.bound {
-                Bound::Exact => return tt_score,
-                Bound::Lower if tt_score >= beta => return tt_score,
-                Bound::Upper if tt_score <= alpha => return tt_score,
-                _ => {}
             }
         }
     }
@@ -983,7 +1006,14 @@ fn negamax(
             }
             engine
                 .tt
-                .store(key, depth, score_to_tt(alpha, ply), Bound::Lower, best_move);
+                .store(
+                    key,
+                    depth,
+                    score_to_tt(alpha, ply),
+                    raw_static_eval,
+                    Bound::Lower,
+                    best_move,
+                );
             return alpha;
         }
     }
@@ -995,7 +1025,7 @@ fn negamax(
     };
     engine
         .tt
-        .store(key, depth, score_to_tt(best, ply), bound, best_move);
+        .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
 
     best
 }
@@ -1023,8 +1053,9 @@ fn quiescence(
     }
 
     let alpha_orig = alpha;
+    let tt_entry = engine.tt.get(key);
     let mut tt_move = None;
-    if let Some(entry) = engine.tt.get(key) {
+    if let Some(entry) = tt_entry {
         tt_move = entry.best;
         if entry.depth >= 0 {
             let tt_score = score_from_tt(entry.score, 0);
@@ -1039,7 +1070,16 @@ fn quiescence(
 
     let in_check = board.is_in_check(board.side_to_move);
     let mut best_move = None;
-    let static_eval = if in_check { None } else { Some(eval_for_side(board)) };
+    let raw_static_eval = if in_check {
+        None
+    } else {
+        Some(
+            tt_entry
+                .and_then(|entry| tt_static_eval(entry, 0))
+                .unwrap_or_else(|| eval_for_side(board)),
+        )
+    };
+    let static_eval = raw_static_eval;
 
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
@@ -1102,7 +1142,9 @@ fn quiescence(
         }
 
         if score >= beta {
-            engine.tt.store(key, 0, score_to_tt(beta, 0), Bound::Lower, Some(mv));
+            engine
+                .tt
+                .store(key, 0, score_to_tt(beta, 0), raw_static_eval, Bound::Lower, Some(mv));
             return beta;
         }
         if score > alpha {
@@ -1112,7 +1154,9 @@ fn quiescence(
     }
 
     let bound = if alpha <= alpha_orig { Bound::Upper } else { Bound::Exact };
-    engine.tt.store(key, 0, score_to_tt(alpha, 0), bound, best_move.or(tt_move));
+    engine
+        .tt
+        .store(key, 0, score_to_tt(alpha, 0), raw_static_eval, bound, best_move.or(tt_move));
     alpha
 }
 

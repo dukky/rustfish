@@ -21,6 +21,8 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Add repetition detection in search tree (line-based/perpetual handling)
 - [x] Add 50-move rule draw detection in search
 - [x] Add better TT replacement strategy (depth+age hybrid)
+- [x] Store static eval in TT and reuse it for search stand-pat/pruning
+- [x] Store static eval in TT and reuse it for pruning/qsearch eval fallback
 
 ## Phase 2 — Search Quality
 - [x] Null-move pruning
@@ -105,7 +107,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [ ] Track Elo progression over frozen-binary versions
 
 ## Current Focus
-1. Improve search efficiency: continue on deeper eval-cost work and only revisit `Threads` after stronger single-thread baselines are frozen.
+1. Improve search efficiency: keep pushing post-2100 structural single-thread work (TT/eval/search architecture) and only revisit `Threads` after stronger single-thread baselines are frozen.
 2. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
 3. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
 4. Keep refactor healthy: only small follow-up structure changes while strength work continues.
