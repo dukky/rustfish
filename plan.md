@@ -73,7 +73,6 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Reduce eval rescanning overhead with piece-list reuse for king safety and mobility
 - [x] Reduce eval allocation churn and pawn-structure helper rescans
 - [x] Reduce eval duplicate mobility work (reuse bishop mobility in main mobility pass)
-- [x] Reduce eval king-attack duplicate scans by combining attack count, units, and tropism
 - [x] Reduce legal-move filtering cost with exact pin/check-based legality filtering
 - [x] Add experimental root-split `Threads` support with conservative gating for longer/deeper searches
 - [ ] Add optional bitboard backend for speed comparison
