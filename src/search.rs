@@ -97,6 +97,115 @@ struct RootWorkerResult {
     completed: bool,
 }
 
+struct MovePicker {
+    tt_move: Option<Move>,
+    tt_yielded: bool,
+    good_captures: Vec<(Move, i32)>,
+    priority_quiets: Vec<(Move, i32)>,
+    quiets: Vec<(Move, i32)>,
+    bad_captures: Vec<(Move, i32)>,
+    total: usize,
+}
+
+impl MovePicker {
+    fn new(
+        board: &mut Board,
+        engine: &EngineState,
+        tt_move: Option<Move>,
+        counter_move: Option<Move>,
+        prev_move: Option<Move>,
+        killers: &[Option<Move>; 2],
+        history: &HistoryTable,
+        captures_only: bool,
+    ) -> Self {
+        let moves = board.generate_legal_moves(captures_only);
+        if moves.is_empty() {
+            return Self {
+                tt_move: None,
+                tt_yielded: true,
+                good_captures: Vec::new(),
+                priority_quiets: Vec::new(),
+                quiets: Vec::new(),
+                bad_captures: Vec::new(),
+                total: 0,
+            };
+        }
+
+        let side = board.side_to_move;
+        let mut picker = Self {
+            tt_move: None,
+            tt_yielded: false,
+            good_captures: Vec::new(),
+            priority_quiets: Vec::new(),
+            quiets: Vec::new(),
+            bad_captures: Vec::new(),
+            total: 0,
+        };
+
+        for mv in moves {
+            picker.total += 1;
+            if Some(mv) == tt_move {
+                picker.tt_move = Some(mv);
+                continue;
+            }
+
+            if is_capture_move(board, mv) {
+                let see_score = see(board, mv);
+                let score = capture_stage_score_from_see(board, mv, see_score);
+                if see_score >= 0 {
+                    picker.good_captures.push((mv, score));
+                } else {
+                    picker.bad_captures.push((mv, score));
+                }
+                continue;
+            }
+
+            let score = quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
+            if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
+                picker.priority_quiets.push((mv, score));
+            } else {
+                picker.quiets.push((mv, score.max(history_score(history, side, mv))));
+            }
+        }
+
+        picker
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    fn next(&mut self) -> Option<Move> {
+        if !self.tt_yielded {
+            self.tt_yielded = true;
+            if let Some(mv) = self.tt_move {
+                return Some(mv);
+            }
+        }
+
+        take_best_scored(&mut self.good_captures)
+            .or_else(|| take_best_scored(&mut self.priority_quiets))
+            .or_else(|| take_best_scored(&mut self.quiets))
+            .or_else(|| take_best_scored(&mut self.bad_captures))
+    }
+}
+
+fn take_best_scored(moves: &mut Vec<(Move, i32)>) -> Option<Move> {
+    if moves.is_empty() {
+        return None;
+    }
+
+    let mut best_idx = 0usize;
+    let mut best_score = moves[0].1;
+    for (idx, &(_, score)) in moves.iter().enumerate().skip(1) {
+        if score > best_score {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+    Some(moves.swap_remove(best_idx).0)
+}
+
 fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) -> bool {
     if rep_stack.len() < 2 || halfmove_clock < 4 {
         return false;
@@ -828,7 +937,7 @@ fn negamax(
 
     let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
     let killers = search.killers[ply];
-    let moves = staged_moves(
+    let mut picker = MovePicker::new(
         board,
         engine,
         tt_move,
@@ -836,8 +945,9 @@ fn negamax(
         prev_move,
         &killers,
         &engine.history,
+        false,
     );
-    if moves.is_empty() {
+    if picker.is_empty() {
         if in_check {
             return -MATE_SCORE + ply as i32;
         }
@@ -848,8 +958,9 @@ fn negamax(
     let mut best_move = None;
     let side = board.side_to_move;
     let mut quiets_tried = Vec::new();
+    let mut idx = 0usize;
 
-    for (idx, mv) in moves.into_iter().enumerate() {
+    while let Some(mv) = picker.next() {
         let quiet = !is_capture_move(board, mv);
         let quiet_history = if quiet {
             history_score(&engine.history, side, mv)
@@ -1016,6 +1127,7 @@ fn negamax(
                 );
             return alpha;
         }
+        idx += 1;
     }
 
     let bound = if best <= alpha_orig {
@@ -1090,26 +1202,24 @@ fn quiescence(
         }
     }
 
-    let mut moves = board.generate_legal_moves(!in_check);
-    if moves.is_empty() {
+    let mut picker = MovePicker::new(
+        board,
+        engine,
+        tt_move,
+        None,
+        None,
+        &[None, None],
+        &engine.history,
+        !in_check,
+    );
+    if picker.is_empty() {
         if in_check {
             return -MATE_SCORE + 1;
         }
         return alpha;
     }
 
-    order_moves(
-        board,
-        engine,
-        &mut moves,
-        tt_move,
-        None,
-        None,
-        &[None, None],
-        &engine.history,
-    );
-
-    for mv in moves {
+    while let Some(mv) = picker.next() {
         if !in_check {
             let see_score = see(board, mv);
             if see_score < 0 {
@@ -1243,70 +1353,6 @@ fn capture_stage_score_from_see(board: &Board, mv: Move, see_score: i32) -> i32 
         .map(|p| piece_value(p.kind))
         .unwrap_or(piece_value(PieceType::Pawn));
     see_score * 16 + victim - attacker
-}
-
-fn staged_move_score(
-    board: &Board,
-    engine: &EngineState,
-    side: Color,
-    mv: Move,
-    tt_move: Option<Move>,
-    counter_move: Option<Move>,
-    prev_move: Option<Move>,
-    killers: &[Option<Move>; 2],
-    history: &HistoryTable,
-) -> i32 {
-    if Some(mv) == tt_move {
-        return 4_000_000;
-    }
-
-    if is_capture_move(board, mv) {
-        let see_score = see(board, mv);
-        let bucket_base = if see_score >= 0 { 3_000_000 } else { 0 };
-        return bucket_base + capture_stage_score_from_see(board, mv, see_score);
-    }
-
-    if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
-        return 2_000_000 + quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
-    }
-
-    1_000_000 + history_score(history, side, mv)
-}
-
-fn staged_moves(
-    board: &mut Board,
-    engine: &EngineState,
-    tt_move: Option<Move>,
-    counter_move: Option<Move>,
-    prev_move: Option<Move>,
-    killers: &[Option<Move>; 2],
-    history: &HistoryTable,
-) -> Vec<Move> {
-    let moves = board.generate_legal_moves(false);
-    if moves.is_empty() {
-        return moves;
-    }
-
-    let side = board.side_to_move;
-    let mut scored = Vec::with_capacity(moves.len());
-    for mv in moves {
-        scored.push((
-            mv,
-            staged_move_score(
-                board,
-                engine,
-                side,
-                mv,
-                tt_move,
-                counter_move,
-                prev_move,
-                killers,
-                history,
-            ),
-        ));
-    }
-    scored.sort_unstable_by_key(|&(_, score)| Reverse(score));
-    scored.into_iter().map(|(mv, _)| mv).collect()
 }
 
 pub(crate) fn piece_attacks_square(

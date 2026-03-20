@@ -41,6 +41,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] History heuristic decay per search
 - [x] Side-aware quiet history with counter-move ordering and fail-high maluses
 - [x] One-ply continuation history for quiet move ordering
+- [x] Replace full staged non-root/qsearch move sorting with staged pick-next move picker
 - [x] Pruning stability follow-up (null-move eval gate, priority-quiet LMP/LMR guards)
 - [ ] Tune pruning margins/reductions from gauntlet data
 
