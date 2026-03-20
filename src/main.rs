@@ -51,6 +51,43 @@ fn color_index(color: Color) -> usize {
     }
 }
 
+fn square_mask(sq: u8) -> u64 {
+    1u64 << sq
+}
+
+fn ray_mask_inclusive(from: u8, to: u8) -> u64 {
+    let ff = (from % 8) as i8;
+    let fr = (from / 8) as i8;
+    let tf = (to % 8) as i8;
+    let tr = (to / 8) as i8;
+    let df = tf - ff;
+    let dr = tr - fr;
+
+    let (step_f, step_r) = if df == 0 {
+        (0, dr.signum())
+    } else if dr == 0 {
+        (df.signum(), 0)
+    } else if df.abs() == dr.abs() {
+        (df.signum(), dr.signum())
+    } else {
+        return 0;
+    };
+
+    let mut mask = 0u64;
+    let mut f = ff;
+    let mut r = fr;
+    loop {
+        let sq = (r as u8) * 8 + (f as u8);
+        mask |= square_mask(sq);
+        if f == tf && r == tr {
+            break;
+        }
+        f += step_f;
+        r += step_r;
+    }
+    mask
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum PieceType {
     Pawn,
@@ -218,6 +255,143 @@ impl Board {
         } else {
             false
         }
+    }
+
+    fn legal_filter_state(&self, color: Color) -> (usize, u64, [u64; 64]) {
+        let mut pin_masks = [u64::MAX; 64];
+        let mut check_count = 0usize;
+        let mut evasion_mask = u64::MAX;
+        let Some(king_sq) = self.king_square(color) else {
+            return (check_count, evasion_mask, pin_masks);
+        };
+        let enemy = color.opposite();
+        let kf = (king_sq % 8) as i8;
+        let kr = (king_sq / 8) as i8;
+
+        let mut register_checker = |mask: u64| {
+            check_count += 1;
+            if check_count == 1 {
+                evasion_mask = mask;
+            } else {
+                evasion_mask = 0;
+            }
+        };
+
+        let pawn_dirs: &[(i8, i8)] = match enemy {
+            Color::White => &[(-1, -1), (1, -1)],
+            Color::Black => &[(-1, 1), (1, 1)],
+        };
+        for &(df, dr) in pawn_dirs {
+            let nf = kf + df;
+            let nr = kr + dr;
+            if !in_bounds(nf, nr) {
+                continue;
+            }
+            let sq = (nr as u8) * 8 + (nf as u8);
+            if self.squares[sq as usize]
+                == Some(Piece {
+                    color: enemy,
+                    kind: PieceType::Pawn,
+                })
+            {
+                register_checker(square_mask(sq));
+            }
+        }
+
+        for (df, dr) in [
+            (1, 2),
+            (2, 1),
+            (2, -1),
+            (1, -2),
+            (-1, -2),
+            (-2, -1),
+            (-2, 1),
+            (-1, 2),
+        ] {
+            let nf = kf + df;
+            let nr = kr + dr;
+            if !in_bounds(nf, nr) {
+                continue;
+            }
+            let sq = (nr as u8) * 8 + (nf as u8);
+            if self.squares[sq as usize]
+                == Some(Piece {
+                    color: enemy,
+                    kind: PieceType::Knight,
+                })
+            {
+                register_checker(square_mask(sq));
+            }
+        }
+
+        for df in -1..=1 {
+            for dr in -1..=1 {
+                if df == 0 && dr == 0 {
+                    continue;
+                }
+                let nf = kf + df;
+                let nr = kr + dr;
+                if !in_bounds(nf, nr) {
+                    continue;
+                }
+                let sq = (nr as u8) * 8 + (nf as u8);
+                if self.squares[sq as usize]
+                    == Some(Piece {
+                        color: enemy,
+                        kind: PieceType::King,
+                    })
+                {
+                    register_checker(square_mask(sq));
+                }
+            }
+        }
+
+        for (step_f, step_r, rook_like) in [
+            (1, 0, true),
+            (-1, 0, true),
+            (0, 1, true),
+            (0, -1, true),
+            (1, 1, false),
+            (1, -1, false),
+            (-1, 1, false),
+            (-1, -1, false),
+        ] {
+            let mut blocker = None;
+            let mut f = kf + step_f;
+            let mut r = kr + step_r;
+            while in_bounds(f, r) {
+                let sq = (r as u8) * 8 + (f as u8);
+                if let Some(piece) = self.squares[sq as usize] {
+                    if blocker.is_none() {
+                        if piece.color == color {
+                            blocker = Some(sq);
+                        } else if matches!(piece.kind, PieceType::Queen)
+                            || (rook_like && matches!(piece.kind, PieceType::Rook))
+                            || (!rook_like && matches!(piece.kind, PieceType::Bishop))
+                        {
+                            register_checker(ray_mask_inclusive(king_sq, sq));
+                        }
+                        if piece.color != color {
+                            break;
+                        }
+                    } else {
+                        if piece.color != color
+                            && (matches!(piece.kind, PieceType::Queen)
+                                || (rook_like && matches!(piece.kind, PieceType::Rook))
+                                || (!rook_like && matches!(piece.kind, PieceType::Bishop)))
+                        {
+                            let pinned_sq = blocker.unwrap();
+                            pin_masks[pinned_sq as usize] = ray_mask_inclusive(king_sq, sq);
+                        }
+                        break;
+                    }
+                }
+                f += step_f;
+                r += step_r;
+            }
+        }
+
+        (check_count, evasion_mask, pin_masks)
     }
 
     fn make_move(&mut self, mv: Move) -> Undo {
@@ -434,14 +608,32 @@ impl Board {
 
     fn generate_legal_moves(&mut self, captures_only: bool) -> Vec<Move> {
         let side = self.side_to_move;
+        let (check_count, evasion_mask, pin_masks) = self.legal_filter_state(side);
         let pseudo = generate_pseudo_moves(self, captures_only);
         let mut legal = Vec::with_capacity(pseudo.len());
         for mv in pseudo {
-            let undo = self.make_move(mv);
-            if !self.is_in_check(side) {
-                legal.push(mv);
+            let moving_piece = self.squares[mv.from as usize].unwrap();
+            if moving_piece.kind == PieceType::King || mv.is_en_passant {
+                let undo = self.make_move(mv);
+                if !self.is_in_check(side) {
+                    legal.push(mv);
+                }
+                self.undo_move(mv, undo);
+                continue;
             }
-            self.undo_move(mv, undo);
+
+            if check_count >= 2 {
+                continue;
+            }
+            if check_count == 1 && (evasion_mask & square_mask(mv.to)) == 0 {
+                continue;
+            }
+            let pin_mask = pin_masks[mv.from as usize];
+            if pin_mask != u64::MAX && (pin_mask & square_mask(mv.to)) == 0 {
+                continue;
+            }
+
+            legal.push(mv);
         }
         legal
     }
