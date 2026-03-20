@@ -37,13 +37,69 @@ fn history_score(history: &HistoryTable, side: Color, mv: Move) -> i32 {
     history[color_index(side)][mv.from as usize][mv.to as usize]
 }
 
+fn continuation_history_score(
+    engine: &EngineState,
+    side: Color,
+    prev_move: Option<Move>,
+    mv: Move,
+) -> i32 {
+    prev_move
+        .map(|prev| {
+            engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
+                [mv.to as usize]
+        })
+        .unwrap_or(0)
+}
+
 fn apply_history_delta(engine: &mut EngineState, side: Color, mv: Move, delta: i32) {
     let h = &mut engine.history[color_index(side)][mv.from as usize][mv.to as usize];
     *h = (*h + delta).clamp(-100_000, 100_000);
 }
 
+fn apply_continuation_history_delta(
+    engine: &mut EngineState,
+    side: Color,
+    prev_move: Option<Move>,
+    mv: Move,
+    delta: i32,
+) {
+    let Some(prev) = prev_move else {
+        return;
+    };
+    let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
+        [mv.to as usize];
+    *h = (*h + delta).clamp(-100_000, 100_000);
+}
+
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
+}
+
+struct RootWorkerResult {
+    best_score: i32,
+    best_move: Option<Move>,
+    nodes: u64,
+    completed: bool,
+}
+
+fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) -> bool {
+    if rep_stack.len() < 2 || halfmove_clock < 4 {
+        return false;
+    }
+
+    let mut idx = rep_stack.len() - 2;
+    let mut remaining = halfmove_clock as usize;
+    loop {
+        if rep_stack[idx] == key {
+            return true;
+        }
+        if idx < 2 || remaining < 2 {
+            break;
+        }
+        idx -= 2;
+        remaining -= 2;
+    }
+    false
 }
 
 pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) -> Option<String> {
@@ -105,8 +161,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         })
     };
 
-    engine.tt.new_search();
-    engine.decay_history();
+    engine.prepare_for_search();
 
     let start = Instant::now();
     let mut search = Search::new(deadline);
@@ -122,8 +177,10 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     let mut rep_stack = vec![hash];
     order_moves(
         board,
+        engine,
         &mut root_moves,
         tt_root_move,
+        None,
         None,
         &search.killers[0],
         &engine.history,
@@ -137,9 +194,20 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
     }
     let mut best_move = Some(root_moves[0]);
+    let threaded = engine.threads > 1 && root_moves.len() > 1;
+    let mut total_threaded_nodes = 0u64;
+    let mut worker_engines = if threaded {
+        Some(
+            (0..engine.threads)
+                .map(|_| engine.worker_clone())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
 
     for d in 1..=depth.max(1) {
-        if search.should_stop() {
+        if !threaded && search.should_stop() {
             break;
         }
 
@@ -150,36 +218,67 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             beta = best_score + ASPIRATION_WINDOW;
         }
 
-        let (score, mv, completed) = loop {
-            let result = search_root(
-                board,
-                d,
-                alpha,
-                beta,
-                hash,
-                &mut search,
-                engine,
-                &mut root_moves,
-                &mut rep_stack,
-            );
-            if !result.2 || d < 4 {
-                break result;
+        let (score, mv, completed, depth_nodes) = loop {
+            if threaded {
+                let result = search_root_parallel(
+                    board,
+                    d,
+                    alpha,
+                    beta,
+                    hash,
+                    deadline,
+                    worker_engines.as_mut().unwrap(),
+                    &mut root_moves,
+                    &rep_stack,
+                );
+                if !result.2 || d < 4 {
+                    break (result.0, result.1, result.2, result.3);
+                }
+                if result.0 <= alpha {
+                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    continue;
+                }
+                if result.0 >= beta {
+                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    continue;
+                }
+                break (result.0, result.1, result.2, result.3);
+            } else {
+                let nodes_before = search.nodes;
+                let result = search_root(
+                    board,
+                    d,
+                    alpha,
+                    beta,
+                    hash,
+                    &mut search,
+                    engine,
+                    &mut root_moves,
+                    &mut rep_stack,
+                );
+                let nodes_after = search.nodes;
+                if !result.2 || d < 4 {
+                    break (result.0, result.1, result.2, nodes_after - nodes_before);
+                }
+                if result.0 <= alpha {
+                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    continue;
+                }
+                if result.0 >= beta {
+                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    continue;
+                }
+                break (result.0, result.1, result.2, nodes_after - nodes_before);
             }
-            if result.0 <= alpha {
-                alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
-                continue;
-            }
-            if result.0 >= beta {
-                beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
-                continue;
-            }
-            break result;
         };
 
         if !completed {
             break;
         }
 
+        if threaded {
+            total_threaded_nodes += depth_nodes;
+        }
         best_score = score;
         if let Some(m) = mv {
             best_move = Some(m);
@@ -189,10 +288,159 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
-        print_info(d, best_score, search.nodes, elapsed, best_move);
+        let nodes = if threaded { total_threaded_nodes } else { search.nodes };
+        print_info(d, best_score, nodes, elapsed, best_move);
     }
 
     best_move.map(move_to_uci)
+}
+
+fn search_root_parallel(
+    board: &Board,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
+    hash: u64,
+    deadline: Option<Instant>,
+    worker_engines: &mut [EngineState],
+    root_moves: &mut [Move],
+    rep_stack: &[u64],
+) -> (i32, Option<Move>, bool, u64) {
+    if root_moves.is_empty() {
+        return (-INF, None, true, 0);
+    }
+
+    let mut assignments = vec![Vec::<(usize, Move)>::new(); worker_engines.len()];
+    for (idx, mv) in root_moves.iter().copied().enumerate() {
+        assignments[idx % worker_engines.len()].push((idx, mv));
+    }
+
+    let mut results = Vec::new();
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (worker, assigned) in worker_engines.iter_mut().zip(assignments.into_iter()) {
+            worker.tt.new_search();
+            let board_clone = board.clone();
+            let rep_stack_vec = rep_stack.to_vec();
+            handles.push(scope.spawn(move || {
+                search_root_worker(
+                    board_clone,
+                    depth,
+                    alpha,
+                    beta,
+                    hash,
+                    deadline,
+                    worker,
+                    assigned,
+                    rep_stack_vec,
+                )
+            }));
+        }
+        for handle in handles {
+            results.push(handle.join().unwrap());
+        }
+    });
+
+    let mut best_score = -INF;
+    let mut best_move = None;
+    let mut completed = true;
+    let mut total_nodes = 0u64;
+
+    for result in results {
+        total_nodes += result.nodes;
+        completed &= result.completed;
+        if let Some(mv) = result.best_move {
+            if result.best_score > best_score {
+                best_score = result.best_score;
+                best_move = Some(mv);
+            }
+        }
+    }
+
+    let alpha_orig = alpha;
+    let bound = if best_score <= alpha_orig {
+        Bound::Upper
+    } else if best_score >= beta {
+        Bound::Lower
+    } else {
+        Bound::Exact
+    };
+    if let Some(mv) = best_move {
+        let mut engine_stub = &mut worker_engines[0];
+        engine_stub
+            .tt
+            .store(hash, depth, score_to_tt(best_score, 0), bound, Some(mv));
+    }
+
+    (best_score, best_move, completed, total_nodes)
+}
+
+fn search_root_worker(
+    mut board: Board,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
+    hash: u64,
+    deadline: Option<Instant>,
+    engine: &mut EngineState,
+    assigned_moves: Vec<(usize, Move)>,
+    rep_stack: Vec<u64>,
+) -> RootWorkerResult {
+    let mut search = Search::new(deadline);
+    let mut best_score = -INF;
+    let mut best_move = None;
+
+    for (_, mv) in assigned_moves {
+        if search.should_stop() {
+            return RootWorkerResult {
+                best_score,
+                best_move,
+                nodes: search.nodes,
+                completed: false,
+            };
+        }
+
+        let undo = board.make_move(mv);
+        let child_key = child_hash(hash, &board, mv, undo, &engine.zobrist);
+        let mut child_rep_stack = rep_stack.clone();
+        child_rep_stack.push(child_key);
+        let score = -negamax(
+            &mut board,
+            depth - 1,
+            -beta,
+            -alpha,
+            1,
+            &mut search,
+            engine,
+            &mut child_rep_stack,
+            child_key,
+            Some(mv),
+            true,
+            true,
+        );
+        board.undo_move(mv, undo);
+
+        if search.stop {
+            return RootWorkerResult {
+                best_score,
+                best_move,
+                nodes: search.nodes,
+                completed: false,
+            };
+        }
+
+        if score > best_score {
+            best_score = score;
+            best_move = Some(mv);
+        }
+    }
+
+    RootWorkerResult {
+        best_score,
+        best_move,
+        nodes: search.nodes,
+        completed: true,
+    }
 }
 
 fn search_root(
@@ -210,8 +458,10 @@ fn search_root(
     let tt_move = engine.tt.get(key).and_then(|e| e.best);
     order_moves(
         board,
+        engine,
         root_moves,
         tt_move,
+        None,
         None,
         &search.killers[0],
         &engine.history,
@@ -365,7 +615,7 @@ fn negamax(
     if board.halfmove_clock >= 100 {
         return 0;
     }
-    if rep_stack.iter().rev().skip(1).any(|k| *k == key) {
+    if is_repetition(rep_stack, key, board.halfmove_clock) {
         return 0;
     }
 
@@ -392,9 +642,15 @@ fn negamax(
 
     let static_eval = if in_check { None } else { Some(eval_for_side(board)) };
 
+    let params = engine.search_params;
+
     if let Some(se) = static_eval {
         if beta - alpha <= 1 && depth <= 2 {
-            let margin = if depth == 1 { 120 } else { 220 };
+            let margin = if depth == 1 {
+                params.futility_margin_d1
+            } else {
+                params.futility_margin_d2
+            };
             if se + margin <= alpha {
                 return quiescence(board, alpha, beta, search, engine, rep_stack, key);
             }
@@ -402,9 +658,9 @@ fn negamax(
 
         if beta - alpha <= 1 && depth <= 3 {
             let margin = match depth {
-                1 => 90,
-                2 => 180,
-                _ => 300,
+                1 => params.reverse_futility_margin_d1,
+                2 => params.reverse_futility_margin_d2,
+                _ => params.reverse_futility_margin_d3,
             };
             if se - margin >= beta {
                 return se;
@@ -433,9 +689,11 @@ fn negamax(
         if !iid_moves.is_empty() {
             order_moves(
                 board,
+                engine,
                 &mut iid_moves,
                 None,
                 counter_move_for(engine, board.side_to_move, prev_move),
+                prev_move,
                 &search.killers[ply],
                 &engine.history,
             );
@@ -451,14 +709,14 @@ fn negamax(
                     -beta,
                     -alpha,
                     ply + 1,
-                    search,
-                    engine,
-                    rep_stack,
-                    child_key,
-                    Some(mv),
-                    true,
-                    false,
-                );
+                search,
+                engine,
+                rep_stack,
+                child_key,
+                Some(mv),
+                true,
+                false,
+            );
                 rep_stack.pop();
                 board.undo_move(mv, undo);
                 if search.stop {
@@ -474,6 +732,7 @@ fn negamax(
     }
 
     if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
+        let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
         let mut has_non_pawn = false;
         for sq in 0..64 {
             if let Some(p) = board.squares[sq] {
@@ -483,8 +742,7 @@ fn negamax(
                 }
             }
         }
-
-        if has_non_pawn {
+        if has_non_pawn && static_eval.map(|se| se >= beta - null_margin).unwrap_or(false) {
             let old_ep = board.en_passant;
             let old_halfmove = board.halfmove_clock;
             let old_fullmove = board.fullmove_number;
@@ -499,7 +757,7 @@ fn negamax(
 
             let child_key = null_move_hash(key, old_ep, &engine.zobrist);
             rep_stack.push(child_key);
-            let reduction = 2 + depth / 4;
+            let reduction = params.null_reduction_base + depth / params.null_reduction_depth_div;
             let score = -negamax(
                 board,
                 depth - 1 - reduction,
@@ -530,22 +788,23 @@ fn negamax(
         }
     }
 
-    let mut moves = board.generate_legal_moves(false);
+    let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
+    let killers = search.killers[ply];
+    let moves = staged_moves(
+        board,
+        engine,
+        tt_move,
+        counter_move,
+        prev_move,
+        &killers,
+        &engine.history,
+    );
     if moves.is_empty() {
         if in_check {
             return -MATE_SCORE + ply as i32;
         }
         return 0;
     }
-
-    order_moves(
-        board,
-        &mut moves,
-        tt_move,
-        counter_move_for(engine, board.side_to_move, prev_move),
-        &search.killers[ply],
-        &engine.history,
-    );
 
     let mut best = -INF;
     let mut best_move = None;
@@ -554,12 +813,28 @@ fn negamax(
 
     for (idx, mv) in moves.into_iter().enumerate() {
         let quiet = !is_capture_move(board, mv);
+        let quiet_history = if quiet {
+            history_score(&engine.history, side, mv)
+        } else {
+            0
+        };
+        let quiet_continuation = if quiet {
+            continuation_history_score(engine, side, prev_move, mv)
+        } else {
+            0
+        };
+        let priority_quiet = quiet
+            && (Some(mv) == killers[0]
+                || Some(mv) == killers[1]
+                || Some(mv) == counter_move
+                || quiet_history > 0
+                || quiet_continuation > 0);
 
-        if quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
+        if quiet && !priority_quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
             let limit = match depth {
-                1 => 6,
-                2 => 10,
-                _ => 14,
+                1 => params.lmp_limit_d1,
+                2 => params.lmp_limit_d2,
+                _ => params.lmp_limit_d3,
             };
             if idx >= limit {
                 continue;
@@ -573,6 +848,7 @@ fn negamax(
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
+        let gives_check = board.is_in_check(board.side_to_move);
 
         let mut score;
         if idx == 0 {
@@ -591,8 +867,15 @@ fn negamax(
                 true,
             );
         } else {
-            let reduction = if quiet && !in_check && depth >= 3 && idx >= 3 {
-                1 + ((depth >= 5) as i32) + ((idx >= 8) as i32)
+            let reduction = if quiet
+                && !in_check
+                && !gives_check
+                && !priority_quiet
+                && depth >= params.lmr_min_depth
+                && idx >= params.lmr_min_move_index
+            {
+                1 + ((depth >= params.lmr_extra_depth) as i32)
+                    + ((idx >= params.lmr_extra_move_index) as i32)
             } else {
                 0
             };
@@ -665,6 +948,7 @@ fn negamax(
         }
         if alpha >= beta {
             if quiet {
+                let bonus = (depth * depth).min(64 * 64);
                 if let Some(prev) = prev_move {
                     engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
                         Some(mv);
@@ -673,11 +957,12 @@ fn negamax(
                     search.killers[ply][1] = search.killers[ply][0];
                     search.killers[ply][0] = Some(mv);
                 }
-                let bonus = (depth * depth).min(64 * 64);
                 apply_history_delta(engine, side, mv, bonus);
+                apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, tried, -bonus);
+                        apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
                     }
                 }
             }
@@ -718,7 +1003,7 @@ fn quiescence(
         return 0;
     }
 
-    if rep_stack.iter().rev().skip(1).any(|k| *k == key) {
+    if is_repetition(rep_stack, key, board.halfmove_clock) {
         return 0;
     }
 
@@ -760,8 +1045,10 @@ fn quiescence(
 
     order_moves(
         board,
+        engine,
         &mut moves,
         tt_move,
+        None,
         None,
         &[None, None],
         &engine.history,
@@ -816,18 +1103,22 @@ fn quiescence(
 
 fn order_moves(
     board: &Board,
+    engine: &EngineState,
     moves: &mut Vec<Move>,
     tt_move: Option<Move>,
     counter_move: Option<Move>,
+    prev_move: Option<Move>,
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) {
     moves.sort_by_cached_key(|m| {
         Reverse(move_order_score(
             board,
+            engine,
             *m,
             tt_move,
             counter_move,
+            prev_move,
             killers,
             history,
         ))
@@ -836,6 +1127,125 @@ fn order_moves(
 
 fn is_capture_move(board: &Board, mv: Move) -> bool {
     mv.is_en_passant || board.squares[mv.to as usize].is_some()
+}
+
+fn is_priority_quiet(
+    engine: &EngineState,
+    side: Color,
+    mv: Move,
+    counter_move: Option<Move>,
+    prev_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+) -> bool {
+    Some(mv) == killers[0]
+        || Some(mv) == killers[1]
+        || Some(mv) == counter_move
+        || history_score(&engine.history, side, mv) > 0
+        || continuation_history_score(engine, side, prev_move, mv) > 0
+}
+
+fn quiet_stage_score(
+    engine: &EngineState,
+    side: Color,
+    mv: Move,
+    counter_move: Option<Move>,
+    prev_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+) -> i32 {
+    let mut score = history_score(&engine.history, side, mv)
+        + continuation_history_score(engine, side, prev_move, mv) / 2;
+    if Some(mv) == killers[0] {
+        score += 30_000;
+    } else if Some(mv) == counter_move {
+        score += 20_000;
+    } else if Some(mv) == killers[1] {
+        score += 10_000;
+    }
+    if mv.is_castle {
+        score += 10;
+    }
+    score += mv
+        .promotion
+        .map(piece_value)
+        .unwrap_or(0)
+        .saturating_sub(piece_value(PieceType::Pawn));
+    score
+}
+
+fn capture_stage_score(board: &Board, mv: Move) -> i32 {
+    let see_score = see(board, mv);
+    let victim = if mv.is_en_passant {
+        piece_value(PieceType::Pawn)
+    } else {
+        board.squares[mv.to as usize]
+            .map(|p| piece_value(p.kind))
+            .unwrap_or(0)
+    };
+    let attacker = board.squares[mv.from as usize]
+        .map(|p| piece_value(p.kind))
+        .unwrap_or(piece_value(PieceType::Pawn));
+    see_score * 16 + victim - attacker
+}
+
+fn staged_moves(
+    board: &mut Board,
+    engine: &EngineState,
+    tt_move: Option<Move>,
+    counter_move: Option<Move>,
+    prev_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+    history: &HistoryTable,
+) -> Vec<Move> {
+    let moves = board.generate_legal_moves(false);
+    if moves.is_empty() {
+        return moves;
+    }
+
+    let side = board.side_to_move;
+    let mut tt = None;
+    let mut good_captures = Vec::new();
+    let mut bad_captures = Vec::new();
+    let mut priority_quiets = Vec::new();
+    let mut quiets = Vec::new();
+
+    for mv in moves {
+        if Some(mv) == tt_move && tt.is_none() {
+            tt = Some(mv);
+            continue;
+        }
+        if is_capture_move(board, mv) {
+            if see(board, mv) >= 0 {
+                good_captures.push(mv);
+            } else {
+                bad_captures.push(mv);
+            }
+            continue;
+        }
+        if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
+            priority_quiets.push(mv);
+        } else {
+            quiets.push(mv);
+        }
+    }
+
+    good_captures.sort_by_cached_key(|m| Reverse(capture_stage_score(board, *m)));
+    priority_quiets.sort_by_cached_key(|m| {
+        Reverse(quiet_stage_score(engine, side, *m, counter_move, prev_move, killers))
+    });
+    quiets.sort_by_cached_key(|m| Reverse(history_score(history, side, *m)));
+    bad_captures.sort_by_cached_key(|m| Reverse(capture_stage_score(board, *m)));
+
+    let mut ordered = Vec::with_capacity(
+        good_captures.len() + priority_quiets.len() + quiets.len() + bad_captures.len() + 1,
+    );
+    if let Some(mv) = tt {
+        ordered.push(mv);
+    }
+    ordered.extend(good_captures);
+    ordered.extend(priority_quiets);
+    ordered.extend(quiets);
+    ordered.extend(bad_captures);
+    ordered
 }
 
 pub(crate) fn piece_attacks_square(
@@ -893,31 +1303,133 @@ pub(crate) fn piece_attacks_square(
     }
 }
 
+fn piece_on_square(squares: &[Option<Piece>; 64], f: i8, r: i8) -> Option<(u8, Piece)> {
+    if !in_bounds(f, r) {
+        return None;
+    }
+    let sq = (r as u8) * 8 + (f as u8);
+    squares[sq as usize].map(|p| (sq, p))
+}
+
+fn first_slider_attacker(
+    squares: &[Option<Piece>; 64],
+    target_file: i8,
+    target_rank: i8,
+    side: Color,
+    directions: &[(i8, i8)],
+    allowed: &[PieceType],
+) -> Option<(u8, Piece)> {
+    for &(df, dr) in directions {
+        let mut f = target_file + df;
+        let mut r = target_rank + dr;
+        while in_bounds(f, r) {
+            let sq = (r as u8) * 8 + (f as u8);
+            if let Some(p) = squares[sq as usize] {
+                if p.color == side && allowed.contains(&p.kind) {
+                    return Some((sq, p));
+                }
+                break;
+            }
+            f += df;
+            r += dr;
+        }
+    }
+    None
+}
+
 fn least_valuable_attacker(
     squares: &[Option<Piece>; 64],
     target: u8,
     side: Color,
 ) -> Option<(u8, Piece)> {
-    let mut best: Option<(u8, Piece)> = None;
-    let mut best_val = INF;
+    let tf = (target % 8) as i8;
+    let tr = (target / 8) as i8;
 
-    for from in 0..64u8 {
-        if let Some(p) = squares[from as usize] {
-            if p.color != side {
-                continue;
-            }
-            if !piece_attacks_square(squares, from, p, target) {
-                continue;
-            }
-            let v = piece_value(p.kind);
-            if v < best_val {
-                best_val = v;
-                best = Some((from, p));
+    let pawn_rank = match side {
+        Color::White => tr - 1,
+        Color::Black => tr + 1,
+    };
+    for pawn_file in [tf - 1, tf + 1] {
+        if let Some((sq, p)) = piece_on_square(squares, pawn_file, pawn_rank) {
+            if p.color == side && p.kind == PieceType::Pawn {
+                return Some((sq, p));
             }
         }
     }
 
-    best
+    for (df, dr) in [
+        (1, 2),
+        (2, 1),
+        (2, -1),
+        (1, -2),
+        (-1, -2),
+        (-2, -1),
+        (-2, 1),
+        (-1, 2),
+    ] {
+        if let Some((sq, p)) = piece_on_square(squares, tf + df, tr + dr) {
+            if p.color == side && p.kind == PieceType::Knight {
+                return Some((sq, p));
+            }
+        }
+    }
+
+    if let Some(attacker) = first_slider_attacker(
+        squares,
+        tf,
+        tr,
+        side,
+        &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
+        &[PieceType::Bishop],
+    ) {
+        return Some(attacker);
+    }
+
+    if let Some(attacker) = first_slider_attacker(
+        squares,
+        tf,
+        tr,
+        side,
+        &[(1, 0), (-1, 0), (0, 1), (0, -1)],
+        &[PieceType::Rook],
+    ) {
+        return Some(attacker);
+    }
+
+    if let Some(attacker) = first_slider_attacker(
+        squares,
+        tf,
+        tr,
+        side,
+        &[
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+        ],
+        &[PieceType::Queen],
+    ) {
+        return Some(attacker);
+    }
+
+    for df in -1..=1 {
+        for dr in -1..=1 {
+            if df == 0 && dr == 0 {
+                continue;
+            }
+            if let Some((sq, p)) = piece_on_square(squares, tf + df, tr + dr) {
+                if p.color == side && p.kind == PieceType::King {
+                    return Some((sq, p));
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn see(board: &Board, mv: Move) -> i32 {
@@ -998,9 +1510,11 @@ fn see(board: &Board, mv: Move) -> i32 {
 
 fn move_order_score(
     board: &Board,
+    engine: &EngineState,
     mv: Move,
     tt_move: Option<Move>,
     counter_move: Option<Move>,
+    prev_move: Option<Move>,
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) -> i32 {
@@ -1029,7 +1543,8 @@ fn move_order_score(
         .unwrap_or(0)
         .saturating_sub(piece_value(PieceType::Pawn));
     let castle = if mv.is_castle { 10 } else { 0 };
-    history_score(history, board.side_to_move, mv) + promo + castle
+    let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
+    history_score(history, board.side_to_move, mv) + continuation / 2 + promo + castle
 }
 
 pub(crate) fn piece_value(kind: PieceType) -> i32 {

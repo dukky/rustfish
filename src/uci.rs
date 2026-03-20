@@ -50,9 +50,64 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         }
         return;
     }
+    if n == "threads" {
+        if let Ok(threads) = value.trim().parse::<usize>() {
+            engine.set_threads(threads);
+        }
+        return;
+    }
     if n == "ownbook" {
         let v = value.trim().to_ascii_lowercase();
         engine.own_book = v == "true" || v == "1" || v == "on";
+        return;
+    }
+    if n == "bookstyle" {
+        let style = match value.trim().to_ascii_lowercase().as_str() {
+            "grinder" | "solid" => Some(BookStyle::Grinder),
+            "chaos" | "sharp" => Some(BookStyle::Chaos),
+            "normal" | "" => Some(BookStyle::Normal),
+            _ => None,
+        };
+        if let Some(style) = style {
+            engine.set_book_style(style);
+        }
+        return;
+    }
+
+    if let Ok(v) = value.trim().parse::<i32>() {
+        match n.as_str() {
+            "futilitymargind1" => engine.search_params.futility_margin_d1 = v.clamp(0, 500),
+            "futilitymargind2" => engine.search_params.futility_margin_d2 = v.clamp(0, 700),
+            "reversefutilitymargind1" => {
+                engine.search_params.reverse_futility_margin_d1 = v.clamp(0, 500)
+            }
+            "reversefutilitymargind2" => {
+                engine.search_params.reverse_futility_margin_d2 = v.clamp(0, 700)
+            }
+            "reversefutilitymargind3" => {
+                engine.search_params.reverse_futility_margin_d3 = v.clamp(0, 900)
+            }
+            "nullmarginbase" => engine.search_params.null_margin_base = v.clamp(0, 300),
+            "nullmargindepthscale" => {
+                engine.search_params.null_margin_depth_scale = v.clamp(0, 80)
+            }
+            "nullreductionbase" => engine.search_params.null_reduction_base = v.clamp(0, 6),
+            "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
+            "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),
+            "lmrextradepth" => engine.search_params.lmr_extra_depth = v.clamp(1, 16),
+            _ => {}
+        }
+    }
+
+    if let Ok(v) = value.trim().parse::<usize>() {
+        match n.as_str() {
+            "lmplimitd1" => engine.search_params.lmp_limit_d1 = v.clamp(0, 24),
+            "lmplimitd2" => engine.search_params.lmp_limit_d2 = v.clamp(0, 32),
+            "lmplimitd3" => engine.search_params.lmp_limit_d3 = v.clamp(0, 40),
+            "lmrminmoveindex" => engine.search_params.lmr_min_move_index = v.clamp(1, 24),
+            "lmrextramoveindex" => engine.search_params.lmr_extra_move_index = v.clamp(1, 32),
+            _ => {}
+        }
     }
 }
 

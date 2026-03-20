@@ -41,6 +41,7 @@ def bench(engine_cmd, depth):
     try:
         send(p, "uci")
         read_until(p, "uciok")
+        send(p, "setoption name OwnBook value false")
         send(p, "isready")
         read_until(p, "readyok")
 

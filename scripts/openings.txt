@@ -1,0 +1,27 @@
+# Paired opening suite for gauntlet A/B tests.
+# Format: UCI position spec without the leading "position ".
+
+startpos
+startpos moves e2e4 e7e5 g1f3 b8c6
+startpos moves e2e4 e7e5 g1f3 b8c6 f1b5 a7a6
+startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6
+startpos moves e2e4 c7c5 g1f3 d7d6
+startpos moves e2e4 c7c5 b1c3 b8c6
+startpos moves e2e4 c7c5 c2c3 d7d5
+startpos moves e2e4 e7e6 d2d4 d7d5
+startpos moves e2e4 e7e6 d2d4 d7d5 b1c3 g8f6
+startpos moves e2e4 c7c6 d2d4 d7d5
+startpos moves e2e4 c7c6 d2d4 d7d5 e4e5 c8f5
+startpos moves d2d4 d7d5 c2c4
+startpos moves d2d4 d7d5 c2c4 c7c6
+startpos moves d2d4 g8f6 c2c4 e7e6
+startpos moves d2d4 g8f6 c2c4 g7g6
+startpos moves c2c4 e7e5 b1c3 g8f6
+startpos moves c2c4 c7c5 b1c3 g8f6
+startpos moves g1f3 d7d5 d2d4
+startpos moves g1f3 g8f6 c2c4 g7g6
+startpos moves g1f3 d7d5 c2c4
+fen r1bq1rk1/pppn1ppp/3bpn2/3p4/2PP4/2N1PN2/PPQ2PPP/R1B1KB1R w KQ - 2 8
+fen r3k2r/p1ppqpb1/bn2pnp1/2pP4/1p2P3/2N2N2/PPQBBPPP/R3K2R w KQkq - 0 1
+fen 2rq1rk1/pp2bppp/2n1pn2/2bp4/3P4/2N1PN2/PPQ1BPPP/2RR2K1 w - - 4 12
+fen r2q1rk1/pp1nbppp/2p1pn2/3p4/3P4/2NBPN2/PPQ2PPP/R1B2RK1 w - - 2 10

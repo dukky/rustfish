@@ -7,6 +7,7 @@ mod uci;
 
 use std::cmp::Reverse;
 use std::io::{self, BufRead, Write};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use book::{build_opening_book, try_book_move, BookEntry};
@@ -20,6 +21,13 @@ const MATE_SCORE: i32 = 30_000;
 const INF: i32 = 1_000_000;
 const MAX_PLY: usize = 128;
 const ASPIRATION_WINDOW: i32 = 35;
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum BookStyle {
+    Normal,
+    Grinder,
+    Chaos,
+}
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum Color {
@@ -441,30 +449,85 @@ impl Board {
 
 type HistoryTable = [[[i32; 64]; 64]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
+type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+
+#[derive(Clone, Copy)]
+struct SearchParams {
+    futility_margin_d1: i32,
+    futility_margin_d2: i32,
+    reverse_futility_margin_d1: i32,
+    reverse_futility_margin_d2: i32,
+    reverse_futility_margin_d3: i32,
+    null_margin_base: i32,
+    null_margin_depth_scale: i32,
+    null_reduction_base: i32,
+    null_reduction_depth_div: i32,
+    lmp_limit_d1: usize,
+    lmp_limit_d2: usize,
+    lmp_limit_d3: usize,
+    lmr_min_depth: i32,
+    lmr_min_move_index: usize,
+    lmr_extra_depth: i32,
+    lmr_extra_move_index: usize,
+}
+
+impl Default for SearchParams {
+    fn default() -> Self {
+        Self {
+            futility_margin_d1: 120,
+            futility_margin_d2: 220,
+            reverse_futility_margin_d1: 90,
+            reverse_futility_margin_d2: 180,
+            reverse_futility_margin_d3: 300,
+            null_margin_base: 90,
+            null_margin_depth_scale: 20,
+            null_reduction_base: 2,
+            null_reduction_depth_div: 4,
+            lmp_limit_d1: 6,
+            lmp_limit_d2: 10,
+            lmp_limit_d3: 14,
+            lmr_min_depth: 3,
+            lmr_min_move_index: 3,
+            lmr_extra_depth: 5,
+            lmr_extra_move_index: 8,
+        }
+    }
+}
 
 struct EngineState {
     zobrist: Zobrist,
     tt: TransTable,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
+    continuation_history: ContinuationHistoryTable,
+    search_params: SearchParams,
+    searches_since_decay: u8,
+    threads: usize,
     hash_mb: usize,
     opening_book: Vec<BookEntry>,
     own_book: bool,
+    book_style: BookStyle,
 }
 
 impl EngineState {
     fn new() -> Self {
         let hash_mb = 64;
         let zobrist = Zobrist::new();
-        let opening_book = build_opening_book(&zobrist);
+        let book_style = BookStyle::Normal;
+        let opening_book = build_opening_book(&zobrist, book_style);
         Self {
             zobrist,
             tt: TransTable::new(hash_mb),
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
+            continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            search_params: SearchParams::default(),
+            searches_since_decay: 0,
+            threads: 1,
             hash_mb,
             opening_book,
             own_book: true,
+            book_style,
         }
     }
 
@@ -473,10 +536,21 @@ impl EngineState {
         self.tt = TransTable::new(self.hash_mb);
     }
 
+    fn set_threads(&mut self, threads: usize) {
+        self.threads = threads.clamp(1, 32);
+    }
+
     fn clear_for_new_game(&mut self) {
         self.tt.clear();
         self.history = [[[0; 64]; 64]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
+        self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.searches_since_decay = 0;
+    }
+
+    fn set_book_style(&mut self, style: BookStyle) {
+        self.book_style = style;
+        self.opening_book = build_opening_book(&self.zobrist, style);
     }
 
     fn decay_history(&mut self) {
@@ -484,8 +558,38 @@ impl EngineState {
             for from in 0..64 {
                 for to in 0..64 {
                     self.history[side][from][to] /= 2;
+                    for next_to in 0..64 {
+                        self.continuation_history[side][to][from][next_to] /= 2;
+                    }
                 }
             }
+        }
+    }
+
+    fn prepare_for_search(&mut self) {
+        self.tt.new_search();
+        self.searches_since_decay = self.searches_since_decay.saturating_add(1);
+        if self.searches_since_decay >= 4 {
+            self.decay_history();
+            self.searches_since_decay = 0;
+        }
+    }
+
+    fn worker_clone(&self) -> Self {
+        let per_thread_hash = (self.hash_mb / self.threads.max(1)).max(1);
+        Self {
+            zobrist: Zobrist::new(),
+            tt: TransTable::new(per_thread_hash),
+            history: self.history,
+            counter_moves: self.counter_moves,
+            continuation_history: self.continuation_history,
+            search_params: self.search_params,
+            searches_since_decay: 0,
+            threads: 1,
+            hash_mb: per_thread_hash,
+            opening_book: self.opening_book.clone(),
+            own_book: false,
+            book_style: self.book_style,
         }
     }
 }
@@ -510,8 +614,26 @@ fn main() {
             println!("id name Rustfish ZeroDep");
             println!("id author pi+chatgpt");
             println!("option name Hash type spin default 64 min 1 max 2048");
+            println!("option name Threads type spin default 1 min 1 max 32");
             println!("option name Clear Hash type button");
             println!("option name OwnBook type check default true");
+            println!("option name BookStyle type combo default normal var normal var grinder var chaos");
+            println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
+            println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
+            println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
+            println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
+            println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");
+            println!("option name NullMarginBase type spin default 90 min 0 max 300");
+            println!("option name NullMarginDepthScale type spin default 20 min 0 max 80");
+            println!("option name NullReductionBase type spin default 2 min 0 max 6");
+            println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
+            println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
+            println!("option name LmpLimitD2 type spin default 10 min 0 max 32");
+            println!("option name LmpLimitD3 type spin default 14 min 0 max 40");
+            println!("option name LmrMinDepth type spin default 3 min 1 max 12");
+            println!("option name LmrMinMoveIndex type spin default 3 min 1 max 24");
+            println!("option name LmrExtraDepth type spin default 5 min 1 max 16");
+            println!("option name LmrExtraMoveIndex type spin default 8 min 1 max 32");
             println!("uciok");
             flush_stdout();
             continue;

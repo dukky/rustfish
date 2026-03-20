@@ -31,6 +31,10 @@ Dependencies: none beyond Rust stdlib and project-local scripts using Python std
 - `src/uci.rs` — UCI/perft/selftest handlers
 - `scripts/gauntlet.py` — gauntlet runner vs Stockfish or other UCI engines
 - `scripts/bench.py` — benchmark runner across fixed positions
+- `scripts/freeze.py` — build + freeze a versioned binary with metadata and bench output
+- `scripts/sweep.py` — run candidate variants against a fixed baseline with gauntlet + SPRT
+- `scripts/test_change.py` — one-command validation for correctness, bench, and A/B smoke
+- `scripts/openings.txt` — reusable opening suite for diversified gauntlets
 - `plan.md` — project roadmap / progress tracking
 
 ---
@@ -100,6 +104,31 @@ Notes:
 
 ---
 
+## One-command change validation
+Use this as the default “test the current change” workflow:
+```bash
+python3 scripts/test_change.py \
+  --baseline ./bin/rustfish_BASELINE \
+  --games 24 \
+  --movetime 20 \
+  --parallel 4
+```
+
+This runs:
+- `cargo check`
+- `perfttest`
+- `selftest 100`
+- release build
+- release UCI smoke
+- fixed benchmark
+- optional A/B smoke against `--baseline`
+
+Notes:
+- `--baseline` is optional, but should usually point at the current frozen champion.
+- Logs from the A/B smoke are written under `tmp/test-change/`.
+
+---
+
 ## Gauntlet / strength testing
 
 ### Basic gauntlet vs Stockfish
@@ -110,6 +139,7 @@ python3 scripts/gauntlet.py \
   --games 20 \
   --movetime 50 \
   --max-plies 160 \
+  --openings-file ./scripts/openings.txt \
   --stockfish-option "UCI_LimitStrength=true" \
   --stockfish-option "UCI_Elo=1800"
 ```
@@ -122,11 +152,31 @@ python3 scripts/gauntlet.py \
   --games 20 \
   --depth 1 \
   --max-plies 160 \
+  --openings-file ./scripts/openings.txt \
   --stockfish-option "UCI_LimitStrength=true" \
   --stockfish-option "UCI_Elo=1800"
 ```
 
-### Elo ladder quick sweep
+### Generic A/B gauntlet between frozen versions
+```bash
+python3 scripts/gauntlet.py \
+  --engine-a ./target/release/rustfish \
+  --engine-b ./bin/rustfish_BASELINE \
+  --engine-a-name candidate \
+  --engine-b-name baseline \
+  --engine-a-option "OwnBook=false" \
+  --engine-b-option "OwnBook=false" \
+  --engine-a-option "Hash=256" \
+  --engine-b-option "Hash=256" \
+  --games 48 \
+  --movetime 30 \
+  --max-plies 220 \
+  --parallel 4 \
+  --openings-file ./scripts/openings.txt \
+  --jsonl ./tmp/ab.jsonl
+```
+
+### Elo ladder quick sweep vs Stockfish
 ```bash
 for E in 1600 1700 1800 1900 2000; do
   echo "=== SF ELO $E ==="
@@ -136,6 +186,7 @@ for E in 1600 1700 1800 1900 2000; do
     --games 20 \
     --movetime 30 \
     --max-plies 220 \
+    --openings-file ./scripts/openings.txt \
     --rustfish-option "Hash=256" \
     --stockfish-option "UCI_LimitStrength=true" \
     --stockfish-option "UCI_Elo=$E"
@@ -143,7 +194,7 @@ for E in 1600 1700 1800 1900 2000; do
  done
 ```
 
-### Better longer gauntlet
+### Longer gauntlet with JSONL logging
 ```bash
 python3 scripts/gauntlet.py \
   --stockfish "$(which stockfish)" \
@@ -151,9 +202,60 @@ python3 scripts/gauntlet.py \
   --games 200 \
   --movetime 200 \
   --max-plies 220 \
+  --openings-file ./scripts/openings.txt \
   --rustfish-option "Hash=256" \
   --stockfish-option "UCI_LimitStrength=true" \
-  --stockfish-option "UCI_Elo=1800"
+  --stockfish-option "UCI_Elo=1800" \
+  --jsonl ./tmp/stockfish-1800.jsonl
+```
+
+### SPRT early-stop A/B test
+```bash
+python3 scripts/gauntlet.py \
+  --engine-a ./target/release/rustfish \
+  --engine-b ./bin/rustfish_BASELINE \
+  --engine-a-name candidate \
+  --engine-b-name baseline \
+  --engine-a-option "OwnBook=false" \
+  --engine-b-option "OwnBook=false" \
+  --engine-a-option "Hash=256" \
+  --engine-b-option "Hash=256" \
+  --games 96 \
+  --movetime 30 \
+  --max-plies 220 \
+  --openings-file ./scripts/openings.txt \
+  --sprt-h0-elo -5 \
+  --sprt-h1-elo 5 \
+  --sprt-min-games 24 \
+  --jsonl ./tmp/sprt.jsonl
+```
+
+Notes:
+- `gauntlet.py` supports both `--stockfish`/`--rustfish` mode and generic `--engine-a`/`--engine-b` mode.
+- Use `--openings-file ./scripts/openings.txt` for diversified tests instead of repeated `startpos`.
+- Use `--jsonl` when you want machine-readable logs.
+- When SPRT is enabled, the runner forces sequential execution for correct early stopping.
+
+---
+
+## Variant sweeps
+Use `sweep.py` to test multiple candidate option sets against one frozen baseline:
+```bash
+python3 scripts/sweep.py \
+  --baseline ./bin/rustfish_BASELINE \
+  --candidate ./target/release/rustfish \
+  --baseline-option "OwnBook=false" \
+  --candidate-option "OwnBook=false" \
+  --baseline-option "Hash=256" \
+  --candidate-option "Hash=256" \
+  --variant normal:BookStyle=normal \
+  --variant grinder:BookStyle=grinder \
+  --variant chaos:BookStyle=chaos \
+  --games 48 \
+  --movetime 30 \
+  --openings-file ./scripts/openings.txt \
+  --sprt-h0-elo -5 \
+  --sprt-h1-elo 5
 ```
 
 ---
@@ -161,14 +263,31 @@ python3 scripts/gauntlet.py \
 ## Frozen binary workflow
 Use this when comparing versions so results are not contaminated by rebuilds.
 
-Create a versioned binary:
+Create a versioned binary with metadata and fixed bench output:
 ```bash
-VER="rustfish_$(date +%Y%m%d_%H%M%S)" && cargo build --release && mkdir -p bin && cp ./target/release/rustfish "./bin/$VER" && echo "$VER"
+python3 scripts/freeze.py --note "describe the accepted change"
 ```
+
+This writes:
+- a frozen binary under `bin/`
+- a sidecar JSON metadata file with git info and bench output
 
 Run gauntlet against that exact binary:
 ```bash
-python3 scripts/gauntlet.py --stockfish "$(which stockfish)" --rustfish "./bin/$VER" --games 300 --movetime 200 --max-plies 220 --rustfish-option "Hash=256" --stockfish-option "UCI_LimitStrength=true" --stockfish-option "UCI_Elo=1800"
+python3 scripts/gauntlet.py \
+  --engine-a ./target/release/rustfish \
+  --engine-b ./bin/rustfish_BASELINE \
+  --engine-a-name candidate \
+  --engine-b-name baseline \
+  --engine-a-option "OwnBook=false" \
+  --engine-b-option "OwnBook=false" \
+  --engine-a-option "Hash=256" \
+  --engine-b-option "Hash=256" \
+  --games 48 \
+  --movetime 30 \
+  --max-plies 220 \
+  --parallel 4 \
+  --openings-file ./scripts/openings.txt
 ```
 
 ---
@@ -177,10 +296,11 @@ python3 scripts/gauntlet.py --stockfish "$(which stockfish)" --rustfish "./bin/$
 - `Hash` — TT size in MB
 - `Clear Hash`
 - `OwnBook` — enable/disable built-in opening book
+- `BookStyle` — opening-book personality: `normal`, `grinder`, `chaos`
 
 Example:
 ```bash
-printf 'uci\nsetoption name OwnBook value false\nsetoption name Hash value 256\nisready\nquit\n' | ./target/release/rustfish
+printf 'uci\nsetoption name OwnBook value false\nsetoption name BookStyle value grinder\nsetoption name Hash value 256\nisready\nquit\n' | ./target/release/rustfish
 ```
 
 ---
@@ -206,6 +326,9 @@ For refactors:
 - Small gauntlets are noisy; prefer 100+ games for real comparisons.
 - `UCI_LimitStrength` Stockfish Elo is only an approximation.
 - Always compare versions under the **same time control**, **same max plies**, and **same Stockfish settings**.
+- For engine-vs-engine A/B, also keep the **same openings file**, **same hash**, and **same book settings**.
+- Prefer frozen binary A/B tests for acceptance decisions, then use Stockfish as a secondary external check.
+- Use `scripts/test_change.py` for the default local loop, and `scripts/sweep.py` when screening multiple variants.
 - Prefer versioned binaries for serious comparisons.
 
 ---

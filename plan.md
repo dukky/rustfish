@@ -38,6 +38,8 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Internal iterative deepening for move ordering when TT move is missing
 - [x] History heuristic decay per search
 - [x] Side-aware quiet history with counter-move ordering and fail-high maluses
+- [x] One-ply continuation history for quiet move ordering
+- [x] Pruning stability follow-up (null-move eval gate, priority-quiet LMP/LMR guards)
 - [ ] Tune pruning margins/reductions from gauntlet data
 
 ## Phase 3 — Evaluation Quality
@@ -53,6 +55,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Basic piece activity (bishop pair, rooks on open/semi-open files)
 - [x] Piece activity follow-up (outposts, 7th-rank rooks)
 - [x] Piece activity follow-up (space, bishop scope)
+- [x] Piece activity follow-up (opening development / castling incentives)
 - [ ] Piece activity follow-up (trapped pieces)
 - [x] Endgame terms (king activity, basic mop-up / king chase)
 - [ ] Endgame terms follow-up (opposition-ish heuristics, rook endings, pawn races)
@@ -65,7 +68,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Add move-generation/make-undo invariant selftest command
 - [x] Expand invariants with targeted edge-case suites
 - [ ] Expand invariants with tactical/pin/check-regression suites
-- [ ] Optimize hot paths (copy avoidance, branch cleanup)
+- [x] Optimize hot paths (SEE attacker lookup, bounded repetition scan, cheaper history decay cadence)
 - [ ] Add optional bitboard backend for speed comparison
 - [x] Add benchmark harness script (nodes/sec by depth/position set)
 
@@ -79,18 +82,26 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Add basic built-in opening book support
 - [x] Add OwnBook UCI option
 - [x] Expand built-in opening book depth
+- [x] Add book-style option for repertoire experiments
 - [ ] Add opening book external plain-text support
 - [ ] Add simple endgame tablebase probing (optional local files)
 - [ ] Add self-play tuning loop (no external crate dependency)
 - [x] Add basic gauntlet script vs fixed opponents (UCI, no deps)
-- [ ] Add SPRT-style statistical decision logic to gauntlet
-- [ ] Add automatic Elo confidence intervals / ladder summary to gauntlet
+- [x] Add frozen-binary A/B gauntlet mode with parallel workers
+- [x] Add opening-suite support for paired A/B gauntlets
+- [x] Add SPRT-style statistical decision logic to gauntlet
+- [x] Add automatic Elo confidence intervals / ladder summary to gauntlet
+- [x] Add machine-readable gauntlet result logging
+- [x] Add sweep driver for candidate variants
+- [x] Add two-stage sweep flow (parallel fixed-length screens, then SPRT confirmation)
+- [x] Add single-command validation runner
+- [x] Expose core pruning/reduction knobs as UCI options for sweep-based tuning
 - [ ] Track Elo progression over frozen-binary versions
 
 ## Current Focus
-1. Improve evaluation stability: true tapered eval, stronger king attack scaling, backward/support pawn logic.
-2. Improve search efficiency: tune pruning margins/reductions, tighten SEE, speed hot paths.
-3. Improve measurement quality: frozen-binary gauntlets, Elo ladder summaries, confidence bounds.
+1. Improve search efficiency: confirm strength of the new hot-path speedup candidate, then continue on structural move-picking and node-cost work.
+2. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
+3. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
 4. Keep refactor healthy: only small follow-up structure changes while strength work continues.
 
 ## Working Protocol
@@ -100,4 +111,4 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - Prioritize search strength + correctness before fancy features.
 
 ## Current Blocker
-- None right now.
+- Recent pruning-parameter sweeps are mostly neutral or negative; immediate Elo gains likely require a structural search change rather than more local threshold tuning.

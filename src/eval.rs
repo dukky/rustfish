@@ -490,6 +490,36 @@ fn pst_values(kind: PieceType, color: Color, sq: u8) -> (i32, i32) {
     )
 }
 
+fn development_score(board: &Board, color: Color) -> i32 {
+    let (minor_starts, king_home, king_castles) = match color {
+        Color::White => (&[1u8, 2, 5, 6][..], 4u8, [2u8, 6u8]),
+        Color::Black => (&[57u8, 58, 61, 62][..], 60u8, [58u8, 62u8]),
+    };
+
+    let undeveloped = minor_starts
+        .iter()
+        .filter(|&&sq| {
+            matches!(
+                board.squares[sq as usize],
+                Some(Piece {
+                    color: c,
+                    kind: PieceType::Knight | PieceType::Bishop,
+                }) if c == color
+            )
+        })
+        .count() as i32;
+
+    let king_sq = board.king_square(color);
+    let mut score = -undeveloped * 5;
+    if king_sq == Some(king_home) && undeveloped >= 2 {
+        score -= 8;
+    }
+    if king_sq.is_some_and(|sq| king_castles.contains(&sq)) {
+        score += 8;
+    }
+    score
+}
+
 pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut mg_score = 0;
     let mut eg_score = 0;
@@ -506,6 +536,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut black_bishops = 0;
     let mut white_pawn_files = [0i32; 8];
     let mut black_pawn_files = [0i32; 8];
+    let mut white_min_pawn_rank = [8i8; 8];
+    let mut black_max_pawn_rank = [-1i8; 8];
     let mut white_non_pawn_material = 0i32;
     let mut black_non_pawn_material = 0i32;
     let mut white_has_queen = false;
@@ -530,12 +562,15 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
             if p.kind == PieceType::Pawn {
                 let f = sq % 8;
+                let rank = (sq / 8) as i8;
                 if p.color == Color::White {
                     white_pawns.push(sq as u8);
                     white_pawn_files[f] += 1;
+                    white_min_pawn_rank[f] = white_min_pawn_rank[f].min(rank);
                 } else {
                     black_pawns.push(sq as u8);
                     black_pawn_files[f] += 1;
+                    black_max_pawn_rank[f] = black_max_pawn_rank[f].max(rank);
                 }
             }
             if p.kind == PieceType::Knight {
@@ -588,6 +623,11 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         eg_score -= 40;
     }
 
+    if phase >= 12 {
+        mg_score += development_score(board, Color::White);
+        mg_score -= development_score(board, Color::Black);
+    }
+
     for &sq in &white_pawns {
         let f = (sq % 8) as usize;
         let r = (sq / 8) as i32;
@@ -605,10 +645,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
 
         let mut passed = true;
-        for &bp in &black_pawns {
-            let bf = (bp % 8) as i32;
-            let br = (bp / 8) as i32;
-            if (bf - f as i32).abs() <= 1 && br > r {
+        for file in f.saturating_sub(1)..=(f + 1).min(7) {
+            if black_max_pawn_rank[file] > r as i8 {
                 passed = false;
                 break;
             }
@@ -632,15 +670,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             eg_score -= 6;
         }
 
-        let mut candidate = true;
-        for &bp in &black_pawns {
-            let bf = (bp % 8) as i32;
-            let br = (bp / 8) as i32;
-            if bf == f as i32 && br > r {
-                candidate = false;
-                break;
-            }
-        }
+        let candidate = black_max_pawn_rank[f] <= r as i8;
         if candidate {
             mg_score += 4 + r;
             eg_score += 8 + r * 3;
@@ -664,10 +694,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
 
         let mut passed = true;
-        for &wp in &white_pawns {
-            let wf = (wp % 8) as i32;
-            let wr = (wp / 8) as i32;
-            if (wf - f as i32).abs() <= 1 && wr < r {
+        for file in f.saturating_sub(1)..=(f + 1).min(7) {
+            if white_min_pawn_rank[file] < r as i8 {
                 passed = false;
                 break;
             }
@@ -691,15 +719,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             eg_score += 6;
         }
 
-        let mut candidate = true;
-        for &wp in &white_pawns {
-            let wf = (wp % 8) as i32;
-            let wr = (wp / 8) as i32;
-            if wf == f as i32 && wr < r {
-                candidate = false;
-                break;
-            }
-        }
+        let candidate = white_min_pawn_rank[f] >= r as i8;
         if candidate {
             mg_score -= 4 + (7 - r);
             eg_score -= 8 + (7 - r) * 3;
