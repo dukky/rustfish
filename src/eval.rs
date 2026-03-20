@@ -19,15 +19,17 @@ fn attack_unit_weight(kind: PieceType) -> i32 {
     }
 }
 
-fn king_attack_units(board: &Board, attacker: Color, king_sq: u8) -> i32 {
+fn king_attack_units(
+    board: &Board,
+    attacker_pieces: &[(u8, Piece)],
+    attacker: Color,
+    king_sq: u8,
+) -> i32 {
     let mut units = 0;
     let kf = (king_sq % 8) as i8;
     let kr = (king_sq / 8) as i8;
 
-    for from in 0..64u8 {
-        let Some(piece) = board.squares[from as usize] else {
-            continue;
-        };
+    for &(from, piece) in attacker_pieces {
         if piece.color != attacker || piece.kind == PieceType::King {
             continue;
         }
@@ -54,13 +56,10 @@ fn king_attack_units(board: &Board, attacker: Color, king_sq: u8) -> i32 {
     units
 }
 
-fn king_tropism(board: &Board, attacker: Color, king_sq: u8) -> i32 {
+fn king_tropism_from_pieces(attacker_pieces: &[(u8, Piece)], attacker: Color, king_sq: u8) -> i32 {
     let mut score = 0;
 
-    for from in 0..64u8 {
-        let Some(piece) = board.squares[from as usize] else {
-            continue;
-        };
+    for &(from, piece) in attacker_pieces {
         if piece.color != attacker {
             continue;
         }
@@ -99,6 +98,7 @@ fn king_safety(
     enemy_pawn_files: &[i32; 8],
     enemy_non_pawn_material: i32,
     enemy_has_queen: bool,
+    enemy_pieces: &[(u8, Piece)],
 ) -> i32 {
     let Some(ksq) = board.king_square(color) else {
         return 0;
@@ -163,11 +163,11 @@ fn king_safety(
     }
     score -= attacked * 6;
 
-    let attack_units = king_attack_units(board, enemy, ksq);
+    let attack_units = king_attack_units(board, enemy_pieces, enemy, ksq);
     let attack_scale = king_attack_scale(enemy_non_pawn_material, enemy_has_queen);
     score -= attack_units * attack_scale / 10;
 
-    let tropism = king_tropism(board, enemy, ksq);
+    let tropism = king_tropism_from_pieces(enemy_pieces, enemy, ksq);
     score -= tropism * attack_scale / 16;
 
     score
@@ -526,6 +526,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
 
     let mut white_pawns: Vec<u8> = Vec::new();
     let mut black_pawns: Vec<u8> = Vec::new();
+    let mut white_pieces: Vec<(u8, Piece)> = Vec::new();
+    let mut black_pieces: Vec<(u8, Piece)> = Vec::new();
     let mut white_rooks: Vec<u8> = Vec::new();
     let mut black_rooks: Vec<u8> = Vec::new();
     let mut white_knights: Vec<u8> = Vec::new();
@@ -546,6 +548,11 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
 
     for sq in 0..64_usize {
         if let Some(p) = board.squares[sq] {
+            if p.color == Color::White {
+                white_pieces.push((sq as u8, p));
+            } else {
+                black_pieces.push((sq as u8, p));
+            }
             let (pst_mg, pst_eg) = pst_values(p.kind, p.color, sq as u8);
             let mut mg = piece_value(p.kind) + pst_mg;
             let mut eg = piece_value(p.kind) + pst_eg;
@@ -841,6 +848,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         &black_pawn_files,
         black_non_pawn_material,
         black_has_queen,
+        &black_pieces,
     ) - king_safety(
         board,
         Color::Black,
@@ -848,6 +856,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         &white_pawn_files,
         white_non_pawn_material,
         white_has_queen,
+        &white_pieces,
     );
     mg_score += king_safety_score;
     eg_score += king_safety_score / 6;
@@ -872,15 +881,11 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
 
     let mut white_mob = 0;
     let mut black_mob = 0;
-    for sq in 0..64_usize {
-        if let Some(p) = board.squares[sq] {
-            let m = mobility_count(board, sq as u8, p);
-            if p.color == Color::White {
-                white_mob += m;
-            } else {
-                black_mob += m;
-            }
-        }
+    for &(sq, piece) in &white_pieces {
+        white_mob += mobility_count(board, sq, piece);
+    }
+    for &(sq, piece) in &black_pieces {
+        black_mob += mobility_count(board, sq, piece);
     }
     let mobility_delta = white_mob - black_mob;
     mg_score += mobility_delta * 2;

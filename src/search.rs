@@ -1,5 +1,7 @@
 use super::*;
 
+const MIN_PARALLEL_DEPTH: i32 = 6;
+
 pub(crate) struct Search {
     pub(crate) nodes: u64,
     deadline: Option<Instant>,
@@ -194,20 +196,18 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
     }
     let mut best_move = Some(root_moves[0]);
-    let threaded = engine.threads > 1 && root_moves.len() > 1;
+    let worker_count = engine.threads.min(root_moves.len()).max(1);
+    let threaded = worker_count > 1;
     let mut total_threaded_nodes = 0u64;
-    let mut worker_engines = if threaded {
-        Some(
-            (0..engine.threads)
-                .map(|_| engine.worker_clone())
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
+    let mut worker_engines: Option<Vec<EngineState>> = None;
+
+    let parallel_allowed = movetime
+        .map(|ms| ms >= 100)
+        .unwrap_or_else(|| depth >= MIN_PARALLEL_DEPTH);
 
     for d in 1..=depth.max(1) {
-        if !threaded && search.should_stop() {
+        let use_threads = threaded && parallel_allowed && d >= MIN_PARALLEL_DEPTH;
+        if !use_threads && search.should_stop() {
             break;
         }
 
@@ -219,7 +219,14 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
 
         let (score, mv, completed, depth_nodes) = loop {
-            if threaded {
+            if use_threads {
+                if worker_engines.is_none() {
+                    worker_engines = Some(
+                        (0..worker_count)
+                            .map(|_| engine.worker_clone())
+                            .collect::<Vec<_>>(),
+                    );
+                }
                 let result = search_root_parallel(
                     board,
                     d,
@@ -276,7 +283,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             break;
         }
 
-        if threaded {
+        if use_threads {
             total_threaded_nodes += depth_nodes;
         }
         best_score = score;
@@ -288,7 +295,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let nodes = if threaded { total_threaded_nodes } else { search.nodes };
+        let nodes = search.nodes + total_threaded_nodes;
         print_info(d, best_score, nodes, elapsed, best_move);
     }
 
@@ -310,31 +317,40 @@ fn search_root_parallel(
         return (-INF, None, true, 0);
     }
 
-    let mut assignments = vec![Vec::<(usize, Move)>::new(); worker_engines.len()];
+    let active_workers = worker_engines.len().min(root_moves.len()).max(1);
+    let mut assignments = vec![Vec::<(usize, Move)>::new(); active_workers];
     for (idx, mv) in root_moves.iter().copied().enumerate() {
-        assignments[idx % worker_engines.len()].push((idx, mv));
+        assignments[idx % active_workers].push((idx, mv));
     }
 
     let mut results = Vec::new();
     thread::scope(|scope| {
         let mut handles = Vec::new();
-        for (worker, assigned) in worker_engines.iter_mut().zip(assignments.into_iter()) {
+        for (worker, assigned) in worker_engines[..active_workers]
+            .iter_mut()
+            .zip(assignments.into_iter())
+        {
             worker.tt.new_search();
             let board_clone = board.clone();
             let rep_stack_vec = rep_stack.to_vec();
-            handles.push(scope.spawn(move || {
-                search_root_worker(
-                    board_clone,
-                    depth,
-                    alpha,
-                    beta,
-                    hash,
-                    deadline,
-                    worker,
-                    assigned,
-                    rep_stack_vec,
-                )
-            }));
+            let builder = thread::Builder::new().stack_size(8 * 1024 * 1024);
+            handles.push(
+                builder
+                    .spawn_scoped(scope, move || {
+                        search_root_worker(
+                            board_clone,
+                            depth,
+                            alpha,
+                            beta,
+                            hash,
+                            deadline,
+                            worker,
+                            assigned,
+                            rep_stack_vec,
+                        )
+                    })
+                    .unwrap(),
+            );
         }
         for handle in handles {
             results.push(handle.join().unwrap());
@@ -366,8 +382,7 @@ fn search_root_parallel(
         Bound::Exact
     };
     if let Some(mv) = best_move {
-        let mut engine_stub = &mut worker_engines[0];
-        engine_stub
+        worker_engines[0]
             .tt
             .store(hash, depth, score_to_tt(best_score, 0), bound, Some(mv));
     }
@@ -1172,8 +1187,7 @@ fn quiet_stage_score(
     score
 }
 
-fn capture_stage_score(board: &Board, mv: Move) -> i32 {
-    let see_score = see(board, mv);
+fn capture_stage_score_from_see(board: &Board, mv: Move, see_score: i32) -> i32 {
     let victim = if mv.is_en_passant {
         piece_value(PieceType::Pawn)
     } else {
@@ -1185,6 +1199,34 @@ fn capture_stage_score(board: &Board, mv: Move) -> i32 {
         .map(|p| piece_value(p.kind))
         .unwrap_or(piece_value(PieceType::Pawn));
     see_score * 16 + victim - attacker
+}
+
+fn staged_move_score(
+    board: &Board,
+    engine: &EngineState,
+    side: Color,
+    mv: Move,
+    tt_move: Option<Move>,
+    counter_move: Option<Move>,
+    prev_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+    history: &HistoryTable,
+) -> i32 {
+    if Some(mv) == tt_move {
+        return 4_000_000;
+    }
+
+    if is_capture_move(board, mv) {
+        let see_score = see(board, mv);
+        let bucket_base = if see_score >= 0 { 3_000_000 } else { 0 };
+        return bucket_base + capture_stage_score_from_see(board, mv, see_score);
+    }
+
+    if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
+        return 2_000_000 + quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
+    }
+
+    1_000_000 + history_score(history, side, mv)
 }
 
 fn staged_moves(
@@ -1202,50 +1244,25 @@ fn staged_moves(
     }
 
     let side = board.side_to_move;
-    let mut tt = None;
-    let mut good_captures = Vec::new();
-    let mut bad_captures = Vec::new();
-    let mut priority_quiets = Vec::new();
-    let mut quiets = Vec::new();
-
+    let mut scored = Vec::with_capacity(moves.len());
     for mv in moves {
-        if Some(mv) == tt_move && tt.is_none() {
-            tt = Some(mv);
-            continue;
-        }
-        if is_capture_move(board, mv) {
-            if see(board, mv) >= 0 {
-                good_captures.push(mv);
-            } else {
-                bad_captures.push(mv);
-            }
-            continue;
-        }
-        if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
-            priority_quiets.push(mv);
-        } else {
-            quiets.push(mv);
-        }
+        scored.push((
+            mv,
+            staged_move_score(
+                board,
+                engine,
+                side,
+                mv,
+                tt_move,
+                counter_move,
+                prev_move,
+                killers,
+                history,
+            ),
+        ));
     }
-
-    good_captures.sort_by_cached_key(|m| Reverse(capture_stage_score(board, *m)));
-    priority_quiets.sort_by_cached_key(|m| {
-        Reverse(quiet_stage_score(engine, side, *m, counter_move, prev_move, killers))
-    });
-    quiets.sort_by_cached_key(|m| Reverse(history_score(history, side, *m)));
-    bad_captures.sort_by_cached_key(|m| Reverse(capture_stage_score(board, *m)));
-
-    let mut ordered = Vec::with_capacity(
-        good_captures.len() + priority_quiets.len() + quiets.len() + bad_captures.len() + 1,
-    );
-    if let Some(mv) = tt {
-        ordered.push(mv);
-    }
-    ordered.extend(good_captures);
-    ordered.extend(priority_quiets);
-    ordered.extend(quiets);
-    ordered.extend(bad_captures);
-    ordered
+    scored.sort_unstable_by_key(|&(_, score)| Reverse(score));
+    scored.into_iter().map(|(mv, _)| mv).collect()
 }
 
 pub(crate) fn piece_attacks_square(

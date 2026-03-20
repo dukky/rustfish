@@ -11,7 +11,6 @@ POSITIONS = [
     "fen 8/2p5/3p4/KP5r/1R3pk1/4P1p1/5P2/8 w - - 0 1",
 ]
 
-
 def send(p, s):
     p.stdin.write(s + "\n")
     p.stdin.flush()
@@ -29,7 +28,7 @@ def read_until(p, prefix, timeout=30.0):
     raise RuntimeError(f"timeout waiting for {prefix}")
 
 
-def bench(engine_cmd, depth):
+def bench(engine_cmd, depth, options):
     p = subprocess.Popen(
         engine_cmd,
         stdin=subprocess.PIPE,
@@ -42,6 +41,11 @@ def bench(engine_cmd, depth):
         send(p, "uci")
         read_until(p, "uciok")
         send(p, "setoption name OwnBook value false")
+        for option in options:
+            if "=" not in option:
+                raise RuntimeError(f"option must be NAME=VALUE, got: {option}")
+            name, value = option.split("=", 1)
+            send(p, f"setoption name {name} value {value}")
         send(p, "isready")
         read_until(p, "readyok")
 
@@ -97,8 +101,14 @@ def main():
     ap = argparse.ArgumentParser(description="No-deps UCI bench runner")
     ap.add_argument("--engine", default="./target/release/rustfish")
     ap.add_argument("--depth", type=int, default=7)
+    ap.add_argument(
+        "--engine-option",
+        action="append",
+        default=[],
+        help="UCI option in NAME=VALUE form, repeatable",
+    )
     args = ap.parse_args()
-    bench([args.engine], args.depth)
+    bench([args.engine], args.depth, args.engine_option)
 
 
 if __name__ == "__main__":

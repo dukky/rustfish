@@ -32,6 +32,18 @@ def main() -> int:
     ap.add_argument("--hash", type=int, default=256)
     ap.add_argument("--jsonl-dir", default=os.path.join(ROOT, "tmp", "test-change"))
     ap.add_argument("--openings-file", default=OPENINGS)
+    ap.add_argument(
+        "--candidate-option",
+        action="append",
+        default=[],
+        help="Repeated UCI option in Name=Value form for the candidate engine",
+    )
+    ap.add_argument(
+        "--baseline-option",
+        action="append",
+        default=[],
+        help="Repeated UCI option in Name=Value form for the baseline engine",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.jsonl_dir, exist_ok=True)
@@ -45,7 +57,10 @@ def main() -> int:
         "uci smoke",
         ["/bin/zsh", "-lc", "printf 'uci\\nisready\\nposition startpos\\ngo depth 4\\nquit\\n' | ./target/release/rustfish"],
     )
-    run_step("bench", [sys.executable, BENCH, "--engine", "./target/release/rustfish", "--depth", str(args.depth)])
+    bench_cmd = [sys.executable, BENCH, "--engine", "./target/release/rustfish", "--depth", str(args.depth)]
+    for option in args.candidate_option:
+        bench_cmd.extend(["--engine-option", option])
+    run_step("bench", bench_cmd)
 
     if args.baseline:
         jsonl_path = os.path.join(args.jsonl_dir, f"{stamp}_ab_smoke.jsonl")
@@ -79,6 +94,10 @@ def main() -> int:
             "--jsonl",
             jsonl_path,
         ]
+        for option in args.candidate_option:
+            gauntlet_cmd.extend(["--engine-a-option", option])
+        for option in args.baseline_option:
+            gauntlet_cmd.extend(["--engine-b-option", option])
         if args.openings_file:
             gauntlet_cmd.extend(["--openings-file", args.openings_file])
         run_step("A/B smoke", gauntlet_cmd)

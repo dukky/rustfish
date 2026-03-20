@@ -69,6 +69,9 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Expand invariants with targeted edge-case suites
 - [ ] Expand invariants with tactical/pin/check-regression suites
 - [x] Optimize hot paths (SEE attacker lookup, bounded repetition scan, cheaper history decay cadence)
+- [x] Reduce staged move-ordering allocation churn (single scored sort instead of bucket rebuilds)
+- [x] Reduce eval rescanning overhead with piece-list reuse for king safety and mobility
+- [x] Add experimental root-split `Threads` support with conservative gating for longer/deeper searches
 - [ ] Add optional bitboard backend for speed comparison
 - [x] Add benchmark harness script (nodes/sec by depth/position set)
 
@@ -99,7 +102,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [ ] Track Elo progression over frozen-binary versions
 
 ## Current Focus
-1. Improve search efficiency: confirm strength of the new hot-path speedup candidate, then continue on structural move-picking and node-cost work.
+1. Improve search efficiency: continue on legal-move cost and deeper eval-cost work; keep `Threads` experimental until SMP pays back in gauntlets.
 2. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
 3. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
 4. Keep refactor healthy: only small follow-up structure changes while strength work continues.
@@ -111,4 +114,4 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - Prioritize search strength + correctness before fancy features.
 
 ## Current Blocker
-- Recent pruning-parameter sweeps are mostly neutral or negative; immediate Elo gains likely require a structural search change rather than more local threshold tuning.
+- Recent pruning-parameter sweeps are mostly neutral or negative, and the first root-split SMP version is now safe but still not a proven strength win; immediate Elo gains likely require better single-thread search structure plus more disciplined SMP.
