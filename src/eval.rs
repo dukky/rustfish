@@ -361,6 +361,14 @@ fn king_distance(a: u8, b: u8) -> i32 {
     (af - bf).abs().max((ar - br).abs())
 }
 
+fn relative_rank(color: Color, sq: u8) -> i32 {
+    let r = (sq / 8) as i32;
+    match color {
+        Color::White => r,
+        Color::Black => 7 - r,
+    }
+}
+
 fn add_tapered_score(mg_score: &mut i32, eg_score: &mut i32, color: Color, mg: i32, eg: i32) {
     if color == Color::White {
         *mg_score += mg;
@@ -743,12 +751,65 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             mg_score += 10;
             eg_score += 6;
         }
+        let scope = mobility_count(
+            board,
+            sq,
+            Piece {
+                color: Color::White,
+                kind: PieceType::Bishop,
+            },
+        );
+        mg_score += scope * 2;
+        eg_score += scope;
     }
     for &sq in &black_bishop_sqs {
         let r = sq / 8;
         if r <= 4 && is_outpost_square(board, sq, Color::Black) {
             mg_score -= 10;
             eg_score -= 6;
+        }
+        let scope = mobility_count(
+            board,
+            sq,
+            Piece {
+                color: Color::Black,
+                kind: PieceType::Bishop,
+            },
+        );
+        mg_score -= scope * 2;
+        eg_score -= scope;
+    }
+
+    for &sq in &white_pawns {
+        let f = (sq % 8) as i32;
+        let r = (sq / 8) as i32;
+        for df in [-1, 1] {
+            let nf = f + df;
+            let nr = r + 1;
+            if !in_bounds(nf as i8, nr as i8) {
+                continue;
+            }
+            let target = (nr as u8) * 8 + (nf as u8);
+            let rel = relative_rank(Color::White, target);
+            if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
+                mg_score += 4;
+            }
+        }
+    }
+    for &sq in &black_pawns {
+        let f = (sq % 8) as i32;
+        let r = (sq / 8) as i32;
+        for df in [-1, 1] {
+            let nf = f + df;
+            let nr = r - 1;
+            if !in_bounds(nf as i8, nr as i8) {
+                continue;
+            }
+            let target = (nr as u8) * 8 + (nf as u8);
+            let rel = relative_rank(Color::Black, target);
+            if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
+                mg_score -= 4;
+            }
         }
     }
 

@@ -52,7 +52,8 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] King safety scaling by game phase/material
 - [x] Basic piece activity (bishop pair, rooks on open/semi-open files)
 - [x] Piece activity follow-up (outposts, 7th-rank rooks)
-- [ ] Piece activity follow-up (trapped pieces, space, bishop scope)
+- [x] Piece activity follow-up (space, bishop scope)
+- [ ] Piece activity follow-up (trapped pieces)
 - [x] Endgame terms (king activity, basic mop-up / king chase)
 - [ ] Endgame terms follow-up (opposition-ish heuristics, rook endings, pawn races)
 - [ ] Incremental evaluation updates (faster nodes/sec)
