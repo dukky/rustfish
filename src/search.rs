@@ -1,0 +1,1034 @@
+use super::*;
+
+pub(crate) struct Search {
+    pub(crate) nodes: u64,
+    deadline: Option<Instant>,
+    pub(crate) stop: bool,
+    pub(crate) killers: [[Option<Move>; 2]; MAX_PLY],
+}
+
+impl Search {
+    pub(crate) fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            nodes: 0,
+            deadline,
+            stop: false,
+            killers: [[None; 2]; MAX_PLY],
+        }
+    }
+
+    pub(crate) fn should_stop(&mut self) -> bool {
+        if self.stop {
+            return true;
+        }
+        if self.nodes & 2047 == 0 {
+            if let Some(dl) = self.deadline {
+                if Instant::now() >= dl {
+                    self.stop = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+fn history_score(history: &HistoryTable, side: Color, mv: Move) -> i32 {
+    history[color_index(side)][mv.from as usize][mv.to as usize]
+}
+
+fn apply_history_delta(engine: &mut EngineState, side: Color, mv: Move, delta: i32) {
+    let h = &mut engine.history[color_index(side)][mv.from as usize][mv.to as usize];
+    *h = (*h + delta).clamp(-100_000, 100_000);
+}
+
+fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
+    prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
+}
+
+pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) -> Option<String> {
+    if engine.own_book {
+        if let Some(book) = try_book_move(board, engine) {
+            return Some(book);
+        }
+    }
+
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let mut depth: i32 = 8;
+    let mut movetime: Option<u64> = None;
+    let mut wtime: Option<u64> = None;
+    let mut btime: Option<u64> = None;
+    let mut winc: u64 = 0;
+    let mut binc: u64 = 0;
+
+    let mut i = 1;
+    while i < tokens.len() {
+        match tokens[i] {
+            "depth" if i + 1 < tokens.len() => {
+                depth = tokens[i + 1].parse().unwrap_or(8);
+                i += 2;
+            }
+            "movetime" if i + 1 < tokens.len() => {
+                movetime = Some(tokens[i + 1].parse().unwrap_or(0));
+                i += 2;
+            }
+            "wtime" if i + 1 < tokens.len() => {
+                wtime = Some(tokens[i + 1].parse().unwrap_or(0));
+                i += 2;
+            }
+            "btime" if i + 1 < tokens.len() => {
+                btime = Some(tokens[i + 1].parse().unwrap_or(0));
+                i += 2;
+            }
+            "winc" if i + 1 < tokens.len() => {
+                winc = tokens[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
+            "binc" if i + 1 < tokens.len() => {
+                binc = tokens[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let deadline = if let Some(ms) = movetime {
+        Some(Instant::now() + Duration::from_millis(ms.max(1)))
+    } else {
+        let (time_left, inc) = match board.side_to_move {
+            Color::White => (wtime, winc),
+            Color::Black => (btime, binc),
+        };
+        time_left.map(|t| {
+            let budget = (t / 28).max(20).saturating_add(inc / 2);
+            Instant::now() + Duration::from_millis(budget)
+        })
+    };
+
+    engine.tt.new_search();
+    engine.decay_history();
+
+    let start = Instant::now();
+    let mut search = Search::new(deadline);
+    let mut best_score = -INF;
+
+    let mut root_moves = board.generate_legal_moves(false);
+    if root_moves.is_empty() {
+        return None;
+    }
+
+    let hash = board_hash(board, &engine.zobrist);
+    let tt_root_move = engine.tt.get(hash).and_then(|e| e.best);
+    let mut rep_stack = vec![hash];
+    order_moves(
+        board,
+        &mut root_moves,
+        tt_root_move,
+        None,
+        &search.killers[0],
+        &engine.history,
+    );
+
+    if let Some(entry) = engine.tt.get(hash) {
+        if let Some(best) = entry.best {
+            if let Some(pos) = root_moves.iter().position(|m| *m == best) {
+                root_moves.swap(0, pos);
+            }
+        }
+    }
+    let mut best_move = Some(root_moves[0]);
+
+    for d in 1..=depth.max(1) {
+        if search.should_stop() {
+            break;
+        }
+
+        let mut alpha = -INF;
+        let mut beta = INF;
+        if d >= 4 {
+            alpha = best_score - ASPIRATION_WINDOW;
+            beta = best_score + ASPIRATION_WINDOW;
+        }
+
+        let (score, mv, completed) = loop {
+            let result = search_root(
+                board,
+                d,
+                alpha,
+                beta,
+                &mut search,
+                engine,
+                &mut root_moves,
+                &mut rep_stack,
+            );
+            if !result.2 || d < 4 {
+                break result;
+            }
+            if result.0 <= alpha {
+                alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                continue;
+            }
+            if result.0 >= beta {
+                beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                continue;
+            }
+            break result;
+        };
+
+        if !completed {
+            break;
+        }
+
+        best_score = score;
+        if let Some(m) = mv {
+            best_move = Some(m);
+            if let Some(pos) = root_moves.iter().position(|x| *x == m) {
+                root_moves.swap(0, pos);
+            }
+        }
+
+        let elapsed = start.elapsed().as_millis() as u64;
+        print_info(d, best_score, search.nodes, elapsed, best_move);
+    }
+
+    best_move.map(move_to_uci)
+}
+
+fn search_root(
+    board: &mut Board,
+    depth: i32,
+    mut alpha: i32,
+    beta: i32,
+    search: &mut Search,
+    engine: &mut EngineState,
+    root_moves: &mut Vec<Move>,
+    rep_stack: &mut Vec<u64>,
+) -> (i32, Option<Move>, bool) {
+    let alpha_orig = alpha;
+    let key = board_hash(board, &engine.zobrist);
+    let tt_move = engine.tt.get(key).and_then(|e| e.best);
+    order_moves(
+        board,
+        root_moves,
+        tt_move,
+        None,
+        &search.killers[0],
+        &engine.history,
+    );
+
+    let mut best_move = None;
+    let mut best_score = -INF;
+
+    for (idx, mv) in root_moves.iter().copied().enumerate() {
+        if search.should_stop() {
+            return (best_score, best_move, false);
+        }
+
+        let undo = board.make_move(mv);
+        let child_key = board_hash(board, &engine.zobrist);
+        rep_stack.push(child_key);
+
+        let mut score;
+        if idx == 0 {
+            score = -negamax(
+                board,
+                depth - 1,
+                -beta,
+                -alpha,
+                1,
+                search,
+                engine,
+                rep_stack,
+                Some(mv),
+                true,
+                true,
+            );
+        } else {
+            score = -negamax(
+                board,
+                depth - 1,
+                -alpha - 1,
+                -alpha,
+                1,
+                search,
+                engine,
+                rep_stack,
+                Some(mv),
+                true,
+                true,
+            );
+            if score > alpha && score < beta {
+                score = -negamax(
+                    board,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    1,
+                    search,
+                    engine,
+                    rep_stack,
+                    Some(mv),
+                    true,
+                    true,
+                );
+            }
+        }
+
+        rep_stack.pop();
+        board.undo_move(mv, undo);
+
+        if search.stop {
+            return (best_score, best_move, false);
+        }
+
+        if score > best_score {
+            best_score = score;
+            best_move = Some(mv);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            break;
+        }
+    }
+
+    let bound = if best_score <= alpha_orig {
+        Bound::Upper
+    } else if best_score >= beta {
+        Bound::Lower
+    } else {
+        Bound::Exact
+    };
+    engine
+        .tt
+        .store(key, depth, score_to_tt(best_score, 0), bound, best_move);
+
+    (best_score, best_move, true)
+}
+
+pub(crate) fn print_info(depth: i32, score: i32, nodes: u64, time_ms: u64, best: Option<Move>) {
+    if score.abs() >= MATE_SCORE - 1000 {
+        let mate = if score > 0 {
+            (MATE_SCORE - score + 1) / 2
+        } else {
+            -(MATE_SCORE + score + 1) / 2
+        };
+        println!(
+            "info depth {} score mate {} nodes {} time {} pv {}",
+            depth,
+            mate,
+            nodes,
+            time_ms,
+            best.map(move_to_uci).unwrap_or_else(|| "0000".to_string())
+        );
+    } else {
+        println!(
+            "info depth {} score cp {} nodes {} time {} pv {}",
+            depth,
+            score,
+            nodes,
+            time_ms,
+            best.map(move_to_uci).unwrap_or_else(|| "0000".to_string())
+        );
+    }
+    flush_stdout();
+}
+
+fn negamax(
+    board: &mut Board,
+    mut depth: i32,
+    mut alpha: i32,
+    mut beta: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    prev_move: Option<Move>,
+    allow_null: bool,
+    allow_iid: bool,
+) -> i32 {
+    search.nodes += 1;
+    if search.should_stop() {
+        return 0;
+    }
+
+    if ply >= MAX_PLY - 1 {
+        return eval_for_side(board);
+    }
+
+    let key = board_hash(board, &engine.zobrist);
+    if board.halfmove_clock >= 100 {
+        return 0;
+    }
+    if rep_stack.iter().rev().skip(1).any(|k| *k == key) {
+        return 0;
+    }
+
+    let in_check = board.is_in_check(board.side_to_move);
+    if in_check {
+        depth += 1;
+    }
+
+    let mate_low = -MATE_SCORE + ply as i32;
+    let mate_high = MATE_SCORE - ply as i32 - 1;
+    if alpha < mate_low {
+        alpha = mate_low;
+    }
+    if beta > mate_high {
+        beta = mate_high;
+    }
+    if alpha >= beta {
+        return alpha;
+    }
+
+    if depth <= 0 {
+        return quiescence(board, alpha, beta, search, engine, rep_stack);
+    }
+
+    let static_eval = if in_check { None } else { Some(eval_for_side(board)) };
+
+    if let Some(se) = static_eval {
+        if beta - alpha <= 1 && depth <= 2 {
+            let margin = if depth == 1 { 120 } else { 220 };
+            if se + margin <= alpha {
+                return quiescence(board, alpha, beta, search, engine, rep_stack);
+            }
+        }
+
+        if beta - alpha <= 1 && depth <= 3 {
+            let margin = match depth {
+                1 => 90,
+                2 => 180,
+                _ => 300,
+            };
+            if se - margin >= beta {
+                return se;
+            }
+        }
+    }
+
+    let alpha_orig = alpha;
+    let mut tt_move = None;
+
+    if let Some(entry) = engine.tt.get(key) {
+        tt_move = entry.best;
+        if entry.depth as i32 >= depth {
+            let tt_score = score_from_tt(entry.score, ply);
+            match entry.bound {
+                Bound::Exact => return tt_score,
+                Bound::Lower if tt_score >= beta => return tt_score,
+                Bound::Upper if tt_score <= alpha => return tt_score,
+                _ => {}
+            }
+        }
+    }
+
+    if tt_move.is_none() && allow_iid && depth >= 5 {
+        let mut iid_moves = board.generate_legal_moves(false);
+        if !iid_moves.is_empty() {
+            order_moves(
+                board,
+                &mut iid_moves,
+                None,
+                counter_move_for(engine, board.side_to_move, prev_move),
+                &search.killers[ply],
+                &engine.history,
+            );
+            let mut best_iid = iid_moves[0];
+            let mut best_iid_score = -INF;
+            for mv in iid_moves.into_iter().take(8) {
+                let undo = board.make_move(mv);
+                let child_key = board_hash(board, &engine.zobrist);
+                rep_stack.push(child_key);
+                let s = -negamax(
+                    board,
+                    depth - 3,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    search,
+                    engine,
+                    rep_stack,
+                    Some(mv),
+                    true,
+                    false,
+                );
+                rep_stack.pop();
+                board.undo_move(mv, undo);
+                if search.stop {
+                    return 0;
+                }
+                if s > best_iid_score {
+                    best_iid_score = s;
+                    best_iid = mv;
+                }
+            }
+            tt_move = Some(best_iid);
+        }
+    }
+
+    if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
+        let mut has_non_pawn = false;
+        for sq in 0..64 {
+            if let Some(p) = board.squares[sq] {
+                if p.color == board.side_to_move && p.kind != PieceType::Pawn && p.kind != PieceType::King {
+                    has_non_pawn = true;
+                    break;
+                }
+            }
+        }
+
+        if has_non_pawn {
+            let old_ep = board.en_passant;
+            let old_halfmove = board.halfmove_clock;
+            let old_fullmove = board.fullmove_number;
+            let old_side = board.side_to_move;
+
+            board.en_passant = None;
+            board.side_to_move = board.side_to_move.opposite();
+            board.halfmove_clock = board.halfmove_clock.saturating_add(1);
+            if old_side == Color::Black {
+                board.fullmove_number = board.fullmove_number.saturating_add(1);
+            }
+
+            let child_key = board_hash(board, &engine.zobrist);
+            rep_stack.push(child_key);
+            let reduction = 2 + depth / 4;
+            let score = -negamax(
+                board,
+                depth - 1 - reduction,
+                -beta,
+                -beta + 1,
+                ply + 1,
+                search,
+                engine,
+                rep_stack,
+                None,
+                false,
+                false,
+            );
+            rep_stack.pop();
+
+            board.en_passant = old_ep;
+            board.halfmove_clock = old_halfmove;
+            board.fullmove_number = old_fullmove;
+            board.side_to_move = old_side;
+
+            if search.stop {
+                return 0;
+            }
+            if score >= beta {
+                return score;
+            }
+        }
+    }
+
+    let mut moves = board.generate_legal_moves(false);
+    if moves.is_empty() {
+        if in_check {
+            return -MATE_SCORE + ply as i32;
+        }
+        return 0;
+    }
+
+    order_moves(
+        board,
+        &mut moves,
+        tt_move,
+        counter_move_for(engine, board.side_to_move, prev_move),
+        &search.killers[ply],
+        &engine.history,
+    );
+
+    let mut best = -INF;
+    let mut best_move = None;
+    let side = board.side_to_move;
+    let mut quiets_tried = Vec::new();
+
+    for (idx, mv) in moves.into_iter().enumerate() {
+        let quiet = !is_capture_move(board, mv);
+
+        if quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
+            let limit = match depth {
+                1 => 6,
+                2 => 10,
+                _ => 14,
+            };
+            if idx >= limit {
+                continue;
+            }
+        }
+
+        if quiet {
+            quiets_tried.push(mv);
+        }
+
+        let undo = board.make_move(mv);
+        let child_key = board_hash(board, &engine.zobrist);
+        rep_stack.push(child_key);
+
+        let mut score;
+        if idx == 0 {
+            score = -negamax(
+                board,
+                depth - 1,
+                -beta,
+                -alpha,
+                ply + 1,
+                search,
+                engine,
+                rep_stack,
+                Some(mv),
+                true,
+                true,
+            );
+        } else {
+            let reduction = if quiet && !in_check && depth >= 3 && idx >= 3 {
+                1 + ((depth >= 5) as i32) + ((idx >= 8) as i32)
+            } else {
+                0
+            };
+            let reduced = reduction > 0;
+            let reduced_depth = (depth - 1 - reduction).max(0);
+
+            score = -negamax(
+                board,
+                reduced_depth,
+                -alpha - 1,
+                -alpha,
+                ply + 1,
+                search,
+                engine,
+                rep_stack,
+                Some(mv),
+                true,
+                true,
+            );
+
+            if reduced && score > alpha {
+                score = -negamax(
+                    board,
+                    depth - 1,
+                    -alpha - 1,
+                    -alpha,
+                    ply + 1,
+                    search,
+                    engine,
+                    rep_stack,
+                    Some(mv),
+                    true,
+                    true,
+                );
+            }
+
+            if score > alpha && score < beta {
+                score = -negamax(
+                    board,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    search,
+                    engine,
+                    rep_stack,
+                    Some(mv),
+                    true,
+                    true,
+                );
+            }
+        }
+
+        rep_stack.pop();
+        board.undo_move(mv, undo);
+
+        if search.stop {
+            return 0;
+        }
+
+        if score > best {
+            best = score;
+            best_move = Some(mv);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            if quiet {
+                if let Some(prev) = prev_move {
+                    engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
+                        Some(mv);
+                }
+                if search.killers[ply][0] != Some(mv) {
+                    search.killers[ply][1] = search.killers[ply][0];
+                    search.killers[ply][0] = Some(mv);
+                }
+                let bonus = (depth * depth).min(64 * 64);
+                apply_history_delta(engine, side, mv, bonus);
+                for tried in quiets_tried.iter().copied() {
+                    if tried != mv {
+                        apply_history_delta(engine, side, tried, -bonus);
+                    }
+                }
+            }
+            engine
+                .tt
+                .store(key, depth, score_to_tt(alpha, ply), Bound::Lower, best_move);
+            return alpha;
+        }
+    }
+
+    let bound = if best <= alpha_orig {
+        Bound::Upper
+    } else {
+        Bound::Exact
+    };
+    engine
+        .tt
+        .store(key, depth, score_to_tt(best, ply), bound, best_move);
+
+    best
+}
+
+fn quiescence(
+    board: &mut Board,
+    mut alpha: i32,
+    beta: i32,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+) -> i32 {
+    search.nodes += 1;
+    if search.should_stop() {
+        return 0;
+    }
+
+    if board.halfmove_clock >= 100 {
+        return 0;
+    }
+
+    let key = board_hash(board, &engine.zobrist);
+    if rep_stack.iter().rev().skip(1).any(|k| *k == key) {
+        return 0;
+    }
+
+    let alpha_orig = alpha;
+    let mut tt_move = None;
+    if let Some(entry) = engine.tt.get(key) {
+        tt_move = entry.best;
+        if entry.depth >= 0 {
+            let tt_score = score_from_tt(entry.score, 0);
+            match entry.bound {
+                Bound::Exact => return tt_score,
+                Bound::Lower if tt_score >= beta => return tt_score,
+                Bound::Upper if tt_score <= alpha => return tt_score,
+                _ => {}
+            }
+        }
+    }
+
+    let in_check = board.is_in_check(board.side_to_move);
+    let mut best_move = None;
+    let static_eval = if in_check { None } else { Some(eval_for_side(board)) };
+
+    if let Some(stand_pat) = static_eval {
+        if stand_pat >= beta {
+            return beta;
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+    }
+
+    let mut moves = board.generate_legal_moves(!in_check);
+    if moves.is_empty() {
+        if in_check {
+            return -MATE_SCORE + 1;
+        }
+        return alpha;
+    }
+
+    order_moves(
+        board,
+        &mut moves,
+        tt_move,
+        None,
+        &[None, None],
+        &engine.history,
+    );
+
+    for mv in moves {
+        if !in_check {
+            let see_score = see(board, mv);
+            if see_score < 0 {
+                continue;
+            }
+            let victim = if mv.is_en_passant {
+                piece_value(PieceType::Pawn)
+            } else {
+                board.squares[mv.to as usize]
+                    .map(|p| piece_value(p.kind))
+                    .unwrap_or(0)
+            };
+            if let Some(stand_pat) = static_eval {
+                if alpha > -INF / 2 && stand_pat + victim + 150 < alpha {
+                    continue;
+                }
+            }
+            let _ = see_score;
+        }
+
+        let undo = board.make_move(mv);
+        let child_key = board_hash(board, &engine.zobrist);
+        rep_stack.push(child_key);
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack);
+        rep_stack.pop();
+        board.undo_move(mv, undo);
+
+        if search.stop {
+            return 0;
+        }
+
+        if score >= beta {
+            engine.tt.store(key, 0, score_to_tt(beta, 0), Bound::Lower, Some(mv));
+            return beta;
+        }
+        if score > alpha {
+            alpha = score;
+            best_move = Some(mv);
+        }
+    }
+
+    let bound = if alpha <= alpha_orig { Bound::Upper } else { Bound::Exact };
+    engine.tt.store(key, 0, score_to_tt(alpha, 0), bound, best_move.or(tt_move));
+    alpha
+}
+
+fn order_moves(
+    board: &Board,
+    moves: &mut Vec<Move>,
+    tt_move: Option<Move>,
+    counter_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+    history: &HistoryTable,
+) {
+    moves.sort_by_key(|m| {
+        Reverse(move_order_score(
+            board,
+            *m,
+            tt_move,
+            counter_move,
+            killers,
+            history,
+        ))
+    });
+}
+
+fn is_capture_move(board: &Board, mv: Move) -> bool {
+    mv.is_en_passant || board.squares[mv.to as usize].is_some()
+}
+
+pub(crate) fn piece_attacks_square(
+    squares: &[Option<Piece>; 64],
+    from: u8,
+    piece: Piece,
+    target: u8,
+) -> bool {
+    let ff = (from % 8) as i8;
+    let fr = (from / 8) as i8;
+    let tf = (target % 8) as i8;
+    let tr = (target / 8) as i8;
+    let df = tf - ff;
+    let dr = tr - fr;
+
+    match piece.kind {
+        PieceType::Pawn => {
+            if piece.color == Color::White {
+                dr == 1 && (df == 1 || df == -1)
+            } else {
+                dr == -1 && (df == 1 || df == -1)
+            }
+        }
+        PieceType::Knight => {
+            (df.abs() == 1 && dr.abs() == 2) || (df.abs() == 2 && dr.abs() == 1)
+        }
+        PieceType::King => df.abs() <= 1 && dr.abs() <= 1 && (df != 0 || dr != 0),
+        PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
+            let (step_f, step_r) = match piece.kind {
+                PieceType::Bishop if df.abs() == dr.abs() && df != 0 => (df.signum(), dr.signum()),
+                PieceType::Rook if (df == 0) ^ (dr == 0) => (df.signum(), dr.signum()),
+                PieceType::Queen
+                    if (df.abs() == dr.abs() && df != 0) || ((df == 0) ^ (dr == 0)) =>
+                {
+                    (df.signum(), dr.signum())
+                }
+                _ => return false,
+            };
+
+            let mut f = ff + step_f;
+            let mut r = fr + step_r;
+            while f != tf || r != tr {
+                if !in_bounds(f, r) {
+                    return false;
+                }
+                let sq = (r as u8) * 8 + (f as u8);
+                if squares[sq as usize].is_some() {
+                    return false;
+                }
+                f += step_f;
+                r += step_r;
+            }
+            true
+        }
+    }
+}
+
+fn least_valuable_attacker(
+    squares: &[Option<Piece>; 64],
+    target: u8,
+    side: Color,
+) -> Option<(u8, Piece)> {
+    let mut best: Option<(u8, Piece)> = None;
+    let mut best_val = INF;
+
+    for from in 0..64u8 {
+        if let Some(p) = squares[from as usize] {
+            if p.color != side {
+                continue;
+            }
+            if !piece_attacks_square(squares, from, p, target) {
+                continue;
+            }
+            let v = piece_value(p.kind);
+            if v < best_val {
+                best_val = v;
+                best = Some((from, p));
+            }
+        }
+    }
+
+    best
+}
+
+fn see(board: &Board, mv: Move) -> i32 {
+    if !is_capture_move(board, mv) {
+        return 0;
+    }
+
+    let mut squares = board.squares;
+    let moving = match squares[mv.from as usize] {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    let captured = if mv.is_en_passant {
+        let cap_sq = if moving.color == Color::White { mv.to - 8 } else { mv.to + 8 };
+        let c = squares[cap_sq as usize];
+        squares[cap_sq as usize] = None;
+        c
+    } else {
+        squares[mv.to as usize]
+    };
+
+    let captured = match captured {
+        Some(c) => c,
+        None => return 0,
+    };
+
+    squares[mv.from as usize] = None;
+    let mut placed = moving;
+    if let Some(promo) = mv.promotion {
+        placed.kind = promo;
+    }
+    squares[mv.to as usize] = Some(placed);
+
+    let promo_delta = mv
+        .promotion
+        .map(piece_value)
+        .unwrap_or(0)
+        .saturating_sub(piece_value(PieceType::Pawn));
+
+    let mut gain = [0i32; 32];
+    let mut depth = 0usize;
+    gain[0] = piece_value(captured.kind) + promo_delta;
+
+    let mut side = board.side_to_move.opposite();
+    let target = mv.to;
+    let mut occupant_value = piece_value(placed.kind);
+
+    loop {
+        depth += 1;
+        if depth >= gain.len() {
+            break;
+        }
+
+        let Some((from, attacker)) = least_valuable_attacker(&squares, target, side) else {
+            break;
+        };
+
+        gain[depth] = occupant_value - gain[depth - 1];
+
+        squares[from as usize] = None;
+        squares[target as usize] = Some(attacker);
+        occupant_value = piece_value(attacker.kind);
+        side = side.opposite();
+
+        if gain[depth].max(-gain[depth - 1]) < 0 {
+            break;
+        }
+    }
+
+    while depth > 0 {
+        gain[depth - 1] = -std::cmp::max(-gain[depth - 1], gain[depth]);
+        depth -= 1;
+    }
+
+    gain[0]
+}
+
+fn move_order_score(
+    board: &Board,
+    mv: Move,
+    tt_move: Option<Move>,
+    counter_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+    history: &HistoryTable,
+) -> i32 {
+    if Some(mv) == tt_move {
+        return 2_000_000;
+    }
+
+    if is_capture_move(board, mv) {
+        let see_score = see(board, mv);
+        return 1_000_000 + see_score * 12;
+    }
+
+    if Some(mv) == killers[0] {
+        return 900_000;
+    }
+    if Some(mv) == counter_move {
+        return 850_000;
+    }
+    if Some(mv) == killers[1] {
+        return 800_000;
+    }
+
+    let promo = mv
+        .promotion
+        .map(piece_value)
+        .unwrap_or(0)
+        .saturating_sub(piece_value(PieceType::Pawn));
+    let castle = if mv.is_castle { 10 } else { 0 };
+    history_score(history, board.side_to_move, mv) + promo + castle
+}
+
+pub(crate) fn piece_value(kind: PieceType) -> i32 {
+    match kind {
+        PieceType::Pawn => 100,
+        PieceType::Knight => 320,
+        PieceType::Bishop => 330,
+        PieceType::Rook => 500,
+        PieceType::Queen => 900,
+        PieceType::King => 20_000,
+    }
+}
