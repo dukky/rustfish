@@ -71,13 +71,15 @@ fn attack_unit_weight(kind: PieceType) -> i32 {
     }
 }
 
-fn king_attack_units(
+fn king_attack_profile(
     board: &Board,
     attacker_pieces: &[(u8, Piece)],
     attacker: Color,
     king_sq: u8,
-) -> i32 {
+) -> (i32, i32, i32) {
+    let mut attacked_mask = 0u64;
     let mut units = 0;
+    let mut tropism = 0;
     let kf = (king_sq % 8) as i8;
     let kr = (king_sq / 8) as i8;
 
@@ -103,18 +105,6 @@ fn king_attack_units(
         if hits > 0 {
             units += attack_unit_weight(piece.kind) * hits;
         }
-    }
-
-    units
-}
-
-fn king_tropism_from_pieces(attacker_pieces: &[(u8, Piece)], attacker: Color, king_sq: u8) -> i32 {
-    let mut score = 0;
-
-    for &(from, piece) in attacker_pieces {
-        if piece.color != attacker {
-            continue;
-        }
 
         let weight = match piece.kind {
             PieceType::Knight | PieceType::Bishop => 2,
@@ -122,15 +112,33 @@ fn king_tropism_from_pieces(attacker_pieces: &[(u8, Piece)], attacker: Color, ki
             PieceType::Queen => 3,
             PieceType::Pawn | PieceType::King => 0,
         };
-        if weight == 0 {
-            continue;
+        if weight > 0 {
+            let closeness = (7 - king_distance(from, king_sq)).max(0);
+            tropism += closeness * weight;
         }
-
-        let closeness = (7 - king_distance(from, king_sq)).max(0);
-        score += closeness * weight;
     }
 
-    score
+    for df in -1..=1 {
+        for dr in -1..=1 {
+            let nf = kf + df;
+            let nr = kr + dr;
+            if !in_bounds(nf, nr) {
+                continue;
+            }
+            let target = (nr as u8) * 8 + (nf as u8);
+            for &(from, piece) in attacker_pieces {
+                if piece.color != attacker || piece.kind == PieceType::King {
+                    continue;
+                }
+                if piece_attacks_square(&board.squares, from, piece, target) {
+                    attacked_mask |= 1u64 << target;
+                    break;
+                }
+            }
+        }
+    }
+
+    (attacked_mask.count_ones() as i32, units, tropism)
 }
 
 fn king_attack_scale(enemy_non_pawn_material: i32, enemy_has_queen: bool) -> i32 {
@@ -197,29 +205,12 @@ fn king_safety(
     }
 
     let enemy = color.opposite();
-    let mut attacked = 0;
-    let kf = (ksq % 8) as i8;
-    let kr = (ksq / 8) as i8;
-    for df in -1..=1 {
-        for dr in -1..=1 {
-            let nf = kf + df;
-            let nr = kr + dr;
-            if !in_bounds(nf, nr) {
-                continue;
-            }
-            let sq = (nr as u8) * 8 + (nf as u8);
-            if is_square_attacked(board, sq, enemy) {
-                attacked += 1;
-            }
-        }
-    }
+    let (attacked, attack_units, tropism) = king_attack_profile(board, enemy_pieces, enemy, ksq);
     score -= attacked * 6;
 
-    let attack_units = king_attack_units(board, enemy_pieces, enemy, ksq);
     let attack_scale = king_attack_scale(enemy_non_pawn_material, enemy_has_queen);
     score -= attack_units * attack_scale / 10;
 
-    let tropism = king_tropism_from_pieces(enemy_pieces, enemy, ksq);
     score -= tropism * attack_scale / 16;
 
     score
@@ -229,7 +220,7 @@ fn has_pawn_bits(mask: &[u8; 8], file: usize, bits: u8) -> bool {
     (mask[file] & bits) != 0
 }
 
-fn is_supported_by_pawn(board: &Board, sq: u8, color: Color) -> bool {
+fn is_supported_by_pawn(pawn_masks: &[u8; 8], sq: u8, color: Color) -> bool {
     let f = (sq % 8) as i32;
     let r = (sq / 8) as i32;
     let support_rank = match color {
@@ -245,13 +236,7 @@ fn is_supported_by_pawn(board: &Board, sq: u8, color: Color) -> bool {
         if !(0..8).contains(&pf) {
             continue;
         }
-        let psq = (support_rank as u8) * 8 + (pf as u8);
-        if board.squares[psq as usize]
-            == Some(Piece {
-                color,
-                kind: PieceType::Pawn,
-            })
-        {
+        if has_pawn_bits(pawn_masks, pf as usize, 1u8 << support_rank) {
             return true;
         }
     }
@@ -272,7 +257,13 @@ fn is_connected_pawn(pawn_masks: &[u8; 8], sq: u8, color: Color) -> bool {
         || (f < 7 && has_pawn_bits(pawn_masks, f + 1, rank_bits))
 }
 
-fn is_backward_pawn(board: &Board, pawn_masks: &[u8; 8], sq: u8, color: Color, passed: bool) -> bool {
+fn is_backward_pawn(
+    own_pawn_masks: &[u8; 8],
+    enemy_pawn_masks: &[u8; 8],
+    sq: u8,
+    color: Color,
+    passed: bool,
+) -> bool {
     if passed {
         return false;
     }
@@ -291,13 +282,12 @@ fn is_backward_pawn(board: &Board, pawn_masks: &[u8; 8], sq: u8, color: Color, p
         Color::White => ((1u16 << (r as u32 + 1)) - 1) as u8,
         Color::Black => !((1u8 << (r as u32)) - 1),
     };
-    let has_adjacent_support = (f > 0 && has_pawn_bits(pawn_masks, f - 1, support_bits))
-        || (f < 7 && has_pawn_bits(pawn_masks, f + 1, support_bits));
+    let has_adjacent_support = (f > 0 && has_pawn_bits(own_pawn_masks, f - 1, support_bits))
+        || (f < 7 && has_pawn_bits(own_pawn_masks, f + 1, support_bits));
     if has_adjacent_support {
         return false;
     }
 
-    let enemy = color.opposite();
     for df in [-1, 1] {
         let ef = f as i32 + df;
         let er = match color {
@@ -307,13 +297,7 @@ fn is_backward_pawn(board: &Board, pawn_masks: &[u8; 8], sq: u8, color: Color, p
         if !(0..8).contains(&ef) || !(0..8).contains(&er) {
             continue;
         }
-        let esq = (er as u8) * 8 + (ef as u8);
-        if board.squares[esq as usize]
-            == Some(Piece {
-                color: enemy,
-                kind: PieceType::Pawn,
-            })
-        {
+        if has_pawn_bits(enemy_pawn_masks, ef as usize, 1u8 << (er as u8)) {
             return true;
         }
     }
@@ -672,7 +656,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         if passed {
             mg_score += 12 + r * 4;
             eg_score += 28 + r * 12;
-            if is_supported_by_pawn(board, sq, Color::White) {
+            if is_supported_by_pawn(&white_pawn_masks, sq, Color::White) {
                 mg_score += 6 + r;
                 eg_score += 12 + r * 3;
             }
@@ -683,7 +667,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             eg_score += 10;
         }
 
-        if is_backward_pawn(board, &white_pawn_masks, sq, Color::White, passed) {
+        if is_backward_pawn(&white_pawn_masks, &black_pawn_masks, sq, Color::White, passed) {
             mg_score -= 12;
             eg_score -= 6;
         }
@@ -721,7 +705,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         if passed {
             mg_score -= 12 + (7 - r) * 4;
             eg_score -= 28 + (7 - r) * 12;
-            if is_supported_by_pawn(board, sq, Color::Black) {
+            if is_supported_by_pawn(&black_pawn_masks, sq, Color::Black) {
                 mg_score -= 6 + (7 - r);
                 eg_score -= 12 + (7 - r) * 3;
             }
@@ -732,7 +716,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             eg_score -= 10;
         }
 
-        if is_backward_pawn(board, &black_pawn_masks, sq, Color::Black, passed) {
+        if is_backward_pawn(&black_pawn_masks, &white_pawn_masks, sq, Color::Black, passed) {
             mg_score += 12;
             eg_score += 6;
         }
