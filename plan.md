@@ -119,6 +119,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
   - TT static eval reuse (`f4143cd`)
   - staged pick-next non-root/qsearch move picker (`9b0b346`)
   - move-buffer reuse for pseudo/legal generation and search-side move collection (bench-positive, strength-neutral)
+  - shared-TT lazy-SMP recovery with a unique-owner scalar TT fast path (throughput-positive for `Threads>1`)
 - Long confirmation that the new structural baseline is real:
   - `9b0b346` vs `f4143cd`, `96g / 100ms / parallel 2`: `41/37/18`, score `62.0%`, about `+84.9 Elo`
 - External confidence progress:
@@ -145,7 +146,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - Prioritize search strength + correctness before fancy features.
 
 ## Current Blocker
-- Recent pruning-parameter sweeps are mostly neutral or negative. SMP throughput is now meaningfully better with shared TT, but strength is still unvalidated and single-thread overhead remains a follow-up target.
+- Recent pruning-parameter sweeps are mostly neutral or negative. SMP throughput is now meaningfully better with shared TT, but strength is still unvalidated and stronger worker coordination is the next follow-up target.
 
 ## SMP Recovery
 - Replaced the old static root-split worker assignment with a shared-TT lazy-SMP style path:
@@ -155,6 +156,9 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
   - root move order is diversified slightly per worker instead of statically partitioned
 - Fixed shared TT sizing so the atomic slot table uses its true slot size instead of the old compact entry size.
 - Current throughput snapshot on the local depth-7 fixed bench (`Hash=256`):
-  - shared-TT SMP candidate: `Threads=1` `~720k nps`, `Threads=2` `~1.12M nps`, `Threads=4` `~1.57M nps`, `Threads=8` `~2.47M nps`
-  - old root-split baseline: `Threads=1` `~645k nps`, `Threads=2` `~672k nps`, `Threads=4` `~1.07M nps`
-- Depth-8 bench also stayed monotonic (`~729k -> ~1.14M -> ~1.40M -> ~2.16M`), so the recovered SMP path is a real throughput improvement even though it is not close to linear scaling yet.
+  - shared-TT SMP candidate with unique-owner scalar TT fast path: `Threads=1` `786750 nps`, `Threads=2` `1247254 nps`, `Threads=4` `1887917 nps`, `Threads=8` `3187421 nps`
+  - old root-split baseline `9b0b346`: `Threads=1` `808576 nps`, `Threads=2` `905173 nps`, `Threads=4` `1256173 nps`
+- Practical read:
+  - scalar cost is now small (`-2.7%` vs `9b0b346` at `Threads=1`)
+  - the recovered SMP path is materially stronger on throughput (`+37.8%` at `Threads=2`, `+50.3%` at `Threads=4`)
+  - the next obvious SMP target is worker lifecycle / coordination efficiency, not another return to static root splitting
