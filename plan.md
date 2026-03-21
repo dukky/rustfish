@@ -21,7 +21,6 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Add repetition detection in search tree (line-based/perpetual handling)
 - [x] Add 50-move rule draw detection in search
 - [x] Add better TT replacement strategy (depth+age hybrid)
-- [x] Store static eval in TT and reuse it for search stand-pat/pruning
 - [x] Store static eval in TT and reuse it for pruning/qsearch eval fallback
 
 ## Phase 2 — Search Quality
@@ -105,13 +104,36 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Add two-stage sweep flow (parallel fixed-length screens, then SPRT confirmation)
 - [x] Add single-command validation runner
 - [x] Expose core pruning/reduction knobs as UCI options for sweep-based tuning
-- [ ] Track Elo progression over frozen-binary versions
+- [x] Track Elo progression over frozen-binary versions with a local round-robin rating pool
 
 ## Current Focus
 1. Improve search efficiency: keep pushing post-2100 structural single-thread work (TT/eval/search architecture) and only revisit `Threads` after stronger single-thread baselines are frozen.
 2. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
 3. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
 4. Keep refactor healthy: only small follow-up structure changes while strength work continues.
+
+## Post-2100 Review
+- Accepted from the post-2100 structural path:
+  - TT static eval reuse (`f4143cd`)
+  - staged pick-next non-root/qsearch move picker (`9b0b346`)
+- Long confirmation that the new structural baseline is real:
+  - `9b0b346` vs `f4143cd`, `96g / 100ms / parallel 2`: `41/37/18`, score `62.0%`, about `+84.9 Elo`
+- External confidence progress:
+  - `9b0b346` vs Stockfish `2100`, `96g / 100ms / parallel 2`: `59/9/28`, score `66.1%`, about `+116.4 Elo`
+  - `9b0b346` vs Stockfish `2200`, `96g / 100ms / parallel 2`: `44/12/40`, score `52.1%`, about `+14.5 Elo`
+  - `9b0b346` vs Stockfish `2300`, `96g / 100ms / parallel 2`: `46/8/42`, score `52.1%`, about `+14.5 Elo`
+  - those `2200` / `2300` results are suspiciously similar, so frozen A/B plus a local pool is a better anchor than over-interpreting `UCI_LimitStrength`
+- Structural ideas tried and rejected so far:
+  - clustered TT
+  - pawn hash / pawn-eval cache groundwork
+  - capture history
+  - correction history
+  - ProbCut
+  - singular extension variants tried so far
+- Best remaining post-2100 priorities:
+  - incremental eval groundwork
+  - better endgame knowledge / scaling
+  - another genuinely different search-concept upgrade, not more local margin tuning
 
 ## Working Protocol
 - Keep this file current.

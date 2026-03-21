@@ -34,6 +34,7 @@ Dependencies: none beyond Rust stdlib and project-local scripts using Python std
 - `scripts/freeze.py` — build + freeze a versioned binary with metadata and bench output
 - `scripts/sweep.py` — run candidate variants against a fixed baseline with gauntlet + SPRT
 - `scripts/test_change.py` — one-command validation for correctness, bench, and A/B smoke
+- `scripts/rating_pool.py` — run a local round-robin rating pool across fixed engine binaries
 - `scripts/openings.txt` — reusable opening suite for diversified gauntlets
 - `plan.md` — project roadmap / progress tracking
 
@@ -175,6 +176,29 @@ python3 scripts/gauntlet.py \
   --openings-file ./scripts/openings.txt \
   --jsonl ./tmp/ab.jsonl
 ```
+
+### Local rating pool across frozen binaries
+```bash
+python3 scripts/rating_pool.py \
+  --engine current=./bin/rustfish_9b0b346_20260320_225723 \
+  --engine f4143cd=./bin/rustfish_f4143cd_20260320_220450 \
+  --engine old=./bin/rustfish_99bdd5d_20260320_205751 \
+  --engine sf=/opt/homebrew/bin/stockfish \
+  --engine-option current:OwnBook=false \
+  --engine-option f4143cd:OwnBook=false \
+  --engine-option old:OwnBook=false \
+  --common-option Hash=256 \
+  --games 48 \
+  --movetime 100 \
+  --parallel 2 \
+  --anchor current \
+  --anchor-rating 0
+```
+
+Notes:
+- This gives a clearer local ladder than `UCI_LimitStrength`, because every opponent is a fixed binary.
+- Treat the output as a local pool rating, not a public Elo list.
+- Keep the same openings, hash, thread count, and time control across runs.
 
 ### Elo ladder quick sweep vs Stockfish
 ```bash
