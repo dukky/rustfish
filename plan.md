@@ -76,6 +76,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Reduce eval allocation churn and pawn-structure helper rescans
 - [x] Reduce eval duplicate mobility work (reuse bishop mobility in main mobility pass)
 - [x] Reduce legal-move filtering cost with exact pin/check-based legality filtering
+- [x] Reuse move buffers across legal move generation and search callers
 - [x] Add experimental root-split `Threads` support with conservative gating for longer/deeper searches
 - [ ] Add optional bitboard backend for speed comparison
 - [x] Add benchmark harness script (nodes/sec by depth/position set)
@@ -116,6 +117,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - Accepted from the post-2100 structural path:
   - TT static eval reuse (`f4143cd`)
   - staged pick-next non-root/qsearch move picker (`9b0b346`)
+  - move-buffer reuse for pseudo/legal generation and search-side move collection (bench-positive, strength-neutral)
 - Long confirmation that the new structural baseline is real:
   - `9b0b346` vs `f4143cd`, `96g / 100ms / parallel 2`: `41/37/18`, score `62.0%`, about `+84.9 Elo`
 - External confidence progress:

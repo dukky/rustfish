@@ -606,36 +606,38 @@ impl Board {
         }
     }
 
-    fn generate_legal_moves(&mut self, captures_only: bool) -> Vec<Move> {
+    fn generate_legal_moves(&mut self, captures_only: bool, buf: &mut Vec<Move>) {
         let side = self.side_to_move;
         let (check_count, evasion_mask, pin_masks) = self.legal_filter_state(side);
-        let pseudo = generate_pseudo_moves(self, captures_only);
-        let mut legal = Vec::with_capacity(pseudo.len());
-        for mv in pseudo {
+        generate_pseudo_moves(self, captures_only, buf);
+        // Filter in-place: write index tracks legal moves kept
+        let mut write = 0usize;
+        for read in 0..buf.len() {
+            let mv = buf[read];
             let moving_piece = self.squares[mv.from as usize].unwrap();
             if moving_piece.kind == PieceType::King || mv.is_en_passant {
                 let undo = self.make_move(mv);
-                if !self.is_in_check(side) {
-                    legal.push(mv);
-                }
+                let legal = !self.is_in_check(side);
                 self.undo_move(mv, undo);
-                continue;
+                if !legal {
+                    continue;
+                }
+            } else {
+                if check_count >= 2 {
+                    continue;
+                }
+                if check_count == 1 && (evasion_mask & square_mask(mv.to)) == 0 {
+                    continue;
+                }
+                let pin_mask = pin_masks[mv.from as usize];
+                if pin_mask != u64::MAX && (pin_mask & square_mask(mv.to)) == 0 {
+                    continue;
+                }
             }
-
-            if check_count >= 2 {
-                continue;
-            }
-            if check_count == 1 && (evasion_mask & square_mask(mv.to)) == 0 {
-                continue;
-            }
-            let pin_mask = pin_masks[mv.from as usize];
-            if pin_mask != u64::MAX && (pin_mask & square_mask(mv.to)) == 0 {
-                continue;
-            }
-
-            legal.push(mv);
+            buf[write] = mv;
+            write += 1;
         }
-        legal
+        buf.truncate(write);
     }
 }
 

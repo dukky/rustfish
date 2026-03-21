@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool) -> Vec<Move> {
-    let mut moves = Vec::with_capacity(128);
+pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &mut Vec<Move>) {
+    moves.clear();
 
     for sq in 0..64_u8 {
         let piece = match board.squares[sq as usize] {
@@ -150,10 +150,10 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool) -> Vec<M
                 }
             }
             PieceType::Bishop => {
-                gen_sliders(board, sq, piece, captures_only, &[(1, 1), (1, -1), (-1, 1), (-1, -1)], &mut moves);
+                gen_sliders(board, sq, piece, captures_only, &[(1, 1), (1, -1), (-1, 1), (-1, -1)], moves);
             }
             PieceType::Rook => {
-                gen_sliders(board, sq, piece, captures_only, &[(1, 0), (-1, 0), (0, 1), (0, -1)], &mut moves);
+                gen_sliders(board, sq, piece, captures_only, &[(1, 0), (-1, 0), (0, 1), (0, -1)], moves);
             }
             PieceType::Queen => {
                 gen_sliders(
@@ -162,7 +162,7 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool) -> Vec<M
                     piece,
                     captures_only,
                     &[(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)],
-                    &mut moves,
+                    moves,
                 );
             }
             PieceType::King => {
@@ -270,7 +270,6 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool) -> Vec<M
         }
     }
 
-    moves
 }
 
 pub(crate) fn mobility_count(board: &Board, sq: u8, piece: Piece) -> i32 {
@@ -542,7 +541,8 @@ pub(crate) fn parse_uci_move(board: &mut Board, s: &str) -> Option<Move> {
         None
     };
 
-    let legal = board.generate_legal_moves(false);
+    let mut legal = Vec::new();
+    board.generate_legal_moves(false, &mut legal);
     legal.into_iter().find(|m| m.from == from && m.to == to && m.promotion == promotion)
 }
 

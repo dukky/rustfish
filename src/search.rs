@@ -7,6 +7,7 @@ pub(crate) struct Search {
     deadline: Option<Instant>,
     pub(crate) stop: bool,
     pub(crate) killers: [[Option<Move>; 2]; MAX_PLY],
+    move_buf: Vec<Move>,
 }
 
 impl Search {
@@ -16,6 +17,7 @@ impl Search {
             deadline,
             stop: false,
             killers: [[None; 2]; MAX_PLY],
+            move_buf: Vec::with_capacity(256),
         }
     }
 
@@ -117,9 +119,10 @@ impl MovePicker {
         killers: &[Option<Move>; 2],
         history: &HistoryTable,
         captures_only: bool,
+        move_buf: &mut Vec<Move>,
     ) -> Self {
-        let moves = board.generate_legal_moves(captures_only);
-        if moves.is_empty() {
+        board.generate_legal_moves(captures_only, move_buf);
+        if move_buf.is_empty() {
             return Self {
                 tt_move: None,
                 tt_yielded: true,
@@ -142,7 +145,7 @@ impl MovePicker {
             total: 0,
         };
 
-        for mv in moves {
+        for mv in move_buf.iter().copied() {
             picker.total += 1;
             if Some(mv) == tt_move {
                 picker.tt_move = Some(mv);
@@ -291,7 +294,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     let mut search = Search::new(deadline);
     let mut best_score = -INF;
 
-    let mut root_moves = board.generate_legal_moves(false);
+    let mut root_moves = Vec::new();
+    board.generate_legal_moves(false, &mut root_moves);
     if root_moves.is_empty() {
         return None;
     }
@@ -832,7 +836,8 @@ fn negamax(
     }
 
     if tt_move.is_none() && allow_iid && depth >= 5 {
-        let mut iid_moves = board.generate_legal_moves(false);
+        board.generate_legal_moves(false, &mut search.move_buf);
+        let mut iid_moves = std::mem::take(&mut search.move_buf);
         if !iid_moves.is_empty() {
             order_moves(
                 board,
@@ -846,7 +851,7 @@ fn negamax(
             );
             let mut best_iid = iid_moves[0];
             let mut best_iid_score = -INF;
-            for mv in iid_moves.into_iter().take(8) {
+            for mv in iid_moves.iter().copied().take(8) {
                 let undo = board.make_move(mv);
                 let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
                 rep_stack.push(child_key);
@@ -876,6 +881,7 @@ fn negamax(
             }
             tt_move = Some(best_iid);
         }
+        search.move_buf = iid_moves;
     }
 
     if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
@@ -946,6 +952,7 @@ fn negamax(
         &killers,
         &engine.history,
         false,
+        &mut search.move_buf,
     );
     if picker.is_empty() {
         if in_check {
@@ -1211,6 +1218,7 @@ fn quiescence(
         &[None, None],
         &engine.history,
         !in_check,
+        &mut search.move_buf,
     );
     if picker.is_empty() {
         if in_check {

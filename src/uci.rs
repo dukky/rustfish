@@ -168,7 +168,8 @@ pub(crate) fn handle_divide(cmd: &str, board: &mut Board) {
     let start = Instant::now();
     let mut total = 0u64;
 
-    let mut root = board.generate_legal_moves(false);
+    let mut root = Vec::new();
+    board.generate_legal_moves(false, &mut root);
     root.sort_by_key(|m| move_to_uci(*m));
     for mv in root {
         let undo = board.make_move(mv);
@@ -187,7 +188,8 @@ pub(crate) fn perft(board: &mut Board, depth: i32) -> u64 {
     if depth <= 0 {
         return 1;
     }
-    let moves = board.generate_legal_moves(false);
+    let mut moves = Vec::new();
+    board.generate_legal_moves(false, &mut moves);
     if depth == 1 {
         return moves.len() as u64;
     }
@@ -304,11 +306,12 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
         "4k3/8/8/8/8/8/4r3/4K3 w - - 0 1",
     ];
 
+    let mut legal = Vec::new();
     for fen in edge_fens {
         board.set_fen(fen);
         let baseline = board.clone();
-        let legal = board.generate_legal_moves(false);
-        for mv in legal {
+        board.generate_legal_moves(false, &mut legal);
+        for mv in legal.iter().copied() {
             let undo = board.make_move(mv);
             board.undo_move(mv, undo);
             if *board != baseline {
@@ -329,7 +332,7 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
         board.set_startpos();
         let plies = (xorshift64(&mut rng) % 40) as usize;
         for _ in 0..plies {
-            let legal = board.generate_legal_moves(false);
+            board.generate_legal_moves(false, &mut legal);
             if legal.is_empty() {
                 break;
             }
@@ -338,8 +341,8 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
         }
 
         let baseline = board.clone();
-        let legal = board.generate_legal_moves(false);
-        for mv in legal {
+        board.generate_legal_moves(false, &mut legal);
+        for mv in legal.iter().copied() {
             let undo = board.make_move(mv);
             board.undo_move(mv, undo);
             if *board != baseline {
