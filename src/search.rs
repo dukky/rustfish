@@ -149,6 +149,7 @@ struct RootWorkerResult {
     best_move: Option<Move>,
     nodes: u64,
     completed: bool,
+    ordered_root_moves: Vec<Move>,
 }
 
 struct MovePicker {
@@ -353,7 +354,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     }
 
     let hash = board_hash(board, &engine.zobrist);
-    let tt_root_move = engine.tt.get(hash).and_then(|e| e.best);
+    let tt_root_move = engine.tt.probe(hash).and_then(|e| e.best);
     let mut rep_stack = vec![hash];
     order_moves(
         board,
@@ -366,7 +367,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         &engine.history,
     );
 
-    if let Some(entry) = engine.tt.get(hash) {
+    if let Some(entry) = engine.tt.probe(hash) {
         if let Some(best) = entry.best {
             if let Some(pos) = root_moves.iter().position(|m| *m == best) {
                 root_moves.swap(0, pos);
@@ -495,27 +496,19 @@ fn search_root_parallel(
         return (-INF, None, true, 0);
     }
 
-    let active_workers = worker_engines.len().min(root_moves.len()).max(1);
-    let mut assignments = vec![Vec::<(usize, Move)>::new(); active_workers];
-    for (idx, mv) in root_moves.iter().copied().enumerate() {
-        assignments[idx % active_workers].push((idx, mv));
-    }
-
+    let active_workers = worker_engines.len().max(1);
     let mut results = Vec::new();
     thread::scope(|scope| {
         let mut handles = Vec::new();
-        for (worker, assigned) in worker_engines[..active_workers]
-            .iter_mut()
-            .zip(assignments.into_iter())
-        {
-            worker.tt.new_search();
+        for (worker_idx, worker) in worker_engines[..active_workers].iter_mut().enumerate() {
             let board_clone = board.clone();
             let rep_stack_vec = rep_stack.to_vec();
+            let root_moves_vec = root_moves.to_vec();
             let builder = thread::Builder::new().stack_size(8 * 1024 * 1024);
             handles.push(
                 builder
                     .spawn_scoped(scope, move || {
-                        search_root_worker(
+                        search_root_lazy_worker(
                             board_clone,
                             depth,
                             alpha,
@@ -523,8 +516,9 @@ fn search_root_parallel(
                             hash,
                             deadline,
                             worker,
-                            assigned,
+                            root_moves_vec,
                             rep_stack_vec,
+                            worker_idx,
                         )
                     })
                     .unwrap(),
@@ -539,6 +533,7 @@ fn search_root_parallel(
     let mut best_move = None;
     let mut completed = true;
     let mut total_nodes = 0u64;
+    let mut best_root_order = None;
 
     for result in results {
         total_nodes += result.nodes;
@@ -547,6 +542,7 @@ fn search_root_parallel(
             if result.best_score > best_score {
                 best_score = result.best_score;
                 best_move = Some(mv);
+                best_root_order = Some(result.ordered_root_moves);
             }
         }
     }
@@ -563,12 +559,25 @@ fn search_root_parallel(
         worker_engines[0]
             .tt
             .store(hash, depth, score_to_tt(best_score, 0), None, bound, Some(mv));
+        if let Some(ordered) = best_root_order {
+            root_moves.clone_from_slice(&ordered);
+        }
     }
 
     (best_score, best_move, completed, total_nodes)
 }
 
-fn search_root_worker(
+fn diversify_root_moves(root_moves: &mut [Move], worker_idx: usize) {
+    if worker_idx == 0 || root_moves.len() < 2 {
+        return;
+    }
+
+    let top = root_moves.len().min(4 + worker_idx);
+    let swap_idx = worker_idx.min(top - 1);
+    root_moves.swap(0, swap_idx);
+}
+
+fn search_root_lazy_worker(
     mut board: Board,
     depth: i32,
     alpha: i32,
@@ -576,63 +585,29 @@ fn search_root_worker(
     hash: u64,
     deadline: Option<Instant>,
     engine: &mut EngineState,
-    assigned_moves: Vec<(usize, Move)>,
-    rep_stack: Vec<u64>,
+    mut root_moves: Vec<Move>,
+    mut rep_stack: Vec<u64>,
+    worker_idx: usize,
 ) -> RootWorkerResult {
     let mut search = Search::new(deadline);
-    let mut best_score = -INF;
-    let mut best_move = None;
-
-    for (_, mv) in assigned_moves {
-        if search.should_stop() {
-            return RootWorkerResult {
-                best_score,
-                best_move,
-                nodes: search.nodes,
-                completed: false,
-            };
-        }
-
-        let undo = board.make_move(mv);
-        let child_key = child_hash(hash, &board, mv, undo, &engine.zobrist);
-        let mut child_rep_stack = rep_stack.clone();
-        child_rep_stack.push(child_key);
-        let score = -negamax(
-            &mut board,
-            depth - 1,
-            -beta,
-            -alpha,
-            1,
-            &mut search,
-            engine,
-            &mut child_rep_stack,
-            child_key,
-            Some(mv),
-            true,
-            true,
-        );
-        board.undo_move(mv, undo);
-
-        if search.stop {
-            return RootWorkerResult {
-                best_score,
-                best_move,
-                nodes: search.nodes,
-                completed: false,
-            };
-        }
-
-        if score > best_score {
-            best_score = score;
-            best_move = Some(mv);
-        }
-    }
-
+    diversify_root_moves(&mut root_moves, worker_idx);
+    let (best_score, best_move, completed) = search_root(
+        &mut board,
+        depth,
+        alpha,
+        beta,
+        hash,
+        &mut search,
+        engine,
+        &mut root_moves,
+        &mut rep_stack,
+    );
     RootWorkerResult {
         best_score,
         best_move,
         nodes: search.nodes,
-        completed: true,
+        completed,
+        ordered_root_moves: root_moves,
     }
 }
 
@@ -648,7 +623,7 @@ fn search_root(
     rep_stack: &mut Vec<u64>,
 ) -> (i32, Option<Move>, bool) {
     let alpha_orig = alpha;
-    let tt_move = engine.tt.get(key).and_then(|e| e.best);
+    let tt_move = engine.tt.probe(key).and_then(|e| e.best);
     order_moves(
         board,
         engine,
@@ -834,7 +809,7 @@ fn negamax(
     }
 
     let alpha_orig = alpha;
-    let tt_entry = engine.tt.get(key);
+    let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
 
     if let Some(entry) = tt_entry {
@@ -1236,7 +1211,7 @@ fn quiescence(
     }
 
     let alpha_orig = alpha;
-    let tt_entry = engine.tt.get(key);
+    let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
     if let Some(entry) = tt_entry {
         tt_move = entry.best;

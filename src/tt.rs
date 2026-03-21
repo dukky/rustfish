@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Bound {
@@ -9,25 +11,21 @@ pub(crate) enum Bound {
 
 #[derive(Copy, Clone)]
 pub(crate) struct TTEntry {
-    pub(crate) key: u64,
     pub(crate) depth: i16,
     pub(crate) score: i32,
     pub(crate) static_eval: i16,
     pub(crate) bound: Bound,
     pub(crate) best: Option<Move>,
-    pub(crate) age: u8,
 }
 
 impl Default for TTEntry {
     fn default() -> Self {
         Self {
-            key: 0,
             depth: -1,
             score: 0,
             static_eval: i16::MIN,
             bound: Bound::Exact,
             best: None,
-            age: 0,
         }
     }
 }
@@ -42,43 +40,172 @@ impl TTEntry {
     }
 }
 
-pub(crate) struct TransTable {
-    entries: Vec<TTEntry>,
+struct TTSlot {
+    key: AtomicU64,
+    depth: AtomicI32,
+    score: AtomicI32,
+    static_eval: AtomicI32,
+    best: AtomicU32,
+    bound: AtomicU8,
+    age: AtomicU8,
+}
+
+impl Default for TTSlot {
+    fn default() -> Self {
+        Self {
+            key: AtomicU64::new(0),
+            depth: AtomicI32::new(-1),
+            score: AtomicI32::new(0),
+            static_eval: AtomicI32::new(i16::MIN as i32),
+            best: AtomicU32::new(u32::MAX),
+            bound: AtomicU8::new(bound_to_u8(Bound::Exact)),
+            age: AtomicU8::new(0),
+        }
+    }
+}
+
+struct TransTableInner {
+    entries: Box<[TTSlot]>,
     mask: usize,
-    current_age: u8,
+    current_age: AtomicU8,
+}
+
+#[derive(Clone)]
+pub(crate) struct TransTable {
+    inner: Arc<TransTableInner>,
+}
+
+fn pack_move(mv: Move) -> u32 {
+    let promo = match mv.promotion {
+        None => 0,
+        Some(PieceType::Knight) => 1,
+        Some(PieceType::Bishop) => 2,
+        Some(PieceType::Rook) => 3,
+        Some(PieceType::Queen) => 4,
+        Some(PieceType::Pawn | PieceType::King) => 0,
+    };
+    mv.from as u32
+        | ((mv.to as u32) << 6)
+        | ((promo as u32) << 12)
+        | ((mv.is_en_passant as u32) << 15)
+        | ((mv.is_castle as u32) << 16)
+}
+
+fn unpack_move(bits: u32) -> Option<Move> {
+    if bits == u32::MAX {
+        return None;
+    }
+    let promotion = match (bits >> 12) & 0x7 {
+        0 => None,
+        1 => Some(PieceType::Knight),
+        2 => Some(PieceType::Bishop),
+        3 => Some(PieceType::Rook),
+        4 => Some(PieceType::Queen),
+        _ => return None,
+    };
+    Some(Move {
+        from: (bits & 0x3f) as u8,
+        to: ((bits >> 6) & 0x3f) as u8,
+        promotion,
+        is_en_passant: ((bits >> 15) & 1) != 0,
+        is_castle: ((bits >> 16) & 1) != 0,
+    })
+}
+
+fn bound_to_u8(bound: Bound) -> u8 {
+    match bound {
+        Bound::Exact => 0,
+        Bound::Lower => 1,
+        Bound::Upper => 2,
+    }
+}
+
+fn u8_to_bound(raw: u8) -> Bound {
+    match raw {
+        1 => Bound::Lower,
+        2 => Bound::Upper,
+        _ => Bound::Exact,
+    }
 }
 
 impl TransTable {
     pub(crate) fn new(megabytes: usize) -> Self {
         let bytes = (megabytes.max(1) * 1024 * 1024) as usize;
-        let entry_size = std::mem::size_of::<TTEntry>();
+        let entry_size = std::mem::size_of::<TTSlot>();
         let mut n = (bytes / entry_size).max(1).next_power_of_two();
         if n == 0 {
             n = 1;
         }
         Self {
-            entries: vec![TTEntry::default(); n],
-            mask: n - 1,
-            current_age: 0,
+            inner: Arc::new(TransTableInner {
+                entries: (0..n).map(|_| TTSlot::default()).collect(),
+                mask: n - 1,
+                current_age: AtomicU8::new(0),
+            }),
         }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.entries.fill(TTEntry::default());
-        self.current_age = 0;
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            for slot in inner.entries.iter_mut() {
+                *slot.key.get_mut() = 0;
+                *slot.depth.get_mut() = -1;
+                *slot.score.get_mut() = 0;
+                *slot.static_eval.get_mut() = i16::MIN as i32;
+                *slot.best.get_mut() = u32::MAX;
+                *slot.bound.get_mut() = bound_to_u8(Bound::Exact);
+                *slot.age.get_mut() = 0;
+            }
+            *inner.current_age.get_mut() = 0;
+            return;
+        }
+
+        for slot in self.inner.entries.iter() {
+            slot.key.store(0, Ordering::Relaxed);
+            slot.depth.store(-1, Ordering::Relaxed);
+            slot.score.store(0, Ordering::Relaxed);
+            slot.static_eval.store(i16::MIN as i32, Ordering::Relaxed);
+            slot.best.store(u32::MAX, Ordering::Relaxed);
+            slot.bound.store(bound_to_u8(Bound::Exact), Ordering::Relaxed);
+            slot.age.store(0, Ordering::Relaxed);
+        }
+        self.inner.current_age.store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn new_search(&mut self) {
-        self.current_age = self.current_age.wrapping_add(1);
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            *inner.current_age.get_mut() = inner.current_age.get_mut().wrapping_add(1);
+            return;
+        }
+        self.inner.current_age.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn get(&self, key: u64) -> Option<TTEntry> {
-        let e = self.entries[key as usize & self.mask];
-        if e.depth >= 0 && e.key == key {
-            Some(e)
-        } else {
-            None
+    pub(crate) fn probe(&mut self, key: u64) -> Option<TTEntry> {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            return probe_unique(inner, key);
         }
+        self.probe_shared(key)
+    }
+
+    fn probe_shared(&self, key: u64) -> Option<TTEntry> {
+        let slot = &self.inner.entries[key as usize & self.inner.mask];
+        let key1 = slot.key.load(Ordering::Acquire);
+        if key1 != key {
+            return None;
+        }
+        let depth = slot.depth.load(Ordering::Relaxed);
+        if depth < 0 {
+            return None;
+        }
+        let score = slot.score.load(Ordering::Relaxed);
+        let static_eval = slot.static_eval.load(Ordering::Relaxed);
+        let best = unpack_move(slot.best.load(Ordering::Relaxed));
+        let bound = u8_to_bound(slot.bound.load(Ordering::Relaxed));
+        let key2 = slot.key.load(Ordering::Acquire);
+        if key2 != key1 || key2 != key {
+            return None;
+        }
+        Some(tt_entry_from_parts(depth, score, static_eval, bound, best))
     }
 
     pub(crate) fn store(
@@ -90,33 +217,115 @@ impl TransTable {
         bound: Bound,
         best: Option<Move>,
     ) {
-        let idx = key as usize & self.mask;
-        let cur = self.entries[idx];
-        let new_depth = depth as i16;
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            store_unique(inner, key, depth, score, static_eval, bound, best);
+            return;
+        }
 
-        let replace = if cur.depth < 0 || cur.key != key {
+        let idx = key as usize & self.inner.mask;
+        let slot = &self.inner.entries[idx];
+        let cur_key = slot.key.load(Ordering::Acquire);
+        let cur_depth = slot.depth.load(Ordering::Relaxed);
+        let cur_age = slot.age.load(Ordering::Relaxed);
+        let new_depth = depth as i16;
+        let current_age = self.inner.current_age.load(Ordering::Relaxed);
+
+        let replace = if cur_depth < 0 || cur_key != key {
             true
         } else {
-            let cur_age_bonus = if cur.age == self.current_age { 4 } else { 0 };
-            new_depth + 1 >= cur.depth + cur_age_bonus
+            let cur_age_bonus = if cur_age == current_age { 4 } else { 0 };
+            new_depth + 1 >= cur_depth as i16 + cur_age_bonus
         };
 
         if replace {
-            self.entries[idx] = TTEntry {
-                key,
-                depth: new_depth,
-                score,
-                static_eval: static_eval
+            slot.depth.store(new_depth as i32, Ordering::Relaxed);
+            slot.score.store(score, Ordering::Relaxed);
+            slot.static_eval.store(
+                static_eval
                     .unwrap_or(i16::MIN as i32)
-                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-                bound,
-                best,
-                age: self.current_age,
-            };
+                    .clamp(i16::MIN as i32, i16::MAX as i32),
+                Ordering::Relaxed,
+            );
+            slot.best.store(best.map(pack_move).unwrap_or(u32::MAX), Ordering::Relaxed);
+            slot.bound.store(bound_to_u8(bound), Ordering::Relaxed);
+            slot.age.store(current_age, Ordering::Relaxed);
+            slot.key.store(key, Ordering::Release);
         }
     }
 }
 
+fn tt_entry_from_parts(
+    depth: i32,
+    score: i32,
+    static_eval: i32,
+    bound: Bound,
+    best: Option<Move>,
+) -> TTEntry {
+    TTEntry {
+        depth: depth as i16,
+        score,
+        static_eval: static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        bound,
+        best,
+    }
+}
+
+fn probe_unique(inner: &mut TransTableInner, key: u64) -> Option<TTEntry> {
+    let slot = &mut inner.entries[key as usize & inner.mask];
+    if *slot.key.get_mut() != key {
+        return None;
+    }
+    let depth = *slot.depth.get_mut();
+    if depth < 0 {
+        return None;
+    }
+    Some(tt_entry_from_parts(
+        depth,
+        *slot.score.get_mut(),
+        *slot.static_eval.get_mut(),
+        u8_to_bound(*slot.bound.get_mut()),
+        unpack_move(*slot.best.get_mut()),
+    ))
+}
+
+fn store_unique(
+    inner: &mut TransTableInner,
+    key: u64,
+    depth: i32,
+    score: i32,
+    static_eval: Option<i32>,
+    bound: Bound,
+    best: Option<Move>,
+) {
+    let idx = key as usize & inner.mask;
+    let slot = &mut inner.entries[idx];
+    let cur_key = *slot.key.get_mut();
+    let cur_depth = *slot.depth.get_mut();
+    let cur_age = *slot.age.get_mut();
+    let new_depth = depth as i16;
+    let current_age = *inner.current_age.get_mut();
+
+    let replace = if cur_depth < 0 || cur_key != key {
+        true
+    } else {
+        let cur_age_bonus = if cur_age == current_age { 4 } else { 0 };
+        new_depth + 1 >= cur_depth as i16 + cur_age_bonus
+    };
+
+    if replace {
+        *slot.depth.get_mut() = new_depth as i32;
+        *slot.score.get_mut() = score;
+        *slot.static_eval.get_mut() = static_eval
+            .unwrap_or(i16::MIN as i32)
+            .clamp(i16::MIN as i32, i16::MAX as i32);
+        *slot.best.get_mut() = best.map(pack_move).unwrap_or(u32::MAX);
+        *slot.bound.get_mut() = bound_to_u8(bound);
+        *slot.age.get_mut() = current_age;
+        *slot.key.get_mut() = key;
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Zobrist {
     pub(crate) piece: [[u64; 64]; 12],
     pub(crate) castling: [u64; 16],

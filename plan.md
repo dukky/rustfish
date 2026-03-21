@@ -78,6 +78,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Reduce legal-move filtering cost with exact pin/check-based legality filtering
 - [x] Reuse move buffers across legal move generation and search callers
 - [x] Add experimental root-split `Threads` support with conservative gating for longer/deeper searches
+- [x] Recover `Threads` with a shared-TT lazy-SMP style search path
 - [ ] Add optional bitboard backend for speed comparison
 - [x] Add benchmark harness script (nodes/sec by depth/position set)
 
@@ -108,7 +109,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Track Elo progression over frozen-binary versions with a local round-robin rating pool
 
 ## Current Focus
-1. Improve search efficiency: keep pushing post-2100 structural single-thread work (TT/eval/search architecture) and only revisit `Threads` after stronger single-thread baselines are frozen.
+1. Improve search efficiency: keep pushing post-2100 structural work, including the new shared-TT SMP path and the next round of single-thread eval/search cleanup.
 2. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
 3. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
 4. Keep refactor healthy: only small follow-up structure changes while strength work continues.
@@ -144,4 +145,16 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - Prioritize search strength + correctness before fancy features.
 
 ## Current Blocker
-- Recent pruning-parameter sweeps are mostly neutral or negative, and the first root-split SMP version is now safe but still not a proven strength win; immediate Elo gains likely require further single-thread eval/search cleanup before revisiting SMP.
+- Recent pruning-parameter sweeps are mostly neutral or negative. SMP throughput is now meaningfully better with shared TT, but strength is still unvalidated and single-thread overhead remains a follow-up target.
+
+## SMP Recovery
+- Replaced the old static root-split worker assignment with a shared-TT lazy-SMP style path:
+  - all workers search the same root
+  - workers share TT and zobrist state
+  - workers keep thread-local history / killers / continuation data
+  - root move order is diversified slightly per worker instead of statically partitioned
+- Fixed shared TT sizing so the atomic slot table uses its true slot size instead of the old compact entry size.
+- Current throughput snapshot on the local depth-7 fixed bench (`Hash=256`):
+  - shared-TT SMP candidate: `Threads=1` `~720k nps`, `Threads=2` `~1.12M nps`, `Threads=4` `~1.57M nps`, `Threads=8` `~2.47M nps`
+  - old root-split baseline: `Threads=1` `~645k nps`, `Threads=2` `~672k nps`, `Threads=4` `~1.07M nps`
+- Depth-8 bench also stayed monotonic (`~729k -> ~1.14M -> ~1.40M -> ~2.16M`), so the recovered SMP path is a real throughput improvement even though it is not close to linear scaling yet.

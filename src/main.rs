@@ -838,10 +838,9 @@ impl EngineState {
     }
 
     fn worker_clone(&self) -> Self {
-        let per_thread_hash = (self.hash_mb / self.threads.max(1)).max(1);
         Self {
-            zobrist: Zobrist::new(),
-            tt: TransTable::new(per_thread_hash),
+            zobrist: self.zobrist.clone(),
+            tt: self.tt.clone(),
             history: self.history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
@@ -849,7 +848,7 @@ impl EngineState {
             lmr_table: self.lmr_table,
             searches_since_decay: 0,
             threads: 1,
-            hash_mb: per_thread_hash,
+            hash_mb: self.hash_mb,
             opening_book: self.opening_book.clone(),
             own_book: false,
             book_style: self.book_style,
