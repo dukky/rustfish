@@ -1,6 +1,58 @@
 use super::*;
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
+const LMR_MAX_DEPTH: usize = 64;
+const LMR_MAX_MOVES: usize = 64;
+
+pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
+    let mut table = [[0i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH];
+    for d in 1..LMR_MAX_DEPTH {
+        for m in 1..LMR_MAX_MOVES {
+            let ln_d = {
+                let mut x = d as f64;
+                let mut result = 0.0f64;
+                while x >= 2.0 {
+                    x /= 2.0;
+                    result += 0.693_147_180_559_945_3; // ln(2)
+                }
+                // ln(1+y) for y in [0,1) via Taylor
+                let y = x - 1.0;
+                let mut term = y;
+                for k in 1..20 {
+                    if k % 2 == 1 {
+                        result += term / k as f64;
+                    } else {
+                        result -= term / k as f64;
+                    }
+                    term *= y;
+                }
+                result
+            };
+            let ln_m = {
+                let mut x = m as f64;
+                let mut result = 0.0f64;
+                while x >= 2.0 {
+                    x /= 2.0;
+                    result += 0.693_147_180_559_945_3;
+                }
+                let y = x - 1.0;
+                let mut term = y;
+                for k in 1..20 {
+                    if k % 2 == 1 {
+                        result += term / k as f64;
+                    } else {
+                        result -= term / k as f64;
+                    }
+                    term *= y;
+                }
+                result
+            };
+            // Base reduction: ln(d) * ln(m) / 2.0
+            table[d][m] = (ln_d * ln_m / 2.0 + 0.5) as i32;
+        }
+    }
+    table
+}
 
 pub(crate) struct Search {
     pub(crate) nodes: u64,
@@ -887,9 +939,11 @@ fn negamax(
     if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
         let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
         let mut has_non_pawn = false;
-        for sq in 0..64 {
-            if let Some(p) = board.squares[sq] {
-                if p.color == board.side_to_move && p.kind != PieceType::Pawn && p.kind != PieceType::King {
+        let side_c = color_index(board.side_to_move);
+        for pi in 0..board.piece_cnt[side_c] {
+            let sq = board.piece_sqs[side_c][pi];
+            if let Some(p) = board.squares[sq as usize] {
+                if p.kind != PieceType::Pawn && p.kind != PieceType::King {
                     has_non_pawn = true;
                     break;
                 }
@@ -1027,11 +1081,21 @@ fn negamax(
                 && !in_check
                 && !gives_check
                 && !priority_quiet
-                && depth >= params.lmr_min_depth
-                && idx >= params.lmr_min_move_index
+                && depth >= 3
+                && idx >= 3
             {
-                1 + ((depth >= params.lmr_extra_depth) as i32)
-                    + ((idx >= params.lmr_extra_move_index) as i32)
+                let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
+                let m = idx.min(LMR_MAX_MOVES - 1);
+                let mut r = engine.lmr_table[d][m];
+                // Reduce more for moves with bad history
+                if quiet_history < -2000 {
+                    r += 1;
+                }
+                // Reduce less for moves with good history
+                if quiet_history > 2000 {
+                    r -= 1;
+                }
+                r.clamp(0, depth - 2)
             } else {
                 0
             };

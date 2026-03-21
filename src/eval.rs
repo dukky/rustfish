@@ -555,13 +555,16 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut black_has_queen = false;
     let mut phase = 0i32;
 
-    for sq in 0..64_usize {
-            if let Some(p) = board.squares[sq] {
-                if p.color == Color::White {
-                    white_pieces.push(sq as u8, p);
-                } else {
-                    black_pieces.push(sq as u8, p);
-                }
+    for c in 0..2usize {
+        let _color = if c == 0 { Color::White } else { Color::Black };
+        for pi in 0..board.piece_cnt[c] {
+            let sq = board.piece_sqs[c][pi] as usize;
+            let p = board.squares[sq].unwrap();
+            if p.color == Color::White {
+                white_pieces.push(sq as u8, p);
+            } else {
+                black_pieces.push(sq as u8, p);
+            }
             let (pst_mg, pst_eg) = pst_values(p.kind, p.color, sq as u8);
             let mut mg = piece_value(p.kind) + pst_mg;
             let mut eg = piece_value(p.kind) + pst_eg;

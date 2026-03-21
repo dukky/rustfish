@@ -3,11 +3,10 @@ use super::*;
 pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &mut Vec<Move>) {
     moves.clear();
 
-    for sq in 0..64_u8 {
-        let piece = match board.squares[sq as usize] {
-            Some(p) if p.color == board.side_to_move => p,
-            _ => continue,
-        };
+    let c = color_index(board.side_to_move);
+    for pi in 0..board.piece_cnt[c] {
+        let sq = board.piece_sqs[c][pi];
+        let piece = board.squares[sq as usize].unwrap();
 
         let f = (sq % 8) as i8;
         let r = (sq / 8) as i8;

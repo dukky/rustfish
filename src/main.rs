@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use book::{build_opening_book, try_book_move, BookEntry};
 use eval::eval_for_side;
 use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, mobility_count, move_to_uci, parse_square, parse_uci_move};
-use search::{handle_go, piece_attacks_square, piece_value};
+use search::{build_lmr_table, handle_go, piece_attacks_square, piece_value};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_divide, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 
@@ -124,7 +124,7 @@ struct Undo {
     moved_piece: Piece,
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq)]
 struct Board {
     squares: [Option<Piece>; 64],
     side_to_move: Color,
@@ -134,6 +134,22 @@ struct Board {
     fullmove_number: u32,
     white_king_sq: Option<u8>,
     black_king_sq: Option<u8>,
+    piece_sqs: [[u8; 16]; 2],
+    piece_cnt: [usize; 2],
+    sq_to_pl: [u8; 64],
+}
+
+impl PartialEq for Board {
+    fn eq(&self, other: &Self) -> bool {
+        self.squares == other.squares
+            && self.side_to_move == other.side_to_move
+            && self.castling == other.castling
+            && self.en_passant == other.en_passant
+            && self.halfmove_clock == other.halfmove_clock
+            && self.fullmove_number == other.fullmove_number
+            && self.white_king_sq == other.white_king_sq
+            && self.black_king_sq == other.black_king_sq
+    }
 }
 
 impl Board {
@@ -147,9 +163,39 @@ impl Board {
             fullmove_number: 1,
             white_king_sq: None,
             black_king_sq: None,
+            piece_sqs: [[0; 16]; 2],
+            piece_cnt: [0; 2],
+            sq_to_pl: [255; 64],
         };
         b.set_startpos();
         b
+    }
+
+    fn pl_add(&mut self, sq: u8, color: Color) {
+        let c = color_index(color);
+        let idx = self.piece_cnt[c];
+        self.piece_sqs[c][idx] = sq;
+        self.sq_to_pl[sq as usize] = idx as u8;
+        self.piece_cnt[c] += 1;
+    }
+
+    fn pl_remove(&mut self, sq: u8, color: Color) {
+        let c = color_index(color);
+        let idx = self.sq_to_pl[sq as usize] as usize;
+        self.piece_cnt[c] -= 1;
+        let last = self.piece_cnt[c];
+        let last_sq = self.piece_sqs[c][last];
+        self.piece_sqs[c][idx] = last_sq;
+        self.sq_to_pl[last_sq as usize] = idx as u8;
+        self.sq_to_pl[sq as usize] = 255;
+    }
+
+    fn pl_move(&mut self, from: u8, to: u8, color: Color) {
+        let c = color_index(color);
+        let idx = self.sq_to_pl[from as usize] as usize;
+        self.piece_sqs[c][idx] = to;
+        self.sq_to_pl[to as usize] = idx as u8;
+        self.sq_to_pl[from as usize] = 255;
     }
 
     fn set_startpos(&mut self) {
@@ -164,6 +210,9 @@ impl Board {
         self.fullmove_number = 1;
         self.white_king_sq = None;
         self.black_king_sq = None;
+        self.piece_sqs = [[0; 16]; 2];
+        self.piece_cnt = [0; 2];
+        self.sq_to_pl = [255; 64];
 
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
@@ -200,6 +249,7 @@ impl Board {
             if rank >= 0 && rank < 8 && file >= 0 && file < 8 {
                 let sq = (rank * 8 + file) as usize;
                 self.squares[sq] = Some(Piece { color, kind });
+                self.pl_add(sq as u8, color);
                 if kind == PieceType::King {
                     if color == Color::White {
                         self.white_king_sq = Some(sq as u8);
@@ -416,6 +466,7 @@ impl Board {
         }
 
         self.squares[mv.from as usize] = None;
+        let enemy = moving_piece.color.opposite();
 
         if mv.is_en_passant {
             let cap_sq = if moving_piece.color == Color::White {
@@ -426,7 +477,12 @@ impl Board {
             captured = self.squares[cap_sq as usize];
             captured_sq = Some(cap_sq);
             self.squares[cap_sq as usize] = None;
+            self.pl_remove(cap_sq, enemy);
+        } else if captured.is_some() {
+            self.pl_remove(mv.to, enemy);
         }
+
+        self.pl_move(mv.from, mv.to, moving_piece.color);
 
         let mut placed = moving_piece;
         if let Some(promo) = mv.promotion {
@@ -449,6 +505,7 @@ impl Board {
                         color: Color::White,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(7, 5, Color::White);
                 }
                 2 => {
                     self.squares[0] = None;
@@ -456,6 +513,7 @@ impl Board {
                         color: Color::White,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(0, 3, Color::White);
                 }
                 62 => {
                     self.squares[63] = None;
@@ -463,6 +521,7 @@ impl Board {
                         color: Color::Black,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(63, 61, Color::Black);
                 }
                 58 => {
                     self.squares[56] = None;
@@ -470,6 +529,7 @@ impl Board {
                         color: Color::Black,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(56, 59, Color::Black);
                 }
                 _ => {}
             }
@@ -555,6 +615,7 @@ impl Board {
         self.halfmove_clock = undo.halfmove_clock;
         self.fullmove_number = undo.fullmove_number;
 
+        self.pl_move(mv.to, mv.from, undo.moved_piece.color);
         self.squares[mv.to as usize] = None;
         self.squares[mv.from as usize] = Some(undo.moved_piece);
         if undo.moved_piece.kind == PieceType::King {
@@ -573,6 +634,7 @@ impl Board {
                         color: Color::White,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(5, 7, Color::White);
                 }
                 2 => {
                     self.squares[3] = None;
@@ -580,6 +642,7 @@ impl Board {
                         color: Color::White,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(3, 0, Color::White);
                 }
                 62 => {
                     self.squares[61] = None;
@@ -587,6 +650,7 @@ impl Board {
                         color: Color::Black,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(61, 63, Color::Black);
                 }
                 58 => {
                     self.squares[59] = None;
@@ -594,6 +658,7 @@ impl Board {
                         color: Color::Black,
                         kind: PieceType::Rook,
                     });
+                    self.pl_move(59, 56, Color::Black);
                 }
                 _ => {}
             }
@@ -602,6 +667,7 @@ impl Board {
         if let Some(cp) = undo.captured {
             if let Some(cs) = undo.captured_sq {
                 self.squares[cs as usize] = Some(cp);
+                self.pl_add(cs, cp.color);
             }
         }
     }
@@ -695,6 +761,7 @@ struct EngineState {
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
     search_params: SearchParams,
+    lmr_table: [[i32; 64]; 64],
     searches_since_decay: u8,
     threads: usize,
     hash_mb: usize,
@@ -716,6 +783,7 @@ impl EngineState {
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
             search_params: SearchParams::default(),
+            lmr_table: build_lmr_table(),
             searches_since_decay: 0,
             threads: 1,
             hash_mb,
@@ -778,6 +846,7 @@ impl EngineState {
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
             search_params: self.search_params,
+            lmr_table: self.lmr_table,
             searches_since_decay: 0,
             threads: 1,
             hash_mb: per_thread_hash,
