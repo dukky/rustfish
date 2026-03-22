@@ -320,6 +320,75 @@ def run_game_batch(
         b.quit()
 
 
+def iter_game_batch(
+    game_indices: list[int],
+    a_cfg: EngineCfg,
+    b_cfg: EngineCfg,
+    a_options: list[str],
+    b_options: list[str],
+    openings: list[str],
+    movetime_ms: int | None,
+    depth: int | None,
+    max_plies: int,
+):
+    try:
+        a = UCIEngine(a_cfg)
+        b = UCIEngine(b_cfg)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"failed to launch engine: {e}") from e
+
+    try:
+        a.init()
+        b.init()
+        configure_engine(a, a_options)
+        configure_engine(b, b_options)
+
+        for game_index in game_indices:
+            a_white = game_index % 2 == 0
+            opening_index = (game_index // 2) % len(openings)
+            opening = openings[opening_index]
+            base_position, opening_moves = split_opening_spec(opening)
+            try:
+                if a_white:
+                    score, moves, reason = play_game(
+                        a,
+                        b,
+                        base_position,
+                        opening_moves,
+                        movetime_ms,
+                        depth,
+                        max_plies,
+                    )
+                else:
+                    score, moves, reason = play_game(
+                        b,
+                        a,
+                        base_position,
+                        opening_moves,
+                        movetime_ms,
+                        depth,
+                        max_plies,
+                    )
+                    score = 1.0 - score
+            except RuntimeError as e:
+                score, moves, reason = 0.0, [], f"error:{e}"
+
+            yield GameResult(
+                game_index,
+                score,
+                len(moves),
+                reason,
+                opening,
+                opening_index,
+                a_white,
+                base_position,
+                opening_moves,
+            )
+    finally:
+        a.quit()
+        b.quit()
+
+
 def print_result_line(
     game_index: int,
     total_games: int,
@@ -732,7 +801,7 @@ def main() -> int:
 
     try:
         if workers == 1:
-            for result in run_game_batch(
+            for result in iter_game_batch(
                 batches[0],
                 a_cfg,
                 b_cfg,
