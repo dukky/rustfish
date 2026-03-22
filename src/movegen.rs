@@ -200,6 +200,11 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
                 if !captures_only {
                     if piece.color == Color::White && sq == 4 {
                         if board.castling & 1 != 0
+                            && board.squares[7]
+                                == Some(Piece {
+                                    color: Color::White,
+                                    kind: PieceType::Rook,
+                                })
                             && board.squares[5].is_none()
                             && board.squares[6].is_none()
                             && !is_square_attacked(board, 4, Color::Black)
@@ -215,6 +220,11 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
                             });
                         }
                         if board.castling & 2 != 0
+                            && board.squares[0]
+                                == Some(Piece {
+                                    color: Color::White,
+                                    kind: PieceType::Rook,
+                                })
                             && board.squares[3].is_none()
                             && board.squares[2].is_none()
                             && board.squares[1].is_none()
@@ -233,6 +243,11 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
                     }
                     if piece.color == Color::Black && sq == 60 {
                         if board.castling & 4 != 0
+                            && board.squares[63]
+                                == Some(Piece {
+                                    color: Color::Black,
+                                    kind: PieceType::Rook,
+                                })
                             && board.squares[61].is_none()
                             && board.squares[62].is_none()
                             && !is_square_attacked(board, 60, Color::White)
@@ -248,6 +263,11 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
                             });
                         }
                         if board.castling & 8 != 0
+                            && board.squares[56]
+                                == Some(Piece {
+                                    color: Color::Black,
+                                    kind: PieceType::Rook,
+                                })
                             && board.squares[59].is_none()
                             && board.squares[58].is_none()
                             && board.squares[57].is_none()
@@ -356,6 +376,25 @@ pub(crate) fn mobility_count(board: &Board, sq: u8, piece: Piece) -> i32 {
     }
 
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn castling_requires_rook_on_rook_square() {
+        let mut board = Board::new();
+        let mut moves = Vec::new();
+
+        board.set_fen("4k3/8/8/8/8/8/8/4K3 w K - 0 1");
+        board.generate_legal_moves(false, &mut moves);
+        assert!(moves.iter().all(|mv| !mv.is_castle));
+
+        board.set_fen("4k3/8/8/8/8/8/8/4K3 b k - 0 1");
+        board.generate_legal_moves(false, &mut moves);
+        assert!(moves.iter().all(|mv| !mv.is_castle));
+    }
 }
 
 fn gen_sliders(

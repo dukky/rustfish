@@ -73,6 +73,15 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         }
         return;
     }
+    if n == "bookfile" {
+        let path = value.trim();
+        if path.is_empty() || path.eq_ignore_ascii_case("none") || path == "-" {
+            engine.set_book_file(None);
+        } else {
+            engine.set_book_file(Some(path.to_string()));
+        }
+        return;
+    }
 
     if let Ok(v) = value.trim().parse::<i32>() {
         match n.as_str() {
@@ -111,7 +120,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
     }
 }
 
-pub(crate) fn handle_position(cmd: &str, board: &mut Board) {
+pub(crate) fn handle_position(cmd: &str, board: &mut Board, engine: &mut EngineState) {
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
     if tokens.len() < 2 {
         return;
@@ -132,11 +141,15 @@ pub(crate) fn handle_position(cmd: &str, board: &mut Board) {
         board.set_fen(&fen);
     }
 
+    engine.position_history.clear();
+    engine.position_history.push(board_hash(board, &engine.zobrist));
+
     if i < tokens.len() && tokens[i] == "moves" {
         i += 1;
         while i < tokens.len() {
             if let Some(mv) = parse_uci_move(board, tokens[i]) {
                 let _ = board.make_move(mv);
+                engine.position_history.push(board_hash(board, &engine.zobrist));
             }
             i += 1;
         }
@@ -288,6 +301,38 @@ fn xorshift64(state: &mut u64) -> u64 {
     x
 }
 
+fn check_legal_move_regression(
+    board: &mut Board,
+    fen: &str,
+    required: &[&str],
+    forbidden: &[&str],
+) -> Result<(), String> {
+    board.set_fen(fen);
+    let mut legal = Vec::new();
+    board.generate_legal_moves(false, &mut legal);
+    let legal_uci: Vec<String> = legal.into_iter().map(move_to_uci).collect();
+
+    for mv in required {
+        if !legal_uci.iter().any(|legal_mv| legal_mv == mv) {
+            return Err(format!(
+                "missing required move {} in fen {} legal {:?}",
+                mv, fen, legal_uci
+            ));
+        }
+    }
+
+    for mv in forbidden {
+        if legal_uci.iter().any(|legal_mv| legal_mv == mv) {
+            return Err(format!(
+                "found forbidden move {} in fen {} legal {:?}",
+                mv, fen, legal_uci
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
     let iters: usize = if tokens.len() >= 2 {
@@ -304,6 +349,23 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
         "8/8/8/3pP3/8/8/8/8 w - d6 0 1",
         "8/P7/8/8/8/8/7p/7k w - - 0 1",
         "4k3/8/8/8/8/8/4r3/4K3 w - - 0 1",
+    ];
+    let regression_suites = [
+        (
+            "4r1k1/8/8/8/8/8/4N3/4K3 w - - 0 1",
+            &[][..],
+            &["e2c1", "e2c3", "e2d4", "e2f4", "e2g3", "e2g1"][..],
+        ),
+        (
+            "4r1k1/8/8/8/8/8/3B4/4K3 w - - 0 1",
+            &["d2e3"][..],
+            &["d2c3", "d2b4", "d2a5", "d2f4"][..],
+        ),
+        (
+            "4k3/8/8/8/1b6/8/4r3/3QK3 w - - 0 1",
+            &[][..],
+            &["d1d8", "d1e2", "d1h5"][..],
+        ),
     ];
 
     let mut legal = Vec::new();
@@ -325,6 +387,18 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
                 return;
             }
             tests_done += 1;
+        }
+    }
+
+    for (fen, required, forbidden) in regression_suites {
+        match check_legal_move_regression(board, fen, required, forbidden) {
+            Ok(()) => tests_done += required.len() + forbidden.len(),
+            Err(err) => {
+                println!("info string selftest FAIL regression {}", err);
+                *board = old;
+                flush_stdout();
+                return;
+            }
         }
     }
 
@@ -358,4 +432,37 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
     *board = old;
     println!("info string selftest ok positions {} makeundo_checks {}", iters, tests_done);
     flush_stdout();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn position_moves_preserve_repetition_history() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                let mut engine = EngineState::new();
+                handle_position(
+                    "position startpos moves g1f3 g8f6 f3g1 f6g8",
+                    &mut board,
+                    &mut engine,
+                );
+
+                let key = board_hash(&board, &engine.zobrist);
+                assert_eq!(engine.position_history.first().copied(), Some(key));
+                assert_eq!(engine.position_history.last().copied(), Some(key));
+                assert!(crate::search::is_repetition(
+                    &engine.position_history,
+                    key,
+                    board.halfmove_clock,
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

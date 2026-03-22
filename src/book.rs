@@ -1,9 +1,10 @@
 use super::*;
+use std::fs;
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub(crate) struct BookEntry {
     pub(crate) key: u64,
-    pub(crate) moves: &'static [&'static str],
+    pub(crate) moves: Vec<String>,
 }
 
 fn book_lines(style: BookStyle) -> &'static [(&'static [&'static str], &'static [&'static str])] {
@@ -100,7 +101,108 @@ fn book_lines(style: BookStyle) -> &'static [(&'static [&'static str], &'static 
     }
 }
 
-pub(crate) fn build_opening_book(zobrist: &Zobrist, style: BookStyle) -> Vec<BookEntry> {
+fn apply_position_spec(board: &mut Board, spec: &str) -> bool {
+    let tokens: Vec<&str> = spec.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let mut i = 0usize;
+    if tokens[i] == "position" {
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return false;
+    }
+
+    if tokens[i] == "startpos" {
+        board.set_startpos();
+        i += 1;
+    } else if tokens[i] == "fen" {
+        i += 1;
+        let mut fen_parts = Vec::new();
+        while i < tokens.len() && tokens[i] != "moves" {
+            fen_parts.push(tokens[i]);
+            i += 1;
+        }
+        if fen_parts.is_empty() {
+            return false;
+        }
+        board.set_fen(&fen_parts.join(" "));
+    } else {
+        return false;
+    }
+
+    if i < tokens.len() && tokens[i] == "moves" {
+        i += 1;
+        while i < tokens.len() {
+            let Some(mv) = parse_uci_move(board, tokens[i]) else {
+                return false;
+            };
+            let _ = board.make_move(mv);
+            i += 1;
+        }
+    }
+
+    true
+}
+
+fn push_book_entry(book: &mut Vec<BookEntry>, key: u64, moves: Vec<String>) {
+    if moves.is_empty() {
+        return;
+    }
+
+    if let Some(entry) = book.iter_mut().find(|entry| entry.key == key) {
+        for mv in moves {
+            if !entry.moves.iter().any(|existing| existing == &mv) {
+                entry.moves.push(mv);
+            }
+        }
+        return;
+    }
+
+    book.push(BookEntry { key, moves });
+}
+
+fn parse_external_book(path: &str, zobrist: &Zobrist) -> Vec<BookEntry> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut book = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((spec, replies)) = line
+            .split_once("=>")
+            .or_else(|| line.split_once('|'))
+        else {
+            continue;
+        };
+
+        let mut board = Board::new();
+        if !apply_position_spec(&mut board, spec.trim()) {
+            continue;
+        }
+
+        let moves = replies
+            .split_whitespace()
+            .filter_map(|mv| parse_uci_move(&mut board, mv).map(|_| mv.to_string()))
+            .collect::<Vec<_>>();
+        push_book_entry(&mut book, board_hash(&board, zobrist), moves);
+    }
+
+    book
+}
+
+pub(crate) fn build_opening_book(
+    zobrist: &Zobrist,
+    style: BookStyle,
+    external_path: Option<&str>,
+) -> Vec<BookEntry> {
     let lines = book_lines(style);
 
     let mut book = Vec::new();
@@ -117,10 +219,16 @@ pub(crate) fn build_opening_book(zobrist: &Zobrist, style: BookStyle) -> Vec<Boo
             }
         }
         if ok {
-            book.push(BookEntry {
-                key: board_hash(&board, zobrist),
-                moves: replies,
-            });
+            push_book_entry(
+                &mut book,
+                board_hash(&board, zobrist),
+                replies.iter().map(|mv| (*mv).to_string()).collect(),
+            );
+        }
+    }
+    if let Some(path) = external_path {
+        for entry in parse_external_book(path, zobrist) {
+            push_book_entry(&mut book, entry.key, entry.moves);
         }
     }
     book
@@ -130,7 +238,7 @@ pub(crate) fn try_book_move(board: &mut Board, engine: &EngineState) -> Option<S
     let key = board_hash(board, &engine.zobrist);
     let entry = engine.opening_book.iter().find(|e| e.key == key)?;
     let mut legal_book_moves = Vec::new();
-    for mv_str in entry.moves {
+    for mv_str in &entry.moves {
         if let Some(mv) = parse_uci_move(board, mv_str) {
             legal_book_moves.push(move_to_uci(mv));
         }
@@ -140,5 +248,70 @@ pub(crate) fn try_book_move(board: &mut Board, engine: &EngineState) -> Option<S
     } else {
         let idx = (key as usize) % legal_book_moves.len();
         Some(legal_book_moves[idx].clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_book_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rustfish_{name}_{nanos}.txt"))
+    }
+
+    #[test]
+    fn external_book_entries_are_loaded() {
+        let path = temp_book_path("book");
+        fs::write(
+            &path,
+            "# comment\nstartpos moves e2e4 e7e5 => g1f3 f1c4\n",
+        )
+        .unwrap();
+
+        let zobrist = Zobrist::new();
+        let book = build_opening_book(&zobrist, BookStyle::Normal, Some(path.to_str().unwrap()));
+        let mut board = Board::new();
+        board.set_startpos();
+        let mv = parse_uci_move(&mut board, "e2e4").unwrap();
+        let _ = board.make_move(mv);
+        let mv = parse_uci_move(&mut board, "e7e5").unwrap();
+        let _ = board.make_move(mv);
+        let key = board_hash(&board, &zobrist);
+        let entry = book.iter().find(|entry| entry.key == key).unwrap();
+
+        assert!(entry.moves.iter().any(|mv| mv == "g1f3"));
+        assert!(entry.moves.iter().any(|mv| mv == "f1c4"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn position_spec_parser_accepts_fen_with_moves() {
+        let mut board = Board::new();
+        assert!(apply_position_spec(
+            &mut board,
+            "fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 moves e2e4 c7c5"
+        ));
+        assert_eq!(board.side_to_move, Color::White);
+        assert_eq!(
+            board.squares[28],
+            Some(Piece {
+                color: Color::White,
+                kind: PieceType::Pawn,
+            })
+        );
+        assert_eq!(
+            board.squares[34],
+            Some(Piece {
+                color: Color::Black,
+                kind: PieceType::Pawn,
+            })
+        );
     }
 }

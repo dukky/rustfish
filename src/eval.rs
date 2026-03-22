@@ -321,6 +321,153 @@ fn is_backward_pawn(board: &Board, pawn_masks: &[u8; 8], sq: u8, color: Color, p
     false
 }
 
+fn pawn_has_lever(board: &Board, sq: u8, color: Color) -> bool {
+    let f = (sq % 8) as i32;
+    let r = (sq / 8) as i32;
+    let target_rank = match color {
+        Color::White => r + 1,
+        Color::Black => r - 1,
+    };
+    if !(0..8).contains(&target_rank) {
+        return false;
+    }
+
+    let enemy = color.opposite();
+    for df in [-1, 1] {
+        let nf = f + df;
+        if !(0..8).contains(&nf) {
+            continue;
+        }
+        let target = (target_rank as u8) * 8 + (nf as u8);
+        if board.squares[target as usize]
+            == Some(Piece {
+                color: enemy,
+                kind: PieceType::Pawn,
+            })
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn passed_pawn_support_score(
+    sq: u8,
+    color: Color,
+    own_king: Option<u8>,
+    enemy_king: Option<u8>,
+    own_rooks: &[u8],
+) -> (i32, i32) {
+    let mut mg = 0;
+    let mut eg = 0;
+
+    if let Some(king) = own_king {
+        let dist = king_distance(king, sq);
+        if dist <= 2 {
+            let bonus = 3 - dist;
+            mg += bonus * 3;
+            eg += bonus * 8;
+        }
+    }
+
+    let promo_sq = match color {
+        Color::White => 56 + (sq % 8),
+        Color::Black => sq % 8,
+    };
+    let remaining = match color {
+        Color::White => 7 - (sq / 8) as i32,
+        Color::Black => (sq / 8) as i32,
+    };
+    if let Some(king) = enemy_king {
+        let promo_dist = king_distance(king, promo_sq);
+        if promo_dist > remaining {
+            eg += (promo_dist - remaining) * 2;
+        }
+        if king_distance(king, sq) <= 1 {
+            eg -= 10;
+        }
+    }
+
+    for &rook_sq in own_rooks {
+        if rook_sq % 8 != sq % 8 {
+            continue;
+        }
+        let rook_rank = rook_sq / 8;
+        let pawn_rank = sq / 8;
+        let behind = match color {
+            Color::White => rook_rank < pawn_rank,
+            Color::Black => rook_rank > pawn_rank,
+        };
+        if behind {
+            mg += 4;
+            eg += 10;
+        } else {
+            eg -= 4;
+        }
+    }
+
+    (mg, eg)
+}
+
+fn trapped_piece_penalty(
+    sq: u8,
+    piece: Piece,
+    mobility: i32,
+    own_king: Option<u8>,
+) -> (i32, i32) {
+    let f = (sq % 8) as i32;
+    let r = (sq / 8) as i32;
+    let on_edge = f == 0 || f == 7 || r == 0 || r == 7;
+    let in_corner = (f == 0 || f == 7) && (r == 0 || r == 7);
+    let mut mg = 0;
+    let mut eg = 0;
+
+    match piece.kind {
+        PieceType::Knight => {
+            if in_corner && mobility <= 2 {
+                let severity = 3 - mobility;
+                mg += severity * 12;
+                eg += severity * 6;
+            } else if on_edge && mobility <= 2 {
+                let severity = 3 - mobility;
+                mg += severity * 6;
+                eg += severity * 3;
+            }
+        }
+        PieceType::Bishop => {
+            if on_edge && mobility <= 2 {
+                let severity = 3 - mobility;
+                mg += severity * 10;
+                eg += severity * 5;
+                if in_corner {
+                    mg += 6;
+                    eg += 2;
+                }
+            }
+        }
+        PieceType::Rook => {
+            if mobility <= 3 {
+                if let Some(king_sq) = own_king {
+                    let same_rank = king_sq / 8 == sq / 8;
+                    let king_file = (king_sq % 8) as i32;
+                    let back_rank = r <= 1 || r >= 6;
+                    let king_between = same_rank
+                        && ((f <= 1 && king_file > f) || (f >= 6 && king_file < f));
+                    if back_rank && king_between {
+                        let severity = 4 - mobility;
+                        mg += severity * 8;
+                        eg += severity * 3;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    (mg.max(0), eg.max(0))
+}
+
 fn is_outpost_square(
     sq: u8,
     color: Color,
@@ -366,6 +513,110 @@ fn king_distance(a: u8, b: u8) -> i32 {
     let bf = (b % 8) as i32;
     let br = (b / 8) as i32;
     (af - bf).abs().max((ar - br).abs())
+}
+
+fn has_direct_opposition(white_king: u8, black_king: u8) -> bool {
+    let same_file = white_king % 8 == black_king % 8
+        && ((white_king / 8) as i32 - (black_king / 8) as i32).abs() == 2;
+    let same_rank = white_king / 8 == black_king / 8
+        && ((white_king % 8) as i32 - (black_king % 8) as i32).abs() == 2;
+    same_file || same_rank
+}
+
+fn promotion_distance(board: &Board, sq: u8, color: Color, side_to_move: Color) -> Option<i32> {
+    let file = sq % 8;
+    let rank = (sq / 8) as i32;
+    let dir = if color == Color::White { 1 } else { -1 };
+    let mut r = rank + dir;
+    while (0..8).contains(&r) {
+        let forward_sq = (r as u8) * 8 + file;
+        if board.squares[forward_sq as usize].is_some() {
+            return None;
+        }
+        r += dir;
+    }
+
+    let mut moves = match color {
+        Color::White => 7 - rank,
+        Color::Black => rank,
+    };
+    let start_rank = match color {
+        Color::White => 1,
+        Color::Black => 6,
+    };
+    if rank == start_rank {
+        let one_step = ((rank + dir) as u8) * 8 + file;
+        let two_step = ((rank + dir * 2) as u8) * 8 + file;
+        if board.squares[one_step as usize].is_none() && board.squares[two_step as usize].is_none()
+        {
+            moves -= 1;
+        }
+    }
+    if color != side_to_move {
+        moves += 1;
+    }
+    Some(moves)
+}
+
+fn passer_is_unstoppable(board: &Board, sq: u8, color: Color, enemy_king: u8) -> bool {
+    let Some(moves) = promotion_distance(board, sq, color, board.side_to_move) else {
+        return false;
+    };
+    let promo_sq = match color {
+        Color::White => 56 + (sq % 8),
+        Color::Black => sq % 8,
+    };
+    king_distance(enemy_king, promo_sq) > moves
+}
+
+fn rook_endgame_bonus(
+    color: Color,
+    rooks: &[u8],
+    own_passed: &[u8],
+    enemy_passed: &[u8],
+    enemy_king: Option<u8>,
+) -> i32 {
+    let mut score = 0;
+
+    for &rook_sq in rooks {
+        if let Some(king_sq) = enemy_king {
+            score += (7 - king_distance(rook_sq, king_sq)).max(0) * 2;
+        }
+
+        for &pawn_sq in own_passed {
+            if rook_sq % 8 != pawn_sq % 8 {
+                continue;
+            }
+            let rook_rank = rook_sq / 8;
+            let pawn_rank = pawn_sq / 8;
+            let behind = match color {
+                Color::White => rook_rank < pawn_rank,
+                Color::Black => rook_rank > pawn_rank,
+            };
+            if behind {
+                score += 18;
+            } else {
+                score -= 8;
+            }
+        }
+
+        for &pawn_sq in enemy_passed {
+            if rook_sq % 8 != pawn_sq % 8 {
+                continue;
+            }
+            let rook_rank = rook_sq / 8;
+            let pawn_rank = pawn_sq / 8;
+            let behind_enemy = match color {
+                Color::White => rook_rank > pawn_rank,
+                Color::Black => rook_rank < pawn_rank,
+            };
+            if behind_enemy {
+                score += 14;
+            }
+        }
+    }
+
+    score
 }
 
 fn relative_rank(color: Color, sq: u8) -> i32 {
@@ -537,6 +788,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut black_pieces = PieceList::new();
     let mut white_rooks = SqList::new();
     let mut black_rooks = SqList::new();
+    let mut white_passed = SqList::new();
+    let mut black_passed = SqList::new();
     let mut white_knights = SqList::new();
     let mut black_knights = SqList::new();
     let mut white_bishop_sqs = SqList::new();
@@ -649,6 +902,9 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         mg_score -= development_score(board, Color::Black);
     }
 
+    let white_king = board.king_square(Color::White);
+    let black_king = board.king_square(Color::Black);
+
     for &sq in white_pawns.as_slice() {
         let f = (sq % 8) as usize;
         let r = (sq / 8) as i32;
@@ -675,10 +931,20 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         if passed {
             mg_score += 12 + r * 4;
             eg_score += 28 + r * 12;
+            white_passed.push(sq);
             if is_supported_by_pawn(board, sq, Color::White) {
                 mg_score += 6 + r;
                 eg_score += 12 + r * 3;
             }
+            let (support_mg, support_eg) = passed_pawn_support_score(
+                sq,
+                Color::White,
+                white_king,
+                black_king,
+                white_rooks.as_slice(),
+            );
+            mg_score += support_mg;
+            eg_score += support_eg;
         }
 
         if is_connected_pawn(&white_pawn_masks, sq, Color::White) {
@@ -693,8 +959,15 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
 
         let candidate = black_max_pawn_rank[f] <= r as i8;
         if candidate {
-            mg_score += 4 + r;
-            eg_score += 8 + r * 3;
+            let lever = pawn_has_lever(board, sq, Color::White);
+            mg_score += 4 + r + if lever { 4 } else { 0 };
+            eg_score += 8 + r * 3 + if lever { 6 + r } else { 0 };
+            if is_supported_by_pawn(board, sq, Color::White)
+                || is_connected_pawn(&white_pawn_masks, sq, Color::White)
+            {
+                mg_score += 2;
+                eg_score += 4;
+            }
         }
     }
 
@@ -724,10 +997,20 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         if passed {
             mg_score -= 12 + (7 - r) * 4;
             eg_score -= 28 + (7 - r) * 12;
+            black_passed.push(sq);
             if is_supported_by_pawn(board, sq, Color::Black) {
                 mg_score -= 6 + (7 - r);
                 eg_score -= 12 + (7 - r) * 3;
             }
+            let (support_mg, support_eg) = passed_pawn_support_score(
+                sq,
+                Color::Black,
+                black_king,
+                white_king,
+                black_rooks.as_slice(),
+            );
+            mg_score -= support_mg;
+            eg_score -= support_eg;
         }
 
         if is_connected_pawn(&black_pawn_masks, sq, Color::Black) {
@@ -742,8 +1025,15 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
 
         let candidate = white_min_pawn_rank[f] >= r as i8;
         if candidate {
-            mg_score -= 4 + (7 - r);
-            eg_score -= 8 + (7 - r) * 3;
+            let lever = pawn_has_lever(board, sq, Color::Black);
+            mg_score -= 4 + (7 - r) + if lever { 4 } else { 0 };
+            eg_score -= 8 + (7 - r) * 3 + if lever { 6 + (7 - r) } else { 0 };
+            if is_supported_by_pawn(board, sq, Color::Black)
+                || is_connected_pawn(&black_pawn_masks, sq, Color::Black)
+            {
+                mg_score -= 2;
+                eg_score -= 4;
+            }
         }
     }
 
@@ -826,9 +1116,6 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     mg_score += king_safety_score;
     eg_score += king_safety_score / 6;
 
-    let white_king = board.king_square(Color::White);
-    let black_king = board.king_square(Color::Black);
-
     if phase <= 8 {
         let material_edge = white_non_pawn_material - black_non_pawn_material;
         if material_edge >= 500 {
@@ -842,6 +1129,68 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 eg_score -= (14 - king_distance(wk, bk)) * 3;
             }
         }
+    }
+
+    if white_non_pawn_material == 0 && black_non_pawn_material == 0 {
+        if let (Some(wk), Some(bk)) = (white_king, black_king) {
+            if has_direct_opposition(wk, bk)
+                && (!white_pawns.as_slice().is_empty() || !black_pawns.as_slice().is_empty())
+            {
+                if board.side_to_move == Color::Black {
+                    eg_score += 14;
+                } else {
+                    eg_score -= 14;
+                }
+            }
+        }
+
+        let white_race = white_passed
+            .as_slice()
+            .iter()
+            .filter_map(|&sq| {
+                black_king
+                    .filter(|&king| passer_is_unstoppable(board, sq, Color::White, king))
+                    .and_then(|_| promotion_distance(board, sq, Color::White, board.side_to_move))
+            })
+            .min();
+        let black_race = black_passed
+            .as_slice()
+            .iter()
+            .filter_map(|&sq| {
+                white_king
+                    .filter(|&king| passer_is_unstoppable(board, sq, Color::Black, king))
+                    .and_then(|_| promotion_distance(board, sq, Color::Black, board.side_to_move))
+            })
+            .min();
+
+        match (white_race, black_race) {
+            (Some(w), None) => eg_score += 90 + (8 - w).max(0) * 6,
+            (None, Some(b)) => eg_score -= 90 + (8 - b).max(0) * 6,
+            (Some(w), Some(b)) if w + 1 < b => eg_score += 40 + (b - w) * 8,
+            (Some(w), Some(b)) if b + 1 < w => eg_score -= 40 + (w - b) * 8,
+            _ => {}
+        }
+    }
+
+    if white_rooks.as_slice().len() == 1
+        && black_rooks.as_slice().len() == 1
+        && !white_has_queen
+        && !black_has_queen
+    {
+        eg_score += rook_endgame_bonus(
+            Color::White,
+            white_rooks.as_slice(),
+            white_passed.as_slice(),
+            black_passed.as_slice(),
+            black_king,
+        );
+        eg_score -= rook_endgame_bonus(
+            Color::Black,
+            black_rooks.as_slice(),
+            black_passed.as_slice(),
+            white_passed.as_slice(),
+            white_king,
+        );
     }
 
     let mut white_mob = 0;
@@ -871,6 +1220,9 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
             _ => {}
         }
+        let (trap_mg, trap_eg) = trapped_piece_penalty(sq, piece, mobility, white_king);
+        mg_score -= trap_mg;
+        eg_score -= trap_eg;
     }
     for &(sq, piece) in black_pieces.as_slice() {
         let mobility = mobility_count(board, sq, piece);
@@ -897,6 +1249,9 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
             _ => {}
         }
+        let (trap_mg, trap_eg) = trapped_piece_penalty(sq, piece, mobility, black_king);
+        mg_score += trap_mg;
+        eg_score += trap_eg;
     }
     let mobility_delta = white_mob - black_mob;
     mg_score += mobility_delta * 2;
@@ -910,4 +1265,69 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     }
 
     score
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lever_detection_finds_adjacent_enemy_pawn() {
+        let mut board = Board::new();
+        board.set_fen("4k3/8/3p4/4P3/8/8/8/4K3 w - - 0 1");
+        assert!(pawn_has_lever(&board, parse_square("e5").unwrap(), Color::White));
+        assert!(!pawn_has_lever(&board, parse_square("e5").unwrap(), Color::Black));
+    }
+
+    #[test]
+    fn trapped_corner_knight_gets_penalized() {
+        let trapped = trapped_piece_penalty(
+            parse_square("a1").unwrap(),
+            Piece {
+                color: Color::White,
+                kind: PieceType::Knight,
+            },
+            1,
+            None,
+        );
+        let free = trapped_piece_penalty(
+            parse_square("d4").unwrap(),
+            Piece {
+                color: Color::White,
+                kind: PieceType::Knight,
+            },
+            6,
+            None,
+        );
+        assert!(trapped.0 > free.0);
+        assert!(trapped.1 > free.1);
+    }
+
+    #[test]
+    fn direct_opposition_is_detected() {
+        assert!(has_direct_opposition(
+            parse_square("c4").unwrap(),
+            parse_square("e4").unwrap(),
+        ));
+        assert!(has_direct_opposition(
+            parse_square("e3").unwrap(),
+            parse_square("e5").unwrap(),
+        ));
+        assert!(!has_direct_opposition(
+            parse_square("c4").unwrap(),
+            parse_square("f4").unwrap(),
+        ));
+    }
+
+    #[test]
+    fn unstoppable_pawn_race_is_detected() {
+        let mut board = Board::new();
+        board.set_fen("7k/8/3P4/8/8/8/4K3/8 w - - 0 1");
+        assert!(passer_is_unstoppable(
+            &board,
+            parse_square("d6").unwrap(),
+            Color::White,
+            parse_square("h8").unwrap(),
+        ));
+    }
 }

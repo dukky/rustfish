@@ -262,12 +262,12 @@ fn take_best_scored(moves: &mut Vec<(Move, i32)>) -> Option<Move> {
     Some(moves.swap_remove(best_idx).0)
 }
 
-fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) -> bool {
-    if rep_stack.len() < 2 || halfmove_clock < 4 {
+pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) -> bool {
+    if rep_stack.len() < 3 || halfmove_clock < 4 {
         return false;
     }
 
-    let mut idx = rep_stack.len() - 2;
+    let mut idx = rep_stack.len() - 3;
     let mut remaining = halfmove_clock as usize;
     loop {
         if rep_stack[idx] == key {
@@ -355,7 +355,11 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
     let hash = board_hash(board, &engine.zobrist);
     let tt_root_move = engine.tt.probe(hash).and_then(|e| e.best);
-    let mut rep_stack = vec![hash];
+    let mut rep_stack = if engine.position_history.last().copied() == Some(hash) {
+        engine.position_history.clone()
+    } else {
+        vec![hash]
+    };
     order_moves(
         board,
         engine,
@@ -805,7 +809,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack, key);
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply);
     }
 
     let alpha_orig = alpha;
@@ -846,7 +850,7 @@ fn negamax(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key);
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply);
             }
         }
 
@@ -1056,12 +1060,15 @@ fn negamax(
                 && !in_check
                 && !gives_check
                 && !priority_quiet
-                && depth >= 3
-                && idx >= 3
+                && depth >= params.lmr_min_depth
+                && idx >= params.lmr_min_move_index
             {
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
                 let m = idx.min(LMR_MAX_MOVES - 1);
                 let mut r = engine.lmr_table[d][m];
+                if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
+                    r += 1;
+                }
                 // Reduce more for moves with bad history
                 if quiet_history < -2000 {
                     r += 1;
@@ -1196,6 +1203,7 @@ fn quiescence(
     engine: &mut EngineState,
     rep_stack: &mut Vec<u64>,
     key: u64,
+    ply: usize,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1216,7 +1224,7 @@ fn quiescence(
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
         if entry.depth >= 0 {
-            let tt_score = score_from_tt(entry.score, 0);
+            let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => return tt_score,
                 Bound::Lower if tt_score >= beta => return tt_score,
@@ -1233,7 +1241,7 @@ fn quiescence(
     } else {
         Some(
             tt_entry
-                .and_then(|entry| tt_static_eval(entry, 0))
+                .and_then(|entry| tt_static_eval(entry, ply))
                 .unwrap_or_else(|| eval_for_side(board)),
         )
     };
@@ -1261,7 +1269,7 @@ fn quiescence(
     );
     if picker.is_empty() {
         if in_check {
-            return -MATE_SCORE + 1;
+            return -MATE_SCORE + ply as i32;
         }
         return alpha;
     }
@@ -1290,7 +1298,7 @@ fn quiescence(
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
-        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key);
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1);
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -1301,7 +1309,14 @@ fn quiescence(
         if score >= beta {
             engine
                 .tt
-                .store(key, 0, score_to_tt(beta, 0), raw_static_eval, Bound::Lower, Some(mv));
+                .store(
+                    key,
+                    0,
+                    score_to_tt(beta, ply),
+                    raw_static_eval,
+                    Bound::Lower,
+                    Some(mv),
+                );
             return beta;
         }
         if score > alpha {
@@ -1313,7 +1328,7 @@ fn quiescence(
     let bound = if alpha <= alpha_orig { Bound::Upper } else { Bound::Exact };
     engine
         .tt
-        .store(key, 0, score_to_tt(alpha, 0), raw_static_eval, bound, best_move.or(tt_move));
+        .store(key, 0, score_to_tt(alpha, ply), raw_static_eval, bound, best_move.or(tt_move));
     alpha
 }
 
@@ -1709,5 +1724,81 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
         PieceType::Rook => 500,
         PieceType::Queen => 900,
         PieceType::King => 20_000,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn quiescence_checkmate_score_is_ply_aware() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1");
+
+                let mut engine = EngineState::new();
+                let key = board_hash(&board, &engine.zobrist);
+                let mut rep_stack = vec![key];
+                let mut search = Search::new(None);
+
+                let score = quiescence(
+                    &mut board,
+                    -INF,
+                    INF,
+                    &mut search,
+                    &mut engine,
+                    &mut rep_stack,
+                    key,
+                    3,
+                );
+
+                assert_eq!(score, -MATE_SCORE + 3);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn quiescence_tt_probe_is_ply_aware_for_mates() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1");
+
+                let mut engine = EngineState::new();
+                let key = board_hash(&board, &engine.zobrist);
+                engine.tt.store(
+                    key,
+                    0,
+                    score_to_tt(-MATE_SCORE + 5, 5),
+                    None,
+                    Bound::Exact,
+                    None,
+                );
+
+                let mut rep_stack = vec![key];
+                let mut search = Search::new(None);
+                let score = quiescence(
+                    &mut board,
+                    -INF,
+                    INF,
+                    &mut search,
+                    &mut engine,
+                    &mut rep_stack,
+                    key,
+                    5,
+                );
+
+                assert_eq!(score, -MATE_SCORE + 5);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

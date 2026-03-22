@@ -768,6 +768,8 @@ struct EngineState {
     opening_book: Vec<BookEntry>,
     own_book: bool,
     book_style: BookStyle,
+    book_file: Option<String>,
+    position_history: Vec<u64>,
 }
 
 impl EngineState {
@@ -775,7 +777,7 @@ impl EngineState {
         let hash_mb = 64;
         let zobrist = Zobrist::new();
         let book_style = BookStyle::Normal;
-        let opening_book = build_opening_book(&zobrist, book_style);
+        let opening_book = build_opening_book(&zobrist, book_style, None);
         Self {
             zobrist,
             tt: TransTable::new(hash_mb),
@@ -790,6 +792,8 @@ impl EngineState {
             opening_book,
             own_book: true,
             book_style,
+            book_file: None,
+            position_history: Vec::new(),
         }
     }
 
@@ -808,11 +812,25 @@ impl EngineState {
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
         self.searches_since_decay = 0;
+        self.position_history.clear();
     }
 
     fn set_book_style(&mut self, style: BookStyle) {
         self.book_style = style;
-        self.opening_book = build_opening_book(&self.zobrist, style);
+        self.reload_opening_book();
+    }
+
+    fn set_book_file(&mut self, path: Option<String>) {
+        self.book_file = path;
+        self.reload_opening_book();
+    }
+
+    fn reload_opening_book(&mut self) {
+        self.opening_book = build_opening_book(
+            &self.zobrist,
+            self.book_style,
+            self.book_file.as_deref(),
+        );
     }
 
     fn decay_history(&mut self) {
@@ -852,6 +870,8 @@ impl EngineState {
             opening_book: self.opening_book.clone(),
             own_book: false,
             book_style: self.book_style,
+            book_file: self.book_file.clone(),
+            position_history: self.position_history.clone(),
         }
     }
 }
@@ -880,6 +900,7 @@ fn main() {
             println!("option name Clear Hash type button");
             println!("option name OwnBook type check default true");
             println!("option name BookStyle type combo default normal var normal var grinder var chaos");
+            println!("option name BookFile type string default");
             println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
@@ -915,7 +936,7 @@ fn main() {
             continue;
         }
         if cmd.starts_with("position") {
-            handle_position(cmd, &mut board);
+            handle_position(cmd, &mut board, &mut engine);
             continue;
         }
         if cmd.starts_with("go") {

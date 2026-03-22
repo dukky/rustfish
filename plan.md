@@ -42,6 +42,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] One-ply continuation history for quiet move ordering
 - [x] Replace full staged non-root/qsearch move sorting with staged pick-next move picker
 - [x] Pruning stability follow-up (null-move eval gate, priority-quiet LMP/LMR guards)
+- [x] Make qsearch TT mate-score handling ply-aware
 - [ ] Tune pruning margins/reductions from gauntlet data
 
 ## Phase 3 — Evaluation Quality
@@ -49,7 +50,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Basic pawn structure (isolated, doubled, passed)
 - [x] Pawn structure follow-up (connected pawns, candidate passers)
 - [x] Pawn structure follow-up (backward pawns, passer support)
-- [ ] Pawn structure follow-up (backward pawns, lever detection, passer support)
+- [x] Pawn structure follow-up (backward pawns, lever detection, passer support)
 - [x] Basic king safety (pawn shield, attacked king zone, open files near king)
 - [x] King safety follow-up (attack units by piece type)
 - [x] King safety follow-up (tropism, scaling by attacking material)
@@ -58,9 +59,9 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Piece activity follow-up (outposts, 7th-rank rooks)
 - [x] Piece activity follow-up (space, bishop scope)
 - [x] Piece activity follow-up (opening development / castling incentives)
-- [ ] Piece activity follow-up (trapped pieces)
+- [x] Piece activity follow-up (trapped pieces)
 - [x] Endgame terms (king activity, basic mop-up / king chase)
-- [ ] Endgame terms follow-up (opposition-ish heuristics, rook endings, pawn races)
+- [x] Endgame terms follow-up (opposition-ish heuristics, rook endings, pawn races)
 - [ ] Incremental evaluation updates (faster nodes/sec)
 
 ## Phase 4 — Engine Correctness + Performance
@@ -69,7 +70,12 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Expand perft suite with additional canonical tricky positions (castling/en-passant/promotion basics)
 - [x] Add move-generation/make-undo invariant selftest command
 - [x] Expand invariants with targeted edge-case suites
-- [ ] Expand invariants with tactical/pin/check-regression suites
+- [x] Fix castling generation to require rook presence on the rook square
+- [x] Fix repetition ancestor parity scan in search
+- [x] Preserve repetition history before the current root across `position ... moves ...`
+- [x] Wire exposed LMR UCI options into the actual reduction conditions or remove them
+- [x] Expand invariants with tactical/pin/check-regression suites
+- [x] Add regression tests for rookless castling, repetition parity/history, and qsearch mate-distance handling
 - [x] Optimize hot paths (SEE attacker lookup, bounded repetition scan, cheaper history decay cadence)
 - [x] Reduce staged move-ordering allocation churn (single scored sort instead of bucket rebuilds)
 - [x] Reduce eval rescanning overhead with piece-list reuse for king safety and mobility
@@ -93,7 +99,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Add OwnBook UCI option
 - [x] Expand built-in opening book depth
 - [x] Add book-style option for repertoire experiments
-- [ ] Add opening book external plain-text support
+- [x] Add opening book external plain-text support
 - [ ] Add simple endgame tablebase probing (optional local files)
 - [ ] Add self-play tuning loop (no external crate dependency)
 - [x] Add basic gauntlet script vs fixed opponents (UCI, no deps)
@@ -109,10 +115,10 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Track Elo progression over frozen-binary versions with a local round-robin rating pool
 
 ## Current Focus
-1. Improve search efficiency: keep pushing post-2100 structural work, including the new shared-TT SMP path and the next round of single-thread eval/search cleanup.
-2. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
-3. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
-4. Keep refactor healthy: only small follow-up structure changes while strength work continues.
+1. Pay down newly identified correctness debt first: castling sanity, repetition correctness, pre-root repetition history, qsearch mate-distance consistency, and dead tuning knobs.
+2. Improve search efficiency: keep pushing post-2100 structural work, including the new shared-TT SMP path and the next round of single-thread eval/search cleanup.
+3. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
+4. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
 
 ## Post-2100 Review
 - Accepted from the post-2100 structural path:
