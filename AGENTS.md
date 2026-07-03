@@ -351,6 +351,11 @@ Notes:
   bench runs, never single before/after numbers (fanless M3 Air drifts).
 - Fixed-depth bench node counts are the acceptance gate for speed work:
   identical nodes = search behavior unchanged, NPS delta is the result.
+- On x86-64 (Ryzen desktop) always build with
+  `RUSTFLAGS="-C target-cpu=native"`: the default x86-64 baseline lacks
+  POPCNT/BMI, so the bitboard hot loops fall back to libcalls without it.
+  Measured no effect on Apple Silicon (defaults are already modern), so
+  M3-frozen binaries stay flag-free; rebuild per machine for comparisons.
 
 ## Validation checklist after engine changes
 For search/eval changes:
