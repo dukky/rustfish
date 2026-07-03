@@ -194,12 +194,7 @@ fn king_safety(
                 continue;
             }
             let sq = (shield_rank as u8) * 8 + (f as u8);
-            if board.squares[sq as usize]
-                == Some(Piece {
-                    color,
-                    kind: PieceType::Pawn,
-                })
-            {
+            if board.bb.pieces[color_index(color)][0] & (1u64 << sq) != 0 {
                 score += 10;
             } else {
                 score -= 8;
@@ -256,33 +251,10 @@ fn has_pawn_bits(mask: &[u8; 8], file: usize, bits: u8) -> bool {
 }
 
 fn is_supported_by_pawn(board: &Board, sq: u8, color: Color) -> bool {
-    let f = (sq % 8) as i32;
-    let r = (sq / 8) as i32;
-    let support_rank = match color {
-        Color::White => r - 1,
-        Color::Black => r + 1,
-    };
-    if !(0..8).contains(&support_rank) {
-        return false;
-    }
-
-    for df in [-1, 1] {
-        let pf = f + df;
-        if !(0..8).contains(&pf) {
-            continue;
-        }
-        let psq = (support_rank as u8) * 8 + (pf as u8);
-        if board.squares[psq as usize]
-            == Some(Piece {
-                color,
-                kind: PieceType::Pawn,
-            })
-        {
-            return true;
-        }
-    }
-
-    false
+    // Own pawns diagonally behind == own-colored pawn attackers of this square.
+    crate::bitboard::PAWN_ATTACKERS[color_index(color)][sq as usize]
+        & board.bb.pieces[color_index(color)][0]
+        != 0
 }
 
 fn is_connected_pawn(pawn_masks: &[u8; 8], sq: u8, color: Color) -> bool {
@@ -324,58 +296,21 @@ fn is_backward_pawn(board: &Board, pawn_masks: &[u8; 8], sq: u8, color: Color, p
     }
 
     let enemy = color.opposite();
-    for df in [-1, 1] {
-        let ef = f as i32 + df;
-        let er = match color {
-            Color::White => advance_rank + 1,
-            Color::Black => advance_rank - 1,
-        };
-        if !(0..8).contains(&ef) || !(0..8).contains(&er) {
-            continue;
-        }
-        let esq = (er as u8) * 8 + (ef as u8);
-        if board.squares[esq as usize]
-            == Some(Piece {
-                color: enemy,
-                kind: PieceType::Pawn,
-            })
-        {
-            return true;
-        }
-    }
-
-    false
+    let advance_sq = (advance_rank as u8) * 8 + (f as u8);
+    // Enemy pawns attacking the advance square block it: same set as the
+    // enemy-colored pawn attackers of that square.
+    crate::bitboard::PAWN_ATTACKERS[color_index(enemy)][advance_sq as usize]
+        & board.bb.pieces[color_index(enemy)][0]
+        != 0
 }
 
 fn pawn_has_lever(board: &Board, sq: u8, color: Color) -> bool {
-    let f = (sq % 8) as i32;
-    let r = (sq / 8) as i32;
-    let target_rank = match color {
-        Color::White => r + 1,
-        Color::Black => r - 1,
-    };
-    if !(0..8).contains(&target_rank) {
-        return false;
-    }
-
+    // Enemy pawns this pawn attacks == enemy pawns on our forward diagonals;
+    // the mirrored attacker table gives exactly those squares.
     let enemy = color.opposite();
-    for df in [-1, 1] {
-        let nf = f + df;
-        if !(0..8).contains(&nf) {
-            continue;
-        }
-        let target = (target_rank as u8) * 8 + (nf as u8);
-        if board.squares[target as usize]
-            == Some(Piece {
-                color: enemy,
-                kind: PieceType::Pawn,
-            })
-        {
-            return true;
-        }
-    }
-
-    false
+    crate::bitboard::PAWN_ATTACKERS[color_index(enemy)][sq as usize]
+        & board.bb.pieces[color_index(enemy)][0]
+        != 0
 }
 
 fn passed_pawn_support_score(
@@ -820,34 +755,49 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let phase = acc.phase;
 
     for c in 0..2usize {
-        for pi in 0..board.piece_cnt[c] {
-            let sq = board.piece_sqs[c][pi] as usize;
-            let p = board.squares[sq].unwrap();
-            if p.color == Color::White {
-                white_pieces.push(sq as u8, p);
-            } else {
-                black_pieces.push(sq as u8, p);
-            }
-            if p.kind == PieceType::Pawn {
-                let f = sq % 8;
-                let rank = (sq / 8) as i8;
-                if p.color == Color::White {
-                    white_pawns.push(sq as u8);
-                    white_pawn_files[f] += 1;
-                    white_pawn_masks[f] |= 1u8 << rank;
-                    white_min_pawn_rank[f] = white_min_pawn_rank[f].min(rank);
+        let color = if c == 0 { Color::White } else { Color::Black };
+        for kind in [
+            PieceType::Pawn,
+            PieceType::Knight,
+            PieceType::Bishop,
+            PieceType::Rook,
+            PieceType::Queen,
+            PieceType::King,
+        ] {
+            let piece = Piece { color, kind };
+            let mut bits = board.bb.pieces[c][crate::bitboard::kind_index(kind)];
+            while bits != 0 {
+                let sq = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                if c == 0 {
+                    white_pieces.push(sq, piece);
                 } else {
-                    black_pawns.push(sq as u8);
-                    black_pawn_files[f] += 1;
-                    black_pawn_masks[f] |= 1u8 << rank;
-                    black_max_pawn_rank[f] = black_max_pawn_rank[f].max(rank);
+                    black_pieces.push(sq, piece);
                 }
-            }
-            if p.kind == PieceType::Rook {
-                if p.color == Color::White {
-                    white_rooks.push(sq as u8);
-                } else {
-                    black_rooks.push(sq as u8);
+                match kind {
+                    PieceType::Pawn => {
+                        let f = (sq % 8) as usize;
+                        let rank = (sq / 8) as i8;
+                        if c == 0 {
+                            white_pawns.push(sq);
+                            white_pawn_files[f] += 1;
+                            white_pawn_masks[f] |= 1u8 << rank;
+                            white_min_pawn_rank[f] = white_min_pawn_rank[f].min(rank);
+                        } else {
+                            black_pawns.push(sq);
+                            black_pawn_files[f] += 1;
+                            black_pawn_masks[f] |= 1u8 << rank;
+                            black_max_pawn_rank[f] = black_max_pawn_rank[f].max(rank);
+                        }
+                    }
+                    PieceType::Rook => {
+                        if c == 0 {
+                            white_rooks.push(sq);
+                        } else {
+                            black_rooks.push(sq);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
