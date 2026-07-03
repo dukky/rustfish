@@ -133,6 +133,11 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
   - `9b0b346` vs Stockfish `2200`, `96g / 100ms / parallel 2`: `44/12/40`, score `52.1%`, about `+14.5 Elo`
   - `9b0b346` vs Stockfish `2300`, `96g / 100ms / parallel 2`: `46/8/42`, score `52.1%`, about `+14.5 Elo`
   - those `2200` / `2300` results are suspiciously similar, so frozen A/B plus a local pool is a better anchor than over-interpreting `UCI_LimitStrength`
+- Calibrated strength estimate (2026-07-03, `fd90bf1`-equivalent build):
+  - 5-level `UCI_Elo` ladder at `500ms/move` (closer to the limiter's calibrated regime than the old `20-100ms` runs), `20g` per level, fixed openings, `Hash=256`, `OwnBook=false`, `Threads=1`
+  - scores: `1900: 72.5%`, `2050: 72.5%`, `2200: 42.5%`, `2350: 20.0%`, `2500: 5.0%` — monotone, so the levels differentiate properly at this TC
+  - maximum-likelihood fit across all levels (`scripts/fit_rating.py`): **~2129, 95% CI 2049-2208** on the SF `UCI_Elo` scale
+  - caveat: still anchored to Stockfish's self-reported limiter scale; an external CCRL-anchored pool would be the next rigor step
 - Structural ideas tried and rejected so far:
   - clustered TT
   - pawn hash / pawn-eval cache groundwork
