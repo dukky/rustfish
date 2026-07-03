@@ -440,122 +440,32 @@ fn gen_sliders(
 }
 
 pub(crate) fn is_square_attacked(board: &Board, sq: u8, by: Color) -> bool {
-    let f = (sq % 8) as i8;
-    let r = (sq / 8) as i8;
+    use crate::bitboard::{
+        bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
+    };
 
-    match by {
-        Color::White => {
-            for (df, dr) in [(-1, -1), (1, -1)] {
-                let nf = f + df;
-                let nr = r + dr;
-                if in_bounds(nf, nr) {
-                    let from = (nr as u8) * 8 + (nf as u8);
-                    if board.squares[from as usize]
-                        == Some(Piece {
-                            color: Color::White,
-                            kind: PieceType::Pawn,
-                        })
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        Color::Black => {
-            for (df, dr) in [(-1, 1), (1, 1)] {
-                let nf = f + df;
-                let nr = r + dr;
-                if in_bounds(nf, nr) {
-                    let from = (nr as u8) * 8 + (nf as u8);
-                    if board.squares[from as usize]
-                        == Some(Piece {
-                            color: Color::Black,
-                            kind: PieceType::Pawn,
-                        })
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
+    let c = color_index(by);
+    let bb = &board.bb;
+    let s = sq as usize;
+
+    if PAWN_ATTACKERS[c][s] & bb.pieces[c][0] != 0 {
+        return true;
+    }
+    if KNIGHT_ATTACKS[s] & bb.pieces[c][1] != 0 {
+        return true;
+    }
+    if KING_ATTACKS[s] & bb.pieces[c][5] != 0 {
+        return true;
     }
 
-    for (df, dr) in [
-        (1, 2),
-        (2, 1),
-        (2, -1),
-        (1, -2),
-        (-1, -2),
-        (-2, -1),
-        (-2, 1),
-        (-1, 2),
-    ] {
-        let nf = f + df;
-        let nr = r + dr;
-        if in_bounds(nf, nr) {
-            let from = (nr as u8) * 8 + (nf as u8);
-            if board.squares[from as usize]
-                == Some(Piece {
-                    color: by,
-                    kind: PieceType::Knight,
-                })
-            {
-                return true;
-            }
-        }
+    let occ = bb.occ_all();
+    let diag_sliders = bb.pieces[c][2] | bb.pieces[c][4];
+    if diag_sliders != 0 && bishop_attacks(s, occ) & diag_sliders != 0 {
+        return true;
     }
-
-    for (df, dr) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
-        let mut nf = f + df;
-        let mut nr = r + dr;
-        while in_bounds(nf, nr) {
-            let from = (nr as u8) * 8 + (nf as u8);
-            if let Some(p) = board.squares[from as usize] {
-                if p.color == by && (p.kind == PieceType::Bishop || p.kind == PieceType::Queen) {
-                    return true;
-                }
-                break;
-            }
-            nf += df;
-            nr += dr;
-        }
-    }
-
-    for (df, dr) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-        let mut nf = f + df;
-        let mut nr = r + dr;
-        while in_bounds(nf, nr) {
-            let from = (nr as u8) * 8 + (nf as u8);
-            if let Some(p) = board.squares[from as usize] {
-                if p.color == by && (p.kind == PieceType::Rook || p.kind == PieceType::Queen) {
-                    return true;
-                }
-                break;
-            }
-            nf += df;
-            nr += dr;
-        }
-    }
-
-    for df in -1..=1 {
-        for dr in -1..=1 {
-            if df == 0 && dr == 0 {
-                continue;
-            }
-            let nf = f + df;
-            let nr = r + dr;
-            if in_bounds(nf, nr) {
-                let from = (nr as u8) * 8 + (nf as u8);
-                if board.squares[from as usize]
-                    == Some(Piece {
-                        color: by,
-                        kind: PieceType::King,
-                    })
-                {
-                    return true;
-                }
-            }
-        }
+    let ortho_sliders = bb.pieces[c][3] | bb.pieces[c][4];
+    if ortho_sliders != 0 && rook_attacks(s, occ) & ortho_sliders != 0 {
+        return true;
     }
 
     false

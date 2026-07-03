@@ -1,3 +1,4 @@
+mod bitboard;
 mod book;
 mod eval;
 mod movegen;
@@ -123,6 +124,7 @@ struct Undo {
     fullmove_number: u32,
     moved_piece: Piece,
     eval_acc: EvalAcc,
+    bb: bitboard::BoardBB,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -185,6 +187,7 @@ struct Board {
     piece_cnt: [usize; 2],
     sq_to_pl: [u8; 64],
     eval_acc: EvalAcc,
+    bb: bitboard::BoardBB,
 }
 
 impl PartialEq for Board {
@@ -215,6 +218,7 @@ impl Board {
             piece_cnt: [0; 2],
             sq_to_pl: [255; 64],
             eval_acc: EvalAcc::default(),
+            bb: bitboard::BoardBB::default(),
         };
         b.set_startpos();
         b
@@ -222,10 +226,12 @@ impl Board {
 
     fn acc_add(&mut self, sq: u8, p: Piece) {
         self.eval_acc.apply(sq, p, 1);
+        self.bb.toggle(sq, p);
     }
 
     fn acc_remove(&mut self, sq: u8, p: Piece) {
         self.eval_acc.apply(sq, p, -1);
+        self.bb.toggle(sq, p);
     }
 
     fn recompute_eval_acc(&self) -> EvalAcc {
@@ -236,6 +242,16 @@ impl Board {
             }
         }
         acc
+    }
+
+    fn recompute_bb(&self) -> bitboard::BoardBB {
+        let mut bb = bitboard::BoardBB::default();
+        for sq in 0..64u8 {
+            if let Some(p) = self.squares[sq as usize] {
+                bb.toggle(sq, p);
+            }
+        }
+        bb
     }
 
     fn pl_add(&mut self, sq: u8, color: Color) {
@@ -359,6 +375,7 @@ impl Board {
         }
 
         self.eval_acc = self.recompute_eval_acc();
+        self.bb = self.recompute_bb();
     }
 
     fn king_square(&self, color: Color) -> Option<u8> {
@@ -527,6 +544,7 @@ impl Board {
             fullmove_number: self.fullmove_number,
             moved_piece: moving_piece,
             eval_acc: self.eval_acc,
+            bb: self.bb,
         };
 
         if moving_piece.kind == PieceType::Pawn || captured.is_some() {
@@ -674,6 +692,7 @@ impl Board {
         self.halfmove_clock = undo.halfmove_clock;
         self.fullmove_number = undo.fullmove_number;
         self.eval_acc = undo.eval_acc;
+        self.bb = undo.bb;
 
         self.pl_move(mv.to, mv.from, undo.moved_piece.color);
         self.squares[mv.to as usize] = None;
