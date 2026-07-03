@@ -152,14 +152,40 @@ struct RootWorkerResult {
     ordered_root_moves: Vec<Move>,
 }
 
-struct MovePicker {
-    tt_move: Option<Move>,
-    tt_yielded: bool,
+#[derive(Default)]
+struct PickerBufs {
     good_captures: Vec<(Move, i32)>,
     priority_quiets: Vec<(Move, i32)>,
     quiets: Vec<(Move, i32)>,
     bad_captures: Vec<(Move, i32)>,
+}
+
+impl PickerBufs {
+    fn clear(&mut self) {
+        self.good_captures.clear();
+        self.priority_quiets.clear();
+        self.quiets.clear();
+        self.bad_captures.clear();
+    }
+}
+
+thread_local! {
+    static PICKER_BUF_POOL: std::cell::RefCell<Vec<PickerBufs>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct MovePicker {
+    tt_move: Option<Move>,
+    tt_yielded: bool,
+    bufs: PickerBufs,
     total: usize,
+}
+
+impl Drop for MovePicker {
+    fn drop(&mut self) {
+        let bufs = std::mem::take(&mut self.bufs);
+        PICKER_BUF_POOL.with(|pool| pool.borrow_mut().push(bufs));
+    }
 }
 
 impl MovePicker {
@@ -175,14 +201,16 @@ impl MovePicker {
         move_buf: &mut Vec<Move>,
     ) -> Self {
         board.generate_legal_moves(captures_only, move_buf);
+        let mut bufs = PICKER_BUF_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        bufs.clear();
+
         if move_buf.is_empty() {
             return Self {
                 tt_move: None,
                 tt_yielded: true,
-                good_captures: Vec::new(),
-                priority_quiets: Vec::new(),
-                quiets: Vec::new(),
-                bad_captures: Vec::new(),
+                bufs,
                 total: 0,
             };
         }
@@ -191,10 +219,7 @@ impl MovePicker {
         let mut picker = Self {
             tt_move: None,
             tt_yielded: false,
-            good_captures: Vec::new(),
-            priority_quiets: Vec::new(),
-            quiets: Vec::new(),
-            bad_captures: Vec::new(),
+            bufs,
             total: 0,
         };
 
@@ -209,18 +234,18 @@ impl MovePicker {
                 let see_score = see(board, mv);
                 let score = capture_stage_score_from_see(board, mv, see_score);
                 if see_score >= 0 {
-                    picker.good_captures.push((mv, score));
+                    picker.bufs.good_captures.push((mv, score));
                 } else {
-                    picker.bad_captures.push((mv, score));
+                    picker.bufs.bad_captures.push((mv, score));
                 }
                 continue;
             }
 
             let score = quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
             if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
-                picker.priority_quiets.push((mv, score));
+                picker.bufs.priority_quiets.push((mv, score));
             } else {
-                picker.quiets.push((mv, score.max(history_score(history, side, mv))));
+                picker.bufs.quiets.push((mv, score.max(history_score(history, side, mv))));
             }
         }
 
@@ -239,10 +264,10 @@ impl MovePicker {
             }
         }
 
-        take_best_scored(&mut self.good_captures)
-            .or_else(|| take_best_scored(&mut self.priority_quiets))
-            .or_else(|| take_best_scored(&mut self.quiets))
-            .or_else(|| take_best_scored(&mut self.bad_captures))
+        take_best_scored(&mut self.bufs.good_captures)
+            .or_else(|| take_best_scored(&mut self.bufs.priority_quiets))
+            .or_else(|| take_best_scored(&mut self.bufs.quiets))
+            .or_else(|| take_best_scored(&mut self.bufs.bad_captures))
     }
 }
 
