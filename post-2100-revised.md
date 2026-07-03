@@ -64,6 +64,7 @@ These were tried seriously enough to matter, and should not be assumed to be nea
 - ProbCut
 - singular extension variants tried so far
 - root-split SMP as a practical strength gain
+- pin-aware/full-legality SEE attacker selection (2026-07-03: ~14% NPS cost, no node reduction at fixed depth; patch archived in `tmp/patches/`)
 
 This does not mean these ideas are bad forever.
 It means they have not paid off yet in this engine, with this surrounding architecture, in the tested forms.

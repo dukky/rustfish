@@ -32,7 +32,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Basic SEE for capture ordering + qsearch pruning
 - [x] Quiescence check handling (evasion generation when in check)
 - [x] Quiescence TT probe/store + simple delta pruning
-- [ ] SEE follow-up: pin-aware/king-safety-aware exactness improvements
+- [ ] SEE follow-up: pin-aware/king-safety-aware exactness improvements (rejected 2026-07-03: full-legality LVA scan cost ~14% NPS with no node reduction at fixed depth; patch archived in tmp/patches/. Revisit only with a cheap king-line pin check)
 - [x] Basic check extension
 - [x] Mate-distance pruning
 - [ ] Singular/check extension tuning follow-up

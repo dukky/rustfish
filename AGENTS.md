@@ -37,6 +37,8 @@ Dependencies: none beyond Rust stdlib and project-local scripts using Python std
 - `scripts/rating_pool.py` — run a local round-robin rating pool across fixed engine binaries
 - `scripts/openings.txt` — reusable opening suite for diversified gauntlets
 - `plan.md` — project roadmap / progress tracking
+- `post-2100-revised.md` — current strategic direction (what was tried, what was rejected, what to do next); read this before picking new work
+- `docs/archive/` — superseded planning/review notes kept for history; do **not** treat their recommendations as current (several of their priorities were later tested and rejected — see `post-2100-revised.md`)
 
 ---
 
