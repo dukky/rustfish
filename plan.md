@@ -62,7 +62,7 @@ Goal: keep improving this engine until it can challenge very strong Stockfish se
 - [x] Piece activity follow-up (trapped pieces)
 - [x] Endgame terms (king activity, basic mop-up / king chase)
 - [x] Endgame terms follow-up (opposition-ish heuristics, rook endings, pawn races)
-- [ ] Incremental evaluation updates (faster nodes/sec)
+- [~] Incremental evaluation updates (faster nodes/sec) — material/PST/phase/npm/queen/bishop accumulator landed 2026-07-03 (+2.4% NPS, node-identical, selftest-enforced invariant); pawn-structure and king-safety terms still computed per eval
 
 ## Phase 4 — Engine Correctness + Performance
 - [x] Add perft/divide commands

@@ -627,16 +627,6 @@ fn relative_rank(color: Color, sq: u8) -> i32 {
     }
 }
 
-fn add_tapered_score(mg_score: &mut i32, eg_score: &mut i32, color: Color, mg: i32, eg: i32) {
-    if color == Color::White {
-        *mg_score += mg;
-        *eg_score += eg;
-    } else {
-        *mg_score -= mg;
-        *eg_score -= eg;
-    }
-}
-
 fn taper_score(mg: i32, eg: i32, phase: i32) -> i32 {
     (mg * phase + eg * (24 - phase)) / 24
 }
@@ -741,7 +731,7 @@ fn eg_pst_value(kind: PieceType, color: Color, sq: u8) -> i32 {
     }
 }
 
-fn pst_values(kind: PieceType, color: Color, sq: u8) -> (i32, i32) {
+pub(crate) fn pst_values(kind: PieceType, color: Color, sq: u8) -> (i32, i32) {
     (
         mg_pst_value(kind, color, sq),
         eg_pst_value(kind, color, sq),
@@ -779,8 +769,9 @@ fn development_score(board: &Board, color: Color) -> i32 {
 }
 
 pub(crate) fn evaluate(board: &Board) -> i32 {
-    let mut mg_score = 0;
-    let mut eg_score = 0;
+    let acc = &board.eval_acc;
+    let mut mg_score = acc.mg;
+    let mut eg_score = acc.eg;
 
     let mut white_pawns = SqList::new();
     let mut black_pawns = SqList::new();
@@ -790,26 +781,19 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     let mut black_rooks = SqList::new();
     let mut white_passed = SqList::new();
     let mut black_passed = SqList::new();
-    let mut white_knights = SqList::new();
-    let mut black_knights = SqList::new();
-    let mut white_bishop_sqs = SqList::new();
-    let mut black_bishop_sqs = SqList::new();
-    let mut white_bishops = 0;
-    let mut black_bishops = 0;
     let mut white_pawn_files = [0i32; 8];
     let mut black_pawn_files = [0i32; 8];
     let mut white_pawn_masks = [0u8; 8];
     let mut black_pawn_masks = [0u8; 8];
     let mut white_min_pawn_rank = [8i8; 8];
     let mut black_max_pawn_rank = [-1i8; 8];
-    let mut white_non_pawn_material = 0i32;
-    let mut black_non_pawn_material = 0i32;
-    let mut white_has_queen = false;
-    let mut black_has_queen = false;
-    let mut phase = 0i32;
+    let white_non_pawn_material = acc.npm[0];
+    let black_non_pawn_material = acc.npm[1];
+    let white_has_queen = acc.queens[0] > 0;
+    let black_has_queen = acc.queens[1] > 0;
+    let phase = acc.phase;
 
     for c in 0..2usize {
-        let _color = if c == 0 { Color::White } else { Color::Black };
         for pi in 0..board.piece_cnt[c] {
             let sq = board.piece_sqs[c][pi] as usize;
             let p = board.squares[sq].unwrap();
@@ -817,20 +801,6 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 white_pieces.push(sq as u8, p);
             } else {
                 black_pieces.push(sq as u8, p);
-            }
-            let (pst_mg, pst_eg) = pst_values(p.kind, p.color, sq as u8);
-            let mut mg = piece_value(p.kind) + pst_mg;
-            let mut eg = piece_value(p.kind) + pst_eg;
-            if p.kind == PieceType::Bishop {
-                mg += 5;
-                eg += 8;
-                if p.color == Color::White {
-                    white_bishops += 1;
-                    white_bishop_sqs.push(sq as u8);
-                } else {
-                    black_bishops += 1;
-                    black_bishop_sqs.push(sq as u8);
-                }
             }
             if p.kind == PieceType::Pawn {
                 let f = sq % 8;
@@ -847,13 +817,6 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                     black_max_pawn_rank[f] = black_max_pawn_rank[f].max(rank);
                 }
             }
-            if p.kind == PieceType::Knight {
-                if p.color == Color::White {
-                    white_knights.push(sq as u8);
-                } else {
-                    black_knights.push(sq as u8);
-                }
-            }
             if p.kind == PieceType::Rook {
                 if p.color == Color::White {
                     white_rooks.push(sq as u8);
@@ -861,38 +824,14 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                     black_rooks.push(sq as u8);
                 }
             }
-            phase += match p.kind {
-                PieceType::Knight | PieceType::Bishop => 1,
-                PieceType::Rook => 2,
-                PieceType::Queen => 4,
-                _ => 0,
-            };
-            match p.kind {
-                PieceType::Knight | PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
-                    if p.color == Color::White {
-                        white_non_pawn_material += piece_value(p.kind);
-                    } else {
-                        black_non_pawn_material += piece_value(p.kind);
-                    }
-                }
-                _ => {}
-            }
-            if p.kind == PieceType::Queen {
-                if p.color == Color::White {
-                    white_has_queen = true;
-                } else {
-                    black_has_queen = true;
-                }
-            }
-            add_tapered_score(&mut mg_score, &mut eg_score, p.color, mg, eg);
         }
     }
 
-    if white_bishops >= 2 {
+    if acc.bishops[0] >= 2 {
         mg_score += 30;
         eg_score += 40;
     }
-    if black_bishops >= 2 {
+    if acc.bishops[1] >= 2 {
         mg_score -= 30;
         eg_score -= 40;
     }

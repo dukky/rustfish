@@ -375,8 +375,9 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
         board.generate_legal_moves(false, &mut legal);
         for mv in legal.iter().copied() {
             let undo = board.make_move(mv);
+            let acc_ok = board.eval_acc == board.recompute_eval_acc();
             board.undo_move(mv, undo);
-            if *board != baseline {
+            if *board != baseline || !acc_ok || board.eval_acc != baseline.eval_acc {
                 println!(
                     "info string selftest FAIL edge make/undo mismatch at move {} fen {}",
                     move_to_uci(mv),
@@ -418,8 +419,17 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
         board.generate_legal_moves(false, &mut legal);
         for mv in legal.iter().copied() {
             let undo = board.make_move(mv);
+            if board.eval_acc != board.recompute_eval_acc() {
+                println!(
+                    "info string selftest FAIL incremental eval_acc mismatch after move {}",
+                    move_to_uci(mv)
+                );
+                *board = old;
+                flush_stdout();
+                return;
+            }
             board.undo_move(mv, undo);
-            if *board != baseline {
+            if *board != baseline || board.eval_acc != baseline.eval_acc {
                 println!("info string selftest FAIL make/undo mismatch at move {}", move_to_uci(mv));
                 *board = old;
                 flush_stdout();
