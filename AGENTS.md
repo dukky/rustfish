@@ -331,6 +331,27 @@ printf 'uci\nsetoption name OwnBook value false\nsetoption name BookStyle value 
 
 ---
 
+## Profiling on macOS
+The release profile sets `strip = true`, so a plain build cannot be profiled.
+Recipe:
+```bash
+CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
+printf 'position fen <busy middlegame FEN>\ngo movetime 10000\nquit\n' | ./target/release/rustfish > /dev/null 2>&1 &
+sample "$(pgrep -n rustfish)" 7 -file tmp/profile.txt
+```
+Notes:
+- Attach by PID (`pgrep`), not by name; name lookup often fails.
+- `lto = true` + `codegen-units = 1` inline almost everything into
+  `negamax`/`quiescence`, so function-level self-time is misleading —
+  aggregate by the source `file.rs:line` suffixes in the sample output
+  instead, and treat hot *lines* inside big functions as inlined callees.
+- Expect underattribution of small, widely-inlined helpers
+  (`is_square_attacked` profiled at 4% but was worth +26% NPS when
+  rewritten). Confirm any speedup with interleaved candidate/baseline
+  bench runs, never single before/after numbers (fanless M3 Air drifts).
+- Fixed-depth bench node counts are the acceptance gate for speed work:
+  identical nodes = search behavior unchanged, NPS delta is the result.
+
 ## Validation checklist after engine changes
 For search/eval changes:
 1. `cargo check`
