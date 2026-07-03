@@ -172,6 +172,51 @@ impl PickerBufs {
 thread_local! {
     static PICKER_BUF_POOL: std::cell::RefCell<Vec<PickerBufs>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static MOVE_VEC_POOL: std::cell::RefCell<Vec<Vec<Move>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct PooledMoveVec {
+    vec: Vec<Move>,
+}
+
+impl PooledMoveVec {
+    fn take() -> Self {
+        let mut vec = MOVE_VEC_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        vec.clear();
+        Self { vec }
+    }
+}
+
+impl Drop for PooledMoveVec {
+    fn drop(&mut self) {
+        let vec = std::mem::take(&mut self.vec);
+        MOVE_VEC_POOL.with(|pool| pool.borrow_mut().push(vec));
+    }
+}
+
+impl std::ops::Deref for PooledMoveVec {
+    type Target = Vec<Move>;
+    fn deref(&self) -> &Vec<Move> {
+        &self.vec
+    }
+}
+
+impl std::ops::DerefMut for PooledMoveVec {
+    fn deref_mut(&mut self) -> &mut Vec<Move> {
+        &mut self.vec
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Stage {
+    Tt,
+    GoodCapture,
+    PriorityQuiet,
+    Quiet,
+    BadCapture,
 }
 
 struct MovePicker {
@@ -256,18 +301,24 @@ impl MovePicker {
         self.total == 0
     }
 
-    fn next(&mut self) -> Option<Move> {
+    fn next(&mut self) -> Option<(Move, Stage)> {
         if !self.tt_yielded {
             self.tt_yielded = true;
             if let Some(mv) = self.tt_move {
-                return Some(mv);
+                return Some((mv, Stage::Tt));
             }
         }
 
         take_best_scored(&mut self.bufs.good_captures)
-            .or_else(|| take_best_scored(&mut self.bufs.priority_quiets))
-            .or_else(|| take_best_scored(&mut self.bufs.quiets))
-            .or_else(|| take_best_scored(&mut self.bufs.bad_captures))
+            .map(|mv| (mv, Stage::GoodCapture))
+            .or_else(|| {
+                take_best_scored(&mut self.bufs.priority_quiets)
+                    .map(|mv| (mv, Stage::PriorityQuiet))
+            })
+            .or_else(|| take_best_scored(&mut self.bufs.quiets).map(|mv| (mv, Stage::Quiet)))
+            .or_else(|| {
+                take_best_scored(&mut self.bufs.bad_captures).map(|mv| (mv, Stage::BadCapture))
+            })
     }
 }
 
@@ -1022,11 +1073,15 @@ fn negamax(
     let mut best = -INF;
     let mut best_move = None;
     let side = board.side_to_move;
-    let mut quiets_tried = Vec::new();
+    let mut quiets_tried = PooledMoveVec::take();
     let mut idx = 0usize;
 
-    while let Some(mv) = picker.next() {
-        let quiet = !is_capture_move(board, mv);
+    while let Some((mv, stage)) = picker.next() {
+        let quiet = match stage {
+            Stage::Tt => !is_capture_move(board, mv),
+            Stage::GoodCapture | Stage::BadCapture => false,
+            Stage::PriorityQuiet | Stage::Quiet => true,
+        };
         let quiet_history = if quiet {
             history_score(&engine.history, side, mv)
         } else {
@@ -1299,10 +1354,14 @@ fn quiescence(
         return alpha;
     }
 
-    while let Some(mv) = picker.next() {
+    while let Some((mv, stage)) = picker.next() {
         if !in_check {
-            let see_score = see(board, mv);
-            if see_score < 0 {
+            // Stage buckets already encode the SEE sign, so only the TT move
+            // (which bypassed bucketing) needs a fresh SEE here.
+            if stage == Stage::BadCapture {
+                continue;
+            }
+            if stage == Stage::Tt && see(board, mv) < 0 {
                 continue;
             }
             let victim = if mv.is_en_passant {
@@ -1317,7 +1376,6 @@ fn quiescence(
                     continue;
                 }
             }
-            let _ = see_score;
         }
 
         let undo = board.make_move(mv);
