@@ -86,6 +86,32 @@ fn king_attack_units(
             continue;
         }
 
+        // Geometric pre-cull: skip pieces that cannot reach any square of the
+        // 3x3 king ring even on an empty board, so the expensive per-target
+        // ray checks below run only for plausible attackers. The conditions
+        // are necessary (blockers only remove attacks), so results are
+        // unchanged.
+        let ff = (from % 8) as i8;
+        let fr = (from / 8) as i8;
+        let reachable = match piece.kind {
+            PieceType::Pawn => (ff - kf).abs() <= 2 && (fr - kr).abs() <= 2,
+            PieceType::Knight => (ff - kf).abs() <= 3 && (fr - kr).abs() <= 3,
+            PieceType::Rook => (ff - kf).abs() <= 1 || (fr - kr).abs() <= 1,
+            PieceType::Bishop => {
+                ((ff - fr) - (kf - kr)).abs() <= 2 || ((ff + fr) - (kf + kr)).abs() <= 2
+            }
+            PieceType::Queen => {
+                (ff - kf).abs() <= 1
+                    || (fr - kr).abs() <= 1
+                    || ((ff - fr) - (kf - kr)).abs() <= 2
+                    || ((ff + fr) - (kf + kr)).abs() <= 2
+            }
+            PieceType::King => false,
+        };
+        if !reachable {
+            continue;
+        }
+
         let mut hits = 0;
         for df in -1..=1 {
             for dr in -1..=1 {
