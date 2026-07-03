@@ -123,8 +123,6 @@ struct Undo {
     halfmove_clock: u32,
     fullmove_number: u32,
     moved_piece: Piece,
-    eval_acc: EvalAcc,
-    bb: bitboard::BoardBB,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -543,8 +541,6 @@ impl Board {
             halfmove_clock: self.halfmove_clock,
             fullmove_number: self.fullmove_number,
             moved_piece: moving_piece,
-            eval_acc: self.eval_acc,
-            bb: self.bb,
         };
 
         if moving_piece.kind == PieceType::Pawn || captured.is_some() {
@@ -691,8 +687,13 @@ impl Board {
         self.en_passant = undo.en_passant;
         self.halfmove_clock = undo.halfmove_clock;
         self.fullmove_number = undo.fullmove_number;
-        self.eval_acc = undo.eval_acc;
-        self.bb = undo.bb;
+
+        let mut placed = undo.moved_piece;
+        if let Some(promo) = mv.promotion {
+            placed.kind = promo;
+        }
+        self.acc_remove(mv.to, placed);
+        self.acc_add(mv.from, undo.moved_piece);
 
         self.pl_move(mv.to, mv.from, undo.moved_piece.color);
         self.squares[mv.to as usize] = None;
@@ -706,40 +707,23 @@ impl Board {
         }
 
         if mv.is_castle {
-            match mv.to {
-                6 => {
-                    self.squares[5] = None;
-                    self.squares[7] = Some(Piece {
-                        color: Color::White,
-                        kind: PieceType::Rook,
-                    });
-                    self.pl_move(5, 7, Color::White);
-                }
-                2 => {
-                    self.squares[3] = None;
-                    self.squares[0] = Some(Piece {
-                        color: Color::White,
-                        kind: PieceType::Rook,
-                    });
-                    self.pl_move(3, 0, Color::White);
-                }
-                62 => {
-                    self.squares[61] = None;
-                    self.squares[63] = Some(Piece {
-                        color: Color::Black,
-                        kind: PieceType::Rook,
-                    });
-                    self.pl_move(61, 63, Color::Black);
-                }
-                58 => {
-                    self.squares[59] = None;
-                    self.squares[56] = Some(Piece {
-                        color: Color::Black,
-                        kind: PieceType::Rook,
-                    });
-                    self.pl_move(59, 56, Color::Black);
-                }
-                _ => {}
+            let rook_shift = match mv.to {
+                6 => Some((7u8, 5u8, Color::White)),
+                2 => Some((0, 3, Color::White)),
+                62 => Some((63, 61, Color::Black)),
+                58 => Some((56, 59, Color::Black)),
+                _ => None,
+            };
+            if let Some((rook_from, rook_to, rook_color)) = rook_shift {
+                let rook = Piece {
+                    color: rook_color,
+                    kind: PieceType::Rook,
+                };
+                self.squares[rook_to as usize] = None;
+                self.squares[rook_from as usize] = Some(rook);
+                self.acc_remove(rook_to, rook);
+                self.acc_add(rook_from, rook);
+                self.pl_move(rook_to, rook_from, rook_color);
             }
         }
 
@@ -747,6 +731,7 @@ impl Board {
             if let Some(cs) = undo.captured_sq {
                 self.squares[cs as usize] = Some(cp);
                 self.pl_add(cs, cp.color);
+                self.acc_add(cs, cp);
             }
         }
     }

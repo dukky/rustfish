@@ -292,90 +292,23 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
 }
 
 pub(crate) fn mobility_count(board: &Board, sq: u8, piece: Piece) -> i32 {
-    let f = (sq % 8) as i8;
-    let r = (sq / 8) as i8;
-    let mut count = 0i32;
+    use crate::bitboard::{
+        bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
+    };
 
-    match piece.kind {
-        PieceType::Pawn => {
-            let dir: i8 = if piece.color == Color::White { 1 } else { -1 };
-            for df in [-1, 1] {
-                let nf = f + df;
-                let nr = r + dir;
-                if in_bounds(nf, nr) {
-                    let to = (nr as u8) * 8 + (nf as u8);
-                    if board.squares[to as usize]
-                        .map(|p| p.color != piece.color)
-                        .unwrap_or(true)
-                    {
-                        count += 1;
-                    }
-                }
-            }
-        }
-        PieceType::Knight => {
-            for (df, dr) in [
-                (1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2),
-            ] {
-                let nf = f + df;
-                let nr = r + dr;
-                if in_bounds(nf, nr) {
-                    let to = (nr as u8) * 8 + (nf as u8);
-                    if board.squares[to as usize]
-                        .map(|p| p.color != piece.color)
-                        .unwrap_or(true)
-                    {
-                        count += 1;
-                    }
-                }
-            }
-        }
-        PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
-            let dirs: &[(i8, i8)] = match piece.kind {
-                PieceType::Bishop => &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
-                PieceType::Rook => &[(1, 0), (-1, 0), (0, 1), (0, -1)],
-                _ => &[(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)],
-            };
-            for (df, dr) in dirs {
-                let mut nf = f + *df;
-                let mut nr = r + *dr;
-                while in_bounds(nf, nr) {
-                    let to = (nr as u8) * 8 + (nf as u8);
-                    if let Some(p) = board.squares[to as usize] {
-                        if p.color != piece.color {
-                            count += 1;
-                        }
-                        break;
-                    }
-                    count += 1;
-                    nf += *df;
-                    nr += *dr;
-                }
-            }
-        }
-        PieceType::King => {
-            for df in -1..=1 {
-                for dr in -1..=1 {
-                    if df == 0 && dr == 0 {
-                        continue;
-                    }
-                    let nf = f + df;
-                    let nr = r + dr;
-                    if in_bounds(nf, nr) {
-                        let to = (nr as u8) * 8 + (nf as u8);
-                        if board.squares[to as usize]
-                            .map(|p| p.color != piece.color)
-                            .unwrap_or(true)
-                        {
-                            count += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    count
+    let s = sq as usize;
+    let occ = board.bb.occ_all();
+    let attacks = match piece.kind {
+        // A pawn's attack squares equal the squares an enemy pawn would
+        // attack this square from, so the attacker table works mirrored.
+        PieceType::Pawn => PAWN_ATTACKERS[color_index(piece.color.opposite())][s],
+        PieceType::Knight => KNIGHT_ATTACKS[s],
+        PieceType::Bishop => bishop_attacks(s, occ),
+        PieceType::Rook => rook_attacks(s, occ),
+        PieceType::Queen => bishop_attacks(s, occ) | rook_attacks(s, occ),
+        PieceType::King => KING_ATTACKS[s],
+    };
+    (attacks & !board.bb.occ[color_index(piece.color)]).count_ones() as i32
 }
 
 #[cfg(test)]
