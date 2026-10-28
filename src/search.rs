@@ -1,6 +1,8 @@
 use super::*;
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
+// Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
+const MAX_SEARCH_DEPTH: i32 = 64;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
@@ -366,7 +368,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     }
 
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let mut depth: i32 = 8;
+    let mut depth: Option<i32> = None;
     let mut movetime: Option<u64> = None;
     let mut wtime: Option<u64> = None;
     let mut btime: Option<u64> = None;
@@ -377,7 +379,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     while i < tokens.len() {
         match tokens[i] {
             "depth" if i + 1 < tokens.len() => {
-                depth = tokens[i + 1].parse().unwrap_or(8);
+                depth = Some(tokens[i + 1].parse().unwrap_or(8));
                 i += 2;
             }
             "movetime" if i + 1 < tokens.len() => {
@@ -403,6 +405,10 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             _ => i += 1,
         }
     }
+
+    // Timed searches deepen until the deadline; a bare `go` keeps the old fixed depth.
+    let timed = movetime.is_some() || wtime.is_some() || btime.is_some();
+    let depth = depth.unwrap_or(if timed { MAX_SEARCH_DEPTH } else { 8 });
 
     let deadline = if let Some(ms) = movetime {
         Some(Instant::now() + Duration::from_millis(ms.max(1)))
