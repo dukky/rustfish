@@ -94,7 +94,10 @@ jobs:
             go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
             *)     echo "unknown kind $KIND"; exit 1 ;;
           esac
-          printf 'uci\nisready\nposition startpos\ngo depth 4\nquit\n' | "engines/$NAME" | grep -m1 bestmove
+          # Sleep before quit so threaded searchers answer; grep the captured
+          # output rather than piping, so an early grep exit can't SIGPIPE the engine.
+          out=$( (printf 'uci\nisready\nposition startpos\ngo depth 4\n'; sleep 2; printf 'quit\n') | "engines/$NAME" )
+          grep bestmove <<<"$out"
 
       - name: Fetch fastchess and openings
         run: |
