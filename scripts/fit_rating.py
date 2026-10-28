@@ -47,6 +47,20 @@ def log_lik(r, runs):
     return total
 
 
+def fit(runs):
+    """Return (ml_rating, ci_lo, ci_hi) for [(anchor, wins, draws, losses), ...]."""
+    grid = [r / 10.0 for r in range(10000, 40001)]  # 1000..4000 in 0.1 steps
+    best = max(grid, key=lambda r: log_lik(r, runs))
+    best_ll = log_lik(best, runs)
+
+    lo = hi = best
+    for r in grid:
+        if 2.0 * (best_ll - log_lik(r, runs)) <= 3.84:
+            lo = min(lo, r)
+            hi = max(hi, r)
+    return best, lo, hi
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -73,15 +87,7 @@ def main():
     if not any(w + d + l for _, w, d, l in runs):
         sys.exit("no finished games found")
 
-    grid = [r / 10.0 for r in range(10000, 40001)]  # 1000..4000 in 0.1 steps
-    best = max(grid, key=lambda r: log_lik(r, runs))
-    best_ll = log_lik(best, runs)
-
-    lo = hi = best
-    for r in grid:
-        if 2.0 * (best_ll - log_lik(r, runs)) <= 3.84:
-            lo = min(lo, r)
-            hi = max(hi, r)
+    best, lo, hi = fit(runs)
 
     print()
     print(f"ML rating estimate: {best:.0f}  (95% CI approx {lo:.0f} .. {hi:.0f})")

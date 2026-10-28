@@ -202,6 +202,21 @@ Notes:
 - Treat the output as a local pool rating, not a public Elo list.
 - Keep the same openings, hash, thread count, and time control across runs.
 
+### CCRL-scale rating in GitHub Actions (preferred absolute strength number)
+The `CCRL ladder` workflow (`.github/workflows/ccrl-ladder.yml`) builds rustfish and
+the CCRL-rated anchors in `scripts/anchors.json`, plays them with fastchess at 120+1
+on GitHub runners, and fits one rating with `scripts/ccrl_ladder.py`. Nothing runs
+on this laptop:
+```bash
+gh workflow run ccrl-ladder.yml -f games_per_anchor=96 -f tc=120+1
+gh run watch   # result lands in the run's job summary + ccrl-ladder-results artifact
+```
+Notes:
+- Add anchors (e.g. stronger ones as rustfish improves) by editing `scripts/anchors.json`
+  with ratings from the CCRL Blitz complete list.
+- Use `-f anchors=a,b,c` to rerun a subset; `-f games_per_anchor=32` for a quick look.
+- This is the number to quote; `UCI_Elo` ladders are only a rough cross-check.
+
 ### Elo ladder quick sweep vs Stockfish
 ```bash
 for E in 1600 1700 1800 1900 2000; do

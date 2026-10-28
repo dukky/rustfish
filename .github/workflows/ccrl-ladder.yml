@@ -1,0 +1,163 @@
+name: CCRL ladder
+
+# Plays rustfish against CCRL-rated anchors (scripts/anchors.json) with
+# fastchess and fits one CCRL Blitz-scale rating. Manual trigger only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      games_per_anchor:
+        description: "Games per anchor (even; split across shards)"
+        default: "96"
+      tc:
+        description: "fastchess time control (CCRL Blitz is 120+1)"
+        default: "120+1"
+      shards:
+        description: "Parallel jobs per anchor"
+        default: "2"
+      anchors:
+        description: "Comma-separated anchor names, or 'all'"
+        default: "all"
+
+env:
+  FASTCHESS_VERSION: v1.8.2-alpha
+  BOOK: 8moves_v3.pgn
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      rounds: ${{ steps.plan.outputs.rounds }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          GAMES: ${{ inputs.games_per_anchor }}
+          SHARDS: ${{ inputs.shards }}
+          ANCHORS: ${{ inputs.anchors }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          anchors = json.load(open("scripts/anchors.json"))["anchors"]
+          wanted = os.environ["ANCHORS"].strip()
+          if wanted != "all":
+              names = {n.strip() for n in wanted.split(",")}
+              unknown = names - {a["name"] for a in anchors}
+              if unknown:
+                  raise SystemExit(f"unknown anchors: {sorted(unknown)}")
+              anchors = [a for a in anchors if a["name"] in names]
+          shards = int(os.environ["SHARDS"])
+          rounds = max(1, int(os.environ["GAMES"]) // (2 * shards))
+          include = [dict(a, shard=s, options=" ".join(a["options"]))
+                     for a in anchors for s in range(shards)]
+          print("matrix=" + json.dumps({"include": include}))
+          print(f"rounds={rounds}")
+          EOF
+
+  play:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.name }} / shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build rustfish
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: |
+          cargo build --release
+          printf 'uci\nisready\nposition startpos\ngo depth 4\nquit\n' | ./target/release/rustfish | tail -1
+          mkdir -p engines && cp target/release/rustfish engines/rustfish
+
+      - uses: actions/setup-go@v5
+        if: matrix.kind == 'go'
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build ${{ matrix.name }}
+        env:
+          REPO: ${{ matrix.repo }}
+          REF: ${{ matrix.ref }}
+          KIND: ${{ matrix.kind }}
+          PKG: ${{ matrix.pkg }}
+          NAME: ${{ matrix.name }}
+        run: |
+          git clone --quiet --depth 1 --branch "$REF" "https://github.com/$REPO.git" anchor-src
+          case "$KIND" in
+            stash) make -C anchor-src/src -j"$(nproc)" EXE=anchor && cp anchor-src/src/anchor "engines/$NAME" ;;
+            go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
+            *)     echo "unknown kind $KIND"; exit 1 ;;
+          esac
+          printf 'uci\nisready\nposition startpos\ngo depth 4\nquit\n' | "engines/$NAME" | grep -m1 bestmove
+
+      - name: Fetch fastchess and openings
+        run: |
+          curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
+          mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
+          install -m 755 "$(find fastchess-dist -type f -name fastchess | head -1)" engines/fastchess
+          curl -sSL -o book.zip "https://github.com/official-stockfish/books/raw/master/$BOOK.zip"
+          unzip -q book.zip
+          engines/fastchess -version
+
+      - name: Play ${{ needs.plan.outputs.rounds }} rounds at ${{ inputs.tc }}
+        env:
+          NAME: ${{ matrix.name }}
+          OPTIONS: ${{ matrix.options }}
+          ROUNDS: ${{ needs.plan.outputs.rounds }}
+          TC: ${{ inputs.tc }}
+          SEED: ${{ github.run_id }}${{ matrix.shard }}
+        run: |
+          # OPTIONS is intentionally unquoted: it holds space-separated option.X=Y words.
+          engines/fastchess \
+            -engine cmd=engines/rustfish name=rustfish option.OwnBook=false \
+            -engine cmd="engines/$NAME" name="$NAME" $OPTIONS \
+            -each proto=uci tc="$TC" option.Hash=64 \
+            -rounds "$ROUNDS" -repeat \
+            -concurrency "$(nproc)" \
+            -openings file="$BOOK" format=pgn order=random \
+            -srand "$SEED" \
+            -draw movenumber=40 movecount=8 score=10 \
+            -resign movecount=3 score=600 \
+            -recover \
+            -pgnout file="games-$NAME-${{ matrix.shard }}.pgn" \
+            -ratinginterval 10
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: games-${{ matrix.name }}-${{ matrix.shard }}
+          path: games-*.pgn
+          if-no-files-found: warn
+
+  report:
+    needs: play
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: games-*
+          path: games
+          merge-multiple: true
+      - name: Fit rating
+        run: |
+          {
+            echo "Commit \`${GITHUB_SHA::7}\`, tc ${{ inputs.tc }}, book $BOOK."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/ccrl_ladder.py --anchors scripts/anchors.json \
+            --summary "$GITHUB_STEP_SUMMARY" --json results.json games/*.pgn
+          cat games/*.pgn > all-games.pgn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccrl-ladder-results
+          path: |
+            results.json
+            all-games.pgn
