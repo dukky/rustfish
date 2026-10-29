@@ -86,12 +86,18 @@ jobs:
           REF: ${{ matrix.ref }}
           KIND: ${{ matrix.kind }}
           PKG: ${{ matrix.pkg }}
+          BIN: ${{ matrix.bin }}
           NAME: ${{ matrix.name }}
         run: |
           git clone --quiet --depth 1 --branch "$REF" "https://github.com/$REPO.git" anchor-src
           case "$KIND" in
             stash) make -C anchor-src/src -j"$(nproc)" EXE=anchor && cp anchor-src/src/anchor "engines/$NAME" ;;
             go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
+            cargo) RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path anchor-src/Cargo.toml -p "$PKG" \
+                     && cp "anchor-src/target/release/$BIN" "engines/$NAME" ;;
+            cmake) cmake -S anchor-src -B anchor-src/build -DCMAKE_BUILD_TYPE=Release \
+                     && cmake --build anchor-src/build --target "$BIN" -j"$(nproc)" \
+                     && cp "anchor-src/build/$BIN" "engines/$NAME" ;;
             *)     echo "unknown kind $KIND"; exit 1 ;;
           esac
           # Sleep before quit so threaded searchers answer; grep the captured
