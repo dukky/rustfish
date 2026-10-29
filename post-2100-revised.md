@@ -55,6 +55,11 @@ Some speed and structure changes paid off, but only when they improved useful se
 
 ## Rejected for now
 
+> **2026-10-29: these rejections are void.** Every test below ran before commit
+> 80862d0, when timed searches were silently capped at depth 8, and with
+> 24-96 game samples (about +-70-140 Elo of noise). Retest each through the
+> SPRT pipeline in `docs/development.md` before ruling it out again.
+
 These were tried seriously enough to matter, and should not be assumed to be near-term winners anymore.
 
 - clustered TT

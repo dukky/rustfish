@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive the GitHub Actions test pipeline from the laptop (needs `gh`).
 
-  sprt <branch>   push nothing, dispatch an SPRT of <branch> vs main, follow
+  sprt <branch>   (branch must already be pushed) dispatch an SPRT of <branch> vs main, follow
                   every wave to a verdict, append it to tests/sprt-log.jsonl
   ladder          dispatch the CCRL ladder on main, wait, append the rating
                   to tests/ladder-log.jsonl

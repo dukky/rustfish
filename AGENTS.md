@@ -9,6 +9,13 @@ Dependencies: none beyond Rust stdlib and project-local scripts using Python std
 
 ---
 
+## Development workflow (read first)
+`docs/development.md` is the authoritative process: `main` is the champion,
+every engine change goes through a branch + SPRT on GitHub Actions
+(`python3 scripts/ci.py sprt <branch>`), and a `Bench: <nodes>` commit trailer
+is required whenever the `bench` node count changes (CI enforces it). The
+local gauntlet commands below are for quick sanity checks only, not acceptance.
+
 ## High-level working rules
 - Prioritize **correctness first**, then **search strength**, then **performance**, then **refactor polish**.
 - Every meaningful engine change should be validated with at least some of:
@@ -108,7 +115,7 @@ Notes:
 ---
 
 ## One-command change validation
-Use this as the default “test the current change” workflow:
+Local pre-push sanity loop (acceptance still needs the SPRT in `docs/development.md`):
 ```bash
 python3 scripts/test_change.py \
   --baseline ./bin/rustfish_BASELINE \
@@ -394,8 +401,9 @@ For refactors:
 - `UCI_LimitStrength` Stockfish Elo is only an approximation.
 - Always compare versions under the **same time control**, **same max plies**, and **same Stockfish settings**.
 - For engine-vs-engine A/B, also keep the **same openings file**, **same hash**, and **same book settings**.
-- Prefer frozen binary A/B tests for acceptance decisions, then use Stockfish as a secondary external check.
-- Use `scripts/test_change.py` for the default local loop, and `scripts/sweep.py` when screening multiple variants.
+- Acceptance decisions come only from the GitHub SPRT (`scripts/ci.py sprt`), never from local gauntlets.
+- The CCRL ladder (`scripts/ci.py ladder`) is the absolute strength number; Stockfish `UCI_Elo` is a rough cross-check at best.
+- `scripts/test_change.py` remains a convenient local correctness + smoke loop before pushing.
 - Prefer versioned binaries for serious comparisons.
 
 ---

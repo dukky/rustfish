@@ -168,7 +168,10 @@ jobs:
           final = res["status"] != "continue" or wave >= max_waves
           if res["status"] == "continue" and final:
               res["status"] = "inconclusive"
-          res.update(test_id=i["test_id"], candidate=i["candidate"], base=i["base"],
+          # Wave 1 records the human-readable ref names; later waves get SHAs.
+          cfg.setdefault("candidate_name", i["candidate"])
+          cfg.setdefault("base_name", i["base"])
+          res.update(test_id=i["test_id"], candidate=cfg["candidate_name"], base=cfg["base_name"],
                      candidate_sha=os.environ["CAND"], base_sha=os.environ["BASE"],
                      tc=cfg["tc"], wave=wave, final=final, shard_logs=len(logs))
           json.dump(res, open("sprt-result.json", "w"), indent=2)
@@ -177,7 +180,7 @@ jobs:
                      "continue": "continuing"}[res["status"]]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write(f"## SPRT {i['test_id']}: {verdict} (wave {wave}/{max_waves})\n\n"
-                       f"`{i['candidate']}` ({os.environ['CAND'][:7]}) vs `{i['base']}` "
+                       f"`{res['candidate']}` ({os.environ['CAND'][:7]}) vs `{res['base']}` "
                        f"({os.environ['BASE'][:7]}), tc {cfg['tc']}, bounds [{cfg['elo0']}, {cfg['elo1']}]\n\n"
                        f"- LLR **{res['llr']:+.2f}** (bounds {res['llr_bounds']})\n"
                        f"- Elo **{res['elo']:+.1f}** (95% CI {res['elo_ci95'][0]:+.1f} .. {res['elo_ci95'][1]:+.1f})\n"
@@ -187,6 +190,7 @@ jobs:
           if not final:
               # Pin SHAs so later waves test identical code.
               fields = dict(i, candidate=os.environ["CAND"], base=os.environ["BASE"],
+                            settings=json.dumps(cfg),
                             wave=str(wave + 1), prior=",".join(map(str, total)))
               cmd = ["gh", "workflow", "run", "sprt.yml", "--ref", os.environ["REF"]]
               for k, v in fields.items():
