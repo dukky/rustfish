@@ -1,0 +1,32 @@
+name: CI
+
+# Correctness gate on every push: build, unit tests, perft, make/undo selftest,
+# and the bench signature (scripts/check_bench.py).
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # check_bench.py walks history for the last Bench: trailer
+      - name: Build
+        run: cargo build --release
+      - name: Unit tests
+        run: cargo test --release
+      - name: Perft suite
+        run: |
+          out=$(printf 'perfttest\nquit\n' | ./target/release/rustfish)
+          echo "$out" | tail -1
+          grep -qE 'perfttest summary ([0-9]+)/\1 passed' <<<"$out"
+      - name: Selftest
+        run: |
+          out=$(printf 'selftest 300\nquit\n' | ./target/release/rustfish)
+          echo "$out" | tail -1
+          grep -q 'selftest ok' <<<"$out"
+      - name: Bench signature
+        run: python3 scripts/check_bench.py

@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fit_rating import fit  # noqa: E402
 
 TAG_RE = re.compile(r'^\[(\w+)\s+"(.*)"\]\s*$')
+LOW_SCORE, HIGH_SCORE = 0.15, 0.85
 
 
 def iter_games(path):
@@ -97,6 +98,18 @@ def main():
         "CI covers game noise only; each anchor's own CCRL rating carries about +-20,",
         "which averages down across anchors but is not included above.",
     ]
+
+    # Games against anchors far from the engine's level carry little rating
+    # information; keep roughly half the anchors inside +-150 of the estimate.
+    lopsided = [r for r in rows if not LOW_SCORE <= r["score"] <= HIGH_SCORE]
+    near = sum(1 for r in rows if abs(r["ccrl"] - best) <= 150)
+    if lopsided or near < len(rows) / 2:
+        lines += ["", "### Anchor health", ""]
+        for r in lopsided:
+            lines.append(f"- {r['anchor']} ({r['ccrl']}) scored {100 * r['score']:.0f}%: "
+                         f"outside {100 * LOW_SCORE:.0f}-{100 * HIGH_SCORE:.0f}%, consider replacing")
+        lines.append(f"- {near}/{len(rows)} anchors within +-150 of {best:.0f}; aim for about half. "
+                     f"Pick replacements near {best - 150:.0f}-{best + 250:.0f} from the CCRL complete list.")
     text = "\n".join(lines)
     print(text)
 

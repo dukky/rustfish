@@ -1,0 +1,199 @@
+name: SPRT
+
+# Candidate vs base A/B with a pentanomial SPRT, run in waves on GitHub runners.
+# Each wave plays shards x rounds_per_shard pairs, adds them to `prior`, and
+# either stops (H1 = accept, H0 = reject, or out of waves) or dispatches the
+# next wave of itself. Both refs are pinned to SHAs on wave 1, so later waves
+# test exactly the same code even if branches move. Drive it with
+# `python3 scripts/ci.py sprt <branch>` rather than by hand.
+
+run-name: "SPRT ${{ inputs.test_id }} wave ${{ inputs.wave }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_id:
+        description: "Unique id for this test (shared by all waves)"
+        required: true
+      candidate:
+        description: "Candidate ref (branch, tag or SHA)"
+        required: true
+      base:
+        description: "Base ref; main is the champion"
+        default: "main"
+      settings:
+        description: "JSON: tc, hash, elo0, elo1, shards, rounds_per_shard, max_waves"
+        default: '{"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 5, "shards": 16, "rounds_per_shard": 64, "max_waves": 10}'
+      wave:
+        default: "1"
+      prior:
+        description: "Pentanomial counts from earlier waves"
+        default: "0,0,0,0,0"
+
+permissions:
+  contents: read
+  actions: write   # the report job dispatches the next wave
+
+env:
+  FASTCHESS_VERSION: v1.8.2-alpha
+  BOOK: UHO_Lichess_4852_v1.epd
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      candidate_sha: ${{ steps.refs.outputs.candidate_sha }}
+      base_sha: ${{ steps.refs.outputs.base_sha }}
+      shards: ${{ steps.refs.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: refs
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          BASE: ${{ inputs.base }}
+          SHARDS: ${{ fromJSON(inputs.settings).shards }}
+        run: |
+          resolve() { git rev-parse --verify --quiet "origin/$1^{commit}" || git rev-parse --verify "$1^{commit}"; }
+          echo "candidate_sha=$(resolve "$CANDIDATE")" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(resolve "$BASE")" >> "$GITHUB_OUTPUT"
+          echo "shards=$(python3 -c "import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$SHARDS")" >> "$GITHUB_OUTPUT"
+
+  play:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build candidate and base
+        env:
+          RUSTFLAGS: -C target-cpu=native
+          CAND: ${{ needs.plan.outputs.candidate_sha }}
+          BASE: ${{ needs.plan.outputs.base_sha }}
+        run: |
+          mkdir -p engines
+          for side in cand:$CAND base:$BASE; do
+            name=${side%%:*}; sha=${side#*:}
+            git worktree add --detach "wt-$name" "$sha"
+            cargo build --release --manifest-path "wt-$name/Cargo.toml"
+            cp "wt-$name/target/release/rustfish" "engines/$name"
+            printf 'bench\nquit\n' | "engines/$name" | grep 'Nodes searched'
+          done
+
+      - name: Fetch fastchess and openings
+        run: |
+          curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
+          mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
+          install -m 755 "$(find fastchess-dist -type f -name fastchess | head -1)" engines/fastchess
+          curl -sSL -o book.zip "https://github.com/official-stockfish/books/raw/master/$BOOK.zip"
+          unzip -q book.zip
+
+      - name: Play
+        env:
+          TC: ${{ fromJSON(inputs.settings).tc }}
+          HASH: ${{ fromJSON(inputs.settings).hash }}
+          ROUNDS: ${{ fromJSON(inputs.settings).rounds_per_shard }}
+          SHARD: ${{ matrix.shard }}
+          SEED: ${{ github.run_id }}${{ matrix.shard }}
+        run: |
+          engines/fastchess \
+            -engine cmd=engines/cand name=candidate \
+            -engine cmd=engines/base name=base \
+            -each proto=uci tc="$TC" option.Hash="$HASH" option.OwnBook=false \
+            -rounds "$ROUNDS" -repeat \
+            -concurrency "$(nproc)" \
+            -openings file="$BOOK" format=epd order=random \
+            -srand "$SEED" \
+            -draw movenumber=40 movecount=8 score=10 \
+            -resign movecount=3 score=600 \
+            -recover \
+            -ratinginterval 0 \
+            -pgnout file="games-$SHARD.pgn" \
+            | tee "fastchess-$SHARD.log"
+          grep 'Ptnml(0-2)' "fastchess-$SHARD.log" | tail -1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            fastchess-*.log
+            games-*.pgn
+          if-no-files-found: warn
+
+  report:
+    needs: [plan, play]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+      - name: Evaluate and continue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          I: ${{ toJSON(inputs) }}
+          CAND: ${{ needs.plan.outputs.candidate_sha }}
+          BASE: ${{ needs.plan.outputs.base_sha }}
+          REF: ${{ github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import glob, json, os, subprocess, sys
+          sys.path.insert(0, "scripts")
+          import sprt
+
+          i = json.loads(os.environ["I"])
+          cfg = json.loads(i["settings"])
+          wave, max_waves = int(i["wave"]), int(cfg["max_waves"])
+          total = sprt.parse_ptnml(i["prior"])
+          logs = sorted(glob.glob("shards/fastchess-*.log"))
+          for path in logs:
+              try:
+                  total = [a + b for a, b in zip(total, sprt.ptnml_from_fastchess_log(path))]
+              except ValueError as exc:
+                  print(f"skipping {path}: {exc}")
+          res = sprt.evaluate(total, float(cfg["elo0"]), float(cfg["elo1"]))
+          final = res["status"] != "continue" or wave >= max_waves
+          if res["status"] == "continue" and final:
+              res["status"] = "inconclusive"
+          res.update(test_id=i["test_id"], candidate=i["candidate"], base=i["base"],
+                     candidate_sha=os.environ["CAND"], base_sha=os.environ["BASE"],
+                     tc=cfg["tc"], wave=wave, final=final, shard_logs=len(logs))
+          json.dump(res, open("sprt-result.json", "w"), indent=2)
+
+          verdict = {"H1": "PASSED", "H0": "FAILED", "inconclusive": "INCONCLUSIVE",
+                     "continue": "continuing"}[res["status"]]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(f"## SPRT {i['test_id']}: {verdict} (wave {wave}/{max_waves})\n\n"
+                       f"`{i['candidate']}` ({os.environ['CAND'][:7]}) vs `{i['base']}` "
+                       f"({os.environ['BASE'][:7]}), tc {cfg['tc']}, bounds [{cfg['elo0']}, {cfg['elo1']}]\n\n"
+                       f"- LLR **{res['llr']:+.2f}** (bounds {res['llr_bounds']})\n"
+                       f"- Elo **{res['elo']:+.1f}** (95% CI {res['elo_ci95'][0]:+.1f} .. {res['elo_ci95'][1]:+.1f})\n"
+                       f"- {res['games']} games, pentanomial {res['ptnml']}\n")
+          print(json.dumps(res, indent=2))
+
+          if not final:
+              # Pin SHAs so later waves test identical code.
+              fields = dict(i, candidate=os.environ["CAND"], base=os.environ["BASE"],
+                            wave=str(wave + 1), prior=",".join(map(str, total)))
+              cmd = ["gh", "workflow", "run", "sprt.yml", "--ref", os.environ["REF"]]
+              for k, v in fields.items():
+                  cmd += ["-f", f"{k}={v}"]
+              subprocess.run(cmd, check=True)
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sprt-result
+          path: sprt-result.json
