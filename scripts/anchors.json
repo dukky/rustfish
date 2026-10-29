@@ -1,10 +1,9 @@
 {
-  "_comment": "CCRL Blitz anchors for scripts/ccrl_ladder.py and .github/workflows/ccrl-ladder.yml. Ratings from the CCRL Blitz complete list (computerchess.org.uk/ccrl/404/rating_list_all.html) dated 2026-10-27; error bars there are roughly +-20 per engine. kind=stash builds with make in src/, kind=go builds the given package with go build. Blunder 7.4.0 was dropped: it builds but never answers 'go depth 4' in CI.",
+  "_comment": "CCRL Blitz anchors for scripts/ccrl_ladder.py and .github/workflows/ccrl-ladder.yml. Ratings from the CCRL Blitz complete list (computerchess.org.uk/ccrl/404/rating_list_all.html) dated 2026-10-27; error bars there are roughly +-20 per engine. kind=stash builds with make in src/, kind=go builds the given package with go build. Blunder 6.1.0 and 7.4.0 were dropped: they build but never answer 'go depth 4' in CI.",
   "anchors": [
     {"name": "zahak-1.0.0",   "ccrl": 1940, "repo": "amanjpro/zahak",     "ref": "1.0.0",   "kind": "go",    "pkg": "./zahak",   "options": ["option.Book=false"]},
     {"name": "blunder-5.0.0", "ccrl": 2018, "repo": "algerbrex/blunder",  "ref": "v5.0.0",  "kind": "go",    "pkg": "./blunder", "options": []},
     {"name": "stash-14",      "ccrl": 2059, "repo": "mhouppin/stash-bot", "ref": "v14",     "kind": "stash", "options": []},
-    {"name": "blunder-6.1.0", "ccrl": 2107, "repo": "algerbrex/blunder",  "ref": "v6.1.0",  "kind": "go",    "pkg": "./blunder", "options": []},
     {"name": "stash-15.3",    "ccrl": 2173, "repo": "mhouppin/stash-bot", "ref": "v15.3",   "kind": "stash", "options": []},
     {"name": "stash-17.0",    "ccrl": 2297, "repo": "mhouppin/stash-bot", "ref": "v17.0",   "kind": "stash", "options": []},
     {"name": "zahak-3.0",     "ccrl": 2363, "repo": "amanjpro/zahak",     "ref": "3.0",     "kind": "go",    "pkg": "./zahak",   "options": ["option.Book=false"]},
