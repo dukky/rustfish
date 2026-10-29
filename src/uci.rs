@@ -1,7 +1,39 @@
 use super::*;
+use crate::search::{ACTIVE_GO, GO_ISSUED, STOP_UPTO};
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 
 pub(crate) fn flush_stdout() {
     let _ = io::stdout().flush();
+}
+
+/// Read stdin on its own thread so `stop` and `isready` are handled while a
+/// search runs on the main thread. Everything except `stop` (and `isready`
+/// mid-search) is forwarded in order; the channel closes at EOF.
+pub(crate) fn spawn_input_reader() -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let cmd = line.trim();
+            if cmd == "stop" {
+                STOP_UPTO.store(GO_ISSUED.load(Ordering::SeqCst), Ordering::SeqCst);
+                continue;
+            }
+            if cmd == "isready" && ACTIVE_GO.load(Ordering::SeqCst) != 0 {
+                println!("readyok");
+                flush_stdout();
+                continue;
+            }
+            if cmd == "go" || cmd.starts_with("go ") {
+                GO_ISSUED.fetch_add(1, Ordering::SeqCst);
+            }
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
@@ -42,6 +74,12 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
     let n = name.to_ascii_lowercase();
     if n == "clear hash" {
         engine.tt.clear();
+        return;
+    }
+    if n == "move overhead" {
+        if let Ok(ms) = value.trim().parse::<u64>() {
+            engine.move_overhead = ms.min(5000);
+        }
         return;
     }
     if n == "hash" {

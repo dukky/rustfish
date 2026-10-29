@@ -16,7 +16,7 @@ use eval::eval_for_side;
 use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, mobility_count, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go, piece_attacks_square};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
-use uci::{flush_stdout, handle_bench, handle_divide, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
+use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 
 const MATE_SCORE: i32 = 30_000;
 const INF: i32 = 1_000_000;
@@ -835,6 +835,7 @@ struct EngineState {
     book_file: Option<String>,
     position_history: Vec<u64>,
     last_search_nodes: u64,
+    move_overhead: u64,
 }
 
 impl EngineState {
@@ -860,6 +861,7 @@ impl EngineState {
             book_file: None,
             position_history: Vec::new(),
             last_search_nodes: 0,
+            move_overhead: 10,
         }
     }
 
@@ -939,21 +941,20 @@ impl EngineState {
             book_file: self.book_file.clone(),
             position_history: self.position_history.clone(),
             last_search_nodes: 0,
+            move_overhead: self.move_overhead,
         }
     }
 }
 
 fn main() {
-    let stdin = io::stdin();
+    let input = spawn_input_reader();
     let mut board = Board::new();
     board.set_startpos();
     let mut engine = EngineState::new();
+    // Counts `go` commands in the same order the reader numbered them.
+    let mut go_seq = 0u64;
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(v) => v,
-            Err(_) => break,
-        };
+    for line in input {
         let cmd = line.trim();
         if cmd.is_empty() {
             continue;
@@ -965,6 +966,7 @@ fn main() {
             println!("option name Hash type spin default 64 min 1 max 2048");
             println!("option name Threads type spin default 1 min 1 max 32");
             println!("option name Clear Hash type button");
+            println!("option name Move Overhead type spin default 10 min 0 max 5000");
             println!("option name OwnBook type check default true");
             println!("option name BookStyle type combo default normal var normal var grinder var chaos");
             println!("option name BookFile type string default");
@@ -1006,8 +1008,11 @@ fn main() {
             handle_position(cmd, &mut board, &mut engine);
             continue;
         }
-        if cmd.starts_with("go") {
+        if cmd == "go" || cmd.starts_with("go ") {
+            go_seq += 1;
+            search::ACTIVE_GO.store(go_seq, std::sync::atomic::Ordering::SeqCst);
             let best = handle_go(cmd, &mut board, &mut engine);
+            search::ACTIVE_GO.store(0, std::sync::atomic::Ordering::SeqCst);
             println!("bestmove {}", best.unwrap_or_else(|| "0000".to_string()));
             flush_stdout();
             continue;

@@ -1,8 +1,31 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
+// Sudden-death clocks are budgeted as if this many moves remain.
+const DEFAULT_MOVES_TO_GO: u64 = 20;
+// The hard limit (checked mid-iteration) is this multiple of the soft target.
+const HARD_LIMIT_FACTOR: u64 = 3;
+// Soft-target scale in percent by how many iterations the best move has held.
+const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
+// A score drop of at least this many cp since the last iteration buys more time.
+const SCORE_DROP_MARGIN: i32 = 40;
+
+// Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
+// gets a sequence number; `stop` marks every go issued so far as stopped. Tying
+// stops to go numbers means a `stop` read before its `go` starts still applies,
+// and a stale stop can't abort a later search. ACTIVE_GO is 0 when no
+// stdin-driven search is running (e.g. during `bench`), so nothing stops it.
+pub(crate) static GO_ISSUED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STOP_UPTO: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ACTIVE_GO: AtomicU64 = AtomicU64::new(0);
+
+fn stop_requested() -> bool {
+    let active = ACTIVE_GO.load(Ordering::Relaxed);
+    active != 0 && STOP_UPTO.load(Ordering::Relaxed) >= active
+}
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
@@ -80,6 +103,10 @@ impl Search {
             return true;
         }
         if self.nodes & 2047 == 0 {
+            if stop_requested() {
+                self.stop = true;
+                return true;
+            }
             if let Some(dl) = self.deadline {
                 if Instant::now() >= dl {
                     self.stop = true;
@@ -374,6 +401,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     let mut btime: Option<u64> = None;
     let mut winc: u64 = 0;
     let mut binc: u64 = 0;
+    let mut movestogo: Option<u64> = None;
+    let mut infinite = false;
 
     let mut i = 1;
     while i < tokens.len() {
@@ -402,25 +431,36 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 binc = tokens[i + 1].parse().unwrap_or(0);
                 i += 2;
             }
+            "movestogo" if i + 1 < tokens.len() => {
+                movestogo = tokens[i + 1].parse().ok();
+                i += 2;
+            }
+            "infinite" => {
+                infinite = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
 
-    // Timed searches deepen until the deadline; a bare `go` keeps the old fixed depth.
+    // Timed and infinite searches deepen until stopped; a bare `go` keeps the old fixed depth.
     let timed = movetime.is_some() || wtime.is_some() || btime.is_some();
-    let depth = depth.unwrap_or(if timed { MAX_SEARCH_DEPTH } else { 8 });
+    let depth = depth.unwrap_or(if timed || infinite { MAX_SEARCH_DEPTH } else { 8 });
 
-    let deadline = if let Some(ms) = movetime {
-        Some(Instant::now() + Duration::from_millis(ms.max(1)))
+    let (time_left, inc) = match board.side_to_move {
+        Color::White => (wtime, winc),
+        Color::Black => (btime, binc),
+    };
+    // soft_ms is checked between iterations; the deadline aborts mid-iteration.
+    let (soft_ms, deadline) = if infinite {
+        (None, None)
+    } else if let Some(ms) = movetime {
+        (None, Some(Instant::now() + Duration::from_millis(ms.max(1))))
+    } else if let Some(t) = time_left {
+        let (soft, hard) = clock_limits(t, inc, movestogo, engine.move_overhead);
+        (Some(soft), Some(Instant::now() + Duration::from_millis(hard)))
     } else {
-        let (time_left, inc) = match board.side_to_move {
-            Color::White => (wtime, winc),
-            Color::Black => (btime, binc),
-        };
-        time_left.map(|t| {
-            let budget = (t / 28).max(20).saturating_add(inc / 2);
-            Instant::now() + Duration::from_millis(budget)
-        })
+        (None, None)
     };
 
     engine.prepare_for_search();
@@ -461,6 +501,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
     }
     let mut best_move = Some(root_moves[0]);
+    let mut stable_iterations = 0usize;
     let worker_count = engine.threads.min(root_moves.len()).max(1);
     let threaded = worker_count > 1;
     let mut total_threaded_nodes = 0u64;
@@ -551,7 +592,13 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         if use_threads {
             total_threaded_nodes += depth_nodes;
         }
+        let prev_score = best_score;
         best_score = score;
+        if mv.is_some() && mv != best_move {
+            stable_iterations = 0;
+        } else {
+            stable_iterations += 1;
+        }
         if let Some(m) = mv {
             best_move = Some(m);
             if let Some(pos) = root_moves.iter().position(|x| *x == m) {
@@ -562,10 +609,33 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         let elapsed = start.elapsed().as_millis() as u64;
         let nodes = search.nodes + total_threaded_nodes;
         print_info(d, best_score, nodes, elapsed, best_move);
+
+        if let Some(soft) = soft_ms {
+            let scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
+            let mut target = soft * scale / 100;
+            if d >= 4 && best_score < prev_score - SCORE_DROP_MARGIN {
+                target = target * 5 / 4;
+            }
+            if elapsed >= target {
+                break;
+            }
+        }
     }
 
     engine.last_search_nodes = search.nodes + total_threaded_nodes;
     best_move.map(move_to_uci)
+}
+
+/// Soft target and hard limit in ms for a clock search. The soft target is
+/// time/movestogo plus most of the increment; the hard limit allows a few
+/// times that but never more than 4/5 of the usable clock.
+fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, overhead: u64) -> (u64, u64) {
+    let usable = time_left.saturating_sub(overhead).max(1);
+    let mtg = movestogo.unwrap_or(DEFAULT_MOVES_TO_GO).clamp(1, DEFAULT_MOVES_TO_GO);
+    let cap = if mtg == 1 { usable * 4 / 5 } else { usable / 2 };
+    let soft = (usable / mtg + inc * 3 / 4).min(cap).max(1);
+    let hard = (soft * HARD_LIMIT_FACTOR).min(usable * 4 / 5).max(soft);
+    (soft, hard)
 }
 
 fn search_root_parallel(
