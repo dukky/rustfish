@@ -16,7 +16,7 @@ use eval::eval_for_side;
 use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, mobility_count, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go, piece_attacks_square};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
-use uci::{flush_stdout, handle_divide, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
+use uci::{flush_stdout, handle_bench, handle_divide, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 
 const MATE_SCORE: i32 = 30_000;
 const INF: i32 = 1_000_000;
@@ -834,6 +834,7 @@ struct EngineState {
     book_style: BookStyle,
     book_file: Option<String>,
     position_history: Vec<u64>,
+    last_search_nodes: u64,
 }
 
 impl EngineState {
@@ -858,6 +859,7 @@ impl EngineState {
             book_style,
             book_file: None,
             position_history: Vec::new(),
+            last_search_nodes: 0,
         }
     }
 
@@ -936,6 +938,7 @@ impl EngineState {
             book_style: self.book_style,
             book_file: self.book_file.clone(),
             position_history: self.position_history.clone(),
+            last_search_nodes: 0,
         }
     }
 }
@@ -1023,6 +1026,10 @@ fn main() {
         }
         if cmd.starts_with("selftest") {
             handle_selftest(cmd, &mut board);
+            continue;
+        }
+        if cmd.starts_with("bench") {
+            handle_bench(cmd, &mut board, &mut engine);
             continue;
         }
         if cmd == "quit" {

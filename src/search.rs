@@ -564,6 +564,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         print_info(d, best_score, nodes, elapsed, best_move);
     }
 
+    engine.last_search_nodes = search.nodes + total_threaded_nodes;
     best_move.map(move_to_uci)
 }
 
