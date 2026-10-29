@@ -1,12 +1,11 @@
 {
-  "_comment": "CCRL Blitz anchors for scripts/ccrl_ladder.py and .github/workflows/ccrl-ladder.yml. Ratings from the CCRL Blitz complete list (computerchess.org.uk/ccrl/404/rating_list_all.html) dated 2026-10-27; error bars there are roughly +-20 per engine. kind=stash: make in src/. kind=go: go build <pkg>. kind=cargo: cargo build --release [-p <pkg>], binary target/release/<bin>. kind=cmake: build CMake target <bin>. Dropped: Blunder 6.1.0 and 7.4.0 (never answer 'go depth 4' in CI); Blunder 7.1.0, Stash 19.0/20.0.1, Zahak 4.0 (2026-10-29, scored under 15% vs rustfish at 2081).",
+  "_comment": "CCRL Blitz anchors for scripts/ccrl_ladder.py and .github/workflows/ccrl-ladder.yml. Ratings from the CCRL Blitz complete list (computerchess.org.uk/ccrl/404/rating_list_all.html) dated 2026-10-27; error bars there are roughly +-20 per engine. kind=stash: make in src/. kind=go: go build <pkg>. kind=cargo: cargo build --release [-p <pkg>], binary target/release/<bin>. Dropped: Blunder 6.1.0 and 7.4.0 (never answer 'go depth 4' in CI); Polaris 1.2.0 (doesn't compile with current GCC); Blunder 7.1.0, Stash 19.0/20.0.1, Zahak 4.0 (2026-10-29, scored under 15% vs rustfish at 2081).",
   "anchors": [
     {"name": "zahak-1.0.0",        "ccrl": 1940, "repo": "amanjpro/zahak",           "ref": "1.0.0",   "kind": "go",    "pkg": "./zahak",   "options": ["option.Book=false"]},
     {"name": "blunder-5.0.0",      "ccrl": 2018, "repo": "algerbrex/blunder",        "ref": "v5.0.0",  "kind": "go",    "pkg": "./blunder", "options": []},
     {"name": "stash-14",           "ccrl": 2059, "repo": "mhouppin/stash-bot",       "ref": "v14",     "kind": "stash", "options": []},
     {"name": "stash-15.3",         "ccrl": 2173, "repo": "mhouppin/stash-bot",       "ref": "v15.3",   "kind": "stash", "options": []},
     {"name": "rusty-rival-1.0.23", "ccrl": 2218, "repo": "chris-moreton/rusty-rival", "ref": "v1.0.23", "kind": "cargo", "pkg": "rusty-rival", "bin": "rusty-rival", "options": []},
-    {"name": "polaris-1.2.0",      "ccrl": 2249, "repo": "Ciekce/Polaris",           "ref": "v1.2.0",  "kind": "cmake", "bin": "polaris-popcnt", "options": []},
     {"name": "stash-17.0",         "ccrl": 2297, "repo": "mhouppin/stash-bot",       "ref": "v17.0",   "kind": "stash", "options": []},
     {"name": "tantabus-1.0.2",     "ccrl": 2331, "repo": "analog-hors/tantabus",     "ref": "v1.0.2",  "kind": "cargo", "pkg": "tantabus-uci", "bin": "tantabus-uci", "options": []},
     {"name": "reckless-0.2.0",     "ccrl": 2352, "repo": "codedeliveryservice/Reckless", "ref": "v0.2.0", "kind": "cargo", "pkg": "reckless", "bin": "reckless", "options": []},

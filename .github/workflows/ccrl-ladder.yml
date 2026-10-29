@@ -95,11 +95,6 @@ jobs:
             go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
             cargo) RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path anchor-src/Cargo.toml -p "$PKG" \
                      && cp "anchor-src/target/release/$BIN" "engines/$NAME" ;;
-            # Older C++ engines relied on headers that newer GCC no longer pulls in transitively.
-            cmake) cmake -S anchor-src -B anchor-src/build -DCMAKE_BUILD_TYPE=Release \
-                     -DCMAKE_CXX_FLAGS="-include cstring -include cstdint -include condition_variable -include mutex -include thread" \
-                     && cmake --build anchor-src/build --target "$BIN" -j"$(nproc)" \
-                     && cp "anchor-src/build/$BIN" "engines/$NAME" ;;
             *)     echo "unknown kind $KIND"; exit 1 ;;
           esac
           # Sleep before quit so threaded searchers answer; grep the captured
