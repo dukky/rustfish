@@ -15,6 +15,61 @@ const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
 
+// Pawn-structure correction history: per side to move, a running average of
+// (search score - static eval) keyed by a hash of the pawn bitboards. The
+// average is added to the static eval used for pruning decisions.
+pub(crate) const CORR_SIZE: usize = 16384;
+// Entries are stored in 1/CORR_GRAIN centipawn units.
+const CORR_GRAIN: i32 = 256;
+// Update weight is min(depth + 1, CORR_MAX_WEIGHT) out of CORR_WEIGHT_SCALE.
+const CORR_WEIGHT_SCALE: i32 = 256;
+const CORR_MAX_WEIGHT: i32 = 16;
+// Entries are clamped to +/- this many centipawns (times CORR_GRAIN).
+const CORR_MAX_CP: i32 = 64;
+const CORR_MAX: i32 = CORR_MAX_CP * CORR_GRAIN;
+pub(crate) type PawnCorrectionTable = [[i32; CORR_SIZE]; 2];
+
+fn pawn_corr_index(board: &Board) -> usize {
+    let white = board.bb.pieces[0][0];
+    let black = board.bb.pieces[1][0];
+    let h = (white.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ black.wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+    .wrapping_mul(0x1656_67B1_9E37_79F9);
+    (h >> 32) as usize % CORR_SIZE
+}
+
+fn corrected_eval(engine: &EngineState, board: &Board, raw: i32) -> i32 {
+    let stm = color_index(board.side_to_move);
+    raw + engine.pawn_correction[stm][pawn_corr_index(board)] / CORR_GRAIN
+}
+
+/// Folds one search result into the pawn correction history. Skips results
+/// whose bound says nothing about the eval's error, and mate scores.
+fn update_pawn_correction(
+    engine: &mut EngineState,
+    board: &Board,
+    depth: i32,
+    best: i32,
+    raw_eval: i32,
+    bound: Bound,
+) {
+    if best.abs() >= MATE_SCORE - MAX_PLY as i32 {
+        return;
+    }
+    match bound {
+        Bound::Lower if best <= raw_eval => return,
+        Bound::Upper if best >= raw_eval => return,
+        _ => {}
+    }
+    let stm = color_index(board.side_to_move);
+    let idx = pawn_corr_index(board);
+    let w = (depth + 1).min(CORR_MAX_WEIGHT);
+    let entry = &mut engine.pawn_correction[stm][idx];
+    let target = (best - raw_eval) * CORR_GRAIN;
+    *entry = ((*entry * (CORR_WEIGHT_SCALE - w) + target * w) / CORR_WEIGHT_SCALE)
+        .clamp(-CORR_MAX, CORR_MAX);
+}
+
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
 // stops to go numbers means a `stop` read before its `go` starts still applies,
@@ -1014,7 +1069,8 @@ fn negamax(
                 .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
-    let static_eval = raw_static_eval;
+    // Pruning uses the corrected eval; the TT keeps the raw one.
+    let static_eval = raw_static_eval.map(|se| corrected_eval(engine, board, se));
 
     let params = engine.search_params;
 
@@ -1302,6 +1358,11 @@ fn negamax(
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
                     }
                 }
+                if mv.promotion.is_none() {
+                    if let Some(raw) = raw_static_eval {
+                        update_pawn_correction(engine, board, depth, alpha, raw, Bound::Lower);
+                    }
+                }
             }
             engine
                 .tt
@@ -1323,6 +1384,14 @@ fn negamax(
     } else {
         Bound::Exact
     };
+    if let Some(raw) = raw_static_eval {
+        let best_is_quiet = best_move
+            .map(|mv| mv.promotion.is_none() && !is_capture_move(board, mv))
+            .unwrap_or(true);
+        if best_is_quiet {
+            update_pawn_correction(engine, board, depth, best, raw, bound);
+        }
+    }
     engine
         .tt
         .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
