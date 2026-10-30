@@ -62,8 +62,17 @@ struct TTSlot {
 const MOVE_BITS: u64 = 0x1ffff;
 const AGE_MASK: u8 = 0x1f;
 
+const BUCKET_SLOTS: usize = 4;
+
+// Four 16-byte slots per bucket, aligned so a probe touches one cache line.
+#[derive(Default)]
+#[repr(align(64))]
+struct Bucket {
+    slots: [TTSlot; BUCKET_SLOTS],
+}
+
 struct TransTableInner {
-    entries: Box<[TTSlot]>,
+    buckets: Box<[Bucket]>,
     mask: usize,
     current_age: AtomicU8,
 }
@@ -172,13 +181,13 @@ fn unpack_data(data: u64) -> TTEntry {
 impl TransTable {
     pub(crate) fn new(megabytes: usize) -> Self {
         let bytes = megabytes.max(1) * 1024 * 1024;
-        let entry_size = std::mem::size_of::<TTSlot>();
+        let bucket_size = std::mem::size_of::<Bucket>();
         // Round down so the table never exceeds the requested size.
-        let n = (bytes / entry_size).max(1);
+        let n = (bytes / bucket_size).max(1);
         let n = if n.is_power_of_two() { n } else { n.next_power_of_two() / 2 };
         Self {
             inner: Arc::new(TransTableInner {
-                entries: (0..n).map(|_| TTSlot::default()).collect(),
+                buckets: (0..n).map(|_| Bucket::default()).collect(),
                 mask: n - 1,
                 current_age: AtomicU8::new(0),
             }),
@@ -186,9 +195,11 @@ impl TransTable {
     }
 
     pub(crate) fn clear(&mut self) {
-        for slot in self.inner.entries.iter() {
-            slot.key.store(0, Ordering::Relaxed);
-            slot.data.store(0, Ordering::Relaxed);
+        for bucket in self.inner.buckets.iter() {
+            for slot in bucket.slots.iter() {
+                slot.key.store(0, Ordering::Relaxed);
+                slot.data.store(0, Ordering::Relaxed);
+            }
         }
         self.inner.current_age.store(0, Ordering::Relaxed);
     }
@@ -200,14 +211,20 @@ impl TransTable {
             .store(age.wrapping_add(1) & AGE_MASK, Ordering::Relaxed);
     }
 
+    #[inline]
+    fn bucket(&self, key: u64) -> &Bucket {
+        &self.inner.buckets[key as usize & self.inner.mask]
+    }
+
     pub(crate) fn probe(&self, key: u64) -> Option<TTEntry> {
-        let slot = &self.inner.entries[key as usize & self.inner.mask];
-        let data = slot.data.load(Ordering::Relaxed);
-        let check = slot.key.load(Ordering::Relaxed);
-        if check ^ data != key || data_depth(data) < 0 {
-            return None;
+        for slot in self.bucket(key).slots.iter() {
+            let data = slot.data.load(Ordering::Relaxed);
+            let check = slot.key.load(Ordering::Relaxed);
+            if check ^ data == key && data_depth(data) >= 0 {
+                return Some(unpack_data(data));
+            }
         }
-        Some(unpack_data(data))
+        None
     }
 
     pub(crate) fn store(
@@ -219,25 +236,55 @@ impl TransTable {
         bound: Bound,
         best: Option<Move>,
     ) {
-        let slot = &self.inner.entries[key as usize & self.inner.mask];
-        let cur_data = slot.data.load(Ordering::Relaxed);
-        let cur_key = slot.key.load(Ordering::Relaxed) ^ cur_data;
-        let cur_depth = data_depth(cur_data);
         let current_age = self.inner.current_age.load(Ordering::Relaxed);
+        let bucket = self.bucket(key);
 
-        let same_key = cur_depth >= 0 && cur_key == key;
+        // Pick the slot: the one already holding this key, else an empty one,
+        // else the least valuable (shallowest, discounted 8 plies per search
+        // of age) so entries from old searches are evicted first.
+        let mut victim = 0usize;
+        let mut victim_data = 0u64;
+        let mut victim_value = i32::MAX;
+        let mut same_key = false;
+        for (i, slot) in bucket.slots.iter().enumerate() {
+            let data = slot.data.load(Ordering::Relaxed);
+            let depth_i = data_depth(data);
+            if depth_i < 0 {
+                if victim_value > i32::MIN {
+                    victim = i;
+                    victim_data = data;
+                    victim_value = i32::MIN;
+                }
+                continue;
+            }
+            if slot.key.load(Ordering::Relaxed) ^ data == key {
+                victim = i;
+                victim_data = data;
+                same_key = true;
+                break;
+            }
+            let rel_age = (current_age.wrapping_sub(data_age(data)) & AGE_MASK) as i32;
+            let value = depth_i - 8 * rel_age;
+            if value < victim_value {
+                victim = i;
+                victim_data = data;
+                victim_value = value;
+            }
+        }
+
         // Same position: overwrite unless the stored entry is from this search
         // and clearly deeper (Stockfish-style slack of 4 plies), so fresh
         // bounds and moves from later iterations are kept. Exact always wins.
         let replace = !same_key
             || bound == Bound::Exact
-            || data_age(cur_data) != current_age
-            || depth.clamp(0, 254) + 4 > cur_depth;
+            || data_age(victim_data) != current_age
+            || depth.clamp(0, 254) + 4 > data_depth(victim_data);
 
         if replace {
             // Keep the old best move when the new search found none.
-            let best = if same_key && best.is_none() { unpack_move(cur_data) } else { best };
+            let best = if same_key && best.is_none() { unpack_move(victim_data) } else { best };
             let data = pack_data(depth, score, static_eval, bound, best, current_age);
+            let slot = &bucket.slots[victim];
             slot.data.store(data, Ordering::Relaxed);
             slot.key.store(key ^ data, Ordering::Relaxed);
         }
@@ -448,12 +495,41 @@ mod tests {
     }
 
     #[test]
+    fn bucket_keeps_deep_entries_and_evicts_old_searches() {
+        let mut tt = TransTable::new(1);
+        let buckets = tt.inner.mask as u64 + 1;
+        // Five keys mapping to the same bucket.
+        let keys: Vec<u64> = (1..=5u64).map(|i| 7 + i * buckets).collect();
+        for (i, k) in keys[..4].iter().enumerate() {
+            tt.store(*k, 10 + i as i32, 0, None, Bound::Exact, None);
+        }
+        for k in &keys[..4] {
+            assert!(tt.probe(*k).is_some());
+        }
+        // A fifth key evicts the shallowest entry (depth 10), keeping the rest.
+        tt.store(keys[4], 1, 0, None, Bound::Exact, None);
+        assert!(tt.probe(keys[0]).is_none());
+        for k in &keys[1..] {
+            assert!(tt.probe(*k).is_some());
+        }
+        // After new searches, an old deep entry loses to a fresh shallow one.
+        tt.new_search();
+        tt.new_search();
+        tt.store(keys[0], 1, 0, None, Bound::Exact, None); // evicts keys[4]
+        let sixth = 7 + 6 * buckets;
+        tt.store(sixth, 1, 0, None, Bound::Exact, None);
+        assert!(tt.probe(keys[0]).is_some(), "fresh shallow entry kept");
+        assert!(tt.probe(sixth).is_some());
+        assert!(tt.probe(keys[1]).is_none(), "old depth-11 entry evicted");
+    }
+
+    #[test]
     fn mismatched_key_and_data_is_rejected() {
         let tt = TransTable::new(1);
         let key = 0xdead_beef_0000_0001u64;
         assert!(tt.probe(key).is_none());
         tt.store(key, 5, 10, Some(3), Bound::Exact, None);
-        let slot = &tt.inner.entries[key as usize & tt.inner.mask];
+        let slot = &tt.bucket(key).slots[0];
         // Simulate a torn write: data from another position, key word unchanged.
         let other = pack_data(9, -500, None, Bound::Lower, None, 0);
         slot.data.store(other, Ordering::Relaxed);
