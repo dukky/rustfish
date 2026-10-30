@@ -34,10 +34,16 @@ PROFILES = {
 
 
 def gh(*args, capture=True):
-    res = subprocess.run(["gh", *args], cwd=ROOT, capture_output=capture, text=True)
-    if res.returncode != 0:
-        sys.exit(f"gh {' '.join(args)} failed:\n{res.stderr if capture else ''}")
-    return res.stdout if capture else ""
+    # Read-only calls retry through network blips; dispatches never retry, so a
+    # lost response can't launch a test twice.
+    attempts = 1 if args[:2] == ("workflow", "run") else 6
+    for attempt in range(attempts):
+        res = subprocess.run(["gh", *args], cwd=ROOT, capture_output=capture, text=True)
+        if res.returncode == 0:
+            return res.stdout if capture else ""
+        if attempt + 1 < attempts:
+            time.sleep(30 * (attempt + 1))
+    sys.exit(f"gh {' '.join(args)} failed:\n{res.stderr if capture else ''}")
 
 
 def git(*args):
