@@ -4,10 +4,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const MIN_PARALLEL_DEPTH: i32 = 6;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
-// Sudden-death clocks are budgeted as if this many moves remain.
-const DEFAULT_MOVES_TO_GO: u64 = 20;
-// The hard limit (checked mid-iteration) is this multiple of the soft target.
+// Sudden-death clocks are budgeted as if max(MTG_MIN, MTG_BASE - fullmove/2)
+// moves remain: a long horizon early (the game is mostly ahead) shrinking to a
+// floor, so the clock is spread over the endgame instead of drained by move 40.
+const MTG_BASE: u64 = 40;
+const MTG_MIN: u64 = 20;
+// Without movestogo, the soft target never exceeds this fraction of the clock
+// (only binds when the increment is large relative to the remaining time).
+const SOFT_CAP_DIV: u64 = 10;
+// The hard limit (checked mid-iteration) is this multiple of the soft target...
 const HARD_LIMIT_FACTOR: u64 = 3;
+// ...but in sudden death never more than this fraction of the clock, keeping a floor.
+const HARD_CAP_DIV: u64 = 3;
+// Stability and score-drop scales combined are capped at this percent of soft.
+const MAX_SOFT_SCALE: u64 = 150;
+// Don't start another iteration past this percent of the scaled soft target:
+// the next iteration typically takes about as long as everything so far.
+const NEXT_ITER_PERCENT: u64 = 60;
 // Soft-target scale in percent by how many iterations the best move has held.
 const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 // A score drop of at least this many cp since the last iteration buys more time.
@@ -479,7 +492,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     } else if let Some(ms) = movetime {
         (None, Some(Instant::now() + Duration::from_millis(ms.max(1))))
     } else if let Some(t) = time_left {
-        let (soft, hard) = clock_limits(t, inc, movestogo, engine.move_overhead);
+        let (soft, hard) =
+            clock_limits(t, inc, movestogo, board.fullmove_number, engine.move_overhead);
         (Some(soft), Some(Instant::now() + Duration::from_millis(hard)))
     } else {
         (None, None)
@@ -637,12 +651,12 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
 
         if let Some(soft) = soft_ms {
-            let scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
-            let mut target = soft * scale / 100;
+            let mut scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
             if d >= 4 && best_score < prev_score - SCORE_DROP_MARGIN {
-                target = target * 5 / 4;
+                scale = scale * 5 / 4;
             }
-            if elapsed >= target {
+            let target = soft * scale.min(MAX_SOFT_SCALE) / 100;
+            if elapsed >= target * NEXT_ITER_PERCENT / 100 {
                 break;
             }
         }
@@ -654,14 +668,27 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 }
 
 /// Soft target and hard limit in ms for a clock search. The soft target is
-/// time/movestogo plus most of the increment; the hard limit allows a few
-/// times that but never more than 4/5 of the usable clock.
-fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, overhead: u64) -> (u64, u64) {
+/// time/moves-to-go plus most of the increment, where moves-to-go is the given
+/// movestogo or a horizon shrinking with the move number. The hard limit allows
+/// a few times that but, in sudden death, never more than 1/HARD_CAP_DIV of the
+/// clock (4/5 when the clock is about to be refilled).
+fn clock_limits(
+    time_left: u64,
+    inc: u64,
+    movestogo: Option<u64>,
+    fullmove: u32,
+    overhead: u64,
+) -> (u64, u64) {
     let usable = time_left.saturating_sub(overhead).max(1);
-    let mtg = movestogo.unwrap_or(DEFAULT_MOVES_TO_GO).clamp(1, DEFAULT_MOVES_TO_GO);
-    let cap = if mtg == 1 { usable * 4 / 5 } else { usable / 2 };
-    let soft = (usable / mtg + inc * 3 / 4).min(cap).max(1);
-    let hard = (soft * HARD_LIMIT_FACTOR).min(usable * 4 / 5).max(soft);
+    let horizon = MTG_BASE.saturating_sub(fullmove as u64 / 2).max(MTG_MIN);
+    let mtg = movestogo.unwrap_or(horizon).clamp(1, horizon);
+    let (soft_cap, hard_cap) = match movestogo {
+        _ if mtg == 1 => (usable * 4 / 5, usable * 4 / 5),
+        Some(_) => (usable / 2, usable * 4 / 5),
+        None => (usable / SOFT_CAP_DIV, usable / HARD_CAP_DIV),
+    };
+    let soft = (usable / mtg + inc * 3 / 4).min(soft_cap).max(1);
+    let hard = (soft * HARD_LIMIT_FACTOR).min(hard_cap).max(soft);
     (soft, hard)
 }
 
