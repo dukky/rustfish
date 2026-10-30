@@ -153,9 +153,32 @@ fn continuation_history_score(
         .unwrap_or(0)
 }
 
+/// Bound on |history| and |continuation history| under the gravity update.
+const HISTORY_MAX: i32 = 16_384;
+/// Cap on a single history bonus/malus. 16 * d^2 reaches it at depth 10, so
+/// one deep cutoff moves an entry at most ~9% of the way to the bound.
+const HISTORY_BONUS_MAX: i32 = 1_536;
+/// LMR adjusts the reduction for quiets whose history passes +/- this value.
+/// The old threshold was 2000 under linear `d^2` accumulation; with a 16x
+/// bonus and gravity, the same number of net same-depth cutoffs lands at
+/// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
+const LMR_HISTORY_THRESHOLD: i32 = 14_000;
+
+fn history_bonus(depth: i32) -> i32 {
+    (16 * depth * depth).min(HISTORY_BONUS_MAX)
+}
+
+/// "Gravity" update: h += delta - h * |delta| / HISTORY_MAX. Large values
+/// move less in their own direction and more against it, so entries
+/// self-limit to [-HISTORY_MAX, HISTORY_MAX] without a hard clamp.
+fn apply_gravity(h: &mut i32, delta: i32) {
+    let delta = delta.clamp(-HISTORY_MAX, HISTORY_MAX);
+    *h += delta - *h * delta.abs() / HISTORY_MAX;
+}
+
 fn apply_history_delta(engine: &mut EngineState, side: Color, mv: Move, delta: i32) {
     let h = &mut engine.history[color_index(side)][mv.from as usize][mv.to as usize];
-    *h = (*h + delta).clamp(-100_000, 100_000);
+    apply_gravity(h, delta);
 }
 
 fn apply_continuation_history_delta(
@@ -170,7 +193,7 @@ fn apply_continuation_history_delta(
     };
     let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
         [mv.to as usize];
-    *h = (*h + delta).clamp(-100_000, 100_000);
+    apply_gravity(h, delta);
 }
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
@@ -1208,11 +1231,11 @@ fn negamax(
                     r += 1;
                 }
                 // Reduce more for moves with bad history
-                if quiet_history < -2000 {
+                if quiet_history < -LMR_HISTORY_THRESHOLD {
                     r += 1;
                 }
                 // Reduce less for moves with good history
-                if quiet_history > 2000 {
+                if quiet_history > LMR_HISTORY_THRESHOLD {
                     r -= 1;
                 }
                 r.clamp(0, depth - 2)
@@ -1285,7 +1308,7 @@ fn negamax(
         }
         if alpha >= beta {
             if quiet {
-                let bonus = (depth * depth).min(64 * 64);
+                let bonus = history_bonus(depth);
                 if let Some(prev) = prev_move {
                     engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
                         Some(mv);
