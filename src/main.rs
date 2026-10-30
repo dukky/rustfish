@@ -1,6 +1,7 @@
 mod bitboard;
 mod book;
 mod eval;
+mod eval_params;
 mod movegen;
 mod search;
 mod tt;

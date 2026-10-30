@@ -1,4 +1,5 @@
 use super::*;
+use crate::eval_params::{self as ep, P, *};
 
 #[derive(Clone, Copy)]
 struct SqList {
@@ -195,9 +196,9 @@ fn king_safety(
             }
             let sq = (shield_rank as u8) * 8 + (f as u8);
             if board.bb.pieces[color_index(color)][0] & (1u64 << sq) != 0 {
-                score += 10;
+                score += KS_SHIELD_PAWN;
             } else {
-                score -= 8;
+                score -= KS_SHIELD_MISSING;
             }
         }
     }
@@ -210,9 +211,9 @@ fn king_safety(
         let fi = f as usize;
         if own_pawn_files[fi] == 0 {
             if enemy_pawn_files[fi] == 0 {
-                score -= 14;
+                score -= KS_OPEN_FILE;
             } else {
-                score -= 22;
+                score -= KS_HALF_OPEN_FILE;
             }
         }
     }
@@ -234,7 +235,7 @@ fn king_safety(
             }
         }
     }
-    score -= attacked * 6;
+    score -= attacked * KS_ATTACKED_SQUARE;
 
     let attack_units = king_attack_units(board, enemy_pieces, enemy, ksq);
     let attack_scale = king_attack_scale(enemy_non_pawn_material, enemy_has_queen);
@@ -327,8 +328,8 @@ fn passed_pawn_support_score(
         let dist = king_distance(king, sq);
         if dist <= 2 {
             let bonus = 3 - dist;
-            mg += bonus * 3;
-            eg += bonus * 8;
+            mg += bonus * ep::mg(P::PasserOwnKingNear);
+            eg += bonus * ep::eg(P::PasserOwnKingNear);
         }
     }
 
@@ -343,10 +344,12 @@ fn passed_pawn_support_score(
     if let Some(king) = enemy_king {
         let promo_dist = king_distance(king, promo_sq);
         if promo_dist > remaining {
-            eg += (promo_dist - remaining) * 2;
+            mg += (promo_dist - remaining) * ep::mg(P::PasserEnemyKingFar);
+            eg += (promo_dist - remaining) * ep::eg(P::PasserEnemyKingFar);
         }
         if king_distance(king, sq) <= 1 {
-            eg -= 10;
+            mg -= ep::mg(P::PasserEnemyKingAdjacent);
+            eg -= ep::eg(P::PasserEnemyKingAdjacent);
         }
     }
 
@@ -361,10 +364,11 @@ fn passed_pawn_support_score(
             Color::Black => rook_rank > pawn_rank,
         };
         if behind {
-            mg += 4;
-            eg += 10;
+            mg += ep::mg(P::PasserRookBehind);
+            eg += ep::eg(P::PasserRookBehind);
         } else {
-            eg -= 4;
+            mg -= ep::mg(P::PasserRookFront);
+            eg -= ep::eg(P::PasserRookFront);
         }
     }
 
@@ -388,22 +392,22 @@ fn trapped_piece_penalty(
         PieceType::Knight => {
             if in_corner && mobility <= 2 {
                 let severity = 3 - mobility;
-                mg += severity * 12;
-                eg += severity * 6;
+                mg += severity * ep::mg(P::TrappedKnightCorner);
+                eg += severity * ep::eg(P::TrappedKnightCorner);
             } else if on_edge && mobility <= 2 {
                 let severity = 3 - mobility;
-                mg += severity * 6;
-                eg += severity * 3;
+                mg += severity * ep::mg(P::TrappedKnightEdge);
+                eg += severity * ep::eg(P::TrappedKnightEdge);
             }
         }
         PieceType::Bishop => {
             if on_edge && mobility <= 2 {
                 let severity = 3 - mobility;
-                mg += severity * 10;
-                eg += severity * 5;
+                mg += severity * ep::mg(P::TrappedBishopEdge);
+                eg += severity * ep::eg(P::TrappedBishopEdge);
                 if in_corner {
-                    mg += 6;
-                    eg += 2;
+                    mg += ep::mg(P::TrappedBishopCornerExtra);
+                    eg += ep::eg(P::TrappedBishopCornerExtra);
                 }
             }
         }
@@ -417,8 +421,8 @@ fn trapped_piece_penalty(
                         && ((f <= 1 && king_file > f) || (f >= 6 && king_file < f));
                     if back_rank && king_between {
                         let severity = 4 - mobility;
-                        mg += severity * 8;
-                        eg += severity * 3;
+                        mg += severity * ep::mg(P::TrappedRookByKing);
+                        eg += severity * ep::eg(P::TrappedRookByKing);
                     }
                 }
             }
@@ -541,7 +545,7 @@ fn rook_endgame_bonus(
 
     for &rook_sq in rooks {
         if let Some(king_sq) = enemy_king {
-            score += (7 - king_distance(rook_sq, king_sq)).max(0) * 2;
+            score += (7 - king_distance(rook_sq, king_sq)).max(0) * ep::eg(P::RookEgEnemyKingClose);
         }
 
         for &pawn_sq in own_passed {
@@ -555,9 +559,9 @@ fn rook_endgame_bonus(
                 Color::Black => rook_rank > pawn_rank,
             };
             if behind {
-                score += 18;
+                score += ep::eg(P::RookEgBehindPasser);
             } else {
-                score -= 8;
+                score -= ep::eg(P::RookEgFrontOfPasser);
             }
         }
 
@@ -572,7 +576,7 @@ fn rook_endgame_bonus(
                 Color::Black => rook_rank < pawn_rank,
             };
             if behind_enemy {
-                score += 14;
+                score += ep::eg(P::RookEgBehindEnemyPasser);
             }
         }
     }
@@ -719,12 +723,12 @@ fn development_score(board: &Board, color: Color) -> i32 {
         .count() as i32;
 
     let king_sq = board.king_square(color);
-    let mut score = -undeveloped * 5;
+    let mut score = -undeveloped * ep::mg(P::DevUndevelopedMinor);
     if king_sq == Some(king_home) && undeveloped >= 2 {
-        score -= 8;
+        score -= ep::mg(P::DevKingHomeUndeveloped);
     }
     if king_sq.is_some_and(|sq| king_castles.contains(&sq)) {
-        score += 8;
+        score += ep::mg(P::DevKingCastled);
     }
     score
 }
@@ -804,12 +808,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     }
 
     if acc.bishops[0] >= 2 {
-        mg_score += 30;
-        eg_score += 40;
+        mg_score += ep::mg(P::BishopPair);
+        eg_score += ep::eg(P::BishopPair);
     }
     if acc.bishops[1] >= 2 {
-        mg_score -= 30;
-        eg_score -= 40;
+        mg_score -= ep::mg(P::BishopPair);
+        eg_score -= ep::eg(P::BishopPair);
     }
 
     if phase >= 12 {
@@ -825,15 +829,15 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let r = (sq / 8) as i32;
 
         if white_pawn_files[f] > 1 {
-            mg_score -= 12;
-            eg_score -= 16;
+            mg_score -= ep::mg(P::Doubled);
+            eg_score -= ep::eg(P::Doubled);
         }
 
         let left = if f > 0 { white_pawn_files[f - 1] } else { 0 };
         let right = if f < 7 { white_pawn_files[f + 1] } else { 0 };
         if left == 0 && right == 0 {
-            mg_score -= 14;
-            eg_score -= 12;
+            mg_score -= ep::mg(P::Isolated);
+            eg_score -= ep::eg(P::Isolated);
         }
 
         let mut passed = true;
@@ -844,12 +848,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
         if passed {
-            mg_score += 12 + r * 4;
-            eg_score += 28 + r * 12;
+            mg_score += ep::mg(P::PassedBase) + r * ep::mg(P::PassedRank);
+            eg_score += ep::eg(P::PassedBase) + r * ep::eg(P::PassedRank);
             white_passed.push(sq);
             if is_supported_by_pawn(board, sq, Color::White) {
-                mg_score += 6 + r;
-                eg_score += 12 + r * 3;
+                mg_score += ep::mg(P::PassedSupportedBase) + r * ep::mg(P::PassedSupportedRank);
+                eg_score += ep::eg(P::PassedSupportedBase) + r * ep::eg(P::PassedSupportedRank);
             }
             let (support_mg, support_eg) = passed_pawn_support_score(
                 sq,
@@ -863,25 +867,29 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
 
         if is_connected_pawn(&white_pawn_masks, sq, Color::White) {
-            mg_score += 8;
-            eg_score += 10;
+            mg_score += ep::mg(P::Connected);
+            eg_score += ep::eg(P::Connected);
         }
 
         if is_backward_pawn(board, &white_pawn_masks, sq, Color::White, passed) {
-            mg_score -= 12;
-            eg_score -= 6;
+            mg_score -= ep::mg(P::Backward);
+            eg_score -= ep::eg(P::Backward);
         }
 
         let candidate = black_max_pawn_rank[f] <= r as i8;
         if candidate {
             let lever = pawn_has_lever(board, sq, Color::White);
-            mg_score += 4 + r + if lever { 4 } else { 0 };
-            eg_score += 8 + r * 3 + if lever { 6 + r } else { 0 };
+            mg_score += ep::mg(P::CandidateBase)
+                + r * ep::mg(P::CandidateRank)
+                + if lever { ep::mg(P::CandidateLever) + r * ep::mg(P::CandidateLeverRank) } else { 0 };
+            eg_score += ep::eg(P::CandidateBase)
+                + r * ep::eg(P::CandidateRank)
+                + if lever { ep::eg(P::CandidateLever) + r * ep::eg(P::CandidateLeverRank) } else { 0 };
             if is_supported_by_pawn(board, sq, Color::White)
                 || is_connected_pawn(&white_pawn_masks, sq, Color::White)
             {
-                mg_score += 2;
-                eg_score += 4;
+                mg_score += ep::mg(P::CandidateSupported);
+                eg_score += ep::eg(P::CandidateSupported);
             }
         }
     }
@@ -891,15 +899,15 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let r = (sq / 8) as i32;
 
         if black_pawn_files[f] > 1 {
-            mg_score += 12;
-            eg_score += 16;
+            mg_score += ep::mg(P::Doubled);
+            eg_score += ep::eg(P::Doubled);
         }
 
         let left = if f > 0 { black_pawn_files[f - 1] } else { 0 };
         let right = if f < 7 { black_pawn_files[f + 1] } else { 0 };
         if left == 0 && right == 0 {
-            mg_score += 14;
-            eg_score += 12;
+            mg_score += ep::mg(P::Isolated);
+            eg_score += ep::eg(P::Isolated);
         }
 
         let mut passed = true;
@@ -910,12 +918,12 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
         if passed {
-            mg_score -= 12 + (7 - r) * 4;
-            eg_score -= 28 + (7 - r) * 12;
+            mg_score -= ep::mg(P::PassedBase) + (7 - r) * ep::mg(P::PassedRank);
+            eg_score -= ep::eg(P::PassedBase) + (7 - r) * ep::eg(P::PassedRank);
             black_passed.push(sq);
             if is_supported_by_pawn(board, sq, Color::Black) {
-                mg_score -= 6 + (7 - r);
-                eg_score -= 12 + (7 - r) * 3;
+                mg_score -= ep::mg(P::PassedSupportedBase) + (7 - r) * ep::mg(P::PassedSupportedRank);
+                eg_score -= ep::eg(P::PassedSupportedBase) + (7 - r) * ep::eg(P::PassedSupportedRank);
             }
             let (support_mg, support_eg) = passed_pawn_support_score(
                 sq,
@@ -929,25 +937,29 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         }
 
         if is_connected_pawn(&black_pawn_masks, sq, Color::Black) {
-            mg_score -= 8;
-            eg_score -= 10;
+            mg_score -= ep::mg(P::Connected);
+            eg_score -= ep::eg(P::Connected);
         }
 
         if is_backward_pawn(board, &black_pawn_masks, sq, Color::Black, passed) {
-            mg_score += 12;
-            eg_score += 6;
+            mg_score += ep::mg(P::Backward);
+            eg_score += ep::eg(P::Backward);
         }
 
         let candidate = white_min_pawn_rank[f] >= r as i8;
         if candidate {
             let lever = pawn_has_lever(board, sq, Color::Black);
-            mg_score -= 4 + (7 - r) + if lever { 4 } else { 0 };
-            eg_score -= 8 + (7 - r) * 3 + if lever { 6 + (7 - r) } else { 0 };
+            mg_score -= ep::mg(P::CandidateBase)
+                + (7 - r) * ep::mg(P::CandidateRank)
+                + if lever { ep::mg(P::CandidateLever) + (7 - r) * ep::mg(P::CandidateLeverRank) } else { 0 };
+            eg_score -= ep::eg(P::CandidateBase)
+                + (7 - r) * ep::eg(P::CandidateRank)
+                + if lever { ep::eg(P::CandidateLever) + (7 - r) * ep::eg(P::CandidateLeverRank) } else { 0 };
             if is_supported_by_pawn(board, sq, Color::Black)
                 || is_connected_pawn(&black_pawn_masks, sq, Color::Black)
             {
-                mg_score -= 2;
-                eg_score -= 4;
+                mg_score -= ep::mg(P::CandidateSupported);
+                eg_score -= ep::eg(P::CandidateSupported);
             }
         }
     }
@@ -956,24 +968,26 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let f = (sq % 8) as usize;
         let r = sq / 8;
         if white_pawn_files[f] == 0 {
-            mg_score += if black_pawn_files[f] == 0 { 20 } else { 10 };
-            eg_score += if black_pawn_files[f] == 0 { 14 } else { 8 };
+            let p = if black_pawn_files[f] == 0 { P::RookOpenFile } else { P::RookSemiOpenFile };
+            mg_score += ep::mg(p);
+            eg_score += ep::eg(p);
         }
         if r == 6 {
-            mg_score += 16;
-            eg_score += 24;
+            mg_score += ep::mg(P::RookSeventh);
+            eg_score += ep::eg(P::RookSeventh);
         }
     }
     for &sq in black_rooks.as_slice() {
         let f = (sq % 8) as usize;
         let r = sq / 8;
         if black_pawn_files[f] == 0 {
-            mg_score -= if white_pawn_files[f] == 0 { 20 } else { 10 };
-            eg_score -= if white_pawn_files[f] == 0 { 14 } else { 8 };
+            let p = if white_pawn_files[f] == 0 { P::RookOpenFile } else { P::RookSemiOpenFile };
+            mg_score -= ep::mg(p);
+            eg_score -= ep::eg(p);
         }
         if r == 1 {
-            mg_score -= 16;
-            eg_score -= 24;
+            mg_score -= ep::mg(P::RookSeventh);
+            eg_score -= ep::eg(P::RookSeventh);
         }
     }
 
@@ -989,7 +1003,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             let target = (nr as u8) * 8 + (nf as u8);
             let rel = relative_rank(Color::White, target);
             if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
-                mg_score += 4;
+                mg_score += ep::mg(P::PawnCenterControl);
+                eg_score += ep::eg(P::PawnCenterControl);
             }
         }
     }
@@ -1005,7 +1020,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             let target = (nr as u8) * 8 + (nf as u8);
             let rel = relative_rank(Color::Black, target);
             if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
-                mg_score -= 4;
+                mg_score -= ep::mg(P::PawnCenterControl);
+                eg_score -= ep::eg(P::PawnCenterControl);
             }
         }
     }
@@ -1029,19 +1045,21 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         white_pieces.as_slice(),
     );
     mg_score += king_safety_score;
-    eg_score += king_safety_score / 6;
+    eg_score += king_safety_score / KS_EG_DIVISOR;
 
     if phase <= 8 {
         let material_edge = white_non_pawn_material - black_non_pawn_material;
         if material_edge >= 500 {
             if let (Some(wk), Some(bk)) = (white_king, black_king) {
                 eg_score += king_edge_pressure(bk);
-                eg_score += (14 - king_distance(wk, bk)) * 3;
+                mg_score += (14 - king_distance(wk, bk)) * ep::mg(P::MopUpKingDistance);
+                eg_score += (14 - king_distance(wk, bk)) * ep::eg(P::MopUpKingDistance);
             }
         } else if material_edge <= -500 {
             if let (Some(wk), Some(bk)) = (white_king, black_king) {
                 eg_score -= king_edge_pressure(wk);
-                eg_score -= (14 - king_distance(wk, bk)) * 3;
+                mg_score -= (14 - king_distance(wk, bk)) * ep::mg(P::MopUpKingDistance);
+                eg_score -= (14 - king_distance(wk, bk)) * ep::eg(P::MopUpKingDistance);
             }
         }
     }
@@ -1052,9 +1070,11 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 && (!white_pawns.as_slice().is_empty() || !black_pawns.as_slice().is_empty())
             {
                 if board.side_to_move == Color::Black {
-                    eg_score += 14;
+                    mg_score += ep::mg(P::PawnEndgameOpposition);
+                    eg_score += ep::eg(P::PawnEndgameOpposition);
                 } else {
-                    eg_score -= 14;
+                    mg_score -= ep::mg(P::PawnEndgameOpposition);
+                    eg_score -= ep::eg(P::PawnEndgameOpposition);
                 }
             }
         }
@@ -1078,12 +1098,17 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             })
             .min();
 
-        match (white_race, black_race) {
-            (Some(w), None) => eg_score += 90 + (8 - w).max(0) * 6,
-            (None, Some(b)) => eg_score -= 90 + (8 - b).max(0) * 6,
-            (Some(w), Some(b)) if w + 1 < b => eg_score += 40 + (b - w) * 8,
-            (Some(w), Some(b)) if b + 1 < w => eg_score -= 40 + (w - b) * 8,
-            _ => {}
+        // (sign, base param, per-unit param, units)
+        let race = match (white_race, black_race) {
+            (Some(w), None) => Some((1, P::RaceUnstoppable, P::RaceUnstoppableSpeed, (8 - w).max(0))),
+            (None, Some(b)) => Some((-1, P::RaceUnstoppable, P::RaceUnstoppableSpeed, (8 - b).max(0))),
+            (Some(w), Some(b)) if w + 1 < b => Some((1, P::RaceAhead, P::RaceAheadGap, b - w)),
+            (Some(w), Some(b)) if b + 1 < w => Some((-1, P::RaceAhead, P::RaceAheadGap, w - b)),
+            _ => None,
+        };
+        if let Some((sign, base, unit, units)) = race {
+            mg_score += sign * (ep::mg(base) + units * ep::mg(unit));
+            eg_score += sign * (ep::eg(base) + units * ep::eg(unit));
         }
     }
 
@@ -1119,19 +1144,19 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 if r >= 3
                     && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score += 18;
-                    eg_score += 8;
+                    mg_score += ep::mg(P::KnightOutpost);
+                    eg_score += ep::eg(P::KnightOutpost);
                 }
             }
             PieceType::Bishop => {
                 if r >= 3
                     && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score += 10;
-                    eg_score += 6;
+                    mg_score += ep::mg(P::BishopOutpost);
+                    eg_score += ep::eg(P::BishopOutpost);
                 }
-                mg_score += mobility * 2;
-                eg_score += mobility;
+                mg_score += mobility * ep::mg(P::BishopMobilityExtra);
+                eg_score += mobility * ep::eg(P::BishopMobilityExtra);
             }
             _ => {}
         }
@@ -1148,19 +1173,19 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 if r <= 4
                     && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score -= 18;
-                    eg_score -= 8;
+                    mg_score -= ep::mg(P::KnightOutpost);
+                    eg_score -= ep::eg(P::KnightOutpost);
                 }
             }
             PieceType::Bishop => {
                 if r <= 4
                     && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score -= 10;
-                    eg_score -= 6;
+                    mg_score -= ep::mg(P::BishopOutpost);
+                    eg_score -= ep::eg(P::BishopOutpost);
                 }
-                mg_score -= mobility * 2;
-                eg_score -= mobility;
+                mg_score -= mobility * ep::mg(P::BishopMobilityExtra);
+                eg_score -= mobility * ep::eg(P::BishopMobilityExtra);
             }
             _ => {}
         }
@@ -1169,14 +1194,14 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         eg_score += trap_eg;
     }
     let mobility_delta = white_mob - black_mob;
-    mg_score += mobility_delta * 2;
-    eg_score += mobility_delta;
+    mg_score += mobility_delta * ep::mg(P::Mobility);
+    eg_score += mobility_delta * ep::eg(P::Mobility);
 
     let mut score = taper_score(mg_score, eg_score, phase);
     if board.side_to_move == Color::White {
-        score += 10;
+        score += TEMPO;
     } else {
-        score -= 10;
+        score -= TEMPO;
     }
 
     score
