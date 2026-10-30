@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use book::{build_opening_book, try_book_move, BookEntry};
 use eval::eval_for_side;
-use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, mobility_count, move_to_uci, parse_square, parse_uci_move};
+use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, is_square_attacked_occ,mobility_count, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go, piece_attacks_square};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
@@ -741,12 +741,23 @@ impl Board {
         let side = self.side_to_move;
         let (check_count, evasion_mask, pin_masks) = self.legal_filter_state(side);
         generate_pseudo_moves(self, captures_only, buf);
+        let enemy = side.opposite();
+        // King destinations are tested with the king lifted off the board so
+        // sliders x-ray through its origin square: no make/undo needed.
+        let king_sq = self.king_square(side);
+        let occ_no_king = match king_sq {
+            Some(k) => self.bb.occ_all() & !square_mask(k),
+            None => self.bb.occ_all(),
+        };
         // Filter in-place: write index tracks legal moves kept
         let mut write = 0usize;
         for read in 0..buf.len() {
             let mv = buf[read];
-            let moving_piece = self.squares[mv.from as usize].unwrap();
-            if moving_piece.kind == PieceType::King || mv.is_en_passant {
+            if Some(mv.from) == king_sq {
+                if is_square_attacked_occ(self, mv.to, enemy, occ_no_king) {
+                    continue;
+                }
+            } else if mv.is_en_passant {
                 let undo = self.make_move(mv);
                 let legal = !self.is_in_check(side);
                 self.undo_move(mv, undo);

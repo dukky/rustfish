@@ -265,6 +265,13 @@ mod tests {
     }
 }
 pub(crate) fn is_square_attacked(board: &Board, sq: u8, by: Color) -> bool {
+    is_square_attacked_occ(board, sq, by, board.bb.occ_all())
+}
+
+/// `is_square_attacked` with slider rays traced over `occ` instead of the
+/// board's real occupancy (e.g. with the moving king lifted off).
+#[inline(always)]
+pub(crate) fn is_square_attacked_occ(board: &Board, sq: u8, by: Color, occ: u64) -> bool {
     use crate::bitboard::{
         bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
     };
@@ -283,7 +290,6 @@ pub(crate) fn is_square_attacked(board: &Board, sq: u8, by: Color) -> bool {
         return true;
     }
 
-    let occ = bb.occ_all();
     let diag_sliders = bb.pieces[c][2] | bb.pieces[c][4];
     if diag_sliders != 0 && bishop_attacks(s, occ) & diag_sliders != 0 {
         return true;
