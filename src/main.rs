@@ -1037,6 +1037,14 @@ fn main() {
             datagen::handle_datagen(cmd);
             continue;
         }
+        if cmd.starts_with("extract ") {
+            tune::handle_extract(cmd);
+            continue;
+        }
+        if cmd.starts_with("tune ") {
+            tune::handle_tune(cmd);
+            continue;
+        }
         if cmd.starts_with("bench") {
             handle_bench(cmd, &mut board, &mut engine);
             continue;
