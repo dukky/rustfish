@@ -1440,6 +1440,14 @@ fn quiescence(
                 if alpha > -INF / 2 && stand_pat + victim + 150 < alpha {
                     continue;
                 }
+                // Futility base: when even stand pat plus a margin cannot
+                // reach alpha, a capture that does not win material (SEE <= 0,
+                // e.g. an even trade) cannot raise the score either. SEE is
+                // only recomputed in this (minority) branch; the picker's
+                // bucket only tells us SEE >= 0.
+                if alpha > -INF / 2 && stand_pat + 150 <= alpha && see(board, mv) <= 0 {
+                    continue;
+                }
             }
         }
 
