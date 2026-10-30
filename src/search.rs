@@ -12,6 +12,8 @@ const HARD_LIMIT_FACTOR: u64 = 3;
 const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 // A score drop of at least this many cp since the last iteration buys more time.
 const SCORE_DROP_MARGIN: i32 = 40;
+// Internal iterative reduction: nodes this deep with no TT move search one ply less.
+const IIR_MIN_DEPTH: i32 = 4;
 
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
@@ -843,7 +845,6 @@ fn search_root(
                 child_key,
                 Some(mv),
                 true,
-                true,
             );
         } else {
             score = -negamax(
@@ -858,7 +859,6 @@ fn search_root(
                 child_key,
                 Some(mv),
                 true,
-                true,
             );
             if score > alpha && score < beta {
                 score = -negamax(
@@ -872,7 +872,6 @@ fn search_root(
                     rep_stack,
                     child_key,
                     Some(mv),
-                    true,
                     true,
                 );
             }
@@ -951,7 +950,6 @@ fn negamax(
     key: u64,
     prev_move: Option<Move>,
     allow_null: bool,
-    allow_iid: bool,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1044,53 +1042,13 @@ fn negamax(
         }
     }
 
-    if tt_move.is_none() && allow_iid && depth >= 5 {
-        board.generate_legal_moves(false, &mut search.move_buf);
-        let mut iid_moves = std::mem::take(&mut search.move_buf);
-        if !iid_moves.is_empty() {
-            order_moves(
-                board,
-                engine,
-                &mut iid_moves,
-                None,
-                counter_move_for(engine, board.side_to_move, prev_move),
-                prev_move,
-                &search.killers[ply],
-                &engine.history,
-            );
-            let mut best_iid = iid_moves[0];
-            let mut best_iid_score = -INF;
-            for mv in iid_moves.iter().copied().take(8) {
-                let undo = board.make_move(mv);
-                let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
-                rep_stack.push(child_key);
-                let s = -negamax(
-                    board,
-                    depth - 3,
-                    -beta,
-                    -alpha,
-                    ply + 1,
-                search,
-                engine,
-                rep_stack,
-                child_key,
-                Some(mv),
-                true,
-                false,
-            );
-                rep_stack.pop();
-                board.undo_move(mv, undo);
-                if search.stop {
-                    return 0;
-                }
-                if s > best_iid_score {
-                    best_iid_score = s;
-                    best_iid = mv;
-                }
-            }
-            tt_move = Some(best_iid);
-        }
-        search.move_buf = iid_moves;
+    // IIR: with no TT move the node is likely poorly ordered and unexplored, so
+    // search it one ply shallower instead of paying for an IID pre-search. It sits
+    // after futility/RFP so those prunes are decided on the node's true depth
+    // (and IIR_MIN_DEPTH > 3 keeps them from triggering on reduced depth here),
+    // but before null move so its reduction and the main loop use the cheaper depth.
+    if tt_move.is_none() && depth >= IIR_MIN_DEPTH {
+        depth -= 1;
     }
 
     if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
@@ -1133,7 +1091,6 @@ fn negamax(
                 rep_stack,
                 child_key,
                 None,
-                false,
                 false,
             );
             rep_stack.pop();
@@ -1235,7 +1192,6 @@ fn negamax(
                 child_key,
                 Some(mv),
                 true,
-                true,
             );
         } else {
             let reduction = if quiet
@@ -1278,7 +1234,6 @@ fn negamax(
                 child_key,
                 Some(mv),
                 true,
-                true,
             );
 
             if reduced && score > alpha {
@@ -1293,7 +1248,6 @@ fn negamax(
                     rep_stack,
                     child_key,
                     Some(mv),
-                    true,
                     true,
                 );
             }
@@ -1310,7 +1264,6 @@ fn negamax(
                     rep_stack,
                     child_key,
                     Some(mv),
-                    true,
                     true,
                 );
             }
