@@ -2,6 +2,7 @@ mod bitboard;
 mod book;
 mod datagen;
 mod eval;
+mod evalcache;
 mod eval_params;
 mod movegen;
 mod psqt;
@@ -775,6 +776,7 @@ impl Default for SearchParams {
 struct EngineState {
     zobrist: Zobrist,
     tt: TransTable,
+    eval_cache: evalcache::EvalCache,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
@@ -801,6 +803,7 @@ impl EngineState {
         Self {
             zobrist,
             tt: TransTable::new(hash_mb),
+            eval_cache: evalcache::EvalCache::new(),
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
@@ -830,6 +833,7 @@ impl EngineState {
 
     fn clear_for_new_game(&mut self) {
         self.tt.clear();
+        self.eval_cache.clear();
         self.history = [[[0; 64]; 64]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
@@ -881,6 +885,7 @@ impl EngineState {
         Self {
             zobrist: self.zobrist.clone(),
             tt: self.tt.clone(),
+            eval_cache: evalcache::EvalCache::new(),
             history: self.history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
