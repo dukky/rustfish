@@ -859,6 +859,8 @@ impl EngineState {
         );
     }
 
+    // Ages history between moves. Gravity already bounds magnitude; this
+    // only fades stale entries that are no longer being updated.
     fn decay_history(&mut self) {
         for side in 0..2 {
             for from in 0..64 {
