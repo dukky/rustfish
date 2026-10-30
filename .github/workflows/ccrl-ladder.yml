@@ -18,6 +18,9 @@ on:
       anchors:
         description: "Comma-separated anchor names, or 'all'"
         default: "all"
+      anchors_file:
+        description: "Anchor list (scripts/anchors-high.json for 2300-2600)"
+        default: "scripts/anchors.json"
 
 env:
   FASTCHESS_VERSION: v1.8.2-alpha
@@ -36,10 +39,11 @@ jobs:
           GAMES: ${{ inputs.games_per_anchor }}
           SHARDS: ${{ inputs.shards }}
           ANCHORS: ${{ inputs.anchors }}
+          ANCHORS_FILE: ${{ inputs.anchors_file }}
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
-          anchors = json.load(open("scripts/anchors.json"))["anchors"]
+          anchors = json.load(open(os.environ["ANCHORS_FILE"]))["anchors"]
           wanted = os.environ["ANCHORS"].strip()
           if wanted != "all":
               names = {n.strip() for n in wanted.split(",")}
@@ -158,7 +162,7 @@ jobs:
             echo "Commit \`${GITHUB_SHA::7}\`, tc ${{ inputs.tc }}, book $BOOK."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
-          python3 scripts/ccrl_ladder.py --anchors scripts/anchors.json \
+          python3 scripts/ccrl_ladder.py --anchors "${{ inputs.anchors_file }}" \
             --summary "$GITHUB_STEP_SUMMARY" --json results.json games/*.pgn
           cat games/*.pgn > all-games.pgn
       - uses: actions/upload-artifact@v4

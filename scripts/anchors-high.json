@@ -1,0 +1,14 @@
+{
+  "_comment": "Stronger CCRL Blitz anchor set (2297-2615) for when rustfish outgrows scripts/anchors.json. Ratings from the CCRL Blitz complete list dated 2026-10-27 (+-13..22 each). Same build kinds as scripts/anchors.json. Select with: gh workflow run ccrl-ladder.yml -f anchors_file=scripts/anchors-high.json",
+  "anchors": [
+    {"name": "stash-17.0",     "ccrl": 2297, "repo": "mhouppin/stash-bot",           "ref": "v17.0",   "kind": "stash", "options": []},
+    {"name": "tantabus-1.0.2", "ccrl": 2331, "repo": "analog-hors/tantabus",         "ref": "v1.0.2",  "kind": "cargo", "pkg": "tantabus-uci", "bin": "tantabus-uci", "options": []},
+    {"name": "reckless-0.2.0", "ccrl": 2352, "repo": "codedeliveryservice/Reckless", "ref": "v0.2.0",  "kind": "cargo", "pkg": "reckless", "bin": "reckless", "options": []},
+    {"name": "zahak-3.0",      "ccrl": 2363, "repo": "amanjpro/zahak",               "ref": "3.0",     "kind": "go",    "pkg": "./zahak", "options": ["option.Book=false"]},
+    {"name": "stash-19.0",     "ccrl": 2473, "repo": "mhouppin/stash-bot",           "ref": "v19.0",   "kind": "stash", "options": []},
+    {"name": "stash-20.0.1",   "ccrl": 2512, "repo": "mhouppin/stash-bot",           "ref": "v20.0.1", "kind": "stash", "options": []},
+    {"name": "zahak-4.0",      "ccrl": 2552, "repo": "amanjpro/zahak",               "ref": "4.0",     "kind": "go",    "pkg": "./zahak", "options": ["option.Book=false"]},
+    {"name": "tantabus-2.0.0", "ccrl": 2555, "repo": "analog-hors/tantabus",         "ref": "v2.0.0",  "kind": "cargo", "pkg": "tantabus-uci", "bin": "tantabus-uci", "options": []},
+    {"name": "reckless-0.3.0", "ccrl": 2615, "repo": "codedeliveryservice/Reckless", "ref": "v0.3.0",  "kind": "cargo", "pkg": "reckless", "bin": "reckless", "options": []}
+  ]
+}
