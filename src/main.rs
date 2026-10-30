@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use book::{build_opening_book, try_book_move, BookEntry};
 use eval::eval_for_side;
-use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, is_square_attacked_occ,mobility_count, move_to_uci, parse_square, parse_uci_move};
+use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, is_square_attacked_occ, mobility_count, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go, piece_attacks_square};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
@@ -60,6 +60,9 @@ fn square_mask(sq: u8) -> u64 {
     1u64 << sq
 }
 
+/// Reference oracle for the ray masks `legal_filter_state` builds from the
+/// bitboard ray tables.
+#[cfg(test)]
 fn ray_mask_inclusive(from: u8, to: u8) -> u64 {
     let ff = (from % 8) as i8;
     let fr = (from / 8) as i8;
@@ -398,130 +401,70 @@ impl Board {
         let Some(king_sq) = self.king_square(color) else {
             return (check_count, evasion_mask, pin_masks);
         };
-        let enemy = color.opposite();
-        let kf = (king_sq % 8) as i8;
-        let kr = (king_sq / 8) as i8;
+        use crate::bitboard::{DIAG_RAYS, KING_ATTACKS, KNIGHT_ATTACKS, ORTHO_RAYS, PAWN_ATTACKERS};
 
-        let mut register_checker = |mask: u64| {
+        let c = color_index(color);
+        let e = 1 - c;
+        let bb = &self.bb;
+        let k = king_sq as usize;
+        let king_bit = square_mask(king_sq);
+        let own = bb.occ[c];
+        let occ = own | bb.occ[e];
+
+        // Leaper checkers: the evasion target is the checker's square.
+        let mut leapers = (PAWN_ATTACKERS[e][k] & bb.pieces[e][0])
+            | (KNIGHT_ATTACKS[k] & bb.pieces[e][1])
+            | (KING_ATTACKS[k] & bb.pieces[e][5]);
+        while leapers != 0 {
+            let sq = leapers.trailing_zeros() as u8;
+            leapers &= leapers - 1;
             check_count += 1;
-            if check_count == 1 {
-                evasion_mask = mask;
-            } else {
-                evasion_mask = 0;
-            }
-        };
+            evasion_mask = if check_count == 1 { square_mask(sq) } else { 0 };
+        }
 
-        let pawn_dirs: &[(i8, i8)] = match enemy {
-            Color::White => &[(-1, -1), (1, -1)],
-            Color::Black => &[(-1, 1), (1, 1)],
-        };
-        for &(df, dr) in pawn_dirs {
-            let nf = kf + df;
-            let nr = kr + dr;
-            if !in_bounds(nf, nr) {
+        // Sliders: walk each of the 8 rays from the king. The first piece is
+        // either an enemy checker or an own piece that may be pinned by the
+        // second piece. Masks run king..slider inclusive (ray_mask_inclusive).
+        let diag = bb.pieces[e][2] | bb.pieces[e][4];
+        let ortho = bb.pieces[e][3] | bb.pieces[e][4];
+        for (rays, sliders) in [(&DIAG_RAYS, diag), (&ORTHO_RAYS, ortho)] {
+            if sliders == 0 {
                 continue;
             }
-            let sq = (nr as u8) * 8 + (nf as u8);
-            if self.squares[sq as usize]
-                == Some(Piece {
-                    color: enemy,
-                    kind: PieceType::Pawn,
-                })
-            {
-                register_checker(square_mask(sq));
-            }
-        }
-
-        for (df, dr) in [
-            (1, 2),
-            (2, 1),
-            (2, -1),
-            (1, -2),
-            (-1, -2),
-            (-2, -1),
-            (-2, 1),
-            (-1, 2),
-        ] {
-            let nf = kf + df;
-            let nr = kr + dr;
-            if !in_bounds(nf, nr) {
-                continue;
-            }
-            let sq = (nr as u8) * 8 + (nf as u8);
-            if self.squares[sq as usize]
-                == Some(Piece {
-                    color: enemy,
-                    kind: PieceType::Knight,
-                })
-            {
-                register_checker(square_mask(sq));
-            }
-        }
-
-        for df in -1..=1 {
-            for dr in -1..=1 {
-                if df == 0 && dr == 0 {
+            for d in 0..4 {
+                let ray = rays[d][k];
+                if ray & sliders == 0 {
                     continue;
                 }
-                let nf = kf + df;
-                let nr = kr + dr;
-                if !in_bounds(nf, nr) {
-                    continue;
-                }
-                let sq = (nr as u8) * 8 + (nf as u8);
-                if self.squares[sq as usize]
-                    == Some(Piece {
-                        color: enemy,
-                        kind: PieceType::King,
-                    })
-                {
-                    register_checker(square_mask(sq));
-                }
-            }
-        }
-
-        for (step_f, step_r, rook_like) in [
-            (1, 0, true),
-            (-1, 0, true),
-            (0, 1, true),
-            (0, -1, true),
-            (1, 1, false),
-            (1, -1, false),
-            (-1, 1, false),
-            (-1, -1, false),
-        ] {
-            let mut blocker = None;
-            let mut f = kf + step_f;
-            let mut r = kr + step_r;
-            while in_bounds(f, r) {
-                let sq = (r as u8) * 8 + (f as u8);
-                if let Some(piece) = self.squares[sq as usize] {
-                    if blocker.is_none() {
-                        if piece.color == color {
-                            blocker = Some(sq);
-                        } else if matches!(piece.kind, PieceType::Queen)
-                            || (rook_like && matches!(piece.kind, PieceType::Rook))
-                            || (!rook_like && matches!(piece.kind, PieceType::Bishop))
-                        {
-                            register_checker(ray_mask_inclusive(king_sq, sq));
-                        }
-                        if piece.color != color {
-                            break;
-                        }
+                let first_of = |b: u64| -> usize {
+                    if d < 2 {
+                        b.trailing_zeros() as usize
                     } else {
-                        if piece.color != color
-                            && (matches!(piece.kind, PieceType::Queen)
-                                || (rook_like && matches!(piece.kind, PieceType::Rook))
-                                || (!rook_like && matches!(piece.kind, PieceType::Bishop)))
-                        {
-                            let pinned_sq = blocker.unwrap();
-                            pin_masks[pinned_sq as usize] = ray_mask_inclusive(king_sq, sq);
-                        }
-                        break;
+                        63 - b.leading_zeros() as usize
                     }
+                };
+                let blockers = ray & occ;
+                let b1 = first_of(blockers);
+                let b1_bit = 1u64 << b1;
+                if b1_bit & own == 0 {
+                    if b1_bit & sliders != 0 {
+                        check_count += 1;
+                        evasion_mask = if check_count == 1 {
+                            (ray & !rays[d][b1]) | king_bit
+                        } else {
+                            0
+                        };
+                    }
+                    continue;
                 }
-                f += step_f;
-                r += step_r;
+                let rest = blockers & rays[d][b1];
+                if rest == 0 {
+                    continue;
+                }
+                let b2 = first_of(rest);
+                if (1u64 << b2) & sliders != 0 {
+                    pin_masks[b1] = (ray & !rays[d][b2]) | king_bit;
+                }
             }
         }
 
@@ -1066,5 +1009,42 @@ fn main() {
         if cmd == "stop" {
             continue;
         }
+    }
+}
+
+#[cfg(test)]
+mod legal_filter_tests {
+    use super::*;
+    use crate::bitboard::{DIAG_RAYS, ORTHO_RAYS};
+
+    #[test]
+    fn ray_table_segments_match_inclusive_ray_mask() {
+        for k in 0..64usize {
+            for rays in [&DIAG_RAYS, &ORTHO_RAYS] {
+                for d in 0..4 {
+                    let ray = rays[d][k];
+                    let mut sqs = ray;
+                    while sqs != 0 {
+                        let b = sqs.trailing_zeros() as usize;
+                        sqs &= sqs - 1;
+                        let seg = (ray & !rays[d][b]) | square_mask(k as u8);
+                        assert_eq!(seg, ray_mask_inclusive(k as u8, b as u8), "k={k} b={b} d={d}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legal_filter_state_pins_and_checks() {
+        let mut board = Board::new();
+        // Rook e8 pins knight e2, bishop a5 pins pawn d2, queen h4 checks e1.
+        board.set_fen("4r1k1/8/8/b7/7q/8/3PN3/4K3 w - - 0 1");
+        let (count, evasion, pins) = board.legal_filter_state(Color::White);
+        assert_eq!(count, 1);
+        assert_eq!(evasion, ray_mask_inclusive(4, 31));
+        assert_eq!(pins[12], ray_mask_inclusive(4, 60));
+        assert_eq!(pins[11], ray_mask_inclusive(4, 32));
+        assert_eq!(pins.iter().filter(|&&m| m != u64::MAX).count(), 2);
     }
 }
