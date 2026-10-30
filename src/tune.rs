@@ -1,6 +1,24 @@
+//! Texel tuning of the piece-square tables (dev tooling, not used in play).
+//!
+//! `extract <out.txt> <games.pgn>...` replays PGN games and writes quiet
+//! positions as `fen;result` lines (result from White's side: 1, 0.5, 0).
+//! `tune <data.txt> <out_psqt.rs> [epochs]` fits PSQT_MG/PSQT_EG by logistic
+//! regression of game result on eval and writes a new src/psqt.rs.
+//!
+//! Material and PST enter the eval linearly through the tapered accumulator,
+//! so each position reduces to a sparse feature list plus a constant
+//! "rest of eval" offset that is exact for the fixed non-PST terms.
+
 use super::*;
+use std::fs;
+use std::io::Write as _;
 
 const KIND_NAMES: [&str; 6] = ["pawn", "knight", "bishop", "rook", "queen", "king"];
+// Skip the first plies of each game's movetext: they come from the opening book.
+const EXTRACT_SKIP_PLIES: usize = 8;
+// Positions this far from equal carry little information about small weights.
+const EXTRACT_MAX_EVAL: i32 = 2000;
+const NUM_PARAMS: usize = 6 * 64;
 
 /// Render middlegame/endgame piece-square tables (material included, a1..h8
 /// from White's side) as the contents of src/psqt.rs.
@@ -23,4 +41,477 @@ pub(crate) fn format_psqt(mg: &[[i32; 64]; 6], eg: &[[i32; 64]; 6], note: &str) 
         out.push_str("];\n\n");
     }
     out.trim_end().to_string() + "\n"
+}
+
+// ---------------------------------------------------------------- extract
+
+fn square_name(sq: u8) -> String {
+    format!("{}{}", (b'a' + sq % 8) as char, sq / 8 + 1)
+}
+
+fn piece_letter(kind: PieceType) -> char {
+    match kind {
+        PieceType::Pawn => 'p',
+        PieceType::Knight => 'n',
+        PieceType::Bishop => 'b',
+        PieceType::Rook => 'r',
+        PieceType::Queen => 'q',
+        PieceType::King => 'k',
+    }
+}
+
+pub(crate) fn board_to_fen(board: &Board) -> String {
+    let mut s = String::new();
+    for rank in (0..8).rev() {
+        let mut empty = 0;
+        for file in 0..8 {
+            match board.squares[rank * 8 + file] {
+                None => empty += 1,
+                Some(p) => {
+                    if empty > 0 {
+                        s.push_str(&empty.to_string());
+                        empty = 0;
+                    }
+                    let c = piece_letter(p.kind);
+                    s.push(if p.color == Color::White { c.to_ascii_uppercase() } else { c });
+                }
+            }
+        }
+        if empty > 0 {
+            s.push_str(&empty.to_string());
+        }
+        if rank > 0 {
+            s.push('/');
+        }
+    }
+    s.push_str(if board.side_to_move == Color::White { " w " } else { " b " });
+    let mut castling = String::new();
+    for (bit, c) in [(1, 'K'), (2, 'Q'), (4, 'k'), (8, 'q')] {
+        if board.castling & bit != 0 {
+            castling.push(c);
+        }
+    }
+    s.push_str(if castling.is_empty() { "-" } else { &castling });
+    s.push(' ');
+    s.push_str(&board.en_passant.map(square_name).unwrap_or_else(|| "-".to_string()));
+    s.push_str(&format!(" {} {}", board.halfmove_clock, board.fullmove_number));
+    s
+}
+
+/// Find the legal move a SAN token denotes. Lenient about check marks,
+/// annotations, `=` in promotions, `0-0` castling and over-disambiguation.
+fn parse_san(board: &mut Board, token: &str, legal: &mut Vec<Move>) -> Option<Move> {
+    let t: String = token
+        .trim_end_matches(['+', '#', '!', '?'])
+        .chars()
+        .filter(|&c| c != '=')
+        .collect::<String>()
+        .replace('0', "O");
+    board.generate_legal_moves(false, legal);
+    if t == "O-O" || t == "O-O-O" {
+        let to_file = if t == "O-O" { 6 } else { 2 };
+        return legal.iter().copied().find(|m| m.is_castle && m.to % 8 == to_file);
+    }
+    let mut body = t.as_str();
+    let kind = match body.chars().next()? {
+        'N' => PieceType::Knight,
+        'B' => PieceType::Bishop,
+        'R' => PieceType::Rook,
+        'Q' => PieceType::Queen,
+        'K' => PieceType::King,
+        _ => PieceType::Pawn,
+    };
+    if kind != PieceType::Pawn {
+        body = &body[1..];
+    }
+    let mut promotion = None;
+    if kind == PieceType::Pawn && body.len() > 2 {
+        promotion = match body.chars().last()? {
+            'Q' => Some(PieceType::Queen),
+            'R' => Some(PieceType::Rook),
+            'B' => Some(PieceType::Bishop),
+            'N' => Some(PieceType::Knight),
+            _ => None,
+        };
+        if promotion.is_some() {
+            body = &body[..body.len() - 1];
+        }
+    }
+    if body.len() < 2 {
+        return None;
+    }
+    let dest = parse_square(&body[body.len() - 2..])?;
+    let hints: Vec<char> = body[..body.len() - 2].chars().filter(|&c| c != 'x').collect();
+    let mut found = None;
+    for &m in legal.iter() {
+        if m.to != dest || m.is_castle || m.promotion != promotion {
+            continue;
+        }
+        if board.squares[m.from as usize].map(|p| p.kind) != Some(kind) {
+            continue;
+        }
+        let fits = hints.iter().all(|&h| match h {
+            'a'..='h' => m.from % 8 == h as u8 - b'a',
+            '1'..='8' => m.from / 8 == h as u8 - b'1',
+            _ => false,
+        });
+        if fits {
+            if found.is_some() {
+                return None; // ambiguous
+            }
+            found = Some(m);
+        }
+    }
+    found
+}
+
+/// Strip comments, variations, NAGs and move numbers from PGN movetext.
+fn movetext_tokens(text: &str) -> Vec<String> {
+    let mut clean = String::with_capacity(text.len());
+    let (mut brace, mut paren) = (false, 0usize);
+    for c in text.chars() {
+        match c {
+            '{' if !brace => brace = true,
+            '}' if brace => brace = false,
+            '(' if !brace => paren += 1,
+            ')' if !brace && paren > 0 => paren -= 1,
+            _ if brace || paren > 0 => {}
+            _ => clean.push(c),
+        }
+    }
+    clean
+        .split_whitespace()
+        .filter_map(|tok| {
+            let tok = match tok.rfind('.') {
+                Some(i) => &tok[i + 1..],
+                None => tok,
+            };
+            if tok.is_empty() || tok.starts_with('$') || ["1-0", "0-1", "1/2-1/2", "*"].contains(&tok) {
+                None
+            } else {
+                Some(tok.to_string())
+            }
+        })
+        .collect()
+}
+
+struct PgnGame {
+    tags: Vec<(String, String)>,
+    movetext: String,
+}
+
+fn parse_pgn(text: &str) -> Vec<PgnGame> {
+    let mut games = Vec::new();
+    let mut cur = PgnGame { tags: Vec::new(), movetext: String::new() };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            if line.starts_with("[Event ") && (!cur.tags.is_empty() || !cur.movetext.is_empty()) {
+                games.push(std::mem::replace(&mut cur, PgnGame { tags: Vec::new(), movetext: String::new() }));
+            }
+            let inner = &line[1..line.len() - 1];
+            if let Some((name, rest)) = inner.split_once(' ') {
+                cur.tags.push((name.to_string(), rest.trim().trim_matches('"').to_string()));
+            }
+        } else if !line.is_empty() {
+            cur.movetext.push_str(line);
+            cur.movetext.push(' ');
+        }
+    }
+    if !cur.tags.is_empty() {
+        games.push(cur);
+    }
+    games
+}
+
+pub(crate) fn handle_extract(cmd: &str) {
+    let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if args.len() < 2 {
+        println!("info string usage: extract <out.txt> <games.pgn>...");
+        return;
+    }
+    let mut out = match fs::File::create(args[0]) {
+        Ok(f) => std::io::BufWriter::new(f),
+        Err(e) => {
+            println!("info string extract: cannot create {}: {}", args[0], e);
+            return;
+        }
+    };
+    let mut engine = EngineState::new();
+    let mut board = Board::new();
+    let mut legal = Vec::new();
+    let (mut games_used, mut positions, mut bad_games) = (0usize, 0usize, 0usize);
+
+    for path in &args[1..] {
+        let Ok(text) = fs::read_to_string(path) else {
+            println!("info string extract: cannot read {}", path);
+            continue;
+        };
+        for game in parse_pgn(&text) {
+            let tag = |name: &str| game.tags.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
+            let result = match tag("Result") {
+                Some("1-0") => "1",
+                Some("0-1") => "0",
+                Some("1/2-1/2") => "0.5",
+                _ => continue,
+            };
+            match tag("FEN") {
+                Some(fen) => board.set_fen(fen),
+                None => board.set_startpos(),
+            }
+            engine.clear_for_new_game();
+            let mut lines = Vec::new();
+            let mut ok = true;
+            for (ply, tok) in movetext_tokens(&game.movetext).iter().enumerate() {
+                if ply >= EXTRACT_SKIP_PLIES && !board.is_in_check(board.side_to_move) {
+                    let static_eval = eval_for_side(&board);
+                    if static_eval.abs() < EXTRACT_MAX_EVAL && search::qsearch_gap(&mut board, &mut engine) == 0 {
+                        lines.push(format!("{};{}", board_to_fen(&board), result));
+                    }
+                }
+                match parse_san(&mut board, tok, &mut legal) {
+                    Some(mv) => {
+                        board.make_move(mv);
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                bad_games += 1;
+                continue;
+            }
+            games_used += 1;
+            positions += lines.len();
+            for l in lines {
+                let _ = writeln!(out, "{}", l);
+            }
+        }
+    }
+    let _ = out.flush();
+    println!(
+        "info string extract: {} games, {} quiet positions, {} games skipped (unparsable moves)",
+        games_used, positions, bad_games
+    );
+}
+
+// ---------------------------------------------------------------- tune
+
+struct Dataset {
+    // Feature (sign << 15 | kind*64 + square) per piece, positions delimited by `offsets`.
+    feats: Vec<u16>,
+    offsets: Vec<u32>,
+    phase: Vec<u8>,
+    rest: Vec<f32>,
+    result: Vec<f32>,
+}
+
+impl Dataset {
+    fn new() -> Self {
+        Self { feats: Vec::new(), offsets: vec![0], phase: Vec::new(), rest: Vec::new(), result: Vec::new() }
+    }
+
+    fn len(&self) -> usize {
+        self.result.len()
+    }
+
+    fn push(&mut self, board: &Board, result: f32) {
+        let phase = board.eval_acc.phase.clamp(0, 24);
+        let acc = &board.eval_acc;
+        let linear = (acc.mg * phase + acc.eg * (24 - phase)) as f64 / 24.0;
+        for sq in 0..64u8 {
+            if let Some(p) = board.squares[sq as usize] {
+                let rel = if p.color == Color::White { sq } else { sq ^ 56 } as u16;
+                let sign: u16 = if p.color == Color::White { 0 } else { 1 << 15 };
+                self.feats.push(sign | (p.kind as u16 * 64 + rel));
+            }
+        }
+        self.offsets.push(self.feats.len() as u32);
+        self.phase.push(phase as u8);
+        self.rest.push((eval::evaluate(board) as f64 - linear) as f32);
+        self.result.push(result);
+    }
+
+    /// Eval (White's side) of position i under params (mg in [0, 384), eg in [384, 768)).
+    fn eval(&self, i: usize, params: &[f64]) -> f64 {
+        let (mut mg, mut eg) = (0.0, 0.0);
+        for &f in &self.feats[self.offsets[i] as usize..self.offsets[i + 1] as usize] {
+            let idx = (f & 0x7fff) as usize;
+            let s = if f & 0x8000 != 0 { -1.0 } else { 1.0 };
+            mg += s * params[idx];
+            eg += s * params[NUM_PARAMS + idx];
+        }
+        let ph = self.phase[i] as f64;
+        (mg * ph + eg * (24.0 - ph)) / 24.0 + self.rest[i] as f64
+    }
+}
+
+fn sigmoid(eval: f64, k: f64) -> f64 {
+    1.0 / (1.0 + 10f64.powf(-k * eval / 400.0))
+}
+
+/// Mean squared error over `idx`, in parallel.
+fn mse(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> f64 {
+    let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let chunk = idx.len().div_ceil(threads).max(1);
+    let total: f64 = thread::scope(|s| {
+        idx.chunks(chunk)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .map(|&i| {
+                            let e = data.result[i] as f64 - sigmoid(data.eval(i, params), k);
+                            e * e
+                        })
+                        .sum::<f64>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .sum()
+    });
+    total / idx.len() as f64
+}
+
+/// Gradient of the training MSE with respect to all 768 parameters.
+fn gradient(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> Vec<f64> {
+    let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let chunk = idx.len().div_ceil(threads).max(1);
+    let c = k * std::f64::consts::LN_10 / 400.0;
+    let parts: Vec<Vec<f64>> = thread::scope(|s| {
+        idx.chunks(chunk)
+            .map(|part| {
+                s.spawn(move || {
+                    let mut g = vec![0.0; 2 * NUM_PARAMS];
+                    for &i in part {
+                        let sg = sigmoid(data.eval(i, params), k);
+                        let d = -2.0 * (data.result[i] as f64 - sg) * sg * (1.0 - sg) * c;
+                        let ph = data.phase[i] as f64 / 24.0;
+                        for &f in &data.feats[data.offsets[i] as usize..data.offsets[i + 1] as usize] {
+                            let fi = (f & 0x7fff) as usize;
+                            let s = if f & 0x8000 != 0 { -d } else { d };
+                            g[fi] += s * ph;
+                            g[NUM_PARAMS + fi] += s * (1.0 - ph);
+                        }
+                    }
+                    g
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
+    });
+    let n = idx.len() as f64;
+    let mut g = vec![0.0; 2 * NUM_PARAMS];
+    for p in parts {
+        for (a, b) in g.iter_mut().zip(p) {
+            *a += b / n;
+        }
+    }
+    g
+}
+
+pub(crate) fn handle_tune(cmd: &str) {
+    let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if args.len() < 2 {
+        println!("info string usage: tune <data.txt> <out_psqt.rs> [epochs]");
+        return;
+    }
+    let epochs: usize = args.get(2).and_then(|e| e.parse().ok()).unwrap_or(2000);
+    let Ok(text) = fs::read_to_string(args[0]) else {
+        println!("info string tune: cannot read {}", args[0]);
+        return;
+    };
+
+    let mut data = Dataset::new();
+    let mut board = Board::new();
+    for line in text.lines() {
+        let Some((fen, res)) = line.rsplit_once(';') else { continue };
+        let Ok(result) = res.trim().parse::<f32>() else { continue };
+        board.set_fen(fen);
+        data.push(&board, result);
+    }
+    // Every 10th position is held out to detect overfitting.
+    let (train, valid): (Vec<usize>, Vec<usize>) = (0..data.len()).partition(|i| i % 10 != 0);
+    println!("info string tune: {} positions ({} train, {} validation)", data.len(), train.len(), valid.len());
+    flush_stdout();
+
+    let mut params = vec![0.0; 2 * NUM_PARAMS];
+    for k in 0..6 {
+        for sq in 0..64 {
+            params[k * 64 + sq] = psqt::PSQT_MG[k][sq] as f64;
+            params[NUM_PARAMS + k * 64 + sq] = psqt::PSQT_EG[k][sq] as f64;
+        }
+    }
+
+    // Fit the eval-to-score scale K for the current tables, then hold it fixed.
+    let mut k = 1.0;
+    let mut best_k_mse = f64::MAX;
+    for step in 0..=200 {
+        let cand = 0.3 + step as f64 * 0.01;
+        let m = mse(&data, &train, &params, cand);
+        if m < best_k_mse {
+            best_k_mse = m;
+            k = cand;
+        }
+    }
+    let start_valid = mse(&data, &valid, &params, k);
+    println!("info string tune: K {:.2}, start mse train {:.6} valid {:.6}", k, best_k_mse, start_valid);
+    flush_stdout();
+
+    // Adam on the full batch.
+    let (lr, b1, b2, eps) = (2.0, 0.9, 0.999, 1e-8);
+    let mut m1 = vec![0.0; 2 * NUM_PARAMS];
+    let mut m2 = vec![0.0; 2 * NUM_PARAMS];
+    let mut best_params = params.clone();
+    let mut best_valid = start_valid;
+    for epoch in 1..=epochs {
+        let g = gradient(&data, &train, &params, k);
+        for i in 0..params.len() {
+            m1[i] = b1 * m1[i] + (1.0 - b1) * g[i];
+            m2[i] = b2 * m2[i] + (1.0 - b2) * g[i] * g[i];
+            let mh = m1[i] / (1.0 - b1.powi(epoch as i32));
+            let vh = m2[i] / (1.0 - b2.powi(epoch as i32));
+            params[i] -= lr * mh / (vh.sqrt() + eps);
+        }
+        if epoch % 50 == 0 || epoch == epochs {
+            let v = mse(&data, &valid, &params, k);
+            if v < best_valid {
+                best_valid = v;
+                best_params.clone_from(&params);
+            }
+            println!(
+                "info string tune: epoch {} train {:.6} valid {:.6} (best {:.6})",
+                epoch,
+                mse(&data, &train, &params, k),
+                v,
+                best_valid
+            );
+            flush_stdout();
+        }
+    }
+
+    let mut mg = [[0i32; 64]; 6];
+    let mut eg = [[0i32; 64]; 6];
+    for kind in 0..6 {
+        for sq in 0..64 {
+            mg[kind][sq] = best_params[kind * 64 + sq].round() as i32;
+            eg[kind][sq] = best_params[NUM_PARAMS + kind * 64 + sq].round() as i32;
+        }
+    }
+    let note = format!(
+        "Texel-tuned on {} positions, K {:.2}; validation mse {:.6} -> {:.6}.",
+        data.len(),
+        k,
+        start_valid,
+        best_valid
+    );
+    match fs::write(args[1], format_psqt(&mg, &eg, &note)) {
+        Ok(()) => println!("info string tune: wrote {} ({})", args[1], note),
+        Err(e) => println!("info string tune: cannot write {}: {}", args[1], e),
+    }
 }

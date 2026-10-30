@@ -1352,6 +1352,16 @@ fn negamax(
     best
 }
 
+/// |quiescence - static eval| for the side to move; 0 means the position is quiet.
+/// Used by the tuner's position extractor.
+pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
+    let key = board_hash(board, &engine.zobrist);
+    let mut search = Search::new(None);
+    let mut rep_stack = vec![key];
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0);
+    (q - eval_for_side(board)).abs()
+}
+
 fn quiescence(
     board: &mut Board,
     mut alpha: i32,
