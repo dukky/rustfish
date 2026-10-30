@@ -225,14 +225,18 @@ impl TransTable {
         let cur_depth = data_depth(cur_data);
         let current_age = self.inner.current_age.load(Ordering::Relaxed);
 
-        let replace = if cur_depth < 0 || cur_key != key {
-            true
-        } else {
-            let cur_age_bonus = if data_age(cur_data) == current_age { 4 } else { 0 };
-            depth.clamp(0, 254) + 1 >= cur_depth + cur_age_bonus
-        };
+        let same_key = cur_depth >= 0 && cur_key == key;
+        // Same position: overwrite unless the stored entry is from this search
+        // and clearly deeper (Stockfish-style slack of 4 plies), so fresh
+        // bounds and moves from later iterations are kept. Exact always wins.
+        let replace = !same_key
+            || bound == Bound::Exact
+            || data_age(cur_data) != current_age
+            || depth.clamp(0, 254) + 4 > cur_depth;
 
         if replace {
+            // Keep the old best move when the new search found none.
+            let best = if same_key && best.is_none() { unpack_move(cur_data) } else { best };
             let data = pack_data(depth, score, static_eval, bound, best, current_age);
             slot.data.store(data, Ordering::Relaxed);
             slot.key.store(key ^ data, Ordering::Relaxed);
@@ -424,6 +428,23 @@ mod tests {
             assert!(e.bound == bound);
             assert!(e.best == best);
         }
+    }
+
+    #[test]
+    fn same_key_deeper_store_replaces_and_keeps_move() {
+        let tt = TransTable::new(1);
+        let key = 0x0123_4567_89ab_cdefu64;
+        let m = Some(mv(12, 28, None, false, false));
+        tt.store(key, 5, 40, None, Bound::Lower, m);
+        // A deeper (next-iteration) result for the same position must win.
+        tt.store(key, 6, -20, None, Bound::Upper, None);
+        let e = tt.probe(key).unwrap();
+        assert_eq!(e.depth, 6);
+        assert_eq!(e.score, -20);
+        assert!(e.best == m, "old move kept when new store has none");
+        // A much shallower non-exact store from the same search is ignored.
+        tt.store(key, 1, 999, None, Bound::Lower, None);
+        assert_eq!(tt.probe(key).unwrap().depth, 6);
     }
 
     #[test]
