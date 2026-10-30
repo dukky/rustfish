@@ -1794,11 +1794,12 @@ fn see(board: &Board, mv: Move) -> i32 {
     }
     squares[mv.to as usize] = Some(placed);
 
+    // Only a promotion changes the value of the capturing piece; a plain
+    // capture must not be charged the pawn value.
     let promo_delta = mv
         .promotion
-        .map(piece_value)
-        .unwrap_or(0)
-        .saturating_sub(piece_value(PieceType::Pawn));
+        .map(|p| piece_value(p) - piece_value(PieceType::Pawn))
+        .unwrap_or(0);
 
     let mut gain = [0i32; 32];
     let mut depth = 0usize;
@@ -1811,10 +1812,15 @@ fn see(board: &Board, mv: Move) -> i32 {
     loop {
         depth += 1;
         if depth >= gain.len() {
+            depth -= 1;
             break;
         }
 
+        // No recapture: gain[depth] was never written, so step back to the
+        // last real entry before unwinding (otherwise the stale 0 clamps the
+        // previous capture's gain to <= 0).
         let Some((from, attacker)) = least_valuable_attacker(&squares, occ, target, side) else {
+            depth -= 1;
             break;
         };
 
@@ -1893,6 +1899,54 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
 mod tests {
     use super::*;
     use std::thread;
+
+    fn see_of(fen: &str, uci: &str) -> i32 {
+        let mut board = Board::new();
+        board.set_fen(fen);
+        let mv = parse_uci_move(&mut board, uci).expect("legal move");
+        see(&board, mv)
+    }
+
+    #[test]
+    fn see_standard_values() {
+        // Undefended NxQ wins the queen.
+        assert_eq!(see_of("4k3/8/8/3q4/8/4N3/8/4K3 w - - 0 1", "e3d5"), 900);
+        // Undefended PxP wins a pawn.
+        assert_eq!(see_of("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1", "e4d5"), 100);
+        // Pawn-defended PxP is an even trade.
+        assert_eq!(see_of("4k3/8/2p5/3p4/4P3/8/8/4K3 w - - 0 1", "e4d5"), 0);
+        // QxP defended by a pawn loses the queen for a pawn.
+        assert_eq!(see_of("4k3/8/2p5/3p4/8/8/3Q4/4K3 w - - 0 1", "d2d5"), -800);
+        // NxB defended by a pawn: wins B, loses N.
+        assert_eq!(see_of("4k3/8/2p5/3b4/8/4N3/8/4K3 w - - 0 1", "e3d5"), 10);
+    }
+
+    #[test]
+    fn see_xray_recapture() {
+        // RxP defended by a rook: loses the exchange without backup...
+        assert_eq!(see_of("3rk3/8/8/3p4/8/8/3R4/4K3 w - - 0 1", "d2d5"), -400);
+        // ...but a second rook behind the first (x-ray) recaptures.
+        assert_eq!(see_of("3rk3/8/8/3p4/8/8/3R4/3RK3 w - - 0 1", "d2d5"), 100);
+        // Black x-ray too (rooks d8+d7 vs d2+d1): R takes P, RxR, RxR, RxR.
+        assert_eq!(see_of("3rk3/3r4/8/3p4/8/8/3R4/3RK3 w - - 0 1", "d2d5"), -400);
+    }
+
+    #[test]
+    fn see_en_passant_and_promotion() {
+        assert_eq!(see_of("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"), 100);
+        // Undefended capture-promotion: rook + (queen - pawn).
+        assert_eq!(see_of("r3k3/1P6/8/8/8/8/8/4K3 w - - 0 1", "b7a8q"), 1300);
+        // Defended capture-promotion: wins rook + promo, loses the new queen.
+        assert_eq!(see_of("r3k3/1Pn5/8/8/8/8/8/4K3 w - - 0 1", "b7a8q"), 400);
+    }
+
+    #[test]
+    fn see_king_as_last_attacker() {
+        // Pawn defended only by the king: K recaptures the knight.
+        assert_eq!(see_of("8/8/4k3/3p4/8/4N3/8/4K3 w - - 0 1", "e3d5"), -220);
+        // With a bishop also covering d5 the king cannot recapture.
+        assert_eq!(see_of("8/8/4k3/3p4/8/4N3/B7/4K3 w - - 0 1", "e3d5"), 100);
+    }
 
     #[test]
     fn quiescence_checkmate_score_is_ply_aware() {
