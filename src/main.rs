@@ -803,10 +803,10 @@ impl Default for SearchParams {
             reverse_futility_margin_d1: 90,
             reverse_futility_margin_d2: 180,
             reverse_futility_margin_d3: 300,
-            null_margin_base: 90,
-            null_margin_depth_scale: 20,
-            null_reduction_base: 2,
-            null_reduction_depth_div: 4,
+            null_margin_base: 0,
+            null_margin_depth_scale: 0,
+            null_reduction_base: 3,
+            null_reduction_depth_div: 3,
             lmp_limit_d1: 6,
             lmp_limit_d2: 10,
             lmp_limit_d3: 14,
@@ -975,10 +975,10 @@ fn main() {
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
             println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
             println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");
-            println!("option name NullMarginBase type spin default 90 min 0 max 300");
-            println!("option name NullMarginDepthScale type spin default 20 min 0 max 80");
-            println!("option name NullReductionBase type spin default 2 min 0 max 6");
-            println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
+            println!("option name NullMarginBase type spin default 0 min 0 max 300");
+            println!("option name NullMarginDepthScale type spin default 0 min 0 max 80");
+            println!("option name NullReductionBase type spin default 3 min 0 max 6");
+            println!("option name NullReductionDepthDiv type spin default 3 min 1 max 12");
             println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
             println!("option name LmpLimitD2 type spin default 10 min 0 max 32");
             println!("option name LmpLimitD3 type spin default 14 min 0 max 40");

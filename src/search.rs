@@ -12,6 +12,8 @@ const HARD_LIMIT_FACTOR: u64 = 3;
 const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 // A score drop of at least this many cp since the last iteration buys more time.
 const SCORE_DROP_MARGIN: i32 = 40;
+// Null-move reduction grows by one ply per this many cp of static eval above beta (max 3).
+const NULL_EVAL_DIV: i32 = 200;
 
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
@@ -1096,7 +1098,10 @@ fn negamax(
 
             let child_key = null_move_hash(key, old_ep, &engine.zobrist);
             rep_stack.push(child_key);
-            let reduction = params.null_reduction_base + depth / params.null_reduction_depth_div;
+            // Reduce more the further static eval is above beta.
+            let eval_margin = static_eval.map(|se| ((se - beta) / NULL_EVAL_DIV).clamp(0, 3)).unwrap_or(0);
+            let reduction =
+                params.null_reduction_base + depth / params.null_reduction_depth_div + eval_margin;
             let score = -negamax(
                 board,
                 depth - 1 - reduction,
