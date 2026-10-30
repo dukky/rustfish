@@ -1667,150 +1667,279 @@ pub(crate) fn piece_attacks_square(
     }
 }
 
-fn piece_on_square(squares: &[Option<Piece>; 64], f: i8, r: i8) -> Option<(u8, Piece)> {
-    if !in_bounds(f, r) {
-        return None;
-    }
-    let sq = (r as u8) * 8 + (f as u8);
-    squares[sq as usize].map(|p| (sq, p))
-}
+/// Original mailbox-scan SEE, kept only as the reference for the
+/// differential test of the bitboard `see` below.
+#[cfg(test)]
+mod see_reference {
+    use super::*;
 
-/// First blocker along `ray` over occupancy `occ`; `toward_high` says
-/// whether the ray runs toward higher bit indices from the target.
-fn first_blocker(ray: u64, occ: u64, toward_high: bool) -> Option<u8> {
-    let blockers = ray & occ;
-    if blockers == 0 {
-        return None;
+    fn piece_on_square(squares: &[Option<Piece>; 64], f: i8, r: i8) -> Option<(u8, Piece)> {
+        if !in_bounds(f, r) {
+            return None;
+        }
+        let sq = (r as u8) * 8 + (f as u8);
+        squares[sq as usize].map(|p| (sq, p))
     }
-    Some(if toward_high {
-        blockers.trailing_zeros() as u8
-    } else {
-        63 - blockers.leading_zeros() as u8
-    })
-}
 
-/// Directional slider probes in the same order as the old mailbox scan, so
-/// equal-valued attacker selection (and therefore x-ray reveal order) is
-/// unchanged. Rays: DIAG_RAYS = [(1,1),(-1,1),(1,-1),(-1,-1)],
-/// ORTHO_RAYS = [(0,1),(1,0),(0,-1),(-1,0)]; first two of each run toward
-/// higher bits.
-fn first_slider_attacker(
-    squares: &[Option<Piece>; 64],
-    occ: u64,
-    target: u8,
-    side: Color,
-    dirs: &[(usize, bool, bool)],
-    allowed: &[PieceType],
-) -> Option<(u8, Piece)> {
-    use crate::bitboard::{DIAG_RAYS, ORTHO_RAYS};
-    let t = target as usize;
-    for &(idx, diag, toward_high) in dirs {
-        let ray = if diag { DIAG_RAYS[idx][t] } else { ORTHO_RAYS[idx][t] };
-        if let Some(sq) = first_blocker(ray, occ, toward_high) {
-            if let Some(p) = squares[sq as usize] {
-                if p.color == side && allowed.contains(&p.kind) {
+    /// First blocker along `ray` over occupancy `occ`; `toward_high` says
+    /// whether the ray runs toward higher bit indices from the target.
+    fn first_blocker(ray: u64, occ: u64, toward_high: bool) -> Option<u8> {
+        let blockers = ray & occ;
+        if blockers == 0 {
+            return None;
+        }
+        Some(if toward_high {
+            blockers.trailing_zeros() as u8
+        } else {
+            63 - blockers.leading_zeros() as u8
+        })
+    }
+
+    /// Directional slider probes in the same order as the old mailbox scan, so
+    /// equal-valued attacker selection (and therefore x-ray reveal order) is
+    /// unchanged. Rays: DIAG_RAYS = [(1,1),(-1,1),(1,-1),(-1,-1)],
+    /// ORTHO_RAYS = [(0,1),(1,0),(0,-1),(-1,0)]; first two of each run toward
+    /// higher bits.
+    fn first_slider_attacker(
+        squares: &[Option<Piece>; 64],
+        occ: u64,
+        target: u8,
+        side: Color,
+        dirs: &[(usize, bool, bool)],
+        allowed: &[PieceType],
+    ) -> Option<(u8, Piece)> {
+        use crate::bitboard::{DIAG_RAYS, ORTHO_RAYS};
+        let t = target as usize;
+        for &(idx, diag, toward_high) in dirs {
+            let ray = if diag { DIAG_RAYS[idx][t] } else { ORTHO_RAYS[idx][t] };
+            if let Some(sq) = first_blocker(ray, occ, toward_high) {
+                if let Some(p) = squares[sq as usize] {
+                    if p.color == side && allowed.contains(&p.kind) {
+                        return Some((sq, p));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn least_valuable_attacker(
+        squares: &[Option<Piece>; 64],
+        occ: u64,
+        target: u8,
+        side: Color,
+    ) -> Option<(u8, Piece)> {
+        let tf = (target % 8) as i8;
+        let tr = (target / 8) as i8;
+
+        let pawn_rank = match side {
+            Color::White => tr - 1,
+            Color::Black => tr + 1,
+        };
+        for pawn_file in [tf - 1, tf + 1] {
+            if let Some((sq, p)) = piece_on_square(squares, pawn_file, pawn_rank) {
+                if p.color == side && p.kind == PieceType::Pawn {
                     return Some((sq, p));
                 }
             }
         }
-    }
-    None
-}
 
-fn least_valuable_attacker(
-    squares: &[Option<Piece>; 64],
-    occ: u64,
-    target: u8,
-    side: Color,
-) -> Option<(u8, Piece)> {
-    let tf = (target % 8) as i8;
-    let tr = (target / 8) as i8;
-
-    let pawn_rank = match side {
-        Color::White => tr - 1,
-        Color::Black => tr + 1,
-    };
-    for pawn_file in [tf - 1, tf + 1] {
-        if let Some((sq, p)) = piece_on_square(squares, pawn_file, pawn_rank) {
-            if p.color == side && p.kind == PieceType::Pawn {
-                return Some((sq, p));
-            }
-        }
-    }
-
-    for (df, dr) in [
-        (1, 2),
-        (2, 1),
-        (2, -1),
-        (1, -2),
-        (-1, -2),
-        (-2, -1),
-        (-2, 1),
-        (-1, 2),
-    ] {
-        if let Some((sq, p)) = piece_on_square(squares, tf + df, tr + dr) {
-            if p.color == side && p.kind == PieceType::Knight {
-                return Some((sq, p));
-            }
-        }
-    }
-
-    const BISHOP_DIRS: &[(usize, bool, bool)] =
-        &[(0, true, true), (2, true, false), (1, true, true), (3, true, false)];
-    const ROOK_DIRS: &[(usize, bool, bool)] =
-        &[(1, false, true), (3, false, false), (0, false, true), (2, false, false)];
-    const QUEEN_DIRS: &[(usize, bool, bool)] = &[
-        (0, true, true),
-        (2, true, false),
-        (1, true, true),
-        (3, true, false),
-        (1, false, true),
-        (3, false, false),
-        (0, false, true),
-        (2, false, false),
-    ];
-
-    if let Some(attacker) =
-        first_slider_attacker(squares, occ, target, side, BISHOP_DIRS, &[PieceType::Bishop])
-    {
-        return Some(attacker);
-    }
-
-    if let Some(attacker) =
-        first_slider_attacker(squares, occ, target, side, ROOK_DIRS, &[PieceType::Rook])
-    {
-        return Some(attacker);
-    }
-
-    if let Some(attacker) =
-        first_slider_attacker(squares, occ, target, side, QUEEN_DIRS, &[PieceType::Queen])
-    {
-        return Some(attacker);
-    }
-
-    for df in -1..=1 {
-        for dr in -1..=1 {
-            if df == 0 && dr == 0 {
-                continue;
-            }
+        for (df, dr) in [
+            (1, 2),
+            (2, 1),
+            (2, -1),
+            (1, -2),
+            (-1, -2),
+            (-2, -1),
+            (-2, 1),
+            (-1, 2),
+        ] {
             if let Some((sq, p)) = piece_on_square(squares, tf + df, tr + dr) {
-                if p.color == side && p.kind == PieceType::King {
+                if p.color == side && p.kind == PieceType::Knight {
                     return Some((sq, p));
                 }
             }
         }
+
+        const BISHOP_DIRS: &[(usize, bool, bool)] =
+            &[(0, true, true), (2, true, false), (1, true, true), (3, true, false)];
+        const ROOK_DIRS: &[(usize, bool, bool)] =
+            &[(1, false, true), (3, false, false), (0, false, true), (2, false, false)];
+        const QUEEN_DIRS: &[(usize, bool, bool)] = &[
+            (0, true, true),
+            (2, true, false),
+            (1, true, true),
+            (3, true, false),
+            (1, false, true),
+            (3, false, false),
+            (0, false, true),
+            (2, false, false),
+        ];
+
+        if let Some(attacker) =
+            first_slider_attacker(squares, occ, target, side, BISHOP_DIRS, &[PieceType::Bishop])
+        {
+            return Some(attacker);
+        }
+
+        if let Some(attacker) =
+            first_slider_attacker(squares, occ, target, side, ROOK_DIRS, &[PieceType::Rook])
+        {
+            return Some(attacker);
+        }
+
+        if let Some(attacker) =
+            first_slider_attacker(squares, occ, target, side, QUEEN_DIRS, &[PieceType::Queen])
+        {
+            return Some(attacker);
+        }
+
+        for df in -1..=1 {
+            for dr in -1..=1 {
+                if df == 0 && dr == 0 {
+                    continue;
+                }
+                if let Some((sq, p)) = piece_on_square(squares, tf + df, tr + dr) {
+                    if p.color == side && p.kind == PieceType::King {
+                        return Some((sq, p));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
-    None
+    pub(super) fn see(board: &Board, mv: Move) -> i32 {
+        if !is_capture_move(board, mv) {
+            return 0;
+        }
+
+        let mut squares = board.squares;
+        let moving = match squares[mv.from as usize] {
+            Some(p) => p,
+            None => return 0,
+        };
+
+        let mut occ = board.bb.occ_all();
+
+        let captured = if mv.is_en_passant {
+            let cap_sq = if moving.color == Color::White { mv.to - 8 } else { mv.to + 8 };
+            let c = squares[cap_sq as usize];
+            squares[cap_sq as usize] = None;
+            occ &= !(1u64 << cap_sq);
+            c
+        } else {
+            squares[mv.to as usize]
+        };
+
+        let captured = match captured {
+            Some(c) => c,
+            None => return 0,
+        };
+
+        squares[mv.from as usize] = None;
+        occ &= !(1u64 << mv.from);
+        occ |= 1u64 << mv.to;
+        let mut placed = moving;
+        if let Some(promo) = mv.promotion {
+            placed.kind = promo;
+        }
+        squares[mv.to as usize] = Some(placed);
+
+        let promo_delta = mv
+            .promotion
+            .map(piece_value)
+            .unwrap_or(0)
+            .saturating_sub(piece_value(PieceType::Pawn));
+
+        let mut gain = [0i32; 32];
+        let mut depth = 0usize;
+        gain[0] = piece_value(captured.kind) + promo_delta;
+
+        let mut side = board.side_to_move.opposite();
+        let target = mv.to;
+        let mut occupant_value = piece_value(placed.kind);
+
+        loop {
+            depth += 1;
+            if depth >= gain.len() {
+                break;
+            }
+
+            let Some((from, attacker)) = least_valuable_attacker(&squares, occ, target, side) else {
+                break;
+            };
+
+            gain[depth] = occupant_value - gain[depth - 1];
+
+            squares[from as usize] = None;
+            occ &= !(1u64 << from);
+            squares[target as usize] = Some(attacker);
+            occupant_value = piece_value(attacker.kind);
+            side = side.opposite();
+
+            if gain[depth].max(-gain[depth - 1]) < 0 {
+                break;
+            }
+        }
+
+        while depth > 0 {
+            gain[depth - 1] = -std::cmp::max(-gain[depth - 1], gain[depth]);
+            depth -= 1;
+        }
+
+        gain[0]
+    }
 }
 
+/// Pick the attacker the original direction-ordered scan would find first
+/// when several sliders of one kind hit the target. Only one live attacker
+/// can sit on each ray, so the first ray (in the old probe order) holding a
+/// candidate decides. Keeping this order keeps x-ray reveals, and therefore
+/// every SEE value, identical to the mailbox implementation.
+#[inline(always)]
+fn pick_slider(cands: u64, t: usize, order: &[(bool, usize)]) -> u64 {
+    use crate::bitboard::{DIAG_RAYS, ORTHO_RAYS};
+    if cands & (cands - 1) == 0 {
+        return cands;
+    }
+    for &(diag, d) in order {
+        let ray = if diag { DIAG_RAYS[d][t] } else { ORTHO_RAYS[d][t] };
+        let m = cands & ray;
+        if m != 0 {
+            return m;
+        }
+    }
+    cands & cands.wrapping_neg()
+}
+
+const SEE_BISHOP_ORDER: &[(bool, usize)] = &[(true, 0), (true, 2), (true, 1), (true, 3)];
+const SEE_ROOK_ORDER: &[(bool, usize)] = &[(false, 1), (false, 3), (false, 0), (false, 2)];
+const SEE_QUEEN_ORDER: &[(bool, usize)] = &[
+    (true, 0),
+    (true, 2),
+    (true, 1),
+    (true, 3),
+    (false, 1),
+    (false, 3),
+    (false, 0),
+    (false, 2),
+];
+
+/// Static exchange evaluation with a bitboard attackers-to-square set:
+/// all attackers are computed once, x-rays are added by recomputing slider
+/// attacks after any non-knight attacker leaves its square, and the least
+/// valuable attacker is found by scanning piece-type bitboards in order.
+/// Values match `see_reference::see` exactly (checked by a differential test).
 fn see(board: &Board, mv: Move) -> i32 {
+    use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS};
+
     if !is_capture_move(board, mv) {
         return 0;
     }
 
-    let mut squares = board.squares;
-    let moving = match squares[mv.from as usize] {
+    let moving = match board.squares[mv.from as usize] {
         Some(p) => p,
         None => return 0,
     };
@@ -1819,12 +1948,10 @@ fn see(board: &Board, mv: Move) -> i32 {
 
     let captured = if mv.is_en_passant {
         let cap_sq = if moving.color == Color::White { mv.to - 8 } else { mv.to + 8 };
-        let c = squares[cap_sq as usize];
-        squares[cap_sq as usize] = None;
         occ &= !(1u64 << cap_sq);
-        c
+        board.squares[cap_sq as usize]
     } else {
-        squares[mv.to as usize]
+        board.squares[mv.to as usize]
     };
 
     let captured = match captured {
@@ -1832,14 +1959,9 @@ fn see(board: &Board, mv: Move) -> i32 {
         None => return 0,
     };
 
-    squares[mv.from as usize] = None;
     occ &= !(1u64 << mv.from);
     occ |= 1u64 << mv.to;
-    let mut placed = moving;
-    if let Some(promo) = mv.promotion {
-        placed.kind = promo;
-    }
-    squares[mv.to as usize] = Some(placed);
+    let placed_kind = mv.promotion.unwrap_or(moving.kind);
 
     let promo_delta = mv
         .promotion
@@ -1851,9 +1973,19 @@ fn see(board: &Board, mv: Move) -> i32 {
     let mut depth = 0usize;
     gain[0] = piece_value(captured.kind) + promo_delta;
 
+    let pc = &board.bb.pieces;
+    let t = mv.to as usize;
+    let diag_sliders = pc[0][2] | pc[0][4] | pc[1][2] | pc[1][4];
+    let ortho_sliders = pc[0][3] | pc[0][4] | pc[1][3] | pc[1][4];
+    let mut attackers = (PAWN_ATTACKERS[0][t] & pc[0][0])
+        | (PAWN_ATTACKERS[1][t] & pc[1][0])
+        | (KNIGHT_ATTACKS[t] & (pc[0][1] | pc[1][1]))
+        | (KING_ATTACKS[t] & (pc[0][5] | pc[1][5]))
+        | (bishop_attacks(t, occ) & diag_sliders)
+        | (rook_attacks(t, occ) & ortho_sliders);
+
     let mut side = board.side_to_move.opposite();
-    let target = mv.to;
-    let mut occupant_value = piece_value(placed.kind);
+    let mut occupant_value = piece_value(placed_kind);
 
     loop {
         depth += 1;
@@ -1861,16 +1993,50 @@ fn see(board: &Board, mv: Move) -> i32 {
             break;
         }
 
-        let Some((from, attacker)) = least_valuable_attacker(&squares, occ, target, side) else {
+        // Pieces already used (and the captured en-passant pawn / mover)
+        // are no longer in `occ`.
+        attackers &= occ;
+        let c = color_index(side);
+        let mine = attackers & board.bb.occ[c];
+        if mine == 0 {
             break;
+        }
+
+        let p = &pc[c];
+        let (bit, kind) = if mine & p[0] != 0 {
+            let b = mine & p[0];
+            (b & b.wrapping_neg(), PieceType::Pawn)
+        } else if mine & p[1] != 0 {
+            let b = mine & p[1];
+            (b & b.wrapping_neg(), PieceType::Knight)
+        } else if mine & p[2] != 0 {
+            (pick_slider(mine & p[2], t, SEE_BISHOP_ORDER), PieceType::Bishop)
+        } else if mine & p[3] != 0 {
+            (pick_slider(mine & p[3], t, SEE_ROOK_ORDER), PieceType::Rook)
+        } else if mine & p[4] != 0 {
+            (pick_slider(mine & p[4], t, SEE_QUEEN_ORDER), PieceType::Queen)
+        } else {
+            let b = mine & p[5];
+            (b & b.wrapping_neg(), PieceType::King)
         };
 
         gain[depth] = occupant_value - gain[depth - 1];
 
-        squares[from as usize] = None;
-        occ &= !(1u64 << from);
-        squares[target as usize] = Some(attacker);
-        occupant_value = piece_value(attacker.kind);
+        occ &= !bit;
+        match kind {
+            PieceType::Pawn | PieceType::Bishop => {
+                attackers |= bishop_attacks(t, occ) & diag_sliders;
+            }
+            PieceType::Rook => attackers |= rook_attacks(t, occ) & ortho_sliders,
+            // The king is adjacent to the target, so it can uncover a
+            // slider on any line.
+            PieceType::Queen | PieceType::King => {
+                attackers |= (bishop_attacks(t, occ) & diag_sliders)
+                    | (rook_attacks(t, occ) & ortho_sliders);
+            }
+            PieceType::Knight => {}
+        }
+        occupant_value = piece_value(kind);
         side = side.opposite();
 
         if gain[depth].max(-gain[depth - 1]) < 0 {
@@ -1940,6 +2106,64 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn see_bitboard_matches_reference() {
+        let seeds = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r1bq1rk1/pppn1ppp/3bpn2/3p4/2PP4/2N1PN2/PPQ2PPP/R1B1KB1R w KQ - 2 8",
+            "8/2p5/3p4/KP5r/1R3pk1/4P1p1/5P2/8 w - - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "1r1q1rk1/1b2bppp/p2p1n2/1pnPp3/4P3/1BN1BN1P/PP3PP1/R2Q1RK1 w - - 0 1",
+            "3r1rk1/1b1q1ppp/p3pn2/1pbnN3/3P4/P1N1B1P1/1PQ1PPBP/2RR2K1 w - - 0 1",
+        ];
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut board = Board::new();
+        let mut legal = Vec::new();
+        let mut positions = 0usize;
+        let mut captures = 0usize;
+        for i in 0..20_000 {
+            board.set_fen(seeds[i % seeds.len()]);
+            let plies = (next() % 60) as usize;
+            for _ in 0..plies {
+                board.generate_legal_moves(false, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let idx = (next() as usize) % legal.len();
+                let _ = board.make_move(legal[idx]);
+            }
+            positions += 1;
+            // Pseudo-legal moves too: search calls see() on those.
+            let mut moves = Vec::new();
+            generate_pseudo_moves(&board, false, &mut moves);
+            for mv in moves {
+                if !is_capture_move(&board, mv) {
+                    continue;
+                }
+                captures += 1;
+                assert_eq!(
+                    see(&board, mv),
+                    see_reference::see(&board, mv),
+                    "SEE mismatch for {} (iteration {}, seed {}, {} plies) {}",
+                    move_to_uci(mv),
+                    i,
+                    i % seeds.len(),
+                    plies,
+                    board.squares.iter().enumerate().filter_map(|(sq, p)| p.map(|p| format!("{}{:?}{:?}", sq, p.color, p.kind))).collect::<Vec<_>>().join(" ") + &format!(" stm {:?}", board.side_to_move)
+                );
+            }
+        }
+        eprintln!("see differential: {} positions, {} captures", positions, captures);
+        assert!(positions == 20_000 && captures > 60_000, "captures {}", captures);
+    }
 
     #[test]
     fn quiescence_checkmate_score_is_ply_aware() {
