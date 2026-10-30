@@ -79,8 +79,18 @@ pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
     table
 }
 
+// Per-thread datagen hooks: QUIET_SEARCH suppresses `info` output from
+// handle_go, LAST_SEARCH_SCORE holds the last completed iteration's score
+// (side to move). Normal play never sets QUIET_SEARCH.
+thread_local! {
+    pub(crate) static QUIET_SEARCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static LAST_SEARCH_SCORE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) struct Search {
     pub(crate) nodes: u64,
+    // `go nodes N`: stop once this many nodes are searched (u64::MAX = no limit).
+    node_limit: u64,
     deadline: Option<Instant>,
     pub(crate) stop: bool,
     pub(crate) killers: [[Option<Move>; 2]; MAX_PLY],
@@ -91,6 +101,7 @@ impl Search {
     pub(crate) fn new(deadline: Option<Instant>) -> Self {
         Self {
             nodes: 0,
+            node_limit: u64::MAX,
             deadline,
             stop: false,
             killers: [[None; 2]; MAX_PLY],
@@ -100,6 +111,10 @@ impl Search {
 
     pub(crate) fn should_stop(&mut self) -> bool {
         if self.stop {
+            return true;
+        }
+        if self.nodes >= self.node_limit {
+            self.stop = true;
             return true;
         }
         if self.nodes & 2047 == 0 {
@@ -402,6 +417,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     let mut winc: u64 = 0;
     let mut binc: u64 = 0;
     let mut movestogo: Option<u64> = None;
+    let mut node_limit: Option<u64> = None;
     let mut infinite = false;
 
     let mut i = 1;
@@ -435,6 +451,10 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 movestogo = tokens[i + 1].parse().ok();
                 i += 2;
             }
+            "nodes" if i + 1 < tokens.len() => {
+                node_limit = tokens[i + 1].parse().ok();
+                i += 2;
+            }
             "infinite" => {
                 infinite = true;
                 i += 1;
@@ -444,7 +464,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     }
 
     // Timed and infinite searches deepen until stopped; a bare `go` keeps the old fixed depth.
-    let timed = movetime.is_some() || wtime.is_some() || btime.is_some();
+    let timed = movetime.is_some() || wtime.is_some() || btime.is_some() || node_limit.is_some();
     let depth = depth.unwrap_or(if timed || infinite { MAX_SEARCH_DEPTH } else { 8 });
 
     let (time_left, inc) = match board.side_to_move {
@@ -467,6 +487,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
     let start = Instant::now();
     let mut search = Search::new(deadline);
+    // Node limits apply to the single-threaded search only.
+    search.node_limit = node_limit.unwrap_or(u64::MAX);
     let mut best_score = -INF;
 
     let mut root_moves = Vec::new();
@@ -608,7 +630,9 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
         let elapsed = start.elapsed().as_millis() as u64;
         let nodes = search.nodes + total_threaded_nodes;
-        print_info(d, best_score, nodes, elapsed, best_move);
+        if !QUIET_SEARCH.with(|q| q.get()) {
+            print_info(d, best_score, nodes, elapsed, best_move);
+        }
 
         if let Some(soft) = soft_ms {
             let scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
@@ -623,6 +647,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     }
 
     engine.last_search_nodes = search.nodes + total_threaded_nodes;
+    LAST_SEARCH_SCORE.with(|s| s.set(best_score));
     best_move.map(move_to_uci)
 }
 
@@ -1350,6 +1375,16 @@ fn negamax(
         .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
 
     best
+}
+
+/// |quiescence - static eval| for the side to move; 0 means the position is quiet.
+/// Used by the tuner's position extractor.
+pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
+    let key = board_hash(board, &engine.zobrist);
+    let mut search = Search::new(None);
+    let mut rep_stack = vec![key];
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0);
+    (q - eval_for_side(board)).abs()
 }
 
 fn quiescence(

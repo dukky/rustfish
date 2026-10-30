@@ -1,5 +1,6 @@
 mod bitboard;
 mod book;
+mod datagen;
 mod eval;
 mod eval_params;
 mod movegen;
@@ -1032,6 +1033,10 @@ fn main() {
         }
         if cmd.starts_with("selftest") {
             handle_selftest(cmd, &mut board);
+            continue;
+        }
+        if cmd.starts_with("datagen ") {
+            datagen::handle_datagen(cmd);
             continue;
         }
         if cmd.starts_with("bench") {
