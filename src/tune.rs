@@ -2,14 +2,18 @@
 //!
 //! `extract <out.txt> <games.pgn>...` replays PGN games and writes quiet
 //! positions as `fen;result` lines (result from White's side: 1, 0.5, 0).
-//! `tune <data.txt> <out_psqt.rs> [epochs]` fits PSQT_MG/PSQT_EG by logistic
-//! regression of game result on eval and writes a new src/psqt.rs.
+//! `tune <data.txt> <out_psqt.rs> <out_eval_params.rs> [epochs]` jointly fits
+//! PSQT_MG/PSQT_EG and the linear eval_params weights by logistic regression
+//! of game result on eval, and writes new src/psqt.rs and src/eval_params.rs.
 //!
-//! Material and PST enter the eval linearly through the tapered accumulator,
-//! so each position reduces to a sparse feature list plus a constant
-//! "rest of eval" offset that is exact for the fixed non-PST terms.
+//! Material/PST enter the eval linearly through the tapered accumulator, and
+//! `eval::evaluate_with` traces the coefficient of every eval_params weight,
+//! so each position reduces to sparse PSQT features, sparse parameter
+//! coefficients and a constant nonlinear remainder (king safety, mop-up edge
+//! pressure, tempo) that is exact for the untuned terms.
 
 use super::*;
+use crate::eval_params::{PARAMS, PARAM_COUNT, PARAM_NAMES, TEMPO};
 use std::fs;
 use std::io::Write as _;
 
@@ -299,18 +303,63 @@ pub(crate) fn handle_extract(cmd: &str) {
 
 // ---------------------------------------------------------------- tune
 
+// Parameter vector layout: PSQT mg, PSQT eg, linear eval_params mg, linear eval_params eg.
+const LIN_MG: usize = 2 * NUM_PARAMS;
+const LIN_EG: usize = LIN_MG + PARAM_COUNT;
+const TOTAL_PARAMS: usize = LIN_EG + PARAM_COUNT;
+
+// L2 pull of every weight toward its starting value, per cp^2 of MSE. Data
+// curvature for a weight active in a fraction f of positions is about
+// f * 2e-6, so this only dominates for weights seen in under ~1/2000 of the
+// positions (e.g. kings on far ranks), keeping them from fitting noise.
+const L2_TOWARD_START: f64 = 1e-9;
+
+#[derive(Clone, Copy)]
+struct LinFeat {
+    idx: u8,
+    mg: i16,
+    eg: i16,
+}
+
 struct Dataset {
-    // Feature (sign << 15 | kind*64 + square) per piece, positions delimited by `offsets`.
+    // PSQT feature (sign << 15 | kind*64 + square) per piece, positions delimited by `offsets`.
     feats: Vec<u16>,
     offsets: Vec<u32>,
+    // Nonzero linear-parameter coefficients, positions delimited by `lin_offsets`.
+    lin: Vec<LinFeat>,
+    lin_offsets: Vec<u32>,
     phase: Vec<u8>,
+    // Tapered nonlinear part of the eval (king safety, mop-up edge) plus tempo.
     rest: Vec<f32>,
     result: Vec<f32>,
+    // Max |model - evaluate()| seen while loading, and integer trace mismatches.
+    max_model_err: f64,
+    trace_mismatches: usize,
+}
+
+/// Untapered linear (psqt + params) mg/eg of a trace under the compiled-in weights.
+fn traced_linear(board: &Board, t: &eval::EvalTrace) -> (i32, i32) {
+    let (mut mg, mut eg) = (board.eval_acc.mg, board.eval_acc.eg);
+    for i in 0..PARAM_COUNT {
+        mg += t.mg[i] * PARAMS[i].0;
+        eg += t.eg[i] * PARAMS[i].1;
+    }
+    (mg, eg)
 }
 
 impl Dataset {
     fn new() -> Self {
-        Self { feats: Vec::new(), offsets: vec![0], phase: Vec::new(), rest: Vec::new(), result: Vec::new() }
+        Self {
+            feats: Vec::new(),
+            offsets: vec![0],
+            lin: Vec::new(),
+            lin_offsets: vec![0],
+            phase: Vec::new(),
+            rest: Vec::new(),
+            result: Vec::new(),
+            max_model_err: 0.0,
+            trace_mismatches: 0,
+        }
     }
 
     fn len(&self) -> usize {
@@ -319,8 +368,17 @@ impl Dataset {
 
     fn push(&mut self, board: &Board, result: f32) {
         let phase = board.eval_acc.phase.clamp(0, 24);
-        let acc = &board.eval_acc;
-        let linear = (acc.mg * phase + acc.eg * (24 - phase)) as f64 / 24.0;
+        let mut trace = eval::EvalTrace::new();
+        let score = eval::evaluate_with(board, &mut trace);
+        let tempo = if board.side_to_move == Color::White { TEMPO } else { -TEMPO };
+
+        // Exactness: the traced terms must rebuild evaluate() bit for bit.
+        let (lin_mg, lin_eg) = traced_linear(board, &trace);
+        let rebuilt = eval::taper_score(lin_mg + trace.nonlinear_mg, lin_eg + trace.nonlinear_eg, phase) + tempo;
+        if rebuilt != score {
+            self.trace_mismatches += 1;
+        }
+
         for sq in 0..64u8 {
             if let Some(p) = board.squares[sq as usize] {
                 let rel = if p.color == Color::White { sq } else { sq ^ 56 } as u16;
@@ -329,12 +387,23 @@ impl Dataset {
             }
         }
         self.offsets.push(self.feats.len() as u32);
+        for i in 0..PARAM_COUNT {
+            if trace.mg[i] != 0 || trace.eg[i] != 0 {
+                self.lin.push(LinFeat { idx: i as u8, mg: trace.mg[i] as i16, eg: trace.eg[i] as i16 });
+            }
+        }
+        self.lin_offsets.push(self.lin.len() as u32);
         self.phase.push(phase as u8);
-        self.rest.push((eval::evaluate(board) as f64 - linear) as f32);
+        let ph = phase as f64 / 24.0;
+        let rest = trace.nonlinear_mg as f64 * ph + trace.nonlinear_eg as f64 * (1.0 - ph) + tempo as f64;
+        self.rest.push(rest as f32);
         self.result.push(result);
+
+        let model = lin_mg as f64 * ph + lin_eg as f64 * (1.0 - ph) + rest;
+        self.max_model_err = self.max_model_err.max((model - score as f64).abs());
     }
 
-    /// Eval (White's side) of position i under params (mg in [0, 384), eg in [384, 768)).
+    /// Eval (White's side) of position i under params.
     fn eval(&self, i: usize, params: &[f64]) -> f64 {
         let (mut mg, mut eg) = (0.0, 0.0);
         for &f in &self.feats[self.offsets[i] as usize..self.offsets[i + 1] as usize] {
@@ -343,8 +412,12 @@ impl Dataset {
             mg += s * params[idx];
             eg += s * params[NUM_PARAMS + idx];
         }
-        let ph = self.phase[i] as f64;
-        (mg * ph + eg * (24.0 - ph)) / 24.0 + self.rest[i] as f64
+        for l in &self.lin[self.lin_offsets[i] as usize..self.lin_offsets[i + 1] as usize] {
+            mg += l.mg as f64 * params[LIN_MG + l.idx as usize];
+            eg += l.eg as f64 * params[LIN_EG + l.idx as usize];
+        }
+        let ph = self.phase[i] as f64 / 24.0;
+        mg * ph + eg * (1.0 - ph) + self.rest[i] as f64
     }
 }
 
@@ -352,10 +425,13 @@ fn sigmoid(eval: f64, k: f64) -> f64 {
     1.0 / (1.0 + 10f64.powf(-k * eval / 400.0))
 }
 
+fn worker_count() -> usize {
+    thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
 /// Mean squared error over `idx`, in parallel.
 fn mse(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> f64 {
-    let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let chunk = idx.len().div_ceil(threads).max(1);
+    let chunk = idx.len().div_ceil(worker_count()).max(1);
     let total: f64 = thread::scope(|s| {
         idx.chunks(chunk)
             .map(|part| {
@@ -376,25 +452,29 @@ fn mse(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> f64 {
     total / idx.len() as f64
 }
 
-/// Gradient of the training MSE with respect to all 768 parameters.
+/// Gradient of the training MSE with respect to all parameters.
 fn gradient(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> Vec<f64> {
-    let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let chunk = idx.len().div_ceil(threads).max(1);
+    let chunk = idx.len().div_ceil(worker_count()).max(1);
     let c = k * std::f64::consts::LN_10 / 400.0;
     let parts: Vec<Vec<f64>> = thread::scope(|s| {
         idx.chunks(chunk)
             .map(|part| {
                 s.spawn(move || {
-                    let mut g = vec![0.0; 2 * NUM_PARAMS];
+                    let mut g = vec![0.0; TOTAL_PARAMS];
                     for &i in part {
                         let sg = sigmoid(data.eval(i, params), k);
                         let d = -2.0 * (data.result[i] as f64 - sg) * sg * (1.0 - sg) * c;
                         let ph = data.phase[i] as f64 / 24.0;
+                        let (dm, de) = (d * ph, d * (1.0 - ph));
                         for &f in &data.feats[data.offsets[i] as usize..data.offsets[i + 1] as usize] {
                             let fi = (f & 0x7fff) as usize;
-                            let s = if f & 0x8000 != 0 { -d } else { d };
-                            g[fi] += s * ph;
-                            g[NUM_PARAMS + fi] += s * (1.0 - ph);
+                            let s = if f & 0x8000 != 0 { -1.0 } else { 1.0 };
+                            g[fi] += s * dm;
+                            g[NUM_PARAMS + fi] += s * de;
+                        }
+                        for l in &data.lin[data.lin_offsets[i] as usize..data.lin_offsets[i + 1] as usize] {
+                            g[LIN_MG + l.idx as usize] += l.mg as f64 * dm;
+                            g[LIN_EG + l.idx as usize] += l.eg as f64 * de;
                         }
                     }
                     g
@@ -406,7 +486,7 @@ fn gradient(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> Vec<f64> {
             .collect()
     });
     let n = idx.len() as f64;
-    let mut g = vec![0.0; 2 * NUM_PARAMS];
+    let mut g = vec![0.0; TOTAL_PARAMS];
     for p in parts {
         for (a, b) in g.iter_mut().zip(p) {
             *a += b / n;
@@ -415,13 +495,53 @@ fn gradient(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> Vec<f64> {
     g
 }
 
+/// Rewrite the `eval_params!` block of src/eval_params.rs with new (mg, eg)
+/// values, keeping every comment, name and the column of trailing comments.
+pub(crate) fn format_eval_params(values: &[(i32, i32); PARAM_COUNT]) -> String {
+    let template = include_str!("eval_params.rs");
+    let mut out = String::with_capacity(template.len());
+    let mut in_block = false;
+    for line in template.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("eval_params! {") {
+            in_block = true;
+        } else if in_block && trimmed.starts_with('}') {
+            in_block = false;
+        } else if in_block {
+            if let Some((name, rest)) = trimmed.split_once(" = (") {
+                if let Some(i) = PARAM_NAMES.iter().position(|&n| n == name) {
+                    let indent = &line[..line.len() - trimmed.len()];
+                    let comment = rest.find("//").map(|c| &rest[c..]);
+                    let mut new_line = format!("{}{} = ({}, {}),", indent, name, values[i].0, values[i].1);
+                    if let Some(comment) = comment {
+                        let col = line.find("//").unwrap();
+                        while new_line.len() < col {
+                            new_line.push(' ');
+                        }
+                        if !new_line.ends_with(' ') {
+                            new_line.push(' ');
+                        }
+                        new_line.push_str(comment);
+                    }
+                    out.push_str(&new_line);
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 pub(crate) fn handle_tune(cmd: &str) {
     let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
-    if args.len() < 2 {
-        println!("info string usage: tune <data.txt> <out_psqt.rs> [epochs]");
+    if args.len() < 3 {
+        println!("info string usage: tune <data.txt> <out_psqt.rs> <out_eval_params.rs> [epochs]");
         return;
     }
-    let epochs: usize = args.get(2).and_then(|e| e.parse().ok()).unwrap_or(2000);
+    let epochs: usize = args.get(3).and_then(|e| e.parse().ok()).unwrap_or(2000);
     let Ok(text) = fs::read_to_string(args[0]) else {
         println!("info string tune: cannot read {}", args[0]);
         return;
@@ -435,16 +555,54 @@ pub(crate) fn handle_tune(cmd: &str) {
         board.set_fen(fen);
         data.push(&board, result);
     }
+    drop(text);
     // Every 10th position is held out to detect overfitting.
     let (train, valid): (Vec<usize>, Vec<usize>) = (0..data.len()).partition(|i| i % 10 != 0);
-    println!("info string tune: {} positions ({} train, {} validation)", data.len(), train.len(), valid.len());
+    println!(
+        "info string tune: {} positions ({} train, {} validation); trace mismatches {}, max |model - eval| {:.3}",
+        data.len(),
+        train.len(),
+        valid.len(),
+        data.trace_mismatches,
+        data.max_model_err
+    );
     flush_stdout();
 
-    let mut params = vec![0.0; 2 * NUM_PARAMS];
+    let mut params = vec![0.0; TOTAL_PARAMS];
     for k in 0..6 {
         for sq in 0..64 {
             params[k * 64 + sq] = psqt::PSQT_MG[k][sq] as f64;
             params[NUM_PARAMS + k * 64 + sq] = psqt::PSQT_EG[k][sq] as f64;
+        }
+    }
+    for i in 0..PARAM_COUNT {
+        params[LIN_MG + i] = PARAMS[i].0 as f64;
+        params[LIN_EG + i] = PARAMS[i].1 as f64;
+    }
+    let start = params.clone();
+
+    // Per-weight step size: Adam moves each weight by about `lr` per step, so a
+    // weight whose coefficient is typically large (mobility counts) gets a
+    // proportionally smaller step to move the eval by a similar amount.
+    let base_lr = 2.0;
+    let mut lr = vec![base_lr; TOTAL_PARAMS];
+    {
+        let mut sum = vec![0.0f64; TOTAL_PARAMS];
+        let mut cnt = vec![0usize; TOTAL_PARAMS];
+        for l in &data.lin {
+            if l.mg != 0 {
+                sum[LIN_MG + l.idx as usize] += (l.mg as f64).abs();
+                cnt[LIN_MG + l.idx as usize] += 1;
+            }
+            if l.eg != 0 {
+                sum[LIN_EG + l.idx as usize] += (l.eg as f64).abs();
+                cnt[LIN_EG + l.idx as usize] += 1;
+            }
+        }
+        for i in LIN_MG..TOTAL_PARAMS {
+            if cnt[i] > 0 {
+                lr[i] = base_lr / (sum[i] / cnt[i] as f64).max(1.0);
+            }
         }
     }
 
@@ -463,33 +621,40 @@ pub(crate) fn handle_tune(cmd: &str) {
     println!("info string tune: K {:.2}, start mse train {:.6} valid {:.6}", k, best_k_mse, start_valid);
     flush_stdout();
 
-    // Adam on the full batch.
-    let (lr, b1, b2, eps) = (2.0, 0.9, 0.999, 1e-8);
-    let mut m1 = vec![0.0; 2 * NUM_PARAMS];
-    let mut m2 = vec![0.0; 2 * NUM_PARAMS];
+    // Adam on the full batch, step size decaying linearly to 10% at the end.
+    let (b1, b2, eps) = (0.9, 0.999, 1e-8);
+    let mut m1 = vec![0.0; TOTAL_PARAMS];
+    let mut m2 = vec![0.0; TOTAL_PARAMS];
     let mut best_params = params.clone();
     let mut best_valid = start_valid;
+    let mut best_epoch = 0;
     for epoch in 1..=epochs {
-        let g = gradient(&data, &train, &params, k);
-        for i in 0..params.len() {
+        let mut g = gradient(&data, &train, &params, k);
+        for i in 0..TOTAL_PARAMS {
+            g[i] += 2.0 * L2_TOWARD_START * (params[i] - start[i]);
+        }
+        let decay = 1.0 - 0.9 * (epoch - 1) as f64 / epochs as f64;
+        for i in 0..TOTAL_PARAMS {
             m1[i] = b1 * m1[i] + (1.0 - b1) * g[i];
             m2[i] = b2 * m2[i] + (1.0 - b2) * g[i] * g[i];
             let mh = m1[i] / (1.0 - b1.powi(epoch as i32));
             let vh = m2[i] / (1.0 - b2.powi(epoch as i32));
-            params[i] -= lr * mh / (vh.sqrt() + eps);
+            params[i] -= lr[i] * decay * mh / (vh.sqrt() + eps);
         }
         if epoch % 50 == 0 || epoch == epochs {
             let v = mse(&data, &valid, &params, k);
             if v < best_valid {
                 best_valid = v;
+                best_epoch = epoch;
                 best_params.clone_from(&params);
             }
             println!(
-                "info string tune: epoch {} train {:.6} valid {:.6} (best {:.6})",
+                "info string tune: epoch {} train {:.6} valid {:.6} (best {:.6} @ {})",
                 epoch,
                 mse(&data, &train, &params, k),
                 v,
-                best_valid
+                best_valid,
+                best_epoch
             );
             flush_stdout();
         }
@@ -503,15 +668,57 @@ pub(crate) fn handle_tune(cmd: &str) {
             eg[kind][sq] = best_params[NUM_PARAMS + kind * 64 + sq].round() as i32;
         }
     }
+    let mut lin = [(0i32, 0i32); PARAM_COUNT];
+    for (i, v) in lin.iter_mut().enumerate() {
+        *v = (best_params[LIN_MG + i].round() as i32, best_params[LIN_EG + i].round() as i32);
+    }
+
+    // Validation MSE after rounding to the integers that are actually written.
+    let mut rounded = best_params.clone();
+    for v in rounded.iter_mut() {
+        *v = v.round();
+    }
+    let rounded_valid = mse(&data, &valid, &rounded, k);
+
+    for kind in 0..6 {
+        let avg = |t: &[i32; 64]| t.iter().sum::<i32>() as f64 / 64.0;
+        println!(
+            "info string tune: {} mean mg {:.1} eg {:.1}",
+            KIND_NAMES[kind],
+            avg(&mg[kind]),
+            avg(&eg[kind])
+        );
+    }
+    for i in 0..PARAM_COUNT {
+        println!(
+            "info string tune: {} ({}, {}) -> ({}, {})",
+            PARAM_NAMES[i], PARAMS[i].0, PARAMS[i].1, lin[i].0, lin[i].1
+        );
+    }
+
     let note = format!(
-        "Texel-tuned on {} positions, K {:.2}; validation mse {:.6} -> {:.6}.",
+        "Jointly Texel-tuned with eval_params on {} positions, K {:.2}; validation mse {:.6} -> {:.6}.",
         data.len(),
         k,
         start_valid,
-        best_valid
+        rounded_valid
     );
     match fs::write(args[1], format_psqt(&mg, &eg, &note)) {
         Ok(()) => println!("info string tune: wrote {} ({})", args[1], note),
         Err(e) => println!("info string tune: cannot write {}: {}", args[1], e),
+    }
+    match fs::write(args[2], format_eval_params(&lin)) {
+        Ok(()) => println!("info string tune: wrote {}", args[2]),
+        Err(e) => println!("info string tune: cannot write {}: {}", args[2], e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_eval_params_round_trips_current_file() {
+        assert_eq!(format_eval_params(&PARAMS), include_str!("eval_params.rs"));
     }
 }

@@ -314,22 +314,20 @@ fn pawn_has_lever(board: &Board, sq: u8, color: Color) -> bool {
         != 0
 }
 
-fn passed_pawn_support_score(
+/// King and rook support of a passed pawn; `sign` is +1 for White, -1 for Black.
+fn passed_pawn_support_score<T: Tracer>(
+    s: &mut Score<'_, T>,
+    sign: i32,
     sq: u8,
     color: Color,
     own_king: Option<u8>,
     enemy_king: Option<u8>,
     own_rooks: &[u8],
-) -> (i32, i32) {
-    let mut mg = 0;
-    let mut eg = 0;
-
+) {
     if let Some(king) = own_king {
         let dist = king_distance(king, sq);
         if dist <= 2 {
-            let bonus = 3 - dist;
-            mg += bonus * ep::mg(P::PasserOwnKingNear);
-            eg += bonus * ep::eg(P::PasserOwnKingNear);
+            s.add(P::PasserOwnKingNear, sign * (3 - dist));
         }
     }
 
@@ -344,12 +342,10 @@ fn passed_pawn_support_score(
     if let Some(king) = enemy_king {
         let promo_dist = king_distance(king, promo_sq);
         if promo_dist > remaining {
-            mg += (promo_dist - remaining) * ep::mg(P::PasserEnemyKingFar);
-            eg += (promo_dist - remaining) * ep::eg(P::PasserEnemyKingFar);
+            s.add(P::PasserEnemyKingFar, sign * (promo_dist - remaining));
         }
         if king_distance(king, sq) <= 1 {
-            mg -= ep::mg(P::PasserEnemyKingAdjacent);
-            eg -= ep::eg(P::PasserEnemyKingAdjacent);
+            s.add(P::PasserEnemyKingAdjacent, -sign);
         }
     }
 
@@ -364,50 +360,40 @@ fn passed_pawn_support_score(
             Color::Black => rook_rank > pawn_rank,
         };
         if behind {
-            mg += ep::mg(P::PasserRookBehind);
-            eg += ep::eg(P::PasserRookBehind);
+            s.add(P::PasserRookBehind, sign);
         } else {
-            mg -= ep::mg(P::PasserRookFront);
-            eg -= ep::eg(P::PasserRookFront);
+            s.add(P::PasserRookFront, -sign);
         }
     }
-
-    (mg, eg)
 }
 
-fn trapped_piece_penalty(
+/// Trapped-piece penalty; `sign` is +1 for White, -1 for Black.
+fn trapped_piece_penalty<T: Tracer>(
+    s: &mut Score<'_, T>,
+    sign: i32,
     sq: u8,
     piece: Piece,
     mobility: i32,
     own_king: Option<u8>,
-) -> (i32, i32) {
+) {
     let f = (sq % 8) as i32;
     let r = (sq / 8) as i32;
     let on_edge = f == 0 || f == 7 || r == 0 || r == 7;
     let in_corner = (f == 0 || f == 7) && (r == 0 || r == 7);
-    let mut mg = 0;
-    let mut eg = 0;
 
     match piece.kind {
         PieceType::Knight => {
             if in_corner && mobility <= 2 {
-                let severity = 3 - mobility;
-                mg += severity * ep::mg(P::TrappedKnightCorner);
-                eg += severity * ep::eg(P::TrappedKnightCorner);
+                s.add(P::TrappedKnightCorner, -sign * (3 - mobility));
             } else if on_edge && mobility <= 2 {
-                let severity = 3 - mobility;
-                mg += severity * ep::mg(P::TrappedKnightEdge);
-                eg += severity * ep::eg(P::TrappedKnightEdge);
+                s.add(P::TrappedKnightEdge, -sign * (3 - mobility));
             }
         }
         PieceType::Bishop => {
             if on_edge && mobility <= 2 {
-                let severity = 3 - mobility;
-                mg += severity * ep::mg(P::TrappedBishopEdge);
-                eg += severity * ep::eg(P::TrappedBishopEdge);
+                s.add(P::TrappedBishopEdge, -sign * (3 - mobility));
                 if in_corner {
-                    mg += ep::mg(P::TrappedBishopCornerExtra);
-                    eg += ep::eg(P::TrappedBishopCornerExtra);
+                    s.add(P::TrappedBishopCornerExtra, -sign);
                 }
             }
         }
@@ -420,17 +406,13 @@ fn trapped_piece_penalty(
                     let king_between = same_rank
                         && ((f <= 1 && king_file > f) || (f >= 6 && king_file < f));
                     if back_rank && king_between {
-                        let severity = 4 - mobility;
-                        mg += severity * ep::mg(P::TrappedRookByKing);
-                        eg += severity * ep::eg(P::TrappedRookByKing);
+                        s.add(P::TrappedRookByKing, -sign * (4 - mobility));
                     }
                 }
             }
         }
         _ => {}
     }
-
-    (mg.max(0), eg.max(0))
 }
 
 fn is_outpost_square(
@@ -526,18 +508,19 @@ fn passer_is_unstoppable(board: &Board, sq: u8, color: Color, enemy_king: u8) ->
     king_distance(enemy_king, promo_sq) > moves
 }
 
-fn rook_endgame_bonus(
+/// Single-rook endgame terms (eg only); `sign` is +1 for White, -1 for Black.
+fn rook_endgame_bonus<T: Tracer>(
+    s: &mut Score<'_, T>,
+    sign: i32,
     color: Color,
     rooks: &[u8],
     own_passed: &[u8],
     enemy_passed: &[u8],
     enemy_king: Option<u8>,
-) -> i32 {
-    let mut score = 0;
-
+) {
     for &rook_sq in rooks {
         if let Some(king_sq) = enemy_king {
-            score += (7 - king_distance(rook_sq, king_sq)).max(0) * ep::eg(P::RookEgEnemyKingClose);
+            s.add_eg(P::RookEgEnemyKingClose, sign * (7 - king_distance(rook_sq, king_sq)).max(0));
         }
 
         for &pawn_sq in own_passed {
@@ -551,9 +534,9 @@ fn rook_endgame_bonus(
                 Color::Black => rook_rank > pawn_rank,
             };
             if behind {
-                score += ep::eg(P::RookEgBehindPasser);
+                s.add_eg(P::RookEgBehindPasser, sign);
             } else {
-                score -= ep::eg(P::RookEgFrontOfPasser);
+                s.add_eg(P::RookEgFrontOfPasser, -sign);
             }
         }
 
@@ -568,12 +551,10 @@ fn rook_endgame_bonus(
                 Color::Black => rook_rank < pawn_rank,
             };
             if behind_enemy {
-                score += ep::eg(P::RookEgBehindEnemyPasser);
+                s.add_eg(P::RookEgBehindEnemyPasser, sign);
             }
         }
     }
-
-    score
 }
 
 fn relative_rank(color: Color, sq: u8) -> i32 {
@@ -584,11 +565,12 @@ fn relative_rank(color: Color, sq: u8) -> i32 {
     }
 }
 
-fn taper_score(mg: i32, eg: i32, phase: i32) -> i32 {
+pub(crate) fn taper_score(mg: i32, eg: i32, phase: i32) -> i32 {
     (mg * phase + eg * (24 - phase)) / 24
 }
 
-fn development_score(board: &Board, color: Color) -> i32 {
+/// Development terms (mg only); `sign` is +1 for White, -1 for Black.
+fn development_score<T: Tracer>(s: &mut Score<'_, T>, sign: i32, board: &Board, color: Color) {
     let (minor_starts, king_home, king_castles) = match color {
         Color::White => (&[1u8, 2, 5, 6][..], 4u8, [2u8, 6u8]),
         Color::Black => (&[57u8, 58, 61, 62][..], 60u8, [58u8, 62u8]),
@@ -608,20 +590,105 @@ fn development_score(board: &Board, color: Color) -> i32 {
         .count() as i32;
 
     let king_sq = board.king_square(color);
-    let mut score = -undeveloped * ep::mg(P::DevUndevelopedMinor);
+    s.add_mg(P::DevUndevelopedMinor, -sign * undeveloped);
     if king_sq == Some(king_home) && undeveloped >= 2 {
-        score -= ep::mg(P::DevKingHomeUndeveloped);
+        s.add_mg(P::DevKingHomeUndeveloped, -sign);
     }
     if king_sq.is_some_and(|sq| king_castles.contains(&sq)) {
-        score += ep::mg(P::DevKingCastled);
+        s.add_mg(P::DevKingCastled, sign);
     }
-    score
+}
+
+/// Observer of the linear structure of `evaluate`: receives, for every
+/// eval_params term, the White-minus-Black coefficient that multiplies its mg
+/// and eg weight (before tapering), plus the nonlinear remainder. The no-op
+/// `NoTrace` is what search uses; it compiles away completely.
+pub(crate) trait Tracer {
+    fn add(&mut self, p: P, mg: i32, eg: i32);
+    fn nonlinear(&mut self, mg: i32, eg: i32);
+}
+
+pub(crate) struct NoTrace;
+
+impl Tracer for NoTrace {
+    #[inline(always)]
+    fn add(&mut self, _p: P, _mg: i32, _eg: i32) {}
+    #[inline(always)]
+    fn nonlinear(&mut self, _mg: i32, _eg: i32) {}
+}
+
+/// Recording tracer used by the tuner.
+#[derive(Clone)]
+pub(crate) struct EvalTrace {
+    pub(crate) mg: [i32; PARAM_COUNT],
+    pub(crate) eg: [i32; PARAM_COUNT],
+    /// Nonlinear (untuned) part of the untapered mg / eg score: king safety, mop-up edge pressure.
+    pub(crate) nonlinear_mg: i32,
+    pub(crate) nonlinear_eg: i32,
+}
+
+impl EvalTrace {
+    pub(crate) fn new() -> Self {
+        Self { mg: [0; PARAM_COUNT], eg: [0; PARAM_COUNT], nonlinear_mg: 0, nonlinear_eg: 0 }
+    }
+}
+
+impl Tracer for EvalTrace {
+    fn add(&mut self, p: P, mg: i32, eg: i32) {
+        self.mg[p as usize] += mg;
+        self.eg[p as usize] += eg;
+    }
+    fn nonlinear(&mut self, mg: i32, eg: i32) {
+        self.nonlinear_mg += mg;
+        self.nonlinear_eg += eg;
+    }
+}
+
+/// Untapered (mg, eg) score under construction, forwarding every term to the tracer.
+pub(crate) struct Score<'a, T: Tracer> {
+    mg: i32,
+    eg: i32,
+    t: &'a mut T,
+}
+
+impl<T: Tracer> Score<'_, T> {
+    /// `n` times parameter `p`, in both mg and eg.
+    #[inline(always)]
+    fn add(&mut self, p: P, n: i32) {
+        self.mg += n * ep::mg(p);
+        self.eg += n * ep::eg(p);
+        self.t.add(p, n, n);
+    }
+
+    #[inline(always)]
+    fn add_mg(&mut self, p: P, n: i32) {
+        self.mg += n * ep::mg(p);
+        self.t.add(p, n, 0);
+    }
+
+    #[inline(always)]
+    fn add_eg(&mut self, p: P, n: i32) {
+        self.eg += n * ep::eg(p);
+        self.t.add(p, 0, n);
+    }
+
+    #[inline(always)]
+    fn nonlinear(&mut self, mg: i32, eg: i32) {
+        self.mg += mg;
+        self.eg += eg;
+        self.t.nonlinear(mg, eg);
+    }
 }
 
 pub(crate) fn evaluate(board: &Board) -> i32 {
+    evaluate_with(board, &mut NoTrace)
+}
+
+/// `evaluate`, additionally reporting its linear structure to `t`.
+#[inline(always)]
+pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     let acc = &board.eval_acc;
-    let mut mg_score = acc.mg;
-    let mut eg_score = acc.eg;
+    let mut s = Score { mg: acc.mg, eg: acc.eg, t };
 
     let mut white_pawns = SqList::new();
     let mut black_pawns = SqList::new();
@@ -693,17 +760,15 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     }
 
     if acc.bishops[0] >= 2 {
-        mg_score += ep::mg(P::BishopPair);
-        eg_score += ep::eg(P::BishopPair);
+        s.add(P::BishopPair, 1);
     }
     if acc.bishops[1] >= 2 {
-        mg_score -= ep::mg(P::BishopPair);
-        eg_score -= ep::eg(P::BishopPair);
+        s.add(P::BishopPair, -1);
     }
 
     if phase >= 12 {
-        mg_score += development_score(board, Color::White);
-        mg_score -= development_score(board, Color::Black);
+        development_score(&mut s, 1, board, Color::White);
+        development_score(&mut s, -1, board, Color::Black);
     }
 
     let white_king = board.king_square(Color::White);
@@ -714,15 +779,13 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let r = (sq / 8) as i32;
 
         if white_pawn_files[f] > 1 {
-            mg_score -= ep::mg(P::Doubled);
-            eg_score -= ep::eg(P::Doubled);
+            s.add(P::Doubled, -1);
         }
 
         let left = if f > 0 { white_pawn_files[f - 1] } else { 0 };
         let right = if f < 7 { white_pawn_files[f + 1] } else { 0 };
         if left == 0 && right == 0 {
-            mg_score -= ep::mg(P::Isolated);
-            eg_score -= ep::eg(P::Isolated);
+            s.add(P::Isolated, -1);
         }
 
         let mut passed = true;
@@ -733,48 +796,44 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
         if passed {
-            mg_score += ep::mg(P::PassedBase) + r * ep::mg(P::PassedRank);
-            eg_score += ep::eg(P::PassedBase) + r * ep::eg(P::PassedRank);
+            s.add(P::PassedBase, 1);
+            s.add(P::PassedRank, r);
             white_passed.push(sq);
             if is_supported_by_pawn(board, sq, Color::White) {
-                mg_score += ep::mg(P::PassedSupportedBase) + r * ep::mg(P::PassedSupportedRank);
-                eg_score += ep::eg(P::PassedSupportedBase) + r * ep::eg(P::PassedSupportedRank);
+                s.add(P::PassedSupportedBase, 1);
+                s.add(P::PassedSupportedRank, r);
             }
-            let (support_mg, support_eg) = passed_pawn_support_score(
+            passed_pawn_support_score(
+                &mut s,
+                1,
                 sq,
                 Color::White,
                 white_king,
                 black_king,
                 white_rooks.as_slice(),
             );
-            mg_score += support_mg;
-            eg_score += support_eg;
         }
 
         if is_connected_pawn(&white_pawn_masks, sq, Color::White) {
-            mg_score += ep::mg(P::Connected);
-            eg_score += ep::eg(P::Connected);
+            s.add(P::Connected, 1);
         }
 
         if is_backward_pawn(board, &white_pawn_masks, sq, Color::White, passed) {
-            mg_score -= ep::mg(P::Backward);
-            eg_score -= ep::eg(P::Backward);
+            s.add(P::Backward, -1);
         }
 
         let candidate = black_max_pawn_rank[f] <= r as i8;
         if candidate {
-            let lever = pawn_has_lever(board, sq, Color::White);
-            mg_score += ep::mg(P::CandidateBase)
-                + r * ep::mg(P::CandidateRank)
-                + if lever { ep::mg(P::CandidateLever) + r * ep::mg(P::CandidateLeverRank) } else { 0 };
-            eg_score += ep::eg(P::CandidateBase)
-                + r * ep::eg(P::CandidateRank)
-                + if lever { ep::eg(P::CandidateLever) + r * ep::eg(P::CandidateLeverRank) } else { 0 };
+            s.add(P::CandidateBase, 1);
+            s.add(P::CandidateRank, r);
+            if pawn_has_lever(board, sq, Color::White) {
+                s.add(P::CandidateLever, 1);
+                s.add(P::CandidateLeverRank, r);
+            }
             if is_supported_by_pawn(board, sq, Color::White)
                 || is_connected_pawn(&white_pawn_masks, sq, Color::White)
             {
-                mg_score += ep::mg(P::CandidateSupported);
-                eg_score += ep::eg(P::CandidateSupported);
+                s.add(P::CandidateSupported, 1);
             }
         }
     }
@@ -784,15 +843,13 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let r = (sq / 8) as i32;
 
         if black_pawn_files[f] > 1 {
-            mg_score += ep::mg(P::Doubled);
-            eg_score += ep::eg(P::Doubled);
+            s.add(P::Doubled, 1);
         }
 
         let left = if f > 0 { black_pawn_files[f - 1] } else { 0 };
         let right = if f < 7 { black_pawn_files[f + 1] } else { 0 };
         if left == 0 && right == 0 {
-            mg_score += ep::mg(P::Isolated);
-            eg_score += ep::eg(P::Isolated);
+            s.add(P::Isolated, 1);
         }
 
         let mut passed = true;
@@ -803,48 +860,44 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             }
         }
         if passed {
-            mg_score -= ep::mg(P::PassedBase) + (7 - r) * ep::mg(P::PassedRank);
-            eg_score -= ep::eg(P::PassedBase) + (7 - r) * ep::eg(P::PassedRank);
+            s.add(P::PassedBase, -1);
+            s.add(P::PassedRank, -(7 - r));
             black_passed.push(sq);
             if is_supported_by_pawn(board, sq, Color::Black) {
-                mg_score -= ep::mg(P::PassedSupportedBase) + (7 - r) * ep::mg(P::PassedSupportedRank);
-                eg_score -= ep::eg(P::PassedSupportedBase) + (7 - r) * ep::eg(P::PassedSupportedRank);
+                s.add(P::PassedSupportedBase, -1);
+                s.add(P::PassedSupportedRank, -(7 - r));
             }
-            let (support_mg, support_eg) = passed_pawn_support_score(
+            passed_pawn_support_score(
+                &mut s,
+                -1,
                 sq,
                 Color::Black,
                 black_king,
                 white_king,
                 black_rooks.as_slice(),
             );
-            mg_score -= support_mg;
-            eg_score -= support_eg;
         }
 
         if is_connected_pawn(&black_pawn_masks, sq, Color::Black) {
-            mg_score -= ep::mg(P::Connected);
-            eg_score -= ep::eg(P::Connected);
+            s.add(P::Connected, -1);
         }
 
         if is_backward_pawn(board, &black_pawn_masks, sq, Color::Black, passed) {
-            mg_score += ep::mg(P::Backward);
-            eg_score += ep::eg(P::Backward);
+            s.add(P::Backward, 1);
         }
 
         let candidate = white_min_pawn_rank[f] >= r as i8;
         if candidate {
-            let lever = pawn_has_lever(board, sq, Color::Black);
-            mg_score -= ep::mg(P::CandidateBase)
-                + (7 - r) * ep::mg(P::CandidateRank)
-                + if lever { ep::mg(P::CandidateLever) + (7 - r) * ep::mg(P::CandidateLeverRank) } else { 0 };
-            eg_score -= ep::eg(P::CandidateBase)
-                + (7 - r) * ep::eg(P::CandidateRank)
-                + if lever { ep::eg(P::CandidateLever) + (7 - r) * ep::eg(P::CandidateLeverRank) } else { 0 };
+            s.add(P::CandidateBase, -1);
+            s.add(P::CandidateRank, -(7 - r));
+            if pawn_has_lever(board, sq, Color::Black) {
+                s.add(P::CandidateLever, -1);
+                s.add(P::CandidateLeverRank, -(7 - r));
+            }
             if is_supported_by_pawn(board, sq, Color::Black)
                 || is_connected_pawn(&black_pawn_masks, sq, Color::Black)
             {
-                mg_score -= ep::mg(P::CandidateSupported);
-                eg_score -= ep::eg(P::CandidateSupported);
+                s.add(P::CandidateSupported, -1);
             }
         }
     }
@@ -854,12 +907,10 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let r = sq / 8;
         if white_pawn_files[f] == 0 {
             let p = if black_pawn_files[f] == 0 { P::RookOpenFile } else { P::RookSemiOpenFile };
-            mg_score += ep::mg(p);
-            eg_score += ep::eg(p);
+            s.add(p, 1);
         }
         if r == 6 {
-            mg_score += ep::mg(P::RookSeventh);
-            eg_score += ep::eg(P::RookSeventh);
+            s.add(P::RookSeventh, 1);
         }
     }
     for &sq in black_rooks.as_slice() {
@@ -867,12 +918,10 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         let r = sq / 8;
         if black_pawn_files[f] == 0 {
             let p = if white_pawn_files[f] == 0 { P::RookOpenFile } else { P::RookSemiOpenFile };
-            mg_score -= ep::mg(p);
-            eg_score -= ep::eg(p);
+            s.add(p, -1);
         }
         if r == 1 {
-            mg_score -= ep::mg(P::RookSeventh);
-            eg_score -= ep::eg(P::RookSeventh);
+            s.add(P::RookSeventh, -1);
         }
     }
 
@@ -888,8 +937,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             let target = (nr as u8) * 8 + (nf as u8);
             let rel = relative_rank(Color::White, target);
             if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
-                mg_score += ep::mg(P::PawnCenterControl);
-                eg_score += ep::eg(P::PawnCenterControl);
+                s.add(P::PawnCenterControl, 1);
             }
         }
     }
@@ -905,8 +953,7 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             let target = (nr as u8) * 8 + (nf as u8);
             let rel = relative_rank(Color::Black, target);
             if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
-                mg_score -= ep::mg(P::PawnCenterControl);
-                eg_score -= ep::eg(P::PawnCenterControl);
+                s.add(P::PawnCenterControl, -1);
             }
         }
     }
@@ -929,22 +976,19 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         white_has_queen,
         white_pieces.as_slice(),
     );
-    mg_score += king_safety_score;
-    eg_score += king_safety_score / KS_EG_DIVISOR;
+    s.nonlinear(king_safety_score, king_safety_score / KS_EG_DIVISOR);
 
     if phase <= 8 {
         let material_edge = white_non_pawn_material - black_non_pawn_material;
         if material_edge >= 500 {
             if let (Some(wk), Some(bk)) = (white_king, black_king) {
-                eg_score += king_edge_pressure(bk);
-                mg_score += (14 - king_distance(wk, bk)) * ep::mg(P::MopUpKingDistance);
-                eg_score += (14 - king_distance(wk, bk)) * ep::eg(P::MopUpKingDistance);
+                s.nonlinear(0, king_edge_pressure(bk));
+                s.add(P::MopUpKingDistance, 14 - king_distance(wk, bk));
             }
         } else if material_edge <= -500 {
             if let (Some(wk), Some(bk)) = (white_king, black_king) {
-                eg_score -= king_edge_pressure(wk);
-                mg_score -= (14 - king_distance(wk, bk)) * ep::mg(P::MopUpKingDistance);
-                eg_score -= (14 - king_distance(wk, bk)) * ep::eg(P::MopUpKingDistance);
+                s.nonlinear(0, -king_edge_pressure(wk));
+                s.add(P::MopUpKingDistance, -(14 - king_distance(wk, bk)));
             }
         }
     }
@@ -955,11 +999,9 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 && (!white_pawns.as_slice().is_empty() || !black_pawns.as_slice().is_empty())
             {
                 if board.side_to_move == Color::Black {
-                    mg_score += ep::mg(P::PawnEndgameOpposition);
-                    eg_score += ep::eg(P::PawnEndgameOpposition);
+                    s.add(P::PawnEndgameOpposition, 1);
                 } else {
-                    mg_score -= ep::mg(P::PawnEndgameOpposition);
-                    eg_score -= ep::eg(P::PawnEndgameOpposition);
+                    s.add(P::PawnEndgameOpposition, -1);
                 }
             }
         }
@@ -992,8 +1034,8 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
             _ => None,
         };
         if let Some((sign, base, unit, units)) = race {
-            mg_score += sign * (ep::mg(base) + units * ep::mg(unit));
-            eg_score += sign * (ep::eg(base) + units * ep::eg(unit));
+            s.add(base, sign);
+            s.add(unit, sign * units);
         }
     }
 
@@ -1002,14 +1044,18 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
         && !white_has_queen
         && !black_has_queen
     {
-        eg_score += rook_endgame_bonus(
+        rook_endgame_bonus(
+            &mut s,
+            1,
             Color::White,
             white_rooks.as_slice(),
             white_passed.as_slice(),
             black_passed.as_slice(),
             black_king,
         );
-        eg_score -= rook_endgame_bonus(
+        rook_endgame_bonus(
+            &mut s,
+            -1,
             Color::Black,
             black_rooks.as_slice(),
             black_passed.as_slice(),
@@ -1029,25 +1075,20 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 if r >= 3
                     && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score += ep::mg(P::KnightOutpost);
-                    eg_score += ep::eg(P::KnightOutpost);
+                    s.add(P::KnightOutpost, 1);
                 }
             }
             PieceType::Bishop => {
                 if r >= 3
                     && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score += ep::mg(P::BishopOutpost);
-                    eg_score += ep::eg(P::BishopOutpost);
+                    s.add(P::BishopOutpost, 1);
                 }
-                mg_score += mobility * ep::mg(P::BishopMobilityExtra);
-                eg_score += mobility * ep::eg(P::BishopMobilityExtra);
+                s.add(P::BishopMobilityExtra, mobility);
             }
             _ => {}
         }
-        let (trap_mg, trap_eg) = trapped_piece_penalty(sq, piece, mobility, white_king);
-        mg_score -= trap_mg;
-        eg_score -= trap_eg;
+        trapped_piece_penalty(&mut s, 1, sq, piece, mobility, white_king);
     }
     for &(sq, piece) in black_pieces.as_slice() {
         let mobility = mobility_count(board, sq, piece);
@@ -1058,31 +1099,24 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
                 if r <= 4
                     && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score -= ep::mg(P::KnightOutpost);
-                    eg_score -= ep::eg(P::KnightOutpost);
+                    s.add(P::KnightOutpost, -1);
                 }
             }
             PieceType::Bishop => {
                 if r <= 4
                     && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
                 {
-                    mg_score -= ep::mg(P::BishopOutpost);
-                    eg_score -= ep::eg(P::BishopOutpost);
+                    s.add(P::BishopOutpost, -1);
                 }
-                mg_score -= mobility * ep::mg(P::BishopMobilityExtra);
-                eg_score -= mobility * ep::eg(P::BishopMobilityExtra);
+                s.add(P::BishopMobilityExtra, -mobility);
             }
             _ => {}
         }
-        let (trap_mg, trap_eg) = trapped_piece_penalty(sq, piece, mobility, black_king);
-        mg_score += trap_mg;
-        eg_score += trap_eg;
+        trapped_piece_penalty(&mut s, -1, sq, piece, mobility, black_king);
     }
-    let mobility_delta = white_mob - black_mob;
-    mg_score += mobility_delta * ep::mg(P::Mobility);
-    eg_score += mobility_delta * ep::eg(P::Mobility);
+    s.add(P::Mobility, white_mob - black_mob);
 
-    let mut score = taper_score(mg_score, eg_score, phase);
+    let mut score = taper_score(s.mg, s.eg, phase);
     if board.side_to_move == Color::White {
         score += TEMPO;
     } else {
@@ -1106,26 +1140,43 @@ mod tests {
 
     #[test]
     fn trapped_corner_knight_gets_penalized() {
-        let trapped = trapped_piece_penalty(
-            parse_square("a1").unwrap(),
-            Piece {
-                color: Color::White,
-                kind: PieceType::Knight,
-            },
-            1,
-            None,
-        );
-        let free = trapped_piece_penalty(
-            parse_square("d4").unwrap(),
-            Piece {
-                color: Color::White,
-                kind: PieceType::Knight,
-            },
-            6,
-            None,
-        );
-        assert!(trapped.0 > free.0);
-        assert!(trapped.1 > free.1);
+        let knight = Piece { color: Color::White, kind: PieceType::Knight };
+        let (mut t1, mut t2) = (NoTrace, NoTrace);
+        let mut trapped = Score { mg: 0, eg: 0, t: &mut t1 };
+        trapped_piece_penalty(&mut trapped, 1, parse_square("a1").unwrap(), knight, 1, None);
+        let mut free = Score { mg: 0, eg: 0, t: &mut t2 };
+        trapped_piece_penalty(&mut free, 1, parse_square("d4").unwrap(), knight, 6, None);
+        assert!(trapped.mg < free.mg);
+        assert!(trapped.eg < free.eg);
+    }
+
+    #[test]
+    fn trace_rebuilds_evaluate_exactly() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r1bq1rk1/pp2bppp/2n1pn2/3p4/2PP4/2N1PN2/PP3PPP/R2QKB1R w KQ - 0 8",
+            "8/5k2/8/3P4/8/8/5K2/8 b - - 0 1",
+            "6k1/5p2/8/8/8/8/1R3PP1/r5K1 w - - 0 40",
+            "4k3/8/8/8/8/8/8/1Q2K3 b - - 0 1",
+            "2n1k3/1P6/8/8/8/8/8/N3K2B w - - 0 1",
+        ];
+        let mut board = Board::new();
+        for fen in fens {
+            board.set_fen(fen);
+            let mut t = EvalTrace::new();
+            let score = evaluate_with(&board, &mut t);
+            assert_eq!(score, evaluate(&board), "{fen}");
+            let (mut mg, mut eg) = (board.eval_acc.mg + t.nonlinear_mg, board.eval_acc.eg + t.nonlinear_eg);
+            for i in 0..PARAM_COUNT {
+                mg += t.mg[i] * ep::PARAMS[i].0;
+                eg += t.eg[i] * ep::PARAMS[i].1;
+            }
+            let tempo = if board.side_to_move == Color::White { TEMPO } else { -TEMPO };
+            let phase = board.eval_acc.phase.clamp(0, 24);
+            assert_eq!(taper_score(mg, eg, phase) + tempo, score, "{fen}");
+        }
     }
 
     #[test]

@@ -50,7 +50,7 @@ eval_params! {
     PassedSupportedRank = (1, 3),
     PasserOwnKingNear = (3, 8),       // * (3 - king_distance) when distance <= 2
     PasserEnemyKingFar = (0, 2),      // * (enemy king promo distance - remaining)
-    PasserEnemyKingAdjacent = (0, 10),// penalty when enemy king touches the passer
+    PasserEnemyKingAdjacent = (0, 10), // penalty when enemy king touches the passer
     PasserRookBehind = (4, 10),       // own rook behind the passer, same file
     PasserRookFront = (0, 4),         // penalty: own rook in front of the passer
 
