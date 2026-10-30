@@ -173,6 +173,42 @@ fn apply_continuation_history_delta(
     *h = (*h + delta).clamp(-100_000, 100_000);
 }
 
+/// Capture-history saturation bound for the gravity update.
+const CAPTURE_HISTORY_MAX: i32 = 16_384;
+/// Divisor applied to capture history when it is added to the SEE/MVV-LVA
+/// ordering score (SEE is scaled by 16, so |h|/16 <= 1024 ~ 64cp of SEE).
+const CAPTURE_HISTORY_ORDER_DIV: i32 = 16;
+
+/// `[moving piece][to][captured kind]` indices for a capture on the current
+/// board, or None if `mv` is not a capture.
+fn capture_history_index(board: &Board, mv: Move) -> Option<(usize, usize, usize)> {
+    let mover = board.squares[mv.from as usize]?;
+    let captured = if mv.is_en_passant {
+        PieceType::Pawn
+    } else {
+        board.squares[mv.to as usize]?.kind
+    };
+    Some((
+        crate::tt::piece_index(mover),
+        mv.to as usize,
+        crate::bitboard::kind_index(captured),
+    ))
+}
+
+fn capture_history_score(engine: &EngineState, board: &Board, mv: Move) -> i32 {
+    capture_history_index(board, mv)
+        .map(|(p, to, c)| engine.capture_history[p][to][c])
+        .unwrap_or(0)
+}
+
+/// Gravity update: `h += bonus - h*|bonus|/MAX`, keeping |h| <= MAX.
+fn apply_capture_history_delta(engine: &mut EngineState, board: &Board, mv: Move, bonus: i32) {
+    if let Some((p, to, c)) = capture_history_index(board, mv) {
+        let h = &mut engine.capture_history[p][to][c];
+        *h += bonus - *h * bonus.abs() / CAPTURE_HISTORY_MAX;
+    }
+}
+
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
 }
@@ -323,7 +359,8 @@ impl MovePicker {
 
             if is_capture_move(board, mv) {
                 let see_score = see(board, mv);
-                let score = capture_stage_score_from_see(board, mv, see_score);
+                let score = capture_stage_score_from_see(board, mv, see_score)
+                    + capture_history_score(engine, board, mv) / CAPTURE_HISTORY_ORDER_DIV;
                 if see_score >= 0 {
                     picker.bufs.good_captures.push((mv, score));
                 } else {
@@ -1133,6 +1170,7 @@ fn negamax(
     let mut best_move = None;
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
+    let mut captures_tried = PooledMoveVec::take();
     let mut idx = 0usize;
 
     while let Some((mv, stage)) = picker.next() {
@@ -1171,6 +1209,8 @@ fn negamax(
 
         if quiet {
             quiets_tried.push(mv);
+        } else if is_capture_move(board, mv) {
+            captures_tried.push(mv);
         }
 
         let undo = board.make_move(mv);
@@ -1284,6 +1324,17 @@ fn negamax(
             alpha = score;
         }
         if alpha >= beta {
+            // Capture history: reward the cutoff capture, penalize captures
+            // searched before it (all of them if a quiet move cut off).
+            let cap_bonus = (16 * depth * depth).min(1200);
+            if !quiet {
+                apply_capture_history_delta(engine, board, mv, cap_bonus);
+            }
+            for tried in captures_tried.iter().copied() {
+                if tried != mv {
+                    apply_capture_history_delta(engine, board, tried, -cap_bonus);
+                }
+            }
             if quiet {
                 let bonus = (depth * depth).min(64 * 64);
                 if let Some(prev) = prev_move {

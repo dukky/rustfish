@@ -729,6 +729,8 @@ impl Board {
 type HistoryTable = [[[i32; 64]; 64]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
 type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// Capture history indexed by [moving piece (piece_index)][to square][captured kind].
+type CaptureHistoryTable = [[[i32; 6]; 64]; 12];
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -780,6 +782,7 @@ struct EngineState {
     history: HistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
+    capture_history: CaptureHistoryTable,
     search_params: SearchParams,
     lmr_table: [[i32; 64]; 64],
     searches_since_decay: u8,
@@ -807,6 +810,7 @@ impl EngineState {
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            capture_history: [[[0; 6]; 64]; 12],
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
             searches_since_decay: 0,
@@ -837,6 +841,7 @@ impl EngineState {
         self.history = [[[0; 64]; 64]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.capture_history = [[[0; 6]; 64]; 12];
         self.searches_since_decay = 0;
         self.position_history.clear();
     }
@@ -870,6 +875,9 @@ impl EngineState {
                 }
             }
         }
+        for h in self.capture_history.iter_mut().flatten().flatten() {
+            *h /= 2;
+        }
     }
 
     fn prepare_for_search(&mut self) {
@@ -889,6 +897,7 @@ impl EngineState {
             history: self.history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
+            capture_history: self.capture_history,
             search_params: self.search_params,
             lmr_table: self.lmr_table,
             searches_since_decay: 0,
