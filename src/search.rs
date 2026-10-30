@@ -1013,7 +1013,7 @@ fn negamax(
         Some(
             tt_entry
                 .and_then(|entry| tt_static_eval(entry, ply))
-                .unwrap_or_else(|| eval_for_side(board)),
+                .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
     let static_eval = raw_static_eval;
@@ -1434,7 +1434,7 @@ fn quiescence(
         Some(
             tt_entry
                 .and_then(|entry| tt_static_eval(entry, ply))
-                .unwrap_or_else(|| eval_for_side(board)),
+                .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
     let static_eval = raw_static_eval;
