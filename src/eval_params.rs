@@ -7,7 +7,10 @@
 //! tempo, which is added after tapering) are kept as plain constants below.
 //!
 //! Sign convention: the stored value is the magnitude; the call site decides
-//! whether it is a bonus or a penalty (e.g. `Doubled` is subtracted).
+//! whether it is a bonus or a penalty (e.g. `Doubled` is subtracted). Values
+//! are Texel-tuned jointly with src/psqt.rs by the `tune` command, which
+//! rewrites only the numbers in the `eval_params!` block; a tuned value may be
+//! negative, which simply flips the term.
 
 macro_rules! eval_params {
     ($($id:ident = ($mg:expr, $eg:expr)),* $(,)?) => {
@@ -30,73 +33,73 @@ macro_rules! eval_params {
 
 eval_params! {
     // Bishop pair, per side with >= 2 bishops.
-    BishopPair = (30, 40),
+    BishopPair = (14, 67),
 
     // Development (only applied while phase >= 12; mg only).
-    DevUndevelopedMinor = (5, 0),     // penalty per minor on its start square
-    DevKingHomeUndeveloped = (8, 0),  // penalty: king at home with >= 2 undeveloped
-    DevKingCastled = (8, 0),          // bonus: king on a castled square
+    DevUndevelopedMinor = (-6, 0),    // penalty per minor on its start square
+    DevKingHomeUndeveloped = (1, 0),  // penalty: king at home with >= 2 undeveloped
+    DevKingCastled = (16, 0),         // bonus: king on a castled square
 
     // Pawn structure.
-    Doubled = (12, 16),               // penalty per pawn on a file with > 1 own pawn
-    Isolated = (14, 12),              // penalty per pawn with no own pawns on adjacent files
-    Connected = (8, 10),              // bonus per phalanx/supported-chain pawn
-    Backward = (12, 6),               // penalty per backward pawn
+    Doubled = (2, 7),                 // penalty per pawn on a file with > 1 own pawn
+    Isolated = (4, 10),               // penalty per pawn with no own pawns on adjacent files
+    Connected = (1, -6),              // bonus per phalanx/supported-chain pawn
+    Backward = (7, 5),                // penalty per backward pawn
 
     // Passed pawns: base + rank * rank_weight (rank is relative 0..7).
-    PassedBase = (12, 28),
-    PassedRank = (4, 12),
-    PassedSupportedBase = (6, 12),    // extra when defended by own pawn
-    PassedSupportedRank = (1, 3),
-    PasserOwnKingNear = (3, 8),       // * (3 - king_distance) when distance <= 2
-    PasserEnemyKingFar = (0, 2),      // * (enemy king promo distance - remaining)
-    PasserEnemyKingAdjacent = (0, 10), // penalty when enemy king touches the passer
-    PasserRookBehind = (4, 10),       // own rook behind the passer, same file
-    PasserRookFront = (0, 4),         // penalty: own rook in front of the passer
+    PassedBase = (-22, -2),
+    PassedRank = (0, 11),
+    PassedSupportedBase = (-13, -69), // extra when defended by own pawn
+    PassedSupportedRank = (5, 21),
+    PasserOwnKingNear = (6, 7),       // * (3 - king_distance) when distance <= 2
+    PasserEnemyKingFar = (2, 28),     // * (enemy king promo distance - remaining)
+    PasserEnemyKingAdjacent = (19, 74), // penalty when enemy king touches the passer
+    PasserRookBehind = (8, 10),       // own rook behind the passer, same file
+    PasserRookFront = (-8, -26),      // penalty: own rook in front of the passer
 
     // Candidate passers (no enemy pawn ahead on the same file).
-    CandidateBase = (4, 8),
-    CandidateRank = (1, 3),
-    CandidateLever = (4, 6),
-    CandidateLeverRank = (0, 1),
-    CandidateSupported = (2, 4),
+    CandidateBase = (-16, -13),
+    CandidateRank = (6, 5),
+    CandidateLever = (-32, -17),
+    CandidateLeverRank = (4, 10),
+    CandidateSupported = (16, 11),
 
     // Pawn attacks on central squares (files c..f, relative ranks 2..4).
-    PawnCenterControl = (4, 0),
+    PawnCenterControl = (7, 23),
 
     // Rooks.
-    RookOpenFile = (20, 14),
-    RookSemiOpenFile = (10, 8),
-    RookSeventh = (16, 24),
+    RookOpenFile = (47, -4),
+    RookSemiOpenFile = (11, 20),
+    RookSeventh = (6, 33),
 
     // Minor pieces.
-    KnightOutpost = (18, 8),
-    BishopOutpost = (10, 6),
-    Mobility = (2, 1),                // per pseudo-legal move, all pieces
-    BishopMobilityExtra = (2, 1),     // additional per bishop move
+    KnightOutpost = (38, 6),
+    BishopOutpost = (34, 11),
+    Mobility = (1, 3),                // per pseudo-legal move, all pieces
+    BishopMobilityExtra = (2, 0),     // additional per bishop move
 
     // Trapped pieces: weight * severity, severity = 3 - mobility (rook: 4 - mobility).
-    TrappedKnightCorner = (12, 6),
-    TrappedKnightEdge = (6, 3),
-    TrappedBishopEdge = (10, 5),
-    TrappedBishopCornerExtra = (6, 2),
-    TrappedRookByKing = (8, 3),
+    TrappedKnightCorner = (8, -10),
+    TrappedKnightEdge = (0, 2),
+    TrappedBishopEdge = (1, 7),
+    TrappedBishopCornerExtra = (15, 19),
+    TrappedRookByKing = (-3, 9),
 
     // Endgame: mop-up with a >= 500 non-pawn material edge, * (14 - king distance).
-    MopUpKingDistance = (0, 3),
+    MopUpKingDistance = (45, -9),
 
     // Pawn endgames (no non-pawn material).
-    PawnEndgameOpposition = (0, 14),
-    RaceUnstoppable = (0, 90),        // + (8 - moves) * RaceUnstoppableSpeed
-    RaceUnstoppableSpeed = (0, 6),
-    RaceAhead = (0, 40),              // + (moves gap) * RaceAheadGap
-    RaceAheadGap = (0, 8),
+    PawnEndgameOpposition = (0, 25),
+    RaceUnstoppable = (0, 81),        // + (8 - moves) * RaceUnstoppableSpeed
+    RaceUnstoppableSpeed = (0, 33),
+    RaceAhead = (0, 63),              // + (moves gap) * RaceAheadGap
+    RaceAheadGap = (0, 66),
 
     // Single-rook endgames (one rook each, no queens).
-    RookEgEnemyKingClose = (0, 2),    // * (7 - distance to enemy king)
-    RookEgBehindPasser = (0, 18),
-    RookEgFrontOfPasser = (0, 8),     // penalty
-    RookEgBehindEnemyPasser = (0, 14),
+    RookEgEnemyKingClose = (0, 0),    // * (7 - distance to enemy king)
+    RookEgBehindPasser = (0, 4),
+    RookEgFrontOfPasser = (0, 31),    // penalty
+    RookEgBehindEnemyPasser = (0, 23),
 }
 
 /// mg weight of a parameter.

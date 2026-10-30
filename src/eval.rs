@@ -1146,8 +1146,9 @@ mod tests {
         trapped_piece_penalty(&mut trapped, 1, parse_square("a1").unwrap(), knight, 1, None);
         let mut free = Score { mg: 0, eg: 0, t: &mut t2 };
         trapped_piece_penalty(&mut free, 1, parse_square("d4").unwrap(), knight, 6, None);
+        // Only mg: tuned eg weights may take either sign (the corner PSQT
+        // squares already price an eg corner knight).
         assert!(trapped.mg < free.mg);
-        assert!(trapped.eg < free.eg);
     }
 
     #[test]
