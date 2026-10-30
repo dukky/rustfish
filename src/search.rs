@@ -1197,7 +1197,6 @@ fn negamax(
             let reduction = if quiet
                 && !in_check
                 && !gives_check
-                && !priority_quiet
                 && depth >= params.lmr_min_depth
                 && idx >= params.lmr_min_move_index
             {
@@ -1206,6 +1205,10 @@ fn negamax(
                 let mut r = engine.lmr_table[d][m];
                 if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
                     r += 1;
+                }
+                // Killers, counter-moves and positive-history quiets reduce one ply less.
+                if priority_quiet {
+                    r -= 1;
                 }
                 // Reduce more for moves with bad history
                 if quiet_history < -2000 {
