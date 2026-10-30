@@ -140,6 +140,45 @@ monthly, whichever comes first:
 4. **Re-tune** eval weights after any large search change, since tuned values
    drift as search changes.
 
+## Tuning search parameters (SPSA)
+
+The search margins and limits (`FutilityMarginD1`, `ReverseFutilityMarginD*`,
+`NullMargin*`, `NullReduction*`, `LmpLimitD*`, `Lmr*`) are UCI spin options, so
+they can be tuned by SPSA on GitHub without rebuilding per point. The state
+(theta, bounds, `c_end`, `r_end`, iteration counter, schedule length) lives in
+`tune/spsa-params.json`; `scripts/spsa.py` implements fishtest-style SPSA
+(alpha 0.602, gamma 0.101, A = 10% of `total_iterations`).
+
+```bash
+gh workflow run spsa.yml -f ref=main -f params=tune/spsa-params.json \
+  -f settings='{"tc": "8+0.08", "hash": 16, "shards": 16, "iterations": 50, "pairs": 8, "rounds": 4, "combine": "mean"}'
+gh run watch    # tuned values land in the merge job's summary + spsa-result artifact
+```
+- One iteration = `pairs` game pairs of theta+c_k*delta vs theta-c_k*delta.
+  Each shard builds rustfish once and runs `iterations` iterations.
+- **Parallel approximation:** shards can't share theta mid-run, so each runs
+  an independent chain from the same theta with its own seed; the merge job
+  takes the iteration-weighted mean of their theta deltas (`combine: mean`:
+  averaged gradient, same step size; safe) or their sum (`combine: sum`:
+  about `shards` times faster, but overshoots unless rounds are short). With
+  `rounds > 1` the merge job dispatches the next round from the merged theta,
+  so keep `iterations` per round small and use more rounds rather than one
+  long round.
+- `total_iterations` counts merged iterations: `mean` adds `iterations` per
+  round, `sum` adds `shards * iterations`. Size it to the total you plan to
+  run so the gains decay to `c_end` / `r_end` at the end.
+- To continue a tune later, commit the `spsa-result.json` artifact over
+  `tune/spsa-params.json` (it carries the iteration counter) and dispatch again.
+- Sanity-check the maths offline: `python3 scripts/spsa.py toy` runs the same
+  shard/merge scheme on a fake quadratic Elo function.
+
+**Applying results:** round the tuned values (`python3 scripts/spsa.py show
+spsa-result.json`), put them in `SearchParams::default()` *and* the matching
+`option name ... default` lines of the `uci` handler in `src/main.rs`, commit
+with the new `Bench:` trailer, and run a normal STC SPRT (`ci.py sprt`, `[0, 5]`)
+plus the LTC non-regression check. A tune is just a candidate: it is merged
+only if it passes the SPRT like any other change.
+
 ## Things to retest
 Everything in `post-2100-revised.md`'s "Rejected for now" list was tested
 before commit 80862d0, when every timed search was silently capped at depth 8,
@@ -157,6 +196,7 @@ this pipeline before ruling it out again.
 | `.github/workflows/sprt.yml` | wave-based SPRT on GitHub runners |
 | `.github/workflows/ccrl-ladder.yml` | CCRL-scale rating vs anchors |
 | `.github/workflows/release.yml` | release binaries on tag `v*` (docs/ccrl-submission.md) |
+| `.github/workflows/spsa.yml`, `scripts/spsa.py`, `tune/spsa-params.json` | SPSA tuning of search options |
 | `tests/sprt-log.jsonl`, `tests/ladder-log.jsonl` | the record of every result |
 
 Capacity: GitHub runs about 20 jobs at once for this account. An STC wave uses

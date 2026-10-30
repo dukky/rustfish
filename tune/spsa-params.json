@@ -1,0 +1,26 @@
+{
+  "comment": "SPSA state for scripts/spsa.py / .github/workflows/spsa.yml. value = current theta (starts at the SearchParams::default values in src/main.rs); min/max = tuning bounds (narrower than the UCI option limits); c_end = final perturbation (~5-10% of range); r_end = fishtest-style final step factor. iteration/total_iterations drive the gain schedules (A = A_ratio * total_iterations).",
+  "iteration": 0,
+  "total_iterations": 500,
+  "alpha": 0.602,
+  "gamma": 0.101,
+  "A_ratio": 0.1,
+  "params": {
+    "FutilityMarginD1":        {"value": 120, "min": 40,  "max": 300, "c_end": 15,  "r_end": 0.002},
+    "FutilityMarginD2":        {"value": 220, "min": 80,  "max": 500, "c_end": 25,  "r_end": 0.002},
+    "ReverseFutilityMarginD1": {"value": 90,  "min": 30,  "max": 250, "c_end": 12,  "r_end": 0.002},
+    "ReverseFutilityMarginD2": {"value": 180, "min": 60,  "max": 400, "c_end": 20,  "r_end": 0.002},
+    "ReverseFutilityMarginD3": {"value": 300, "min": 100, "max": 600, "c_end": 30,  "r_end": 0.002},
+    "NullMarginBase":          {"value": 90,  "min": 0,   "max": 250, "c_end": 15,  "r_end": 0.002},
+    "NullMarginDepthScale":    {"value": 20,  "min": 0,   "max": 60,  "c_end": 4,   "r_end": 0.002},
+    "NullReductionBase":       {"value": 2,   "min": 1,   "max": 5,   "c_end": 0.4, "r_end": 0.002},
+    "NullReductionDepthDiv":   {"value": 4,   "min": 2,   "max": 10,  "c_end": 0.6, "r_end": 0.002},
+    "LmpLimitD1":              {"value": 6,   "min": 2,   "max": 16,  "c_end": 1,   "r_end": 0.002},
+    "LmpLimitD2":              {"value": 10,  "min": 4,   "max": 24,  "c_end": 1.5, "r_end": 0.002},
+    "LmpLimitD3":              {"value": 14,  "min": 6,   "max": 32,  "c_end": 2,   "r_end": 0.002},
+    "LmrMinDepth":             {"value": 3,   "min": 1,   "max": 6,   "c_end": 0.4, "r_end": 0.002},
+    "LmrMinMoveIndex":         {"value": 3,   "min": 1,   "max": 8,   "c_end": 0.5, "r_end": 0.002},
+    "LmrExtraDepth":           {"value": 5,   "min": 2,   "max": 10,  "c_end": 0.6, "r_end": 0.002},
+    "LmrExtraMoveIndex":       {"value": 8,   "min": 3,   "max": 20,  "c_end": 1.2, "r_end": 0.002}
+  }
+}

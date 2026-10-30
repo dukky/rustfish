@@ -1,0 +1,210 @@
+name: SPSA
+
+# SPSA tuning of rustfish's UCI spin options (scripts/spsa.py, tune/*.json).
+#
+# Each shard builds rustfish once, then loops `iterations` times: perturb theta
+# by +-c_k, play `pairs` game pairs plus-vs-minus with fastchess, update theta.
+# Shards can't share theta mid-run, so each runs an independent SPSA chain from
+# the same starting theta (different seeds); the merge job combines the
+# shards' theta deltas (iteration-weighted mean by default) into a new params
+# JSON. That is a parallel approximation of sequential SPSA, not the exact
+# algorithm. With rounds > 1 the merge job dispatches the next round from the
+# merged theta (passed inline as `state`), keeping each chain's staleness short.
+#
+#   gh workflow run spsa.yml -f params=tune/spsa-params.json \
+#     -f settings='{"tc": "8+0.08", "hash": 16, "shards": 16, "iterations": 50, "pairs": 8, "rounds": 1, "combine": "mean"}'
+
+run-name: "SPSA ${{ inputs.params }} @ ${{ inputs.ref }} round ${{ inputs.round }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Engine ref to tune (branch, tag or SHA)"
+        default: "main"
+      params:
+        description: "SPSA params/state JSON, path in the repo"
+        default: "tune/spsa-params.json"
+      settings:
+        description: "JSON: tc, hash, shards, iterations (per shard job), pairs (game pairs per iteration), rounds, combine (mean|sum)"
+        default: '{"tc": "8+0.08", "hash": 16, "shards": 16, "iterations": 50, "pairs": 8, "rounds": 1, "combine": "mean"}'
+      round:
+        default: "1"
+      state:
+        description: "Internal: merged state JSON from the previous round (empty = read the params file)"
+        default: ""
+
+permissions:
+  contents: read
+  actions: write   # the merge job dispatches the next round
+
+env:
+  FASTCHESS_VERSION: v1.8.2-alpha
+  BOOK: UHO_Lichess_4852_v1.epd
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          REF: ${{ inputs.ref }}
+          PARAMS: ${{ inputs.params }}
+          STATE: ${{ inputs.state }}
+          SHARDS: ${{ fromJSON(inputs.settings).shards }}
+        run: |
+          resolve() { git rev-parse --verify --quiet "origin/$1^{commit}" || git rev-parse --verify "$1^{commit}"; }
+          echo "sha=$(resolve "$REF")" >> "$GITHUB_OUTPUT"
+          echo "shards=$(python3 -c "import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$SHARDS")" >> "$GITHUB_OUTPUT"
+          if [ -n "$STATE" ]; then printf '%s' "$STATE" > spsa-base.json; else cp "$PARAMS" spsa-base.json; fi
+          python3 -c "import json; s=json.load(open('spsa-base.json')); s.pop('pending', None); json.dump(s, open('spsa-base.json','w'), indent=2)"
+          cat spsa-base.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spsa-base
+          path: spsa-base.json
+
+  play:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: spsa-base
+
+      - name: Build rustfish
+        env:
+          RUSTFLAGS: -C target-cpu=native
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          mkdir -p engines
+          git worktree add --detach wt-engine "$SHA"
+          cargo build --release --manifest-path wt-engine/Cargo.toml
+          cp wt-engine/target/release/rustfish engines/rustfish
+          printf 'bench\nquit\n' | engines/rustfish | grep 'Nodes searched'
+          # Every tuned name must be a real spin option, or fastchess would
+          # silently tune nothing.
+          printf 'uci\nquit\n' | engines/rustfish > uci.txt
+          python3 -c "
+          import json, sys
+          opts = open('uci.txt').read()
+          missing = [n for n in json.load(open('spsa-base.json'))['params'] if f'option name {n} type spin' not in opts]
+          sys.exit(f'not UCI spin options: {missing}' if missing else 0)"
+
+      - name: Fetch fastchess and openings
+        run: |
+          curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
+          mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
+          install -m 755 "$(find fastchess-dist -type f -name fastchess | head -1)" engines/fastchess
+          curl -sSL -o book.zip "https://github.com/official-stockfish/books/raw/master/$BOOK.zip"
+          unzip -q book.zip
+
+      - name: Tune
+        env:
+          TC: ${{ fromJSON(inputs.settings).tc }}
+          HASH: ${{ fromJSON(inputs.settings).hash }}
+          ITERS: ${{ fromJSON(inputs.settings).iterations }}
+          PAIRS: ${{ fromJSON(inputs.settings).pairs }}
+          SHARD: ${{ matrix.shard }}
+          SEED: ${{ github.run_id }}-${{ matrix.shard }}
+        run: |
+          STATE="spsa-state-$SHARD.json"
+          python3 scripts/spsa.py start spsa-base.json --seed "$SEED" --out "$STATE"
+          for i in $(seq 1 "$ITERS"); do
+            python3 scripts/spsa.py perturb "$STATE" --plus-file plus.opts --minus-file minus.opts
+            # Unquoted on purpose: each file is a list of option.X=v words.
+            engines/fastchess \
+              -engine cmd=engines/rustfish name=plus $(cat plus.opts) \
+              -engine cmd=engines/rustfish name=minus $(cat minus.opts) \
+              -each proto=uci tc="$TC" option.Hash="$HASH" option.OwnBook=false \
+              -rounds "$PAIRS" -repeat \
+              -concurrency "$(nproc)" \
+              -openings file="$BOOK" format=epd order=random \
+              -srand "$(( ${{ github.run_id }} % 100000 * 1000 + SHARD * 100000000 + i ))" \
+              -draw movenumber=40 movecount=8 score=10 \
+              -resign movecount=3 score=600 \
+              -recover \
+              -ratinginterval 0 \
+              > batch.log 2>&1 || echo "fastchess exited $? on iteration $i"
+            python3 scripts/spsa.py update "$STATE" --fastchess-log batch.log
+            grep -E 'Ptnml\(0-2\)' batch.log | tail -1 >> "fastchess-$SHARD.log" || true
+          done
+          python3 scripts/spsa.py show "$STATE"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            spsa-state-*.json
+            fastchess-*.log
+          if-no-files-found: warn
+
+  merge:
+    needs: [plan, play]
+    # !cancelled(): a cancelled run must not merge or dispatch the next round;
+    # individual shard failures still merge the shards that finished.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: spsa-base
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+      - name: Merge shards
+        env:
+          COMBINE: ${{ fromJSON(inputs.settings).combine || 'mean' }}
+        run: |
+          shopt -s nullglob
+          states=(shards/spsa-state-*.json)
+          [ ${#states[@]} -gt 0 ] || { echo "no shard states"; exit 1; }
+          python3 scripts/spsa.py merge spsa-base.json "${states[@]}" \
+            --combine "$COMBINE" --out spsa-result.json --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spsa-result
+          path: spsa-result.json
+      - name: Next round
+        env:
+          GH_TOKEN: ${{ github.token }}
+          I: ${{ toJSON(inputs) }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          REF: ${{ github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, subprocess
+          i = json.loads(os.environ["I"])
+          rnd, rounds = int(i["round"]), int(json.loads(i["settings"]).get("rounds", 1))
+          if rnd >= rounds:
+              print(f"round {rnd}/{rounds}: done")
+              raise SystemExit
+          state = json.load(open("spsa-result.json"))
+          state.pop("history", None)  # keep the inline input small
+          fields = dict(i, ref=os.environ["SHA"], round=str(rnd + 1),
+                        state=json.dumps(state, separators=(",", ":")))
+          cmd = ["gh", "workflow", "run", "spsa.yml", "--ref", os.environ["REF"]]
+          for k, v in fields.items():
+              cmd += ["-f", f"{k}={v}"]
+          subprocess.run(cmd, check=True)
+          print(f"dispatched round {rnd + 1}/{rounds}")
+          EOF
