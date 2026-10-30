@@ -3,8 +3,10 @@ mod book;
 mod eval;
 mod eval_params;
 mod movegen;
+mod psqt;
 mod search;
 mod tt;
+mod tune;
 mod uci;
 
 use std::cmp::Reverse;
@@ -138,13 +140,9 @@ struct EvalAcc {
 
 impl EvalAcc {
     fn apply(&mut self, sq: u8, p: Piece, sign: i32) {
-        let (pst_mg, pst_eg) = eval::pst_values(p.kind, p.color, sq);
-        let mut mg = search::piece_value(p.kind) + pst_mg;
-        let mut eg = search::piece_value(p.kind) + pst_eg;
-        if p.kind == PieceType::Bishop {
-            mg += 5;
-            eg += 8;
-        }
+        let rel = if p.color == Color::White { sq } else { sq ^ 56 } as usize;
+        let mg = psqt::PSQT_MG[p.kind as usize][rel];
+        let eg = psqt::PSQT_EG[p.kind as usize][rel];
         let side_sign = if p.color == Color::White { sign } else { -sign };
         self.mg += side_sign * mg;
         self.eg += side_sign * eg;

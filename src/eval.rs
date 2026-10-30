@@ -457,14 +457,6 @@ fn is_outpost_square(
     true
 }
 
-fn king_centralization(sq: u8) -> i32 {
-    let f = (sq % 8) as i32;
-    let r = (sq / 8) as i32;
-    let df = (f - 3).abs().min((f - 4).abs());
-    let dr = (r - 3).abs().min((r - 4).abs());
-    14 - (df + dr) * 4
-}
-
 fn king_edge_pressure(sq: u8) -> i32 {
     let f = (sq % 8) as i32;
     let r = (sq / 8) as i32;
@@ -594,113 +586,6 @@ fn relative_rank(color: Color, sq: u8) -> i32 {
 
 fn taper_score(mg: i32, eg: i32, phase: i32) -> i32 {
     (mg * phase + eg * (24 - phase)) / 24
-}
-
-fn mg_pst_value(kind: PieceType, color: Color, sq: u8) -> i32 {
-    let idx = if color == Color::White {
-        sq as usize
-    } else {
-        (sq ^ 56) as usize
-    };
-
-    const PAWN: [i32; 64] = [
-        0, 0, 0, 0, 0, 0, 0, 0,
-        5, 10, 10, -20, -20, 10, 10, 5,
-        5, -5, -10, 0, 0, -10, -5, 5,
-        0, 0, 0, 20, 20, 0, 0, 0,
-        5, 5, 10, 25, 25, 10, 5, 5,
-        10, 10, 20, 30, 30, 20, 10, 10,
-        50, 50, 50, 50, 50, 50, 50, 50,
-        0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    const KNIGHT: [i32; 64] = [
-        -50, -40, -30, -30, -30, -30, -40, -50,
-        -40, -20, 0, 0, 0, 0, -20, -40,
-        -30, 0, 10, 15, 15, 10, 0, -30,
-        -30, 5, 15, 20, 20, 15, 5, -30,
-        -30, 0, 15, 20, 20, 15, 0, -30,
-        -30, 5, 10, 15, 15, 10, 5, -30,
-        -40, -20, 0, 5, 5, 0, -20, -40,
-        -50, -40, -30, -30, -30, -30, -40, -50,
-    ];
-    const BISHOP: [i32; 64] = [
-        -20, -10, -10, -10, -10, -10, -10, -20,
-        -10, 0, 0, 0, 0, 0, 0, -10,
-        -10, 0, 5, 10, 10, 5, 0, -10,
-        -10, 5, 5, 10, 10, 5, 5, -10,
-        -10, 0, 10, 10, 10, 10, 0, -10,
-        -10, 10, 10, 10, 10, 10, 10, -10,
-        -10, 5, 0, 0, 0, 0, 5, -10,
-        -20, -10, -10, -10, -10, -10, -10, -20,
-    ];
-    const ROOK: [i32; 64] = [
-        0, 0, 0, 5, 5, 0, 0, 0,
-        -5, 0, 0, 0, 0, 0, 0, -5,
-        -5, 0, 0, 0, 0, 0, 0, -5,
-        -5, 0, 0, 0, 0, 0, 0, -5,
-        -5, 0, 0, 0, 0, 0, 0, -5,
-        -5, 0, 0, 0, 0, 0, 0, -5,
-        5, 10, 10, 10, 10, 10, 10, 5,
-        0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    const QUEEN: [i32; 64] = [
-        -20, -10, -10, -5, -5, -10, -10, -20,
-        -10, 0, 0, 0, 0, 0, 0, -10,
-        -10, 0, 5, 5, 5, 5, 0, -10,
-        -5, 0, 5, 5, 5, 5, 0, -5,
-        0, 0, 5, 5, 5, 5, 0, -5,
-        -10, 5, 5, 5, 5, 5, 0, -10,
-        -10, 0, 5, 0, 0, 0, 0, -10,
-        -20, -10, -10, -5, -5, -10, -10, -20,
-    ];
-    const KING: [i32; 64] = [
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -30, -40, -40, -50, -50, -40, -40, -30,
-        -20, -30, -30, -40, -40, -30, -30, -20,
-        -10, -20, -20, -20, -20, -20, -20, -10,
-        20, 20, 0, 0, 0, 0, 20, 20,
-        20, 30, 10, 0, 0, 10, 30, 20,
-    ];
-
-    match kind {
-        PieceType::Pawn => PAWN[idx],
-        PieceType::Knight => KNIGHT[idx],
-        PieceType::Bishop => BISHOP[idx],
-        PieceType::Rook => ROOK[idx],
-        PieceType::Queen => QUEEN[idx],
-        PieceType::King => KING[idx],
-    }
-}
-
-fn eg_pst_value(kind: PieceType, color: Color, sq: u8) -> i32 {
-    let idx = if color == Color::White {
-        sq
-    } else {
-        sq ^ 56
-    };
-    let f = (idx % 8) as i32;
-    let r = (idx / 8) as i32;
-    let center_file = (f - 3).abs().min((f - 4).abs());
-    let center_rank = (r - 3).abs().min((r - 4).abs());
-    let center = center_file + center_rank;
-
-    match kind {
-        PieceType::Pawn => r * 10 - center_file * 2,
-        PieceType::Knight => 28 - center * 8,
-        PieceType::Bishop => 20 - center * 5,
-        PieceType::Rook => r * 4 - center_file * 2,
-        PieceType::Queen => 12 - center * 4,
-        PieceType::King => king_centralization(idx) * 2,
-    }
-}
-
-pub(crate) fn pst_values(kind: PieceType, color: Color, sq: u8) -> (i32, i32) {
-    (
-        mg_pst_value(kind, color, sq),
-        eg_pst_value(kind, color, sq),
-    )
 }
 
 fn development_score(board: &Board, color: Color) -> i32 {
