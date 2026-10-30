@@ -1194,7 +1194,8 @@ fn negamax(
                 true,
             );
         } else {
-            let reduction = if quiet
+            let bad_capture = stage == Stage::BadCapture;
+            let reduction = if (quiet || bad_capture)
                 && !in_check
                 && !gives_check
                 && depth >= params.lmr_min_depth
@@ -1203,19 +1204,29 @@ fn negamax(
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
                 let m = idx.min(LMR_MAX_MOVES - 1);
                 let mut r = engine.lmr_table[d][m];
-                if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
-                    r += 1;
-                }
-                // Killers, counter-moves and positive-history quiets reduce one ply less.
-                if priority_quiet {
+                if quiet {
+                    if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
+                        r += 1;
+                    }
+                    // Killers, counter-moves and positive-history quiets reduce one ply less.
+                    if priority_quiet {
+                        r -= 1;
+                    }
+                    // Reduce more for moves with bad history
+                    if quiet_history < -2000 {
+                        r += 1;
+                    }
+                    // Reduce less for moves with good history
+                    if quiet_history > 2000 {
+                        r -= 1;
+                    }
+                } else {
+                    // Late losing captures (SEE < 0): a lighter reduction than quiets,
+                    // since they still change material and are often tactically sharp.
                     r -= 1;
                 }
-                // Reduce more for moves with bad history
-                if quiet_history < -2000 {
-                    r += 1;
-                }
-                // Reduce less for moves with good history
-                if quiet_history > 2000 {
+                // PV nodes reduce one ply less.
+                if beta - alpha > 1 {
                     r -= 1;
                 }
                 r.clamp(0, depth - 2)
