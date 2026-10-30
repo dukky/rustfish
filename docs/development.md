@@ -156,6 +156,7 @@ this pipeline before ruling it out again.
 | `.github/workflows/ci.yml` | correctness gate on every push |
 | `.github/workflows/sprt.yml` | wave-based SPRT on GitHub runners |
 | `.github/workflows/ccrl-ladder.yml` | CCRL-scale rating vs anchors |
+| `.github/workflows/release.yml` | release binaries on tag `v*` (docs/ccrl-submission.md) |
 | `tests/sprt-log.jsonl`, `tests/ladder-log.jsonl` | the record of every result |
 
 Capacity: GitHub runs about 20 jobs at once for this account. An STC wave uses

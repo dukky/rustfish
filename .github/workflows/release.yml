@@ -1,0 +1,133 @@
+name: Release
+
+# Builds downloadable rustfish binaries (Windows / Linux x86-64 in two CPU
+# variants, macOS arm64), smoke-tests each one, and records its bench node
+# count. Pushing a tag `v*` publishes a GitHub release with every binary
+# attached. A manual dispatch builds and uploads workflow artifacts only; it
+# never creates a release or a tag. See docs/ccrl-submission.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Name used in the binary file names (no release is created)"
+        default: "vtest"
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   platform: windows-x86-64, variant: v2, cpu: x86-64-v2, ext: .exe }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   platform: windows-x86-64, variant: v3, cpu: x86-64-v3, ext: .exe }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, platform: linux-x86-64,   variant: v2, cpu: x86-64-v2, ext: "" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, platform: linux-x86-64,   variant: v3, cpu: x86-64-v3, ext: "" }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     platform: macos-arm64,    variant: "", cpu: "",        ext: "" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        env:
+          CPU: ${{ matrix.cpu }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          flags=""
+          if [ -n "$CPU" ]; then flags="-C target-cpu=$CPU"; fi
+          # The search runs on the main thread; MSVC's default 1 MB main-thread
+          # stack is far below the 8 MB Linux/macOS give it, so raise it.
+          if [[ "$TARGET" == *windows-msvc ]]; then flags="$flags -C link-arg=/STACK:8388608"; fi
+          echo "RUSTFLAGS=$flags"
+          RUSTFLAGS="$flags" cargo build --release --target "$TARGET"
+
+      - name: Name binary
+        id: name
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VARIANT: ${{ matrix.variant }}
+          EXT: ${{ matrix.ext }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="rustfish-$TAG-$PLATFORM${VARIANT:+-$VARIANT}$EXT"
+          mkdir -p dist
+          cp "target/$TARGET/release/rustfish$EXT" "dist/$name"
+          echo "file=dist/$name" >> "$GITHUB_OUTPUT"
+          echo "base=$name" >> "$GITHUB_OUTPUT"
+
+      - name: UCI smoke
+        env:
+          BIN: ${{ steps.name.outputs.file }}
+        run: |
+          out=$(printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | "./$BIN")
+          echo "$out" | grep -E '^id |uciok|readyok|bestmove'
+          grep -q '^uciok' <<<"$out"
+          grep -q '^readyok' <<<"$out"
+          grep -qE '^bestmove [a-h][1-8][a-h][1-8]' <<<"$out"
+
+      - name: Bench
+        env:
+          BIN: ${{ steps.name.outputs.file }}
+          BASE: ${{ steps.name.outputs.base }}
+        run: |
+          out=$(printf 'bench\nquit\n' | "./$BIN")
+          echo "$out"
+          nodes=$(sed -n 's/^Nodes searched *: *//p' <<<"$out" | tr -d '\r')
+          nps=$(sed -n 's/^Nodes\/second *: *//p' <<<"$out" | tr -d '\r')
+          [ -n "$nodes" ] || { echo "bench printed no node count"; exit 1; }
+          echo "| \`$BASE\` | $nodes | $nps |" > "dist/$BASE.bench.md"
+          echo "### $BASE: bench $nodes nodes, $nps nps" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.base }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "rustfish $TAG ($GITHUB_SHA)"
+            echo
+            echo "UCI engine, single thread by default (\`Threads\`), \`Hash\` default 64 MB."
+            echo "x86-64 binaries: \`v3\` needs AVX2/BMI2 (Haswell / Zen 1 or newer); \`v2\` needs only POPCNT/SSE4.2 and runs on older CPUs."
+            echo
+            echo "Bench (\`bench\` UCI command; the node count is the build signature and should match across binaries):"
+            echo
+            echo "| Binary | Nodes | NPS (CI runner) |"
+            echo "|---|---|---|"
+            cat artifacts/*.bench.md | sort
+          } > notes.md
+          cat notes.md
+          rm artifacts/*.bench.md
+          gh release create "$TAG" artifacts/* --title "rustfish $TAG" --notes-file notes.md --verify-tag
