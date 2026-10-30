@@ -158,11 +158,15 @@ const HISTORY_MAX: i32 = 16_384;
 /// Cap on a single history bonus/malus. 16 * d^2 reaches it at depth 10, so
 /// one deep cutoff moves an entry at most ~9% of the way to the bound.
 const HISTORY_BONUS_MAX: i32 = 1_536;
-/// LMR adjusts the reduction for quiets whose history passes +/- this value.
-/// The old threshold was 2000 under linear `d^2` accumulation; with a 16x
-/// bonus and gravity, the same number of net same-depth cutoffs lands at
-/// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
-const LMR_HISTORY_THRESHOLD: i32 = 14_000;
+/// LMR reduction changes by -(history + continuation history) / this divisor.
+/// Measured at the LMR site (3s middlegame search) the sum has median -915,
+/// p10 -1933, p1 -2696, so the median late quiet gets +1 ply and the worst
+/// +2..3. (A +/-14000 threshold never fired: the sum never got near it.)
+const LMR_HISTORY_DIV: i32 = 768;
+/// Clamp on the history term, in plies: up to 2 less reduction for good
+/// history, up to 3 more for bad history.
+const LMR_HISTORY_MIN_ADJ: i32 = -2;
+const LMR_HISTORY_MAX_ADJ: i32 = 3;
 
 fn history_bonus(depth: i32) -> i32 {
     (16 * depth * depth).min(HISTORY_BONUS_MAX)
@@ -1230,14 +1234,10 @@ fn negamax(
                 if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
                     r += 1;
                 }
-                // Reduce more for moves with bad history
-                if quiet_history < -LMR_HISTORY_THRESHOLD {
-                    r += 1;
-                }
-                // Reduce less for moves with good history
-                if quiet_history > LMR_HISTORY_THRESHOLD {
-                    r -= 1;
-                }
+                // Continuous history adjustment: bad history reduces more,
+                // good history reduces less.
+                r += (-(quiet_history + quiet_continuation) / LMR_HISTORY_DIV)
+                    .clamp(LMR_HISTORY_MIN_ADJ, LMR_HISTORY_MAX_ADJ);
                 r.clamp(0, depth - 2)
             } else {
                 0
