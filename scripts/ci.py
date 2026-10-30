@@ -9,7 +9,8 @@
 
 Examples:
   python3 scripts/ci.py sprt tm-soft-limit                  # STC gainer [0, 5]
-  python3 scripts/ci.py sprt tm-soft-limit --ltc            # LTC confirmation
+  python3 scripts/ci.py sprt tm-soft-limit --ltc            # LTC non-regression [-5, 0]
+  python3 scripts/ci.py sprt tm-soft-limit --ltc --gainer   # LTC gainer [0, 5] (time management)
   python3 scripts/ci.py sprt refactor-movegen --nonreg      # must not lose [-5, 0]
   python3 scripts/ci.py sprt my-branch --no-wait            # dispatch and exit
   python3 scripts/ci.py sprt --resume <test_id>             # re-attach to a test
@@ -123,7 +124,10 @@ def cmd_sprt(args):
             print(f"warning: origin/{branch} ({remote.split()[0][:7]}) differs from local ({local[:7]})")
         profile = "ltc" if args.ltc else "stc"
         settings = dict(PROFILES[profile])
-        elo0, elo1 = (-5, 0) if args.nonreg else (args.elo0, args.elo1)
+        # An LTC run confirms an STC pass, so it defaults to non-regression:
+        # a real gain clears [-5, 0] in far fewer games than [0, 5].
+        nonreg = args.nonreg or (args.ltc and not args.gainer)
+        elo0, elo1 = (-5, 0) if nonreg else (args.elo0, args.elo1)
         settings.update(elo0=elo0, elo1=elo1, max_waves=args.max_waves)
         stamp = datetime.datetime.now().strftime("%m%d-%H%M")
         test_id = f"{re.sub(r'[^A-Za-z0-9._-]', '-', branch)}-{profile}-{stamp}"
@@ -179,6 +183,7 @@ def main():
     sp.add_argument("--base", default="main")
     sp.add_argument("--ltc", action="store_true", help="60+0.6 instead of 10+0.1")
     sp.add_argument("--nonreg", action="store_true", help="non-regression bounds [-5, 0]")
+    sp.add_argument("--gainer", action="store_true", help="with --ltc: gainer bounds instead of non-regression")
     sp.add_argument("--elo0", type=float, default=0)
     sp.add_argument("--elo1", type=float, default=5)
     sp.add_argument("--max-waves", type=int, default=10)

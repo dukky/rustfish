@@ -27,9 +27,14 @@ sanity; GitHub Actions (public repo, free) does every strength measurement.
 | Refactor, cleanup, tooling, docs | must be unchanged | CI | none |
 | Pure speedup (same nodes, faster) | must be unchanged | CI + interleaved local bench NPS | optional `--nonreg` if large |
 | New eval or search idea, parameter change | new `Bench:` trailer | STC SPRT | `[0, 5]` |
-| Search change that passed STC | (same) | **also** LTC SPRT | `[0, 5]` with `--ltc` |
+| Search change that passed STC | (same) | **also** LTC non-regression | `[-5, 0]` with `--ltc` |
 | Simplification (removes code/terms) | new `Bench:` trailer | STC non-regression | `[-5, 0]` via `--nonreg` |
-| Time management change | usually unchanged | LTC SPRT (STC barely exercises it) | `[0, 5]` with `--ltc` |
+| Time management change | usually unchanged | LTC gainer (STC barely exercises it) | `[0, 5]` with `--ltc --gainer` |
+
+The LTC step for search changes is a non-regression check: the STC gainer
+test already established the gain, and LTC only has to show it doesn't turn
+into a loss at longer time controls. A real gain clears `[-5, 0]` in a fraction
+of the games a second `[0, 5]` test would need; compute is the bottleneck.
 
 STC is 10+0.1 and LTC is 60+0.6, both one thread, with UHO openings and paired
 colors. Bounds are logistic Elo; alpha = beta = 0.05.
@@ -80,7 +85,7 @@ python3 scripts/gauntlet.py --engine-a ./target/release/rustfish --engine-b ../r
 git commit          # include "Bench: <nodes>" if behavior changed
 git push -u origin <idea-name>
 python3 scripts/ci.py sprt <idea-name>            # STC [0, 5]; follows every wave
-python3 scripts/ci.py sprt <idea-name> --ltc      # after an STC pass, for search changes
+python3 scripts/ci.py sprt <idea-name> --ltc      # after an STC pass, for search changes: LTC [-5, 0]
 python3 scripts/ci.py sprt <idea-name> --nonreg   # simplifications
 ```
 - Pushing the branch also runs CI (build, tests, perft, selftest, bench).
