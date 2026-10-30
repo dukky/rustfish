@@ -132,7 +132,9 @@ jobs:
 
   report:
     needs: [plan, play]
-    if: always() && needs.plan.result == 'success'
+    # !cancelled(): a cancelled wave must not report or dispatch the next one;
+    # individual shard failures still report on the shards that finished.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
