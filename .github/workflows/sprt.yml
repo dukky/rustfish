@@ -190,6 +190,10 @@ jobs:
           print(json.dumps(res, indent=2))
 
           if not final:
+              # Waves start small and double up to max_rounds_per_shard, so a
+              # clear result stops early instead of finishing a big wave.
+              cap = int(cfg.get("max_rounds_per_shard", cfg["rounds_per_shard"]))
+              cfg["rounds_per_shard"] = min(cap, int(cfg["rounds_per_shard"]) * 2)
               # Pin SHAs so later waves test identical code.
               fields = dict(i, candidate=os.environ["CAND"], base=os.environ["BASE"],
                             settings=json.dumps(cfg),

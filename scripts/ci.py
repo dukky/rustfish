@@ -29,8 +29,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, "tests")
 
 PROFILES = {
-    "stc": {"tc": "10+0.1", "hash": 16, "shards": 16, "rounds_per_shard": 64},
-    "ltc": {"tc": "60+0.6", "hash": 64, "shards": 20, "rounds_per_shard": 24},
+    # rounds_per_shard is the first wave; each later wave doubles up to the max.
+    "stc": {"tc": "10+0.1", "hash": 16, "shards": 16, "rounds_per_shard": 16, "max_rounds_per_shard": 64},
+    "ltc": {"tc": "60+0.6", "hash": 64, "shards": 20, "rounds_per_shard": 6, "max_rounds_per_shard": 24},
 }
 
 
@@ -185,7 +186,10 @@ def main():
     sp.add_argument("--nonreg", action="store_true", help="non-regression bounds [-5, 0]")
     sp.add_argument("--gainer", action="store_true", help="with --ltc: gainer bounds instead of non-regression")
     sp.add_argument("--elo0", type=float, default=0)
-    sp.add_argument("--elo1", type=float, default=5)
+    # [0, 10] while the big gains are being harvested: same 5% false-accept
+    # rate, ~4x faster on borderline patches, but real +2..5 gains often fail.
+    # Return to --elo1 5 once typical patches get small.
+    sp.add_argument("--elo1", type=float, default=10)
     sp.add_argument("--max-waves", type=int, default=10)
     sp.add_argument("--no-wait", action="store_true")
     sp.add_argument("--resume", metavar="TEST_ID")

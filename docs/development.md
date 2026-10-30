@@ -26,10 +26,17 @@ sanity; GitHub Actions (public repo, free) does every strength measurement.
 |---|---|---|---|
 | Refactor, cleanup, tooling, docs | must be unchanged | CI | none |
 | Pure speedup (same nodes, faster) | must be unchanged | CI + interleaved local bench NPS | optional `--nonreg` if large |
-| New eval or search idea, parameter change | new `Bench:` trailer | STC SPRT | `[0, 5]` |
-| Search change that passed STC | (same) | **also** LTC non-regression | `[-5, 0]` with `--ltc` |
+| New eval or search idea, parameter change | new `Bench:` trailer | STC SPRT | `[0, 10]` (default; `--elo1 5` later) |
+| Search changes, in batches | — | LTC non-regression of `main` vs `main` ~5 merges back | `[-5, 0]` with `--ltc --base <sha>` |
 | Simplification (removes code/terms) | new `Bench:` trailer | STC non-regression | `[-5, 0]` via `--nonreg` |
 | Time management change | usually unchanged | LTC gainer (STC barely exercises it) | `[0, 5]` with `--ltc --gainer` |
+
+Compute is the bottleneck, so three choices keep tests fast without raising
+the false-accept rate (still 5%): waves start at 512 STC games and double up
+to 2,048, so clear results stop early; STC bounds are `[0, 10]` while big gains
+are still available (borderline tests ~4x shorter, but real +2..5 patches
+often fail — return to `[0, 5]` when typical gains shrink); and LTC is run on
+batches of merged search changes rather than every patch.
 
 The LTC step for search changes is a non-regression check: the STC gainer
 test already established the gain, and LTC only has to show it doesn't turn
