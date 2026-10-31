@@ -28,6 +28,11 @@ fn stop_requested() -> bool {
     let active = ACTIVE_GO.load(Ordering::Relaxed);
     active != 0 && STOP_UPTO.load(Ordering::Relaxed) >= active
 }
+// ProbCut: minimum depth, margin over beta, and depth reduction for the
+// verification search (child searched at depth - 1 - PROBCUT_REDUCTION).
+const PROBCUT_MIN_DEPTH: i32 = 5;
+const PROBCUT_MARGIN: i32 = 190;
+const PROBCUT_REDUCTION: i32 = 3;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
@@ -1105,6 +1110,85 @@ fn negamax(
             }
             if score >= beta {
                 return score;
+            }
+        }
+    }
+
+    // ProbCut: if a good capture beats beta by a wide margin in qsearch and
+    // then in a shallow (depth - PROBCUT_REDUCTION) null-window search, the
+    // full-depth search would almost surely fail high too.
+    if !in_check
+        && beta - alpha <= 1
+        && depth >= PROBCUT_MIN_DEPTH
+        && beta.abs() < MATE_SCORE - MAX_PLY as i32 * 2
+    {
+        let probcut_beta = beta + PROBCUT_MARGIN;
+        let tt_says_no = tt_entry
+            .map(|e| {
+                e.depth as i32 >= depth - 3 && score_from_tt(e.score, ply) < probcut_beta
+            })
+            .unwrap_or(false);
+        if let (false, Some(se)) = (tt_says_no, static_eval) {
+            let see_threshold = probcut_beta - se;
+            let mut picker = MovePicker::new(
+                board,
+                engine,
+                tt_move,
+                None,
+                None,
+                &[None, None],
+                &engine.history,
+                true,
+                &mut search.move_buf,
+            );
+            while let Some((mv, stage)) = picker.next() {
+                if stage == Stage::BadCapture || see(board, mv) < see_threshold {
+                    continue;
+                }
+                let undo = board.make_move(mv);
+                let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
+                rep_stack.push(child_key);
+                let mut score = -quiescence(
+                    board,
+                    -probcut_beta,
+                    -probcut_beta + 1,
+                    search,
+                    engine,
+                    rep_stack,
+                    child_key,
+                    ply + 1,
+                );
+                if score >= probcut_beta && !search.stop {
+                    score = -negamax(
+                        board,
+                        depth - 1 - PROBCUT_REDUCTION,
+                        -probcut_beta,
+                        -probcut_beta + 1,
+                        ply + 1,
+                        search,
+                        engine,
+                        rep_stack,
+                        child_key,
+                        Some(mv),
+                        true,
+                    );
+                }
+                rep_stack.pop();
+                board.undo_move(mv, undo);
+                if search.stop {
+                    return 0;
+                }
+                if score >= probcut_beta {
+                    engine.tt.store(
+                        key,
+                        depth - 3,
+                        score_to_tt(score, ply),
+                        raw_static_eval,
+                        Bound::Lower,
+                        Some(mv),
+                    );
+                    return score;
+                }
             }
         }
     }
