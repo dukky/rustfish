@@ -20,6 +20,12 @@ const RFP_MAX_DEPTH: i32 = 7;
 const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
+// Aspiration windows: first iteration searched with a window around the last score.
+const ASPIRATION_MIN_DEPTH: i32 = 5;
+// Initial half-width in cp; grows by half of itself on every fail.
+const ASPIRATION_DELTA: i32 = 25;
+// Once the half-width exceeds this, re-search with a full window.
+const ASPIRATION_MAX_DELTA: i32 = 500;
 
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
@@ -477,6 +483,50 @@ pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) ->
     false
 }
 
+/// Root search window for one iterative-deepening iteration. Starts narrow
+/// around the previous score and widens gradually on each fail.
+struct AspirationWindow {
+    alpha: i32,
+    beta: i32,
+    delta: i32,
+}
+
+impl AspirationWindow {
+    fn new(depth: i32, prev_score: i32) -> Self {
+        if depth < ASPIRATION_MIN_DEPTH || prev_score.abs() >= MATE_SCORE - 1000 {
+            return Self { alpha: -INF, beta: INF, delta: INF };
+        }
+        Self {
+            alpha: (prev_score - ASPIRATION_DELTA).max(-INF),
+            beta: (prev_score + ASPIRATION_DELTA).min(INF),
+            delta: ASPIRATION_DELTA,
+        }
+    }
+
+    /// Adjusts the window after a completed search returning `score`.
+    /// Returns true if the score fell outside the window and a re-search is needed.
+    fn widen(&mut self, score: i32) -> bool {
+        if score > self.alpha && score < self.beta {
+            return false;
+        }
+        if score <= self.alpha {
+            // Fail low: drop alpha and pull beta toward the old alpha.
+            self.beta = (self.alpha + self.beta) / 2;
+            self.alpha = score - self.delta;
+        } else {
+            self.beta = score + self.delta;
+        }
+        self.delta += self.delta / 2;
+        if self.delta > ASPIRATION_MAX_DELTA || score.abs() >= MATE_SCORE - 1000 {
+            self.alpha = -INF;
+            self.beta = INF;
+        }
+        self.alpha = self.alpha.max(-INF);
+        self.beta = self.beta.min(INF);
+        true
+    }
+}
+
 pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) -> Option<String> {
     if engine.own_book {
         if let Some(book) = try_book_move(board, engine) {
@@ -614,12 +664,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             break;
         }
 
-        let mut alpha = -INF;
-        let mut beta = INF;
-        if d >= 4 {
-            alpha = best_score - ASPIRATION_WINDOW;
-            beta = best_score + ASPIRATION_WINDOW;
-        }
+        let mut window = AspirationWindow::new(d, best_score);
 
         let (score, mv, completed, depth_nodes) = loop {
             if use_threads {
@@ -633,23 +678,15 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 let result = search_root_parallel(
                     board,
                     d,
-                    alpha,
-                    beta,
+                    window.alpha,
+                    window.beta,
                     hash,
                     deadline,
                     worker_engines.as_mut().unwrap(),
                     &mut root_moves,
                     &rep_stack,
                 );
-                if !result.2 || d < 4 {
-                    break (result.0, result.1, result.2, result.3);
-                }
-                if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
-                    continue;
-                }
-                if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                if result.2 && window.widen(result.0) {
                     continue;
                 }
                 break (result.0, result.1, result.2, result.3);
@@ -658,8 +695,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 let result = search_root(
                     board,
                     d,
-                    alpha,
-                    beta,
+                    window.alpha,
+                    window.beta,
                     hash,
                     &mut search,
                     engine,
@@ -667,15 +704,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     &mut rep_stack,
                 );
                 let nodes_after = search.nodes;
-                if !result.2 || d < 4 {
-                    break (result.0, result.1, result.2, nodes_after - nodes_before);
-                }
-                if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
-                    continue;
-                }
-                if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                if result.2 && window.widen(result.0) {
                     continue;
                 }
                 break (result.0, result.1, result.2, nodes_after - nodes_before);
