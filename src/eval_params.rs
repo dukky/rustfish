@@ -75,8 +75,13 @@ eval_params! {
     // Minor pieces.
     KnightOutpost = (38, 6),
     BishopOutpost = (34, 11),
-    Mobility = (1, 3),                // per pseudo-legal move, all pieces
-    BishopMobilityExtra = (2, 0),     // additional per bishop move
+
+    // Mobility: per attacked "safe" square, i.e. not attacked by an enemy
+    // pawn and not occupied by an own pawn or the own king.
+    KnightMobility = (4, 4),
+    BishopMobility = (4, 4),
+    RookMobility = (2, 4),
+    QueenMobility = (1, 3),
 
     // Trapped pieces: weight * severity, severity = 3 - mobility (rook: 4 - mobility).
     TrappedKnightCorner = (8, -10),

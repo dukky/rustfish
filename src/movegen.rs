@@ -226,29 +226,49 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
     }
 }
 
-pub(crate) fn mobility_count(board: &Board, sq: u8, piece: Piece) -> i32 {
-    use crate::bitboard::{
-        bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
-    };
+/// Squares attacked by a knight, bishop, rook or queen on `sq` given
+/// occupancy `occ` (0 for pawns and kings, which have no mobility term).
+#[inline(always)]
+pub(crate) fn piece_attacks(kind: PieceType, sq: u8, occ: u64) -> u64 {
+    use crate::bitboard::{bishop_attacks, rook_attacks, KNIGHT_ATTACKS};
 
     let s = sq as usize;
-    let occ = board.bb.occ_all();
-    let attacks = match piece.kind {
-        // A pawn's attack squares equal the squares an enemy pawn would
-        // attack this square from, so the attacker table works mirrored.
-        PieceType::Pawn => PAWN_ATTACKERS[color_index(piece.color.opposite())][s],
+    match kind {
         PieceType::Knight => KNIGHT_ATTACKS[s],
         PieceType::Bishop => bishop_attacks(s, occ),
         PieceType::Rook => rook_attacks(s, occ),
         PieceType::Queen => bishop_attacks(s, occ) | rook_attacks(s, occ),
-        PieceType::King => KING_ATTACKS[s],
-    };
-    (attacks & !board.bb.occ[color_index(piece.color)]).count_ones() as i32
+        PieceType::Pawn | PieceType::King => 0,
+    }
+}
+
+/// All squares attacked by the pawns in `pawns` of color `color`.
+#[inline(always)]
+pub(crate) fn pawn_attacks_bb(pawns: u64, color: Color) -> u64 {
+    const NOT_A: u64 = !0x0101_0101_0101_0101;
+    const NOT_H: u64 = !0x8080_8080_8080_8080;
+    match color {
+        Color::White => ((pawns & NOT_A) << 7) | ((pawns & NOT_H) << 9),
+        Color::Black => ((pawns & NOT_A) >> 9) | ((pawns & NOT_H) >> 7),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pawn_attacks_bb_matches_attacker_table() {
+        use crate::bitboard::PAWN_ATTACKERS;
+        for sq in 0..64usize {
+            for color in [Color::White, Color::Black] {
+                // A pawn's attack squares are the squares an enemy pawn
+                // would attack this square from.
+                let expected = PAWN_ATTACKERS[color_index(color.opposite())][sq];
+                assert_eq!(pawn_attacks_bb(1u64 << sq, color), expected, "{sq} {color:?}");
+            }
+        }
+    }
 
     #[test]
     fn castling_requires_rook_on_rook_square() {

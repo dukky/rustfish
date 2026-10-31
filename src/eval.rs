@@ -1064,57 +1064,51 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
         );
     }
 
-    let mut white_mob = 0;
-    let mut black_mob = 0;
-    for &(sq, piece) in white_pieces.as_slice() {
-        let mobility = mobility_count(board, sq, piece);
-        white_mob += mobility;
-        let r = sq / 8;
-        match piece.kind {
-            PieceType::Knight => {
-                if r >= 3
-                    && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
+    // Mobility over "safe" squares: not attacked by an enemy pawn and not
+    // occupied by an own pawn or king. Trapped-piece checks keep using the
+    // plain pseudo-legal count (attacks minus own-occupied squares).
+    let occ = board.bb.occ_all();
+    let pawn_bb = [board.bb.pieces[0][0], board.bb.pieces[1][0]];
+    let king_bb = [board.bb.pieces[0][5], board.bb.pieces[1][5]];
+    let mob_area = [
+        !(crate::movegen::pawn_attacks_bb(pawn_bb[1], Color::Black) | pawn_bb[0] | king_bb[0]),
+        !(crate::movegen::pawn_attacks_bb(pawn_bb[0], Color::White) | pawn_bb[1] | king_bb[1]),
+    ];
+    for (c, sign, pieces, own_king) in [
+        (0usize, 1i32, white_pieces.as_slice(), white_king),
+        (1usize, -1i32, black_pieces.as_slice(), black_king),
+    ] {
+        let color = if c == 0 { Color::White } else { Color::Black };
+        for &(sq, piece) in pieces {
+            let mob_param = match piece.kind {
+                PieceType::Knight => P::KnightMobility,
+                PieceType::Bishop => P::BishopMobility,
+                PieceType::Rook => P::RookMobility,
+                PieceType::Queen => P::QueenMobility,
+                PieceType::Pawn | PieceType::King => continue,
+            };
+            let attacks = crate::movegen::piece_attacks(piece.kind, sq, occ);
+            s.add(mob_param, sign * (attacks & mob_area[c]).count_ones() as i32);
+            let mobility = (attacks & !board.bb.occ[c]).count_ones() as i32;
+            let r = sq / 8;
+            let advanced = if c == 0 { r >= 3 } else { r <= 4 };
+            match piece.kind {
+                PieceType::Knight | PieceType::Bishop
+                    if advanced
+                        && is_outpost_square(sq, color, &white_min_pawn_rank, &black_max_pawn_rank) =>
                 {
-                    s.add(P::KnightOutpost, 1);
+                    let outpost = if piece.kind == PieceType::Knight {
+                        P::KnightOutpost
+                    } else {
+                        P::BishopOutpost
+                    };
+                    s.add(outpost, sign);
                 }
+                _ => {}
             }
-            PieceType::Bishop => {
-                if r >= 3
-                    && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::BishopOutpost, 1);
-                }
-                s.add(P::BishopMobilityExtra, mobility);
-            }
-            _ => {}
+            trapped_piece_penalty(&mut s, sign, sq, piece, mobility, own_king);
         }
-        trapped_piece_penalty(&mut s, 1, sq, piece, mobility, white_king);
     }
-    for &(sq, piece) in black_pieces.as_slice() {
-        let mobility = mobility_count(board, sq, piece);
-        black_mob += mobility;
-        let r = sq / 8;
-        match piece.kind {
-            PieceType::Knight => {
-                if r <= 4
-                    && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::KnightOutpost, -1);
-                }
-            }
-            PieceType::Bishop => {
-                if r <= 4
-                    && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::BishopOutpost, -1);
-                }
-                s.add(P::BishopMobilityExtra, -mobility);
-            }
-            _ => {}
-        }
-        trapped_piece_penalty(&mut s, -1, sq, piece, mobility, black_king);
-    }
-    s.add(P::Mobility, white_mob - black_mob);
 
     let mut score = taper_score(s.mg, s.eg, phase);
     if board.side_to_move == Color::White {
