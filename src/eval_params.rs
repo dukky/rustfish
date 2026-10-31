@@ -87,6 +87,15 @@ eval_params! {
     TrappedBishopCornerExtra = (30, 25),
     TrappedRookByKing = (-1, 11),
 
+    // Threats: per enemy piece attacked by a lower-value piece of ours.
+    ThreatPawnOnMinor = (30, 20),     // knight/bishop attacked by a pawn
+    ThreatPawnOnRook = (45, 25),
+    ThreatPawnOnQueen = (50, 30),
+    ThreatMinorOnRook = (30, 20),     // rook attacked by a knight/bishop
+    ThreatMinorOnQueen = (35, 20),
+    ThreatRookOnQueen = (30, 15),
+    Hanging = (25, 15),               // non-pawn piece attacked by us, undefended
+
     // Endgame: mop-up with a >= 500 non-pawn material edge, * (14 - king distance).
     MopUpKingDistance = (37, -10),
 

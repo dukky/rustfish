@@ -520,6 +520,82 @@ fn relative_rank(color: Color, sq: u8) -> i32 {
     }
 }
 
+/// Squares attacked by one side, split by attacker class. Shared by king
+/// safety, mobility and threats.
+#[derive(Clone, Copy, Default)]
+struct AttackMaps {
+    pawn: u64,
+    minor: u64,
+    rook: u64,
+    /// Every attacker except the king.
+    no_king: u64,
+    /// Every attacker, king included.
+    all: u64,
+}
+
+impl AttackMaps {
+    #[inline(always)]
+    fn record(&mut self, kind: PieceType, attacks: u64) {
+        match kind {
+            PieceType::Pawn => self.pawn |= attacks,
+            PieceType::Knight | PieceType::Bishop => self.minor |= attacks,
+            PieceType::Rook => self.rook |= attacks,
+            _ => {}
+        }
+        if kind != PieceType::King {
+            self.no_king |= attacks;
+        }
+        self.all |= attacks;
+    }
+}
+
+/// Threats by the side with attack maps `us` against the pieces of `them_idx`
+/// (defended by `them`): pieces attacked by a lower-value attacker, and
+/// undefended attacked pieces.
+#[inline(always)]
+fn threats<T: Tracer>(
+    s: &mut Score<'_, T>,
+    sign: i32,
+    board: &Board,
+    us: &AttackMaps,
+    them: &AttackMaps,
+    them_idx: usize,
+) {
+    let p = &board.bb.pieces[them_idx];
+    let minors = p[1] | p[2];
+    let rooks = p[3];
+    let queens = p[4];
+    let cnt = |b: u64| b.count_ones() as i32;
+    let n = cnt(us.pawn & minors);
+    if n != 0 {
+        s.add(P::ThreatPawnOnMinor, sign * n);
+    }
+    let n = cnt(us.pawn & rooks);
+    if n != 0 {
+        s.add(P::ThreatPawnOnRook, sign * n);
+    }
+    let n = cnt(us.pawn & queens);
+    if n != 0 {
+        s.add(P::ThreatPawnOnQueen, sign * n);
+    }
+    let n = cnt(us.minor & rooks);
+    if n != 0 {
+        s.add(P::ThreatMinorOnRook, sign * n);
+    }
+    let n = cnt(us.minor & queens);
+    if n != 0 {
+        s.add(P::ThreatMinorOnQueen, sign * n);
+    }
+    let n = cnt(us.rook & queens);
+    if n != 0 {
+        s.add(P::ThreatRookOnQueen, sign * n);
+    }
+    let n = cnt(us.all & !them.all & (minors | rooks | queens));
+    if n != 0 {
+        s.add(P::Hanging, sign * n);
+    }
+}
+
 pub(crate) fn taper_score(mg: i32, eg: i32, phase: i32) -> i32 {
     (mg * phase + eg * (24 - phase)) / 24
 }
@@ -914,27 +990,24 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     }
 
     let phase = phase.clamp(0, 24);
-    // Per-piece attack sets, shared by king safety and mobility.
+    // Per-piece attack sets and per-side attack maps, shared by king safety,
+    // mobility and threats.
     let occ = board.bb.occ_all();
     let mut white_atts = [0u64; 16];
     let mut black_atts = [0u64; 16];
-    let (mut white_all, mut white_no_king, mut black_all, mut black_no_king) = (0u64, 0u64, 0u64, 0u64);
+    let mut att = [AttackMaps::default(); 2];
     for (i, &(sq, piece)) in white_pieces.as_slice().iter().enumerate() {
-        let att = piece_attacks(sq, piece, occ);
-        white_atts[i] = att;
-        white_all |= att;
-        if piece.kind != PieceType::King {
-            white_no_king |= att;
-        }
+        let a = piece_attacks(sq, piece, occ);
+        white_atts[i] = a;
+        att[0].record(piece.kind, a);
     }
     for (i, &(sq, piece)) in black_pieces.as_slice().iter().enumerate() {
-        let att = piece_attacks(sq, piece, occ);
-        black_atts[i] = att;
-        black_all |= att;
-        if piece.kind != PieceType::King {
-            black_no_king |= att;
-        }
+        let a = piece_attacks(sq, piece, occ);
+        black_atts[i] = a;
+        att[1].record(piece.kind, a);
     }
+    let (white_all, white_no_king) = (att[0].all, att[0].no_king);
+    let (black_all, black_no_king) = (att[1].all, att[1].no_king);
 
     king_safety(
         &mut s,
@@ -1101,6 +1174,9 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     }
     s.add(P::Mobility, white_mob - black_mob);
 
+    threats(&mut s, 1, board, &att[0], &att[1], 1);
+    threats(&mut s, -1, board, &att[1], &att[0], 0);
+
     let mut score = taper_score(s.mg, s.eg, phase);
     if board.side_to_move == Color::White {
         score += TEMPO;
@@ -1147,6 +1223,7 @@ mod tests {
             "6k1/5p2/8/8/8/8/1R3PP1/r5K1 w - - 0 40",
             "4k3/8/8/8/8/8/8/1Q2K3 b - - 0 1",
             "2n1k3/1P6/8/8/8/8/8/N3K2B w - - 0 1",
+            "r2qk2r/ppp2ppp/2n5/3pP1B1/1b1n4/2N2N2/PPP2PPP/R2QKB1R b KQkq - 0 8",
         ];
         let mut board = Board::new();
         for fen in fens {
@@ -1163,6 +1240,24 @@ mod tests {
             let phase = board.eval_acc.phase.clamp(0, 24);
             assert_eq!(taper_score(mg, eg, phase) + tempo, score, "{fen}");
         }
+    }
+
+    #[test]
+    fn threats_are_counted() {
+        let mut board = Board::new();
+        // e4 forks the undefended d5 knight and f5 bishop.
+        board.set_fen("4k3/8/8/3n1b2/4P3/8/8/4K3 w - - 0 1");
+        let mut t = EvalTrace::new();
+        evaluate_with(&board, &mut t);
+        assert_eq!(t.mg[P::ThreatPawnOnMinor as usize], 2);
+        assert_eq!(t.mg[P::Hanging as usize], 2);
+        // Knight on c7 forks the a8 rook and e8 queen, which defend each other.
+        board.set_fen("r3q1k1/2N3pp/8/8/8/8/8/4K2R b - - 0 1");
+        let mut t = EvalTrace::new();
+        evaluate_with(&board, &mut t);
+        assert_eq!(t.mg[P::ThreatMinorOnRook as usize], 1);
+        assert_eq!(t.mg[P::ThreatMinorOnQueen as usize], 1);
+        assert_eq!(t.mg[P::Hanging as usize], 0);
     }
 
     #[test]
