@@ -729,6 +729,14 @@ impl Board {
 type HistoryTable = [[[i32; 64]; 64]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
 type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// Same [side][prev.to][from][to] layout as `ContinuationHistoryTable`, but
+/// flat and heap-allocated: a second 2 MB inline array overflows the 8 MB stack.
+type FollowupHistoryTable = Box<[i32]>;
+const FOLLOWUP_HISTORY_LEN: usize = 2 * 64 * 64 * 64;
+
+fn followup_index(side: usize, prev2_to: usize, from: usize, to: usize) -> usize {
+    ((side * 64 + prev2_to) * 64 + from) * 64 + to
+}
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -780,6 +788,7 @@ struct EngineState {
     history: HistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
+    followup_history: FollowupHistoryTable,
     search_params: SearchParams,
     lmr_table: [[i32; 64]; 64],
     searches_since_decay: u8,
@@ -807,6 +816,7 @@ impl EngineState {
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            followup_history: vec![0; FOLLOWUP_HISTORY_LEN].into_boxed_slice(),
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
             searches_since_decay: 0,
@@ -837,6 +847,7 @@ impl EngineState {
         self.history = [[[0; 64]; 64]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.followup_history.fill(0);
         self.searches_since_decay = 0;
         self.position_history.clear();
     }
@@ -872,11 +883,18 @@ impl EngineState {
         }
     }
 
+    fn decay_followup_history(&mut self) {
+        for h in self.followup_history.iter_mut() {
+            *h /= 2;
+        }
+    }
+
     fn prepare_for_search(&mut self) {
         self.tt.new_search();
         self.searches_since_decay = self.searches_since_decay.saturating_add(1);
         if self.searches_since_decay >= 4 {
             self.decay_history();
+            self.decay_followup_history();
             self.searches_since_decay = 0;
         }
     }
@@ -889,6 +907,7 @@ impl EngineState {
             history: self.history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
+            followup_history: self.followup_history.clone(),
             search_params: self.search_params,
             lmr_table: self.lmr_table,
             searches_since_decay: 0,
