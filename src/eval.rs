@@ -314,21 +314,109 @@ fn pawn_has_lever(board: &Board, sq: u8, color: Color) -> bool {
         != 0
 }
 
-/// King and rook support of a passed pawn; `sign` is +1 for White, -1 for Black.
-fn passed_pawn_support_score<T: Tracer>(
+// Per-rank passed-pawn tables, indexed by relative rank - 1 (ranks 2..7).
+const PASSED_BASE: [P; 6] =
+    [P::PassedR2, P::PassedR3, P::PassedR4, P::PassedR5, P::PassedR6, P::PassedR7];
+const PASSED_FREE: [P; 6] = [
+    P::PassedFreeR2,
+    P::PassedFreeR3,
+    P::PassedFreeR4,
+    P::PassedFreeR5,
+    P::PassedFreeR6,
+    P::PassedFreeR7,
+];
+const PASSED_SAFE_PUSH: [P; 6] = [
+    P::PassedSafePushR2,
+    P::PassedSafePushR3,
+    P::PassedSafePushR4,
+    P::PassedSafePushR5,
+    P::PassedSafePushR6,
+    P::PassedSafePushR7,
+];
+const PASSED_BLOCKED: [P; 6] = [
+    P::PassedBlockedR2,
+    P::PassedBlockedR3,
+    P::PassedBlockedR4,
+    P::PassedBlockedR5,
+    P::PassedBlockedR6,
+    P::PassedBlockedR7,
+];
+const PASSED_OWN_KING_DIST: [P; 6] = [
+    P::PassedOwnKingDistR2,
+    P::PassedOwnKingDistR3,
+    P::PassedOwnKingDistR4,
+    P::PassedOwnKingDistR5,
+    P::PassedOwnKingDistR6,
+    P::PassedOwnKingDistR7,
+];
+const PASSED_ENEMY_KING_DIST: [P; 6] = [
+    P::PassedEnemyKingDistR2,
+    P::PassedEnemyKingDistR3,
+    P::PassedEnemyKingDistR4,
+    P::PassedEnemyKingDistR5,
+    P::PassedEnemyKingDistR6,
+    P::PassedEnemyKingDistR7,
+];
+const PASSED_CONNECTED: [P; 6] = [
+    P::PassedConnectedR2,
+    P::PassedConnectedR3,
+    P::PassedConnectedR4,
+    P::PassedConnectedR5,
+    P::PassedConnectedR6,
+    P::PassedConnectedR7,
+];
+
+/// Squares strictly in front of `sq` on its file, toward promotion.
+#[inline(always)]
+fn front_span(sq: u8, color: Color) -> u64 {
+    let file = 0x0101_0101_0101_0101u64 << (sq % 8);
+    match color {
+        Color::White => file & (!0u64 << sq << 1),
+        Color::Black => file & ((1u64 << sq) - 1),
+    }
+}
+
+/// Passed-pawn terms; `sign` is +1 for White, -1 for Black.
+#[allow(clippy::too_many_arguments)]
+fn passed_pawn_score<T: Tracer>(
     s: &mut Score<'_, T>,
     sign: i32,
+    board: &Board,
+    pawn_masks: &[u8; 8],
     sq: u8,
     color: Color,
     own_king: Option<u8>,
     enemy_king: Option<u8>,
     own_rooks: &[u8],
 ) {
-    if let Some(king) = own_king {
-        let dist = king_distance(king, sq);
-        if dist <= 2 {
-            s.add(P::PasserOwnKingNear, sign * (3 - dist));
+    let rr = relative_rank(color, sq);
+    let i = (rr - 1).clamp(0, 5) as usize;
+    s.add(PASSED_BASE[i], sign);
+
+    let stop = match color {
+        Color::White => sq + 8,
+        Color::Black => sq - 8,
+    };
+    let occ = board.bb.occ_all();
+    let enemy = color.opposite();
+    if front_span(sq, color) & occ == 0 {
+        s.add(PASSED_FREE[i], sign);
+    }
+    if occ & (1u64 << stop) == 0 {
+        if !crate::movegen::is_square_attacked(board, stop, enemy) {
+            s.add(PASSED_SAFE_PUSH[i], sign);
         }
+    } else if board.bb.occ[color_index(enemy)] & (1u64 << stop) != 0 {
+        s.add(PASSED_BLOCKED[i], sign);
+    }
+    if let Some(king) = own_king {
+        s.add(PASSED_OWN_KING_DIST[i], sign * king_distance(king, stop).min(5));
+    }
+    if let Some(king) = enemy_king {
+        s.add(PASSED_ENEMY_KING_DIST[i], sign * king_distance(king, stop).min(5));
+    }
+    if is_connected_pawn(pawn_masks, sq, color) {
+        s.add(PASSED_CONNECTED[i], sign);
     }
 
     let promo_sq = match color {
@@ -343,9 +431,6 @@ fn passed_pawn_support_score<T: Tracer>(
         let promo_dist = king_distance(king, promo_sq);
         if promo_dist > remaining {
             s.add(P::PasserEnemyKingFar, sign * (promo_dist - remaining));
-        }
-        if king_distance(king, sq) <= 1 {
-            s.add(P::PasserEnemyKingAdjacent, -sign);
         }
     }
 
@@ -796,16 +881,12 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
             }
         }
         if passed {
-            s.add(P::PassedBase, 1);
-            s.add(P::PassedRank, r);
             white_passed.push(sq);
-            if is_supported_by_pawn(board, sq, Color::White) {
-                s.add(P::PassedSupportedBase, 1);
-                s.add(P::PassedSupportedRank, r);
-            }
-            passed_pawn_support_score(
+            passed_pawn_score(
                 &mut s,
                 1,
+                board,
+                &white_pawn_masks,
                 sq,
                 Color::White,
                 white_king,
@@ -860,16 +941,12 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
             }
         }
         if passed {
-            s.add(P::PassedBase, -1);
-            s.add(P::PassedRank, -(7 - r));
             black_passed.push(sq);
-            if is_supported_by_pawn(board, sq, Color::Black) {
-                s.add(P::PassedSupportedBase, -1);
-                s.add(P::PassedSupportedRank, -(7 - r));
-            }
-            passed_pawn_support_score(
+            passed_pawn_score(
                 &mut s,
                 -1,
+                board,
+                &black_pawn_masks,
                 sq,
                 Color::Black,
                 black_king,
