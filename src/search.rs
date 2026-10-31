@@ -28,6 +28,10 @@ fn stop_requested() -> bool {
     let active = ACTIVE_GO.load(Ordering::Relaxed);
     active != 0 && STOP_UPTO.load(Ordering::Relaxed) >= active
 }
+// Quiet SEE pruning: at depth <= this, a non-priority quiet in a non-PV node
+// is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
+const SEE_QUIET_MAX_DEPTH: i32 = 8;
+const SEE_QUIET_MARGIN: i32 = 20;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
@@ -1169,6 +1173,20 @@ fn negamax(
             }
         }
 
+        // Quiet SEE pruning: skip late, unremarkable quiets that hang material
+        // by more than a depth-scaled margin.
+        if quiet
+            && !priority_quiet
+            && !in_check
+            && beta - alpha <= 1
+            && idx > 0
+            && depth <= SEE_QUIET_MAX_DEPTH
+            && best > -(MATE_SCORE - 1000)
+            && see(board, mv) < -SEE_QUIET_MARGIN * depth * depth
+        {
+            continue;
+        }
+
         if quiet {
             quiets_tried.push(mv);
         }
@@ -1764,7 +1782,7 @@ mod see_reference {
     }
 
     pub(super) fn see(board: &Board, mv: Move) -> i32 {
-        if !is_capture_move(board, mv) {
+        if mv.is_castle {
             return 0;
         }
 
@@ -1785,11 +1803,8 @@ mod see_reference {
         } else {
             squares[mv.to as usize]
         };
-
-        let captured = match captured {
-            Some(c) => c,
-            None => return 0,
-        };
+        // A quiet move starts the swap from 0: nothing is won on arrival.
+        let captured_value = captured.map(|c| piece_value(c.kind)).unwrap_or(0);
 
         squares[mv.from as usize] = None;
         occ &= !(1u64 << mv.from);
@@ -1809,7 +1824,7 @@ mod see_reference {
 
         let mut gain = [0i32; 32];
         let mut depth = 0usize;
-        gain[0] = piece_value(captured.kind) + promo_delta;
+        gain[0] = captured_value + promo_delta;
 
         let mut side = board.side_to_move.opposite();
         let target = mv.to;
@@ -1891,10 +1906,14 @@ const SEE_QUEEN_ORDER: &[(bool, usize)] = &[
 /// attacks after any non-knight attacker leaves its square, and the least
 /// valuable attacker is found by scanning piece-type bitboards in order.
 /// Values match `see_reference::see` exactly (checked by a differential test).
+///
+/// Works for quiet moves too: the initial gain is 0 (plus any promotion
+/// gain), then the opponent may capture the moved piece on `to` and the swap
+/// proceeds as for captures. Castling returns 0. Capture values are unchanged.
 fn see(board: &Board, mv: Move) -> i32 {
     use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS};
 
-    if !is_capture_move(board, mv) {
+    if mv.is_castle {
         return 0;
     }
 
@@ -1912,11 +1931,8 @@ fn see(board: &Board, mv: Move) -> i32 {
     } else {
         board.squares[mv.to as usize]
     };
-
-    let captured = match captured {
-        Some(c) => c,
-        None => return 0,
-    };
+    // A quiet move starts the swap from 0: nothing is won on arrival.
+    let captured_value = captured.map(|c| piece_value(c.kind)).unwrap_or(0);
 
     occ &= !(1u64 << mv.from);
     occ |= 1u64 << mv.to;
@@ -1931,7 +1947,7 @@ fn see(board: &Board, mv: Move) -> i32 {
 
     let mut gain = [0i32; 32];
     let mut depth = 0usize;
-    gain[0] = piece_value(captured.kind) + promo_delta;
+    gain[0] = captured_value + promo_delta;
 
     let pc = &board.bb.pieces;
     let t = mv.to as usize;
@@ -2176,6 +2192,47 @@ mod tests {
         assert_eq!(see_of("r3k3/1P6/8/8/8/8/8/4K3 w - - 0 1", "b7a8q"), 1300);
         // Defended capture-promotion: wins rook + promo, loses the new queen.
         assert_eq!(see_of("r3k3/1Pn5/8/8/8/8/8/4K3 w - - 0 1", "b7a8q"), 400);
+    }
+
+    #[test]
+    fn see_quiet_move_into_pawn_attack_loses_the_piece() {
+        // Qd1-d5 walks into the e6 pawn's attack.
+        let fen = "4k3/8/4p3/8/8/8/8/3QK3 w - - 0 1";
+        assert_eq!(see_of(fen, "d1d5"), -piece_value(PieceType::Queen));
+    }
+
+    #[test]
+    fn see_safe_quiet_move_is_zero() {
+        let fen = "4k3/8/4p3/8/8/8/8/3QK3 w - - 0 1";
+        assert_eq!(see_of(fen, "d1d2"), 0);
+    }
+
+    #[test]
+    fn see_quiet_move_to_defended_square_counts_recapture() {
+        // Nb1-c3 is attacked by the b4 pawn but defended by the b2 pawn:
+        // pawn takes knight, pawn retakes => -N + P.
+        let fen = "4k3/8/8/8/1p6/8/1P6/1N2K3 w - - 0 1";
+        assert_eq!(
+            see_of(fen, "b1c3"),
+            piece_value(PieceType::Pawn) - piece_value(PieceType::Knight)
+        );
+    }
+
+    #[test]
+    fn see_quiet_promotion_and_castling() {
+        // Undefended push-promotion gains queen - pawn.
+        assert_eq!(see_of("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q"), 800);
+        // Rook on b8 takes the new queen: only the pawn is lost.
+        assert_eq!(see_of("1r2k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q"), -100);
+        // Castling is never scored.
+        assert_eq!(see_of("4k3/8/8/8/8/8/8/4K2R w K - 0 1", "e1g1"), 0);
+    }
+
+    #[test]
+    fn see_capture_values_unchanged_by_quiet_support() {
+        // Undefended QxP wins a pawn; pawn-defended QxP loses Q for P.
+        assert_eq!(see_of("4k3/8/4p3/8/8/8/8/4QK2 w - - 0 1", "e1e6"), 100);
+        assert_eq!(see_of("4k3/3p4/4p3/8/8/8/8/4QK2 w - - 0 1", "e1e6"), -800);
     }
 
     #[test]
