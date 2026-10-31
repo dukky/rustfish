@@ -33,82 +33,82 @@ macro_rules! eval_params {
 
 eval_params! {
     // Bishop pair, per side with >= 2 bishops.
-    BishopPair = (14, 67),
+    BishopPair = (17, 61),
 
     // Development (only applied while phase >= 12; mg only).
-    DevUndevelopedMinor = (-6, 0),    // penalty per minor on its start square
-    DevKingHomeUndeveloped = (1, 0),  // penalty: king at home with >= 2 undeveloped
-    DevKingCastled = (16, 0),         // bonus: king on a castled square
+    DevUndevelopedMinor = (-12, 0),   // penalty per minor on its start square
+    DevKingHomeUndeveloped = (-4, 0), // penalty: king at home with >= 2 undeveloped
+    DevKingCastled = (23, 0),         // bonus: king on a castled square
 
     // Pawn structure.
-    Doubled = (2, 7),                 // penalty per pawn on a file with > 1 own pawn
-    Isolated = (4, 10),               // penalty per pawn with no own pawns on adjacent files
+    Doubled = (6, 8),                 // penalty per pawn on a file with > 1 own pawn
+    Isolated = (4, 11),               // penalty per pawn with no own pawns on adjacent files
     Connected = (1, -6),              // bonus per phalanx/supported-chain pawn
-    Backward = (7, 5),                // penalty per backward pawn
+    Backward = (3, 5),                // penalty per backward pawn
 
     // Passed pawns: base + rank * rank_weight (rank is relative 0..7).
-    PassedBase = (-22, -2),
-    PassedRank = (0, 11),
-    PassedSupportedBase = (-13, -69), // extra when defended by own pawn
-    PassedSupportedRank = (5, 21),
-    PasserOwnKingNear = (6, 7),       // * (3 - king_distance) when distance <= 2
-    PasserEnemyKingFar = (2, 28),     // * (enemy king promo distance - remaining)
-    PasserEnemyKingAdjacent = (19, 74), // penalty when enemy king touches the passer
-    PasserRookBehind = (8, 10),       // own rook behind the passer, same file
-    PasserRookFront = (-8, -26),      // penalty: own rook in front of the passer
+    PassedBase = (-28, 0),
+    PassedRank = (5, 9),
+    PassedSupportedBase = (-15, -72), // extra when defended by own pawn
+    PassedSupportedRank = (5, 22),
+    PasserOwnKingNear = (7, 7),       // * (3 - king_distance) when distance <= 2
+    PasserEnemyKingFar = (-3, 29),    // * (enemy king promo distance - remaining)
+    PasserEnemyKingAdjacent = (25, 73), // penalty when enemy king touches the passer
+    PasserRookBehind = (17, 2),       // own rook behind the passer, same file
+    PasserRookFront = (-12, -26),     // penalty: own rook in front of the passer
 
     // Candidate passers (no enemy pawn ahead on the same file).
-    CandidateBase = (-16, -13),
-    CandidateRank = (6, 5),
-    CandidateLever = (-32, -17),
-    CandidateLeverRank = (4, 10),
-    CandidateSupported = (16, 11),
+    CandidateBase = (-18, -18),
+    CandidateRank = (5, 5),
+    CandidateLever = (-35, -21),
+    CandidateLeverRank = (5, 11),
+    CandidateSupported = (17, 10),
 
     // Pawn attacks on central squares (files c..f, relative ranks 2..4).
-    PawnCenterControl = (7, 23),
+    PawnCenterControl = (9, 27),
 
     // Rooks.
-    RookOpenFile = (47, -4),
-    RookSemiOpenFile = (11, 20),
-    RookSeventh = (6, 33),
+    RookOpenFile = (47, -5),
+    RookSemiOpenFile = (14, 16),
+    RookSeventh = (8, 38),
 
     // Minor pieces.
-    KnightOutpost = (38, 6),
-    BishopOutpost = (34, 11),
-    Mobility = (1, 3),                // per pseudo-legal move, all pieces
-    BishopMobilityExtra = (2, 0),     // additional per bishop move
+    KnightOutpost = (33, 4),
+    BishopOutpost = (31, 8),
+    Mobility = (1, 2),                // per pseudo-legal move, all pieces
+    BishopMobilityExtra = (2, 1),     // additional per bishop move
 
     // Trapped pieces: weight * severity, severity = 3 - mobility (rook: 4 - mobility).
-    TrappedKnightCorner = (8, -10),
-    TrappedKnightEdge = (0, 2),
-    TrappedBishopEdge = (1, 7),
-    TrappedBishopCornerExtra = (15, 19),
-    TrappedRookByKing = (-3, 9),
+    TrappedKnightCorner = (23, -13),
+    TrappedKnightEdge = (2, 5),
+    TrappedBishopEdge = (0, 11),
+    TrappedBishopCornerExtra = (31, 24),
+    TrappedRookByKing = (-3, 13),
 
     // Threats: per enemy piece attacked by a lower-value piece of ours.
-    ThreatPawnOnMinor = (30, 20),     // knight/bishop attacked by a pawn
-    ThreatPawnOnRook = (45, 25),
-    ThreatPawnOnQueen = (50, 30),
-    ThreatMinorOnRook = (30, 20),     // rook attacked by a knight/bishop
-    ThreatMinorOnQueen = (35, 20),
-    ThreatRookOnQueen = (30, 15),
-    Hanging = (25, 15),               // non-pawn piece attacked by us, undefended
+    ThreatPawnOnMinor = (40, 28),     // knight/bishop attacked by a pawn
+    ThreatPawnOnRook = (46, 24),
+    ThreatPawnOnQueen = (31, 16),
+    ThreatMinorOnRook = (46, 15),     // rook attacked by a knight/bishop
+    ThreatMinorOnQueen = (43, 6),
+    ThreatRookOnQueen = (49, 22),
+    Hanging = (19, 26),               // non-pawn piece attacked by us, undefended
 
     // Endgame: mop-up with a >= 500 non-pawn material edge, * (14 - king distance).
-    MopUpKingDistance = (45, -9),
+    MopUpKingDistance = (40, -12),
 
     // Pawn endgames (no non-pawn material).
-    PawnEndgameOpposition = (0, 25),
-    RaceUnstoppable = (0, 81),        // + (8 - moves) * RaceUnstoppableSpeed
-    RaceUnstoppableSpeed = (0, 33),
-    RaceAhead = (0, 63),              // + (moves gap) * RaceAheadGap
-    RaceAheadGap = (0, 66),
+    PawnEndgameOpposition = (0, 27),
+    RaceUnstoppable = (0, 67),        // + (8 - moves) * RaceUnstoppableSpeed
+    RaceUnstoppableSpeed = (0, 36),
+    RaceAhead = (0, 77),              // + (moves gap) * RaceAheadGap
+    RaceAheadGap = (0, 99),
 
     // Single-rook endgames (one rook each, no queens).
     RookEgEnemyKingClose = (0, 0),    // * (7 - distance to enemy king)
     RookEgBehindPasser = (0, 4),
-    RookEgFrontOfPasser = (0, 31),    // penalty
-    RookEgBehindEnemyPasser = (0, 23),
+    RookEgFrontOfPasser = (0, 36),    // penalty
+    RookEgBehindEnemyPasser = (0, 22),
 }
 
 /// mg weight of a parameter.
