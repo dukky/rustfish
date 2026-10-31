@@ -148,9 +148,6 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
 
     if let Ok(v) = value.trim().parse::<usize>() {
         match n.as_str() {
-            "lmplimitd1" => engine.search_params.lmp_limit_d1 = v.clamp(0, 24),
-            "lmplimitd2" => engine.search_params.lmp_limit_d2 = v.clamp(0, 32),
-            "lmplimitd3" => engine.search_params.lmp_limit_d3 = v.clamp(0, 40),
             "lmrminmoveindex" => engine.search_params.lmr_min_move_index = v.clamp(1, 24),
             "lmrextramoveindex" => engine.search_params.lmr_extra_move_index = v.clamp(1, 32),
             _ => {}
