@@ -2,6 +2,9 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
+// Singular extensions: minimum depth, and singular-beta margin per ply of depth.
+const SE_MIN_DEPTH: i32 = 8;
+const SE_MARGIN_PER_DEPTH: i32 = 2;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
@@ -97,6 +100,8 @@ pub(crate) struct Search {
     pub(crate) stop: bool,
     pub(crate) killers: [[Option<Move>; 2]; MAX_PLY],
     move_buf: Vec<Move>,
+    /// Move skipped by a singular-extension verification search at this ply.
+    excluded: [Option<Move>; MAX_PLY],
 }
 
 impl Search {
@@ -108,6 +113,7 @@ impl Search {
             stop: false,
             killers: [[None; 2]; MAX_PLY],
             move_buf: Vec::with_capacity(256),
+            excluded: [None; MAX_PLY],
         }
     }
 
@@ -989,12 +995,15 @@ fn negamax(
     }
 
     let alpha_orig = alpha;
+    // Singular verification search: same node, minus this move. The TT entry
+    // describes the full node, so it must not cut off or be overwritten here.
+    let excluded = search.excluded[ply];
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
-        if entry.depth as i32 >= depth {
+        if excluded.is_none() && entry.depth as i32 >= depth {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => return tt_score,
@@ -1030,7 +1039,7 @@ fn negamax(
             }
         }
 
-        if beta - alpha <= 1 && depth <= 3 {
+        if excluded.is_none() && beta - alpha <= 1 && depth <= 3 {
             let margin = match depth {
                 1 => params.reverse_futility_margin_d1,
                 2 => params.reverse_futility_margin_d2,
@@ -1051,7 +1060,7 @@ fn negamax(
         depth -= 1;
     }
 
-    if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
+    if allow_null && excluded.is_none() && depth >= 3 && !in_check && beta - alpha <= 1 {
         let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
         let mut has_non_pawn = false;
         let side_c = color_index(board.side_to_move);
@@ -1136,6 +1145,49 @@ fn negamax(
     let mut idx = 0usize;
 
     while let Some((mv, stage)) = picker.next() {
+        if Some(mv) == excluded {
+            continue;
+        }
+        // Singular extension: if every alternative to the TT move fails low
+        // against a margin below the TT score, the TT move is singular.
+        let mut extension = 0;
+        if stage == Stage::Tt && excluded.is_none() && depth >= SE_MIN_DEPTH {
+            if let Some(entry) = tt_entry {
+                let tt_score = score_from_tt(entry.score, ply);
+                if entry.best == Some(mv)
+                    && matches!(entry.bound, Bound::Lower | Bound::Exact)
+                    && entry.depth as i32 >= depth - 3
+                    && tt_score.abs() < MATE_SCORE - MAX_PLY as i32
+                {
+                    let singular_beta = tt_score - SE_MARGIN_PER_DEPTH * depth;
+                    search.excluded[ply] = Some(mv);
+                    let s = negamax(
+                        board,
+                        (depth - 1) / 2,
+                        singular_beta - 1,
+                        singular_beta,
+                        ply,
+                        search,
+                        engine,
+                        rep_stack,
+                        key,
+                        prev_move,
+                        false,
+                    );
+                    search.excluded[ply] = None;
+                    if search.stop {
+                        return 0;
+                    }
+                    if s < singular_beta {
+                        extension = 1;
+                    } else if singular_beta >= beta && beta - alpha <= 1 {
+                        // Multi-cut: the TT move and at least one alternative
+                        // both beat beta.
+                        return singular_beta;
+                    }
+                }
+            }
+        }
         let quiet = match stage {
             Stage::Tt => !is_capture_move(board, mv),
             Stage::GoodCapture | Stage::BadCapture => false,
@@ -1182,7 +1234,7 @@ fn negamax(
         if idx == 0 {
             score = -negamax(
                 board,
-                depth - 1,
+                depth - 1 + extension,
                 -beta,
                 -alpha,
                 ply + 1,
@@ -1303,9 +1355,8 @@ fn negamax(
                     }
                 }
             }
-            engine
-                .tt
-                .store(
+            if excluded.is_none() {
+                engine.tt.store(
                     key,
                     depth,
                     score_to_tt(alpha, ply),
@@ -1313,9 +1364,15 @@ fn negamax(
                     Bound::Lower,
                     best_move,
                 );
+            }
             return alpha;
         }
         idx += 1;
+    }
+
+    if excluded.is_some() {
+        // Only the excluded move was legal: alternatives are "infinitely" bad.
+        return if best == -INF { alpha } else { best };
     }
 
     let bound = if best <= alpha_orig {
