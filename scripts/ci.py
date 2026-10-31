@@ -77,12 +77,15 @@ def wait_for_run(run_id, quiet=False):
 
 def download_json(run_id, artifact, filename):
     with tempfile.TemporaryDirectory() as tmp:
-        res = subprocess.run(["gh", "run", "download", str(run_id), "-n", artifact, "-D", tmp],
-                             cwd=ROOT, capture_output=True, text=True)
-        if res.returncode != 0:
-            return None
-        with open(os.path.join(tmp, filename)) as fh:
-            return json.load(fh)
+        # Artifacts can lag the run's completion or hit network blips; retry.
+        for attempt in range(6):
+            res = subprocess.run(["gh", "run", "download", str(run_id), "-n", artifact, "-D", tmp],
+                                 cwd=ROOT, capture_output=True, text=True)
+            if res.returncode == 0:
+                with open(os.path.join(tmp, filename)) as fh:
+                    return json.load(fh)
+            time.sleep(30 * (attempt + 1))
+        return None
 
 
 def follow_sprt(test_id):
