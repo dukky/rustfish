@@ -9,8 +9,8 @@
 //! Material/PST enter the eval linearly through the tapered accumulator, and
 //! `eval::evaluate_with` traces the coefficient of every eval_params weight,
 //! so each position reduces to sparse PSQT features, sparse parameter
-//! coefficients and a constant nonlinear remainder (king safety, mop-up edge
-//! pressure, tempo) that is exact for the untuned terms.
+//! coefficients and a constant nonlinear remainder (mop-up edge pressure,
+//! tempo) that is exact for the untuned terms.
 
 use super::*;
 use crate::eval_params::{PARAMS, PARAM_COUNT, PARAM_NAMES, TEMPO};
@@ -329,7 +329,7 @@ struct Dataset {
     lin: Vec<LinFeat>,
     lin_offsets: Vec<u32>,
     phase: Vec<u8>,
-    // Tapered nonlinear part of the eval (king safety, mop-up edge) plus tempo.
+    // Tapered nonlinear part of the eval (mop-up edge pressure) plus tempo.
     rest: Vec<f32>,
     result: Vec<f32>,
     // Max |model - evaluate()| seen while loading, and integer trace mismatches.

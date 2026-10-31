@@ -62,189 +62,144 @@ pub(crate) fn eval_for_side(board: &Board) -> i32 {
     }
 }
 
-fn attack_unit_weight(kind: PieceType) -> i32 {
-    match kind {
-        PieceType::Pawn => 1,
-        PieceType::Knight | PieceType::Bishop => 2,
-        PieceType::Rook => 3,
-        PieceType::Queen => 5,
-        PieceType::King => 0,
-    }
-}
+/// Zone-attack units per attack pair, by piece kind (pawn..king), feeding the
+/// attacker-count buckets.
+const ZONE_UNITS: [i32; 6] = [0, 2, 2, 3, 5, 0];
+/// Tropism weight per piece kind (pawn..king).
+const TROPISM_WEIGHT: [i32; 6] = [0, 2, 2, 2, 3, 0];
+const FILE_A: u64 = 0x0101_0101_0101_0101;
 
-fn king_attack_units(
-    board: &Board,
-    attacker_pieces: &[(u8, Piece)],
-    attacker: Color,
-    king_sq: u8,
-) -> i32 {
-    let mut units = 0;
-    let kf = (king_sq % 8) as i8;
-    let kr = (king_sq / 8) as i8;
-
-    for &(from, piece) in attacker_pieces {
-        if piece.color != attacker || piece.kind == PieceType::King {
-            continue;
-        }
-
-        // Geometric pre-cull: skip pieces that cannot reach any square of the
-        // 3x3 king ring even on an empty board, so the expensive per-target
-        // ray checks below run only for plausible attackers. The conditions
-        // are necessary (blockers only remove attacks), so results are
-        // unchanged.
-        let ff = (from % 8) as i8;
-        let fr = (from / 8) as i8;
-        let reachable = match piece.kind {
-            PieceType::Pawn => (ff - kf).abs() <= 2 && (fr - kr).abs() <= 2,
-            PieceType::Knight => (ff - kf).abs() <= 3 && (fr - kr).abs() <= 3,
-            PieceType::Rook => (ff - kf).abs() <= 1 || (fr - kr).abs() <= 1,
-            PieceType::Bishop => {
-                ((ff - fr) - (kf - kr)).abs() <= 2 || ((ff + fr) - (kf + kr)).abs() <= 2
-            }
-            PieceType::Queen => {
-                (ff - kf).abs() <= 1
-                    || (fr - kr).abs() <= 1
-                    || ((ff - fr) - (kf - kr)).abs() <= 2
-                    || ((ff + fr) - (kf + kr)).abs() <= 2
-            }
-            PieceType::King => false,
-        };
-        if !reachable {
-            continue;
-        }
-
-        let mut hits = 0;
-        for df in -1..=1 {
-            for dr in -1..=1 {
-                let nf = kf + df;
-                let nr = kr + dr;
-                if !in_bounds(nf, nr) {
-                    continue;
-                }
-                let target = (nr as u8) * 8 + (nf as u8);
-                if piece_attacks_square(&board.squares, from, piece, target) {
-                    hits += 1;
-                }
-            }
-        }
-        if hits > 0 {
-            units += attack_unit_weight(piece.kind) * hits;
-        }
-    }
-
-    units
-}
-
-fn king_tropism_from_pieces(attacker_pieces: &[(u8, Piece)], attacker: Color, king_sq: u8) -> i32 {
-    let mut score = 0;
-
-    for &(from, piece) in attacker_pieces {
-        if piece.color != attacker {
-            continue;
-        }
-
-        let weight = match piece.kind {
-            PieceType::Knight | PieceType::Bishop => 2,
-            PieceType::Rook => 2,
-            PieceType::Queen => 3,
-            PieceType::Pawn | PieceType::King => 0,
-        };
-        if weight == 0 {
-            continue;
-        }
-
-        let closeness = (7 - king_distance(from, king_sq)).max(0);
-        score += closeness * weight;
-    }
-
-    score
-}
-
-fn king_attack_scale(enemy_non_pawn_material: i32, enemy_has_queen: bool) -> i32 {
-    let mut scale = 12 + enemy_non_pawn_material.min(3200) / 200;
-    if enemy_has_queen {
-        scale += 8;
-    } else {
-        scale -= 2;
-    }
-    scale.max(6)
-}
-
-fn king_safety(
+/// King safety of `color`'s king, traced as linear terms; `sign` is +1 for
+/// White, -1 for Black. `enemy_atts[i]` is the attack set of
+/// `enemy_pieces[i]`; `own_all` / `own_no_king` are the union of own attacks
+/// with and without the king, `enemy_all` the union of enemy attacks.
+#[allow(clippy::too_many_arguments)]
+fn king_safety<T: Tracer>(
+    s: &mut Score<'_, T>,
+    sign: i32,
     board: &Board,
     color: Color,
     own_pawn_files: &[i32; 8],
     enemy_pawn_files: &[i32; 8],
-    enemy_non_pawn_material: i32,
-    enemy_has_queen: bool,
     enemy_pieces: &[(u8, Piece)],
-) -> i32 {
-    let Some(ksq) = board.king_square(color) else {
-        return 0;
-    };
+    enemy_atts: &[u64],
+    own_all: u64,
+    own_no_king: u64,
+    enemy_all: u64,
+) {
+    use crate::bitboard::{bishop_attacks, kind_index, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
 
-    let mut score = 0;
+    let Some(ksq) = board.king_square(color) else {
+        return;
+    };
+    let ci = color_index(color);
+    let zone = KING_ATTACKS[ksq as usize] | (1u64 << ksq);
+
+    // Attacks on the king zone, per attacker kind, and the per-kind attack
+    // unions used for safe checks.
+    let mut pairs = [0i32; 6];
+    let mut kind_att = [0u64; 6];
+    let mut attackers = 0;
+    let mut units = 0;
+    let mut tropism = 0;
+    for (&(from, piece), &att) in enemy_pieces.iter().zip(enemy_atts) {
+        let k = kind_index(piece.kind);
+        kind_att[k] |= att;
+        let hits = (att & zone).count_ones() as i32;
+        pairs[k] += hits;
+        if hits > 0 && ZONE_UNITS[k] > 0 {
+            attackers += 1;
+            units += ZONE_UNITS[k] * hits;
+        }
+        if TROPISM_WEIGHT[k] > 0 {
+            tropism += (7 - king_distance(from, ksq)).max(0) * TROPISM_WEIGHT[k];
+        }
+    }
+    s.add(P::KsAttackPawn, -sign * pairs[0]);
+    s.add(P::KsAttackKnight, -sign * pairs[1]);
+    s.add(P::KsAttackBishop, -sign * pairs[2]);
+    s.add(P::KsAttackRook, -sign * pairs[3]);
+    s.add(P::KsAttackQueen, -sign * pairs[4]);
+    if attackers >= 2 {
+        let bucket = match attackers {
+            2 => P::KsAttackers2,
+            3 => P::KsAttackers3,
+            _ => P::KsAttackers4,
+        };
+        s.add(bucket, -sign * units);
+    }
+    s.add(P::KsTropism, -sign * tropism);
+
+    // Safe checks: squares the enemy piece reaches, from which it would check
+    // the king, not defended by us and not occupied by the enemy.
+    let occ = board.bb.occ_all();
+    let safe = !own_all & !board.bb.occ[1 - ci];
+    let diag = bishop_attacks(ksq as usize, occ);
+    let ortho = rook_attacks(ksq as usize, occ);
+    let checks = |bb: u64| -sign * (bb & safe).count_ones() as i32;
+    s.add(P::KsSafeCheckKnight, checks(KNIGHT_ATTACKS[ksq as usize] & kind_att[1]));
+    s.add(P::KsSafeCheckBishop, checks(diag & kind_att[2]));
+    s.add(P::KsSafeCheckRook, checks(ortho & kind_att[3]));
+    s.add(P::KsSafeCheckQueen, checks((diag | ortho) & kind_att[4]));
+
+    // Zone squares the enemy attacks, and those only the king defends.
+    let hit = zone & enemy_all;
+    s.add(P::KsZoneAttacked, -sign * hit.count_ones() as i32);
+    s.add(P::KsZoneWeak, -sign * (hit & !own_no_king).count_ones() as i32);
+
+    // Pawn shield / storm and open files on the king file and its neighbours.
     let kf = (ksq % 8) as i32;
     let kr = (ksq / 8) as i32;
+    let white = color == Color::White;
+    let ahead = if white {
+        if kr < 7 { !0u64 << (8 * (kr + 1)) } else { 0 }
+    } else {
+        (1u64 << (8 * kr)) - 1
+    };
+    // Rank distance from the king to the nearest pawn of `bb` ahead of it.
+    let dist = |bb: u64| -> i32 {
+        let sq = if white { bb.trailing_zeros() as i32 } else { 63 - bb.leading_zeros() as i32 };
+        (sq / 8 - kr).abs()
+    };
+    let own_pawns = board.bb.pieces[ci][0];
+    let enemy_pawns = board.bb.pieces[1 - ci][0];
+    for f in (kf - 1).max(0)..=(kf + 1).min(7) {
+        let file = (FILE_A << f) & ahead;
+        let own = own_pawns & file;
+        let own_d = if own != 0 { dist(own) } else { 0 };
+        let (d1, d2, missing) = if f == kf {
+            (P::KsShieldKingFileD1, P::KsShieldKingFileD2, P::KsShieldKingFileMissing)
+        } else {
+            (P::KsShieldSideFileD1, P::KsShieldSideFileD2, P::KsShieldSideFileMissing)
+        };
+        match own_d {
+            1 => s.add(d1, sign),
+            2 => s.add(d2, sign),
+            _ => s.add(missing, -sign),
+        }
 
-    let shield_rank = if color == Color::White { kr + 1 } else { kr - 1 };
-    if shield_rank >= 0 && shield_rank < 8 {
-        for df in -1..=1 {
-            let f = kf + df;
-            if f < 0 || f >= 8 {
-                continue;
-            }
-            let sq = (shield_rank as u8) * 8 + (f as u8);
-            if board.bb.pieces[color_index(color)][0] & (1u64 << sq) != 0 {
-                score += KS_SHIELD_PAWN;
+        let enemy = enemy_pawns & file;
+        if enemy != 0 {
+            let enemy_d = dist(enemy);
+            if own != 0 && enemy_d == own_d + 1 {
+                s.add(P::KsStormBlocked, -sign);
             } else {
-                score -= KS_SHIELD_MISSING;
+                match enemy_d {
+                    1 => s.add(P::KsStormD1, -sign),
+                    2 => s.add(P::KsStormD2, -sign),
+                    3 => s.add(P::KsStormD3, -sign),
+                    4 => s.add(P::KsStormD4, -sign),
+                    _ => {}
+                }
             }
         }
-    }
 
-    for df in -1..=1 {
-        let f = kf + df;
-        if f < 0 || f >= 8 {
-            continue;
-        }
         let fi = f as usize;
         if own_pawn_files[fi] == 0 {
-            if enemy_pawn_files[fi] == 0 {
-                score -= KS_OPEN_FILE;
-            } else {
-                score -= KS_HALF_OPEN_FILE;
-            }
+            let p = if enemy_pawn_files[fi] == 0 { P::KsOpenFile } else { P::KsHalfOpenFile };
+            s.add(p, -sign);
         }
     }
-
-    let enemy = color.opposite();
-    let mut attacked = 0;
-    let kf = (ksq % 8) as i8;
-    let kr = (ksq / 8) as i8;
-    for df in -1..=1 {
-        for dr in -1..=1 {
-            let nf = kf + df;
-            let nr = kr + dr;
-            if !in_bounds(nf, nr) {
-                continue;
-            }
-            let sq = (nr as u8) * 8 + (nf as u8);
-            if is_square_attacked(board, sq, enemy) {
-                attacked += 1;
-            }
-        }
-    }
-    score -= attacked * KS_ATTACKED_SQUARE;
-
-    let attack_units = king_attack_units(board, enemy_pieces, enemy, ksq);
-    let attack_scale = king_attack_scale(enemy_non_pawn_material, enemy_has_queen);
-    score -= attack_units * attack_scale / 10;
-
-    let tropism = king_tropism_from_pieces(enemy_pieces, enemy, ksq);
-    score -= tropism * attack_scale / 16;
-
-    score
 }
 
 fn has_pawn_bits(mask: &[u8; 8], file: usize, bits: u8) -> bool {
@@ -622,7 +577,7 @@ impl Tracer for NoTrace {
 pub(crate) struct EvalTrace {
     pub(crate) mg: [i32; PARAM_COUNT],
     pub(crate) eg: [i32; PARAM_COUNT],
-    /// Nonlinear (untuned) part of the untapered mg / eg score: king safety, mop-up edge pressure.
+    /// Nonlinear (untuned) part of the untapered mg / eg score: mop-up edge pressure.
     pub(crate) nonlinear_mg: i32,
     pub(crate) nonlinear_eg: i32,
 }
@@ -959,24 +914,54 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     }
 
     let phase = phase.clamp(0, 24);
-    let king_safety_score = king_safety(
+    // Per-piece attack sets, shared by king safety and mobility.
+    let occ = board.bb.occ_all();
+    let mut white_atts = [0u64; 16];
+    let mut black_atts = [0u64; 16];
+    let (mut white_all, mut white_no_king, mut black_all, mut black_no_king) = (0u64, 0u64, 0u64, 0u64);
+    for (i, &(sq, piece)) in white_pieces.as_slice().iter().enumerate() {
+        let att = piece_attacks(sq, piece, occ);
+        white_atts[i] = att;
+        white_all |= att;
+        if piece.kind != PieceType::King {
+            white_no_king |= att;
+        }
+    }
+    for (i, &(sq, piece)) in black_pieces.as_slice().iter().enumerate() {
+        let att = piece_attacks(sq, piece, occ);
+        black_atts[i] = att;
+        black_all |= att;
+        if piece.kind != PieceType::King {
+            black_no_king |= att;
+        }
+    }
+
+    king_safety(
+        &mut s,
+        1,
         board,
         Color::White,
         &white_pawn_files,
         &black_pawn_files,
-        black_non_pawn_material,
-        black_has_queen,
         black_pieces.as_slice(),
-    ) - king_safety(
+        &black_atts,
+        white_all,
+        white_no_king,
+        black_all,
+    );
+    king_safety(
+        &mut s,
+        -1,
         board,
         Color::Black,
         &black_pawn_files,
         &white_pawn_files,
-        white_non_pawn_material,
-        white_has_queen,
         white_pieces.as_slice(),
+        &white_atts,
+        black_all,
+        black_no_king,
+        white_all,
     );
-    s.nonlinear(king_safety_score, king_safety_score / KS_EG_DIVISOR);
 
     if phase <= 8 {
         let material_edge = white_non_pawn_material - black_non_pawn_material;
@@ -1066,8 +1051,8 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
 
     let mut white_mob = 0;
     let mut black_mob = 0;
-    for &(sq, piece) in white_pieces.as_slice() {
-        let mobility = mobility_count(board, sq, piece);
+    for (i, &(sq, piece)) in white_pieces.as_slice().iter().enumerate() {
+        let mobility = (white_atts[i] & !board.bb.occ[0]).count_ones() as i32;
         white_mob += mobility;
         let r = sq / 8;
         match piece.kind {
@@ -1090,8 +1075,8 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
         }
         trapped_piece_penalty(&mut s, 1, sq, piece, mobility, white_king);
     }
-    for &(sq, piece) in black_pieces.as_slice() {
-        let mobility = mobility_count(board, sq, piece);
+    for (i, &(sq, piece)) in black_pieces.as_slice().iter().enumerate() {
+        let mobility = (black_atts[i] & !board.bb.occ[1]).count_ones() as i32;
         black_mob += mobility;
         let r = sq / 8;
         match piece.kind {

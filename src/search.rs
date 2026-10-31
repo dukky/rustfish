@@ -1565,61 +1565,6 @@ fn capture_stage_score_from_see(board: &Board, mv: Move, see_score: i32) -> i32 
     see_score * 16 + victim - attacker
 }
 
-pub(crate) fn piece_attacks_square(
-    squares: &[Option<Piece>; 64],
-    from: u8,
-    piece: Piece,
-    target: u8,
-) -> bool {
-    let ff = (from % 8) as i8;
-    let fr = (from / 8) as i8;
-    let tf = (target % 8) as i8;
-    let tr = (target / 8) as i8;
-    let df = tf - ff;
-    let dr = tr - fr;
-
-    match piece.kind {
-        PieceType::Pawn => {
-            if piece.color == Color::White {
-                dr == 1 && (df == 1 || df == -1)
-            } else {
-                dr == -1 && (df == 1 || df == -1)
-            }
-        }
-        PieceType::Knight => {
-            (df.abs() == 1 && dr.abs() == 2) || (df.abs() == 2 && dr.abs() == 1)
-        }
-        PieceType::King => df.abs() <= 1 && dr.abs() <= 1 && (df != 0 || dr != 0),
-        PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
-            let (step_f, step_r) = match piece.kind {
-                PieceType::Bishop if df.abs() == dr.abs() && df != 0 => (df.signum(), dr.signum()),
-                PieceType::Rook if (df == 0) ^ (dr == 0) => (df.signum(), dr.signum()),
-                PieceType::Queen
-                    if (df.abs() == dr.abs() && df != 0) || ((df == 0) ^ (dr == 0)) =>
-                {
-                    (df.signum(), dr.signum())
-                }
-                _ => return false,
-            };
-
-            let mut f = ff + step_f;
-            let mut r = fr + step_r;
-            while f != tf || r != tr {
-                if !in_bounds(f, r) {
-                    return false;
-                }
-                let sq = (r as u8) * 8 + (f as u8);
-                if squares[sq as usize].is_some() {
-                    return false;
-                }
-                f += step_f;
-                r += step_r;
-            }
-            true
-        }
-    }
-}
-
 /// Mailbox-scan SEE (the see-fix scalar version), kept only as the
 /// reference for the differential test of the bitboard `see` below.
 #[cfg(test)]

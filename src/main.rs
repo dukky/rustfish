@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use book::{build_opening_book, try_book_move, BookEntry};
 use eval::eval_for_side;
-use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, is_square_attacked_occ, mobility_count, move_to_uci, parse_square, parse_uci_move};
-use search::{build_lmr_table, handle_go, piece_attacks_square};
+use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, is_square_attacked_occ, piece_attacks, move_to_uci, parse_square, parse_uci_move};
+use search::{build_lmr_table, handle_go};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 

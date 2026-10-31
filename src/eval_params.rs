@@ -2,9 +2,11 @@
 //!
 //! Every entry is an (mg, eg) pair. Most terms enter the score linearly
 //! (`score += weight * count`, White minus Black), which is what makes them
-//! fittable by a Texel tuner alongside the PSQT. The few weights that feed
-//! nonlinear machinery (king safety, which is folded into eg as `/ 6`, and
-//! tempo, which is added after tapering) are kept as plain constants below.
+//! fittable by a Texel tuner alongside the PSQT. King safety is linear too:
+//! its one nonlinearity (attack pressure growing with the number of
+//! attackers) is expressed as per-attacker-count buckets whose coefficient is
+//! the weighted attack count, so each bucket weight is still a plain slope.
+//! Tempo, which is added after tapering, is kept as a plain constant below.
 //!
 //! Sign convention: the stored value is the magnitude; the call site decides
 //! whether it is a bonus or a penalty (e.g. `Doubled` is subtracted). Values
@@ -100,6 +102,49 @@ eval_params! {
     RookEgBehindPasser = (0, 4),
     RookEgFrontOfPasser = (0, 31),    // penalty
     RookEgBehindEnemyPasser = (0, 23),
+
+    // King safety, per king (penalties are applied to the defending side).
+    // Zone = the king square and its 8 neighbours.
+    KsAttackPawn = (3, 0),            // penalty per enemy pawn attack on a zone square
+    KsAttackKnight = (6, 1),          // penalty per (knight, zone square) attack pair
+    KsAttackBishop = (6, 1),
+    KsAttackRook = (9, 1),
+    KsAttackQueen = (15, 2),
+    // Interaction: with n >= 2 enemy pieces hitting the zone, an extra penalty
+    // of weight * units, units = sum of N/B 2, R 3, Q 5 per attack pair.
+    KsAttackers2 = (1, 0),
+    KsAttackers3 = (2, 0),
+    KsAttackers4 = (3, 0),            // 4 or more attackers
+    // Penalty per square from which an enemy piece could give a safe check
+    // (reachable by it, not defended by us, not occupied by the enemy).
+    KsSafeCheckKnight = (10, 2),
+    KsSafeCheckBishop = (6, 1),
+    KsSafeCheckRook = (10, 2),
+    KsSafeCheckQueen = (8, 2),
+    // Pawn shield on the king file / adjacent files: nearest own pawn ahead of
+    // the king, 1 or 2 ranks ahead (bonus) or missing / further (penalty).
+    KsShieldKingFileD1 = (10, 2),
+    KsShieldKingFileD2 = (5, 1),
+    KsShieldKingFileMissing = (8, 1),
+    KsShieldSideFileD1 = (10, 2),
+    KsShieldSideFileD2 = (5, 1),
+    KsShieldSideFileMissing = (8, 1),
+    // Pawn storm: nearest enemy pawn ahead of the king on the king file or an
+    // adjacent file, by rank distance (penalty), or blocked by an own pawn.
+    KsStormD1 = (0, 0),
+    KsStormD2 = (10, 0),
+    KsStormD3 = (6, 0),
+    KsStormD4 = (3, 0),
+    KsStormBlocked = (2, 0),
+    // Files at or next to the king without own pawns (penalty).
+    KsOpenFile = (14, 2),             // no pawns of either side
+    KsHalfOpenFile = (22, 4),         // enemy pawn present
+    // Zone squares attacked by the enemy (penalty), and the subset not
+    // defended by any own piece other than the king (extra penalty).
+    KsZoneAttacked = (6, 1),
+    KsZoneWeak = (4, 1),
+    // Enemy piece proximity: sum of (7 - distance) * (N/B/R 2, Q 3) (penalty).
+    KsTropism = (2, 0),
 }
 
 /// mg weight of a parameter.
@@ -113,15 +158,6 @@ pub(crate) const fn mg(p: P) -> i32 {
 pub(crate) const fn eg(p: P) -> i32 {
     PARAMS[p as usize].1
 }
-
-// --- King safety (nonlinear: the per-king sum enters mg fully and eg as / 6,
-// and attack units are scaled by enemy material). Single-valued weights. ---
-pub(crate) const KS_SHIELD_PAWN: i32 = 10;
-pub(crate) const KS_SHIELD_MISSING: i32 = 8;
-pub(crate) const KS_OPEN_FILE: i32 = 14; // no pawns of either side on the file
-pub(crate) const KS_HALF_OPEN_FILE: i32 = 22; // no own pawn, enemy pawn present
-pub(crate) const KS_ATTACKED_SQUARE: i32 = 6;
-pub(crate) const KS_EG_DIVISOR: i32 = 6;
 
 /// Side-to-move bonus, added after tapering.
 pub(crate) const TEMPO: i32 = 10;
