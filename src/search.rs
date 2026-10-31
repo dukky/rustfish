@@ -384,6 +384,43 @@ fn take_best_scored(moves: &mut Vec<(Move, i32)>) -> Option<Move> {
     Some(moves.swap_remove(best_idx).0)
 }
 
+const DARK_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
+
+/// True for positions no sequence of legal moves can (sensibly) win:
+/// K vs K, KN vs K, KB vs K, KNN vs K, and kings plus any bishops that all
+/// stand on one square colour (covers KB vs KB same-coloured). Pure bitboard
+/// work; the leading popcount check rejects nearly every node immediately.
+#[inline]
+pub(crate) fn is_insufficient_material(board: &Board) -> bool {
+    let bb = &board.bb;
+    let all = bb.occ_all();
+    if all.count_ones() > 4 {
+        return false;
+    }
+    let p = &bb.pieces;
+    let heavy_or_pawns = p[0][0] | p[1][0] | p[0][3] | p[1][3] | p[0][4] | p[1][4];
+    if heavy_or_pawns != 0 {
+        return false;
+    }
+    let knights = p[0][1] | p[1][1];
+    let bishops = p[0][2] | p[1][2];
+    let minors = knights | bishops;
+    match minors.count_ones() {
+        0 | 1 => true,
+        _ => {
+            if knights == 0 {
+                // Bishops only: dead draw if all share a square colour.
+                bishops & DARK_SQUARES == 0 || bishops & !DARK_SQUARES == 0
+            } else {
+                // KNN vs K: exactly two knights, both owned by one side.
+                bishops == 0
+                    && knights.count_ones() == 2
+                    && (p[0][1] == 0 || p[1][1] == 0)
+            }
+        }
+    }
+}
+
 pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) -> bool {
     if rep_stack.len() < 3 || halfmove_clock < 4 {
         return false;
@@ -966,6 +1003,9 @@ fn negamax(
     if is_repetition(rep_stack, key, board.halfmove_clock) {
         return 0;
     }
+    if is_insufficient_material(board) {
+        return 0;
+    }
 
     let in_check = board.is_in_check(board.side_to_move);
     if in_check {
@@ -1360,6 +1400,10 @@ fn quiescence(
     }
 
     if is_repetition(rep_stack, key, board.halfmove_clock) {
+        return 0;
+    }
+    // ply > 0 keeps qsearch_gap (tuner, called at ply 0) unaffected.
+    if ply > 0 && is_insufficient_material(board) {
         return 0;
     }
 
@@ -2016,6 +2060,34 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn insufficient_material_detector() {
+        let check = |fen: &str, expected: bool| {
+            let mut board = Board::new();
+            board.set_fen(fen);
+            assert_eq!(is_insufficient_material(&board), expected, "{}", fen);
+        };
+        // Dead draws.
+        check("8/8/4k3/8/8/3K4/8/8 w - - 0 1", true); // K vs K
+        check("8/8/4k3/8/8/3KN3/8/8 w - - 0 1", true); // KN vs K
+        check("8/8/4k3/8/8/3K4/8/5b2 b - - 0 1", true); // KB vs K
+        check("8/8/4k3/8/8/3KNN2/8/8 w - - 0 1", true); // KNN vs K
+        check("8/8/2n1k3/8/8/3K4/8/4n3 b - - 0 1", true); // K vs KNN
+        check("8/8/4k3/8/8/3K4/8/2B1b3 w - - 0 1", true); // KB vs KB, c1 and e1 both dark
+        check("8/8/4kb2/8/8/3K4/8/2B5 w - - 0 1", true); // c1 dark, f6 dark
+        // Not dead draws.
+        check("8/8/4k3/8/8/3K4/8/2B2b2 w - - 0 1", false); // c1 dark vs f1 light: opposite bishops
+        check("8/8/4k3/8/8/3KB3/4P3/8 w - - 0 1", false); // KBP vs K
+        check("8/8/4k3/8/8/3KR3/8/8 w - - 0 1", false); // KR vs K
+        check("8/8/4k3/8/8/3KQ3/8/8 w - - 0 1", false); // KQ vs K
+        check("8/8/4k3/8/8/3KBN2/8/8 w - - 0 1", false); // KBN vs K
+        check("8/8/4k3/8/8/3KBB2/8/8 w - - 0 1", false); // KBB vs K (opposite colours)
+        check("8/8/4kn2/8/8/3KN3/8/8 w - - 0 1", false); // KN vs KN
+        check("8/8/4kn2/8/8/3KB3/8/8 w - - 0 1", false); // KB vs KN
+        check("8/8/4k3/8/8/3KNN2/4p3/8 w - - 0 1", false); // KNN vs KP
+        check("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", false);
+    }
 
     fn see_of(fen: &str, uci: &str) -> i32 {
         let mut board = Board::new();
