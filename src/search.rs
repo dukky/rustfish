@@ -12,6 +12,9 @@ const HARD_LIMIT_FACTOR: u64 = 3;
 const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 // A score drop of at least this many cp since the last iteration buys more time.
 const SCORE_DROP_MARGIN: i32 = 40;
+// Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
+const SEE_PRUNE_MAX_DEPTH: i32 = 6;
+const SEE_PRUNE_CAPTURE_MARGIN: i32 = 100;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
 
@@ -1167,6 +1170,17 @@ fn negamax(
             if idx >= limit {
                 continue;
             }
+        }
+
+        if stage == Stage::BadCapture
+            && !in_check
+            && beta - alpha <= 1
+            && depth <= SEE_PRUNE_MAX_DEPTH
+            && idx > 0
+            && best > -MATE_SCORE + 1000
+            && see(board, mv) < -SEE_PRUNE_CAPTURE_MARGIN * depth
+        {
+            continue;
         }
 
         if quiet {
