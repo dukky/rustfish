@@ -48,14 +48,57 @@ eval_params! {
     Connected = (1, -3),              // bonus per phalanx/supported-chain pawn
     Backward = (3, 4),                // penalty per backward pawn
 
-    // Passed pawns: base + rank * rank_weight (rank is relative 0..7).
-    PassedBase = (-29, -6),
-    PassedRank = (5, 11),
-    PassedSupportedBase = (-12, -80), // extra when defended by own pawn
-    PassedSupportedRank = (4, 23),
-    PasserOwnKingNear = (7, 12),      // * (3 - king_distance) when distance <= 2
+    // Passed pawns: per-rank tables, R2..R7 = relative rank of the passer.
+    // Base bonus per rank.
+    PassedR2 = (-24, 5),
+    PassedR3 = (-19, 16),
+    PassedR4 = (-14, 27),
+    PassedR5 = (-9, 38),
+    PassedR6 = (-4, 49),
+    PassedR7 = (1, 60),
+    // Free path: every square from the stop square to promotion is empty.
+    PassedFreeR2 = (0, 0),
+    PassedFreeR3 = (0, 2),
+    PassedFreeR4 = (0, 5),
+    PassedFreeR5 = (0, 10),
+    PassedFreeR6 = (0, 20),
+    PassedFreeR7 = (0, 30),
+    // Safe push: stop square empty and not attacked by the enemy.
+    PassedSafePushR2 = (0, 0),
+    PassedSafePushR3 = (0, 2),
+    PassedSafePushR4 = (0, 5),
+    PassedSafePushR5 = (0, 10),
+    PassedSafePushR6 = (0, 20),
+    PassedSafePushR7 = (0, 30),
+    // Blocked: an enemy piece stands on the stop square (bonus; tunes negative).
+    PassedBlockedR2 = (0, 0),
+    PassedBlockedR3 = (0, 0),
+    PassedBlockedR4 = (0, -5),
+    PassedBlockedR5 = (0, -10),
+    PassedBlockedR6 = (0, -15),
+    PassedBlockedR7 = (0, -20),
+    // * min(own king distance to the stop square, 5) (tunes negative).
+    PassedOwnKingDistR2 = (0, 0),
+    PassedOwnKingDistR3 = (0, 0),
+    PassedOwnKingDistR4 = (0, -2),
+    PassedOwnKingDistR5 = (0, -4),
+    PassedOwnKingDistR6 = (0, -6),
+    PassedOwnKingDistR7 = (0, -8),
+    // * min(enemy king distance to the stop square, 5).
+    PassedEnemyKingDistR2 = (0, 0),
+    PassedEnemyKingDistR3 = (0, 0),
+    PassedEnemyKingDistR4 = (0, 5),
+    PassedEnemyKingDistR5 = (0, 10),
+    PassedEnemyKingDistR6 = (0, 15),
+    PassedEnemyKingDistR7 = (0, 20),
+    // Connected: defended by an own pawn or with an own pawn beside it.
+    PassedConnectedR2 = (-8, -57),
+    PassedConnectedR3 = (-4, -34),
+    PassedConnectedR4 = (0, -11),
+    PassedConnectedR5 = (4, 12),
+    PassedConnectedR6 = (8, 35),
+    PassedConnectedR7 = (12, 58),
     PasserEnemyKingFar = (0, 25),     // * (enemy king promo distance - remaining)
-    PasserEnemyKingAdjacent = (19, 49), // penalty when enemy king touches the passer
     PasserRookBehind = (17, 5),       // own rook behind the passer, same file
     PasserRookFront = (-11, -26),     // penalty: own rook in front of the passer
 
