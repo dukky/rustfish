@@ -554,6 +554,213 @@ fn development_score<T: Tracer>(s: &mut Score<'_, T>, sign: i32, board: &Board, 
     }
 }
 
+/// Pawn-hash entry: the full pawn bitboards are the key, so a hit is exact.
+/// The all-zero entry is also correct (no pawns -> no terms, no passers).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PawnEntry {
+    wp: u64,
+    bp: u64,
+    mg: i32,
+    eg: i32,
+    passed: u64,
+}
+
+const PAWN_TABLE_BITS: u32 = 14;
+
+#[derive(Clone)]
+pub(crate) struct PawnTable {
+    entries: Vec<PawnEntry>,
+}
+
+impl PawnTable {
+    pub(crate) fn new() -> Self {
+        Self { entries: vec![PawnEntry::default(); 1 << PAWN_TABLE_BITS] }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.fill(PawnEntry::default());
+    }
+
+    #[inline(always)]
+    fn probe(&mut self, wp: u64, bp: u64) -> &mut PawnEntry {
+        let h = (wp ^ bp.rotate_left(29)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        &mut self.entries[(h >> (64 - PAWN_TABLE_BITS)) as usize]
+    }
+}
+
+#[inline(always)]
+fn squares(mut bits: u64) -> impl Iterator<Item = u8> {
+    std::iter::from_fn(move || {
+        if bits == 0 {
+            return None;
+        }
+        let sq = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        Some(sq)
+    })
+}
+
+/// Terms that depend only on the pawn bitboards (doubled/isolated/passed/
+/// connected/backward/candidate/center control). Returns the passed-pawn set.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn pawn_structure<T: Tracer>(
+    s: &mut Score<'_, T>,
+    board: &Board,
+    wf: &[i32; 8],
+    bf: &[i32; 8],
+    wm: &[u8; 8],
+    bm: &[u8; 8],
+    wmin: &[i8; 8],
+    bmax: &[i8; 8],
+) -> u64 {
+    let mut passed_bb = 0u64;
+    for sq in squares(board.bb.pieces[0][0]) {
+        let f = (sq % 8) as usize;
+        let r = (sq / 8) as i32;
+
+        if wf[f] > 1 {
+            s.add(P::Doubled, -1);
+        }
+
+        let left = if f > 0 { wf[f - 1] } else { 0 };
+        let right = if f < 7 { wf[f + 1] } else { 0 };
+        if left == 0 && right == 0 {
+            s.add(P::Isolated, -1);
+        }
+
+        let mut passed = true;
+        for file in f.saturating_sub(1)..=(f + 1).min(7) {
+            if bmax[file] > r as i8 {
+                passed = false;
+                break;
+            }
+        }
+        if passed {
+            s.add(P::PassedBase, 1);
+            s.add(P::PassedRank, r);
+            passed_bb |= 1u64 << sq;
+            if is_supported_by_pawn(board, sq, Color::White) {
+                s.add(P::PassedSupportedBase, 1);
+                s.add(P::PassedSupportedRank, r);
+            }
+        }
+
+        if is_connected_pawn(wm, sq, Color::White) {
+            s.add(P::Connected, 1);
+        }
+
+        if is_backward_pawn(board, wm, sq, Color::White, passed) {
+            s.add(P::Backward, -1);
+        }
+
+        let candidate = bmax[f] <= r as i8;
+        if candidate {
+            s.add(P::CandidateBase, 1);
+            s.add(P::CandidateRank, r);
+            if pawn_has_lever(board, sq, Color::White) {
+                s.add(P::CandidateLever, 1);
+                s.add(P::CandidateLeverRank, r);
+            }
+            if is_supported_by_pawn(board, sq, Color::White)
+                || is_connected_pawn(wm, sq, Color::White)
+            {
+                s.add(P::CandidateSupported, 1);
+            }
+        }
+    }
+
+    for sq in squares(board.bb.pieces[1][0]) {
+        let f = (sq % 8) as usize;
+        let r = (sq / 8) as i32;
+
+        if bf[f] > 1 {
+            s.add(P::Doubled, 1);
+        }
+
+        let left = if f > 0 { bf[f - 1] } else { 0 };
+        let right = if f < 7 { bf[f + 1] } else { 0 };
+        if left == 0 && right == 0 {
+            s.add(P::Isolated, 1);
+        }
+
+        let mut passed = true;
+        for file in f.saturating_sub(1)..=(f + 1).min(7) {
+            if wmin[file] < r as i8 {
+                passed = false;
+                break;
+            }
+        }
+        if passed {
+            s.add(P::PassedBase, -1);
+            s.add(P::PassedRank, -(7 - r));
+            passed_bb |= 1u64 << sq;
+            if is_supported_by_pawn(board, sq, Color::Black) {
+                s.add(P::PassedSupportedBase, -1);
+                s.add(P::PassedSupportedRank, -(7 - r));
+            }
+        }
+
+        if is_connected_pawn(bm, sq, Color::Black) {
+            s.add(P::Connected, -1);
+        }
+
+        if is_backward_pawn(board, bm, sq, Color::Black, passed) {
+            s.add(P::Backward, 1);
+        }
+
+        let candidate = wmin[f] >= r as i8;
+        if candidate {
+            s.add(P::CandidateBase, -1);
+            s.add(P::CandidateRank, -(7 - r));
+            if pawn_has_lever(board, sq, Color::Black) {
+                s.add(P::CandidateLever, -1);
+                s.add(P::CandidateLeverRank, -(7 - r));
+            }
+            if is_supported_by_pawn(board, sq, Color::Black)
+                || is_connected_pawn(bm, sq, Color::Black)
+            {
+                s.add(P::CandidateSupported, -1);
+            }
+        }
+    }
+
+    for sq in squares(board.bb.pieces[0][0]) {
+        let f = (sq % 8) as i32;
+        let r = (sq / 8) as i32;
+        for df in [-1, 1] {
+            let nf = f + df;
+            let nr = r + 1;
+            if !in_bounds(nf as i8, nr as i8) {
+                continue;
+            }
+            let target = (nr as u8) * 8 + (nf as u8);
+            let rel = relative_rank(Color::White, target);
+            if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
+                s.add(P::PawnCenterControl, 1);
+            }
+        }
+    }
+    for sq in squares(board.bb.pieces[1][0]) {
+        let f = (sq % 8) as i32;
+        let r = (sq / 8) as i32;
+        for df in [-1, 1] {
+            let nf = f + df;
+            let nr = r - 1;
+            if !in_bounds(nf as i8, nr as i8) {
+                continue;
+            }
+            let target = (nr as u8) * 8 + (nf as u8);
+            let rel = relative_rank(Color::Black, target);
+            if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
+                s.add(P::PawnCenterControl, -1);
+            }
+        }
+    }
+
+    passed_bb
+}
+
 /// Observer of the linear structure of `evaluate`: receives, for every
 /// eval_params term, the White-minus-Black coefficient that multiplies its mg
 /// and eg weight (before tapering), plus the nonlinear remainder. The no-op
@@ -636,12 +843,27 @@ impl<T: Tracer> Score<'_, T> {
 }
 
 pub(crate) fn evaluate(board: &Board) -> i32 {
-    evaluate_with(board, &mut NoTrace)
+    evaluate_impl(board, &mut NoTrace, None)
+}
+
+/// `eval_for_side` with pawn-structure terms served from `pawns`; bit-identical result.
+pub(crate) fn eval_for_side_cached(board: &Board, pawns: &mut PawnTable) -> i32 {
+    let s = evaluate_impl(board, &mut NoTrace, Some(pawns));
+    if board.side_to_move == Color::White {
+        s
+    } else {
+        -s
+    }
 }
 
 /// `evaluate`, additionally reporting its linear structure to `t`.
-#[inline(always)]
+/// Bypasses the pawn hash so every term reaches the tracer.
 pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
+    evaluate_impl(board, t, None)
+}
+
+#[inline(always)]
+fn evaluate_impl<T: Tracer>(board: &Board, t: &mut T, pawns: Option<&mut PawnTable>) -> i32 {
     let acc = &board.eval_acc;
     let mut s = Score { mg: acc.mg, eg: acc.eg, t };
 
@@ -729,132 +951,56 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     let white_king = board.king_square(Color::White);
     let black_king = board.king_square(Color::Black);
 
-    for &sq in white_pawns.as_slice() {
-        let f = (sq % 8) as usize;
-        let r = (sq / 8) as i32;
-
-        if white_pawn_files[f] > 1 {
-            s.add(P::Doubled, -1);
-        }
-
-        let left = if f > 0 { white_pawn_files[f - 1] } else { 0 };
-        let right = if f < 7 { white_pawn_files[f + 1] } else { 0 };
-        if left == 0 && right == 0 {
-            s.add(P::Isolated, -1);
-        }
-
-        let mut passed = true;
-        for file in f.saturating_sub(1)..=(f + 1).min(7) {
-            if black_max_pawn_rank[file] > r as i8 {
-                passed = false;
-                break;
+    // Pawn-structure terms depend only on the two pawn bitboards: serve them
+    // (and the passed-pawn set) from the pawn hash when one is supplied.
+    let passed_bb = match pawns {
+        Some(table) => {
+            let wp = board.bb.pieces[0][0];
+            let bp = board.bb.pieces[1][0];
+            let entry = table.probe(wp, bp);
+            if entry.wp != wp || entry.bp != bp {
+                let mut ps = Score { mg: 0, eg: 0, t: &mut NoTrace };
+                let passed = pawn_structure(
+                    &mut ps,
+                    board,
+                    &white_pawn_files,
+                    &black_pawn_files,
+                    &white_pawn_masks,
+                    &black_pawn_masks,
+                    &white_min_pawn_rank,
+                    &black_max_pawn_rank,
+                );
+                *entry = PawnEntry { wp, bp, mg: ps.mg, eg: ps.eg, passed };
             }
+            s.mg += entry.mg;
+            s.eg += entry.eg;
+            entry.passed
         }
-        if passed {
-            s.add(P::PassedBase, 1);
-            s.add(P::PassedRank, r);
-            white_passed.push(sq);
-            if is_supported_by_pawn(board, sq, Color::White) {
-                s.add(P::PassedSupportedBase, 1);
-                s.add(P::PassedSupportedRank, r);
-            }
-            passed_pawn_support_score(
-                &mut s,
-                1,
-                sq,
-                Color::White,
-                white_king,
-                black_king,
-                white_rooks.as_slice(),
-            );
-        }
+        None => pawn_structure(
+            &mut s,
+            board,
+            &white_pawn_files,
+            &black_pawn_files,
+            &white_pawn_masks,
+            &black_pawn_masks,
+            &white_min_pawn_rank,
+            &black_max_pawn_rank,
+        ),
+    };
 
-        if is_connected_pawn(&white_pawn_masks, sq, Color::White) {
-            s.add(P::Connected, 1);
-        }
-
-        if is_backward_pawn(board, &white_pawn_masks, sq, Color::White, passed) {
-            s.add(P::Backward, -1);
-        }
-
-        let candidate = black_max_pawn_rank[f] <= r as i8;
-        if candidate {
-            s.add(P::CandidateBase, 1);
-            s.add(P::CandidateRank, r);
-            if pawn_has_lever(board, sq, Color::White) {
-                s.add(P::CandidateLever, 1);
-                s.add(P::CandidateLeverRank, r);
-            }
-            if is_supported_by_pawn(board, sq, Color::White)
-                || is_connected_pawn(&white_pawn_masks, sq, Color::White)
-            {
-                s.add(P::CandidateSupported, 1);
-            }
-        }
+    let mut bits = passed_bb & board.bb.pieces[0][0];
+    while bits != 0 {
+        let sq = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        white_passed.push(sq);
+        passed_pawn_support_score(&mut s, 1, sq, Color::White, white_king, black_king, white_rooks.as_slice());
     }
-
-    for &sq in black_pawns.as_slice() {
-        let f = (sq % 8) as usize;
-        let r = (sq / 8) as i32;
-
-        if black_pawn_files[f] > 1 {
-            s.add(P::Doubled, 1);
-        }
-
-        let left = if f > 0 { black_pawn_files[f - 1] } else { 0 };
-        let right = if f < 7 { black_pawn_files[f + 1] } else { 0 };
-        if left == 0 && right == 0 {
-            s.add(P::Isolated, 1);
-        }
-
-        let mut passed = true;
-        for file in f.saturating_sub(1)..=(f + 1).min(7) {
-            if white_min_pawn_rank[file] < r as i8 {
-                passed = false;
-                break;
-            }
-        }
-        if passed {
-            s.add(P::PassedBase, -1);
-            s.add(P::PassedRank, -(7 - r));
-            black_passed.push(sq);
-            if is_supported_by_pawn(board, sq, Color::Black) {
-                s.add(P::PassedSupportedBase, -1);
-                s.add(P::PassedSupportedRank, -(7 - r));
-            }
-            passed_pawn_support_score(
-                &mut s,
-                -1,
-                sq,
-                Color::Black,
-                black_king,
-                white_king,
-                black_rooks.as_slice(),
-            );
-        }
-
-        if is_connected_pawn(&black_pawn_masks, sq, Color::Black) {
-            s.add(P::Connected, -1);
-        }
-
-        if is_backward_pawn(board, &black_pawn_masks, sq, Color::Black, passed) {
-            s.add(P::Backward, 1);
-        }
-
-        let candidate = white_min_pawn_rank[f] >= r as i8;
-        if candidate {
-            s.add(P::CandidateBase, -1);
-            s.add(P::CandidateRank, -(7 - r));
-            if pawn_has_lever(board, sq, Color::Black) {
-                s.add(P::CandidateLever, -1);
-                s.add(P::CandidateLeverRank, -(7 - r));
-            }
-            if is_supported_by_pawn(board, sq, Color::Black)
-                || is_connected_pawn(&black_pawn_masks, sq, Color::Black)
-            {
-                s.add(P::CandidateSupported, -1);
-            }
-        }
+    let mut bits = passed_bb & board.bb.pieces[1][0];
+    while bits != 0 {
+        let sq = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        black_passed.push(sq);
+        passed_pawn_support_score(&mut s, -1, sq, Color::Black, black_king, white_king, black_rooks.as_slice());
     }
 
     for &sq in white_rooks.as_slice() {
@@ -877,39 +1023,6 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
         }
         if r == 1 {
             s.add(P::RookSeventh, -1);
-        }
-    }
-
-    for &sq in white_pawns.as_slice() {
-        let f = (sq % 8) as i32;
-        let r = (sq / 8) as i32;
-        for df in [-1, 1] {
-            let nf = f + df;
-            let nr = r + 1;
-            if !in_bounds(nf as i8, nr as i8) {
-                continue;
-            }
-            let target = (nr as u8) * 8 + (nf as u8);
-            let rel = relative_rank(Color::White, target);
-            if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
-                s.add(P::PawnCenterControl, 1);
-            }
-        }
-    }
-    for &sq in black_pawns.as_slice() {
-        let f = (sq % 8) as i32;
-        let r = (sq / 8) as i32;
-        for df in [-1, 1] {
-            let nf = f + df;
-            let nr = r - 1;
-            if !in_bounds(nf as i8, nr as i8) {
-                continue;
-            }
-            let target = (nr as u8) * 8 + (nf as u8);
-            let rel = relative_rank(Color::Black, target);
-            if (2..=4).contains(&rel) && (2..=5).contains(&nf) {
-                s.add(P::PawnCenterControl, -1);
-            }
         }
     }
 
@@ -1162,6 +1275,29 @@ mod tests {
             let tempo = if board.side_to_move == Color::White { TEMPO } else { -TEMPO };
             let phase = board.eval_acc.phase.clamp(0, 24);
             assert_eq!(taper_score(mg, eg, phase) + tempo, score, "{fen}");
+        }
+    }
+
+    #[test]
+    fn pawn_hash_matches_uncached_eval() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "8/5k2/8/3P4/8/8/5K2/8 b - - 0 1",
+            "6k1/5p2/8/8/8/8/1R3PP1/r5K1 w - - 0 40",
+            "4k3/8/8/8/8/8/8/1Q2K3 b - - 0 1",
+            // Same pawns, different pieces: hit must still add king/rook passer terms.
+            "8/5k2/8/3P4/8/8/3R1K2/8 w - - 0 1",
+            "8/3k4/8/3P4/8/8/5K2/r7 b - - 0 1",
+        ];
+        let mut table = PawnTable::new();
+        let mut board = Board::new();
+        for _ in 0..2 {
+            for fen in fens {
+                board.set_fen(fen);
+                assert_eq!(eval_for_side_cached(&board, &mut table), eval_for_side(&board), "{fen}");
+            }
         }
     }
 

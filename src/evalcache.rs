@@ -6,7 +6,7 @@
 //! stored and compared, so this never changes search behavior beyond the
 //! zobrist-collision risk the TT already carries.
 
-use crate::eval::eval_for_side;
+use crate::eval::{eval_for_side_cached, PawnTable};
 use crate::Board;
 
 const EVAL_CACHE_BITS: u32 = 17;
@@ -24,15 +24,18 @@ struct Entry {
 #[derive(Clone)]
 pub(crate) struct EvalCache {
     entries: Vec<Entry>,
+    /// Pawn-structure memo consulted on eval-cache misses (exact; see eval.rs).
+    pawns: PawnTable,
 }
 
 impl EvalCache {
     pub(crate) fn new() -> Self {
-        Self { entries: vec![Entry { key: EMPTY_KEY, eval: 0 }; EVAL_CACHE_SIZE] }
+        Self { entries: vec![Entry { key: EMPTY_KEY, eval: 0 }; EVAL_CACHE_SIZE], pawns: PawnTable::new() }
     }
 
     pub(crate) fn clear(&mut self) {
         self.entries.fill(Entry { key: EMPTY_KEY, eval: 0 });
+        self.pawns.clear();
     }
 
     /// `key` must be the zobrist key of `board` (as maintained by search).
@@ -42,7 +45,7 @@ impl EvalCache {
         if slot.key == key && key != EMPTY_KEY {
             return slot.eval;
         }
-        let eval = eval_for_side(board);
+        let eval = eval_for_side_cached(board, &mut self.pawns);
         *slot = Entry { key, eval };
         eval
     }
