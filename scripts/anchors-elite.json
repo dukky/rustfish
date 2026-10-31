@@ -1,0 +1,15 @@
+{
+  "_comment": "Elite CCRL Blitz anchor set (2615-2956) for rustfish at ~2650-2700+. Ratings from the CCRL Blitz complete list dated 2026-10-27 (+-13..18 each, single-CPU entries). Same build kinds as scripts/anchors.json; all are HCE except reckless-0.3.0/0.4.0 (net embedded from data/weights.bin in-repo); no build-time net downloads. simbelmyne-1.7.0 pulls crates.io deps via its Cargo.lock (clap, rayon, ...); all others are dependency-free. Risks: stash v21.0/v25.0 build with -Werror (newer GCC warnings could break them; v19/v20.0.1 built fine); zahak 6.2 has no Book UCI option (book is off unless -book is passed). Excluded: Blunder 7.x/8.x (RunCommLoop and UCILoop each wrap stdin in their own bufio.Reader, so piped smoke input after 'uci' is swallowed: the cause of the 6.1.0/7.4.0 'go depth 4' failures, and 8.5.5 has the same pattern); Zahak 7.1 (needs 'make netgen' to generate engine/nn.go); Velvet 2.0.0 (packed_simd_2, nightly only); Pedantic (C#). Select with: gh workflow run ccrl-ladder.yml -f anchors_file=scripts/anchors-elite.json",
+  "anchors": [
+    {"name": "reckless-0.3.0",   "ccrl": 2615, "repo": "codedeliveryservice/Reckless", "ref": "v0.3.0",  "kind": "cargo", "pkg": "reckless",   "bin": "reckless",   "options": []},
+    {"name": "velvet-1.1.0",     "ccrl": 2654, "repo": "mhonert/velvet-chess",         "ref": "v1.1.0",  "kind": "cargo", "pkg": "velvet",     "bin": "velvet",     "options": []},
+    {"name": "stash-21.0",       "ccrl": 2714, "repo": "mhouppin/stash-bot",           "ref": "v21.0",   "kind": "stash", "options": []},
+    {"name": "zahak-5.0",        "ccrl": 2726, "repo": "amanjpro/zahak",               "ref": "5.0",     "kind": "go",    "pkg": "./zahak", "options": ["option.Book=false"]},
+    {"name": "velvet-1.2.0",     "ccrl": 2765, "repo": "mhonert/velvet-chess",         "ref": "v1.2.0",  "kind": "cargo", "pkg": "velvet",     "bin": "velvet",     "options": []},
+    {"name": "zahak-6.2",        "ccrl": 2826, "repo": "amanjpro/zahak",               "ref": "6.2",     "kind": "go",    "pkg": "./zahak", "options": []},
+    {"name": "simbelmyne-1.7.0", "ccrl": 2923, "repo": "sroelants/simbelmyne",         "ref": "v1.7.0",  "kind": "cargo", "pkg": "simbelmyne", "bin": "simbelmyne", "options": []},
+    {"name": "reckless-0.4.0",   "ccrl": 2932, "repo": "codedeliveryservice/Reckless", "ref": "v0.4.0",  "kind": "cargo", "pkg": "reckless",   "bin": "reckless",   "options": []},
+    {"name": "stash-25.0",       "ccrl": 2933, "repo": "mhouppin/stash-bot",           "ref": "v25.0",   "kind": "stash", "options": []},
+    {"name": "inanis-1.4.0",     "ccrl": 2956, "repo": "Tearth/Inanis",                "ref": "v1.4.0",  "kind": "cargo", "pkg": "inanis",     "bin": "inanis",     "options": []}
+  ]
+}
