@@ -226,26 +226,6 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
     }
 }
 
-pub(crate) fn mobility_count(board: &Board, sq: u8, piece: Piece) -> i32 {
-    use crate::bitboard::{
-        bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
-    };
-
-    let s = sq as usize;
-    let occ = board.bb.occ_all();
-    let attacks = match piece.kind {
-        // A pawn's attack squares equal the squares an enemy pawn would
-        // attack this square from, so the attacker table works mirrored.
-        PieceType::Pawn => PAWN_ATTACKERS[color_index(piece.color.opposite())][s],
-        PieceType::Knight => KNIGHT_ATTACKS[s],
-        PieceType::Bishop => bishop_attacks(s, occ),
-        PieceType::Rook => rook_attacks(s, occ),
-        PieceType::Queen => bishop_attacks(s, occ) | rook_attacks(s, occ),
-        PieceType::King => KING_ATTACKS[s],
-    };
-    (attacks & !board.bb.occ[color_index(piece.color)]).count_ones() as i32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
