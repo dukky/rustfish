@@ -133,12 +133,19 @@ def cmd_sprt(args):
         nonreg = args.nonreg or (args.ltc and not args.gainer)
         elo0, elo1 = (-5, 0) if nonreg else (args.elo0, args.elo1)
         settings.update(elo0=elo0, elo1=elo1, max_waves=args.max_waves)
+        # Pin both refs to SHAs now: a test may sit queued for hours, and main
+        # (or the candidate branch) moving meanwhile must not change what it tests.
+        cand_sha = remote.split()[0]
+        base_remote = git("ls-remote", "origin", f"refs/heads/{args.base}")
+        base_sha = base_remote.split()[0] if base_remote else args.base
+        settings.update(candidate_name=branch, base_name=args.base)
         stamp = datetime.datetime.now().strftime("%m%d-%H%M")
         test_id = f"{re.sub(r'[^A-Za-z0-9._-]', '-', branch)}-{profile}-{stamp}"
         gh("workflow", "run", "sprt.yml", "--ref", "main",
-           "-f", f"test_id={test_id}", "-f", f"candidate={branch}", "-f", f"base={args.base}",
+           "-f", f"test_id={test_id}", "-f", f"candidate={cand_sha}", "-f", f"base={base_sha}",
            "-f", f"settings={json.dumps(settings)}", capture=False)
-        print(f"dispatched {test_id}: {branch} vs {args.base}, {settings['tc']}, [{elo0}, {elo1}]")
+        print(f"dispatched {test_id}: {branch} ({cand_sha[:7]}) vs {args.base} ({base_sha[:7]}), "
+              f"{settings['tc']}, [{elo0}, {elo1}]")
         if args.no_wait:
             print(f"re-attach later with: python3 scripts/ci.py sprt --resume {test_id}")
             return
