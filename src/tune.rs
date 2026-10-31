@@ -329,7 +329,9 @@ struct Dataset {
     lin: Vec<LinFeat>,
     lin_offsets: Vec<u32>,
     phase: Vec<u8>,
-    // Tapered nonlinear part of the eval (king safety, mop-up edge) plus tempo.
+    // Endgame scale factor / SCALE_NORMAL; multiplies the tapered (pre-tempo) eval.
+    scale: Vec<f32>,
+    // Scaled, tapered nonlinear part of the eval (king safety, mop-up edge) plus tempo.
     rest: Vec<f32>,
     result: Vec<f32>,
     // Max |model - evaluate()| seen while loading, and integer trace mismatches.
@@ -355,6 +357,7 @@ impl Dataset {
             lin: Vec::new(),
             lin_offsets: vec![0],
             phase: Vec::new(),
+            scale: Vec::new(),
             rest: Vec::new(),
             result: Vec::new(),
             max_model_err: 0.0,
@@ -374,7 +377,10 @@ impl Dataset {
 
         // Exactness: the traced terms must rebuild evaluate() bit for bit.
         let (lin_mg, lin_eg) = traced_linear(board, &trace);
-        let rebuilt = eval::taper_score(lin_mg + trace.nonlinear_mg, lin_eg + trace.nonlinear_eg, phase) + tempo;
+        let rebuilt = eval::taper_score(lin_mg + trace.nonlinear_mg, lin_eg + trace.nonlinear_eg, phase)
+            * trace.scale
+            / eval::SCALE_NORMAL
+            + tempo;
         if rebuilt != score {
             self.trace_mismatches += 1;
         }
@@ -395,11 +401,14 @@ impl Dataset {
         self.lin_offsets.push(self.lin.len() as u32);
         self.phase.push(phase as u8);
         let ph = phase as f64 / 24.0;
-        let rest = trace.nonlinear_mg as f64 * ph + trace.nonlinear_eg as f64 * (1.0 - ph) + tempo as f64;
+        let sc = trace.scale as f64 / eval::SCALE_NORMAL as f64;
+        self.scale.push(sc as f32);
+        let rest =
+            (trace.nonlinear_mg as f64 * ph + trace.nonlinear_eg as f64 * (1.0 - ph)) * sc + tempo as f64;
         self.rest.push(rest as f32);
         self.result.push(result);
 
-        let model = lin_mg as f64 * ph + lin_eg as f64 * (1.0 - ph) + rest;
+        let model = (lin_mg as f64 * ph + lin_eg as f64 * (1.0 - ph)) * sc + rest;
         self.max_model_err = self.max_model_err.max((model - score as f64).abs());
     }
 
@@ -417,7 +426,7 @@ impl Dataset {
             eg += l.eg as f64 * params[LIN_EG + l.idx as usize];
         }
         let ph = self.phase[i] as f64 / 24.0;
-        mg * ph + eg * (1.0 - ph) + self.rest[i] as f64
+        (mg * ph + eg * (1.0 - ph)) * self.scale[i] as f64 + self.rest[i] as f64
     }
 }
 
@@ -465,7 +474,8 @@ fn gradient(data: &Dataset, idx: &[usize], params: &[f64], k: f64) -> Vec<f64> {
                         let sg = sigmoid(data.eval(i, params), k);
                         let d = -2.0 * (data.result[i] as f64 - sg) * sg * (1.0 - sg) * c;
                         let ph = data.phase[i] as f64 / 24.0;
-                        let (dm, de) = (d * ph, d * (1.0 - ph));
+                        let sc = data.scale[i] as f64;
+                        let (dm, de) = (d * ph * sc, d * (1.0 - ph) * sc);
                         for &f in &data.feats[data.offsets[i] as usize..data.offsets[i + 1] as usize] {
                             let fi = (f & 0x7fff) as usize;
                             let s = if f & 0x8000 != 0 { -1.0 } else { 1.0 };

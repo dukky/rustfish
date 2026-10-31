@@ -599,13 +599,124 @@ fn development_score<T: Tracer>(s: &mut Score<'_, T>, sign: i32, board: &Board, 
     }
 }
 
+/// Full-strength endgame scale factor (scores are multiplied by `scale / SCALE_NORMAL`).
+pub(crate) const SCALE_NORMAL: i32 = 128;
+/// Stronger side has no pawns and too little extra material to mate.
+const SCALE_DRAW: i32 = 0;
+/// No pawns, small material edge, defender has at most a minor (e.g. KR vs KB).
+const SCALE_NO_PAWNS_VS_MINOR: i32 = 8;
+/// No pawns, small material edge, defender has more than a minor (e.g. KRB vs KR).
+const SCALE_NO_PAWNS_VS_MAJOR: i32 = 28;
+/// One pawn and the defender can give up a piece for it.
+const SCALE_ONE_PAWN: i32 = 96;
+/// Pure opposite-coloured bishop ending with a pawn edge of at most one.
+const SCALE_OCB_CLOSE: i32 = 40;
+/// Pure opposite-coloured bishop ending with a larger pawn edge.
+const SCALE_OCB: i32 = 64;
+/// Single-rook ending with a one-pawn edge.
+const SCALE_ROOK_ONE_PAWN: i32 = 96;
+/// Light squares (b1, a2, ...); a1 is dark.
+const LIGHT_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
+const FILE_A_BB: u64 = 0x0101_0101_0101_0101;
+const FILE_H_BB: u64 = FILE_A_BB << 7;
+
+/// Drawishness scale factor in `0..=SCALE_NORMAL` for the side the tapered
+/// `score` favours (white if positive). Applied as `score * scale / SCALE_NORMAL`.
+fn endgame_scale(board: &Board, score: i32) -> i32 {
+    if score == 0 {
+        return SCALE_NORMAL;
+    }
+    let acc = &board.eval_acc;
+    let (s, w) = if score > 0 { (0usize, 1usize) } else { (1usize, 0usize) };
+    let pawns = [
+        board.bb.pieces[0][0].count_ones() as i32,
+        board.bb.pieces[1][0].count_ones() as i32,
+    ];
+    let npm_s = acc.npm[s];
+    let npm_w = acc.npm[w];
+    let bishop = search::piece_value(PieceType::Bishop);
+    let rook = search::piece_value(PieceType::Rook);
+
+    if pawns[s] == 0 && npm_s - npm_w <= bishop {
+        return if npm_s < rook {
+            SCALE_DRAW
+        } else if npm_w <= bishop {
+            SCALE_NO_PAWNS_VS_MINOR
+        } else {
+            SCALE_NO_PAWNS_VS_MAJOR
+        };
+    }
+    // KNN vs bare king cannot be forced.
+    if pawns[s] == 0
+        && pawns[w] == 0
+        && npm_w == 0
+        && npm_s == 2 * search::piece_value(PieceType::Knight)
+        && board.bb.pieces[s][1].count_ones() == 2
+    {
+        return SCALE_DRAW;
+    }
+
+    // KB + rook pawn(s) vs K with the wrong-coloured bishop and the defending
+    // king on the queening corner.
+    if npm_s == bishop && acc.bishops[s] == 1 && npm_w == 0 && pawns[s] > 0 {
+        let sp = board.bb.pieces[s][0];
+        let file_bb = if sp & !FILE_A_BB == 0 {
+            Some(0u8)
+        } else if sp & !FILE_H_BB == 0 {
+            Some(7u8)
+        } else {
+            None
+        };
+        let weak_king = if w == 0 { board.white_king_sq } else { board.black_king_sq };
+        if let (Some(file), Some(wk)) = (file_bb, weak_king) {
+            let queen_sq = if s == 0 { 56 + file } else { file };
+            let bishop_light = board.bb.pieces[s][2] & LIGHT_SQUARES != 0;
+            let corner_light = (1u64 << queen_sq) & LIGHT_SQUARES != 0;
+            let dist = ((wk % 8) as i32 - (queen_sq % 8) as i32)
+                .abs()
+                .max(((wk / 8) as i32 - (queen_sq / 8) as i32).abs());
+            if bishop_light != corner_light && dist <= 1 {
+                return SCALE_DRAW;
+            }
+        }
+    }
+
+    if pawns[s] == 1 && npm_w > 0 && npm_s - npm_w <= bishop {
+        return SCALE_ONE_PAWN;
+    }
+
+    let pawn_diff = pawns[s] - pawns[w];
+    // Pure opposite-coloured bishops.
+    if npm_s == bishop && npm_w == bishop && acc.bishops[0] == 1 && acc.bishops[1] == 1 {
+        let s_light = board.bb.pieces[s][2] & LIGHT_SQUARES != 0;
+        let w_light = board.bb.pieces[w][2] & LIGHT_SQUARES != 0;
+        if s_light != w_light {
+            return if pawn_diff <= 1 { SCALE_OCB_CLOSE } else { SCALE_OCB };
+        }
+    }
+    // Single-rook endings with a one-pawn edge.
+    if npm_s == rook
+        && npm_w == rook
+        && board.bb.pieces[0][3].count_ones() == 1
+        && board.bb.pieces[1][3].count_ones() == 1
+        && pawn_diff <= 1
+    {
+        return SCALE_ROOK_ONE_PAWN;
+    }
+    SCALE_NORMAL
+}
+
 /// Observer of the linear structure of `evaluate`: receives, for every
 /// eval_params term, the White-minus-Black coefficient that multiplies its mg
-/// and eg weight (before tapering), plus the nonlinear remainder. The no-op
-/// `NoTrace` is what search uses; it compiles away completely.
+/// and eg weight (before tapering), plus the nonlinear remainder and the
+/// endgame scale factor applied to the tapered score. The no-op `NoTrace` is
+/// what search uses; it compiles away completely.
 pub(crate) trait Tracer {
     fn add(&mut self, p: P, mg: i32, eg: i32);
     fn nonlinear(&mut self, mg: i32, eg: i32);
+    /// Endgame scale factor: the final score is
+    /// `taper_score(mg, eg, phase) * scale / SCALE_NORMAL + tempo`.
+    fn scale(&mut self, scale: i32);
 }
 
 pub(crate) struct NoTrace;
@@ -615,6 +726,8 @@ impl Tracer for NoTrace {
     fn add(&mut self, _p: P, _mg: i32, _eg: i32) {}
     #[inline(always)]
     fn nonlinear(&mut self, _mg: i32, _eg: i32) {}
+    #[inline(always)]
+    fn scale(&mut self, _scale: i32) {}
 }
 
 /// Recording tracer used by the tuner.
@@ -625,11 +738,19 @@ pub(crate) struct EvalTrace {
     /// Nonlinear (untuned) part of the untapered mg / eg score: king safety, mop-up edge pressure.
     pub(crate) nonlinear_mg: i32,
     pub(crate) nonlinear_eg: i32,
+    /// Endgame scale factor (SCALE_NORMAL = unscaled) applied to the tapered score.
+    pub(crate) scale: i32,
 }
 
 impl EvalTrace {
     pub(crate) fn new() -> Self {
-        Self { mg: [0; PARAM_COUNT], eg: [0; PARAM_COUNT], nonlinear_mg: 0, nonlinear_eg: 0 }
+        Self {
+            mg: [0; PARAM_COUNT],
+            eg: [0; PARAM_COUNT],
+            nonlinear_mg: 0,
+            nonlinear_eg: 0,
+            scale: SCALE_NORMAL,
+        }
     }
 }
 
@@ -641,6 +762,9 @@ impl Tracer for EvalTrace {
     fn nonlinear(&mut self, mg: i32, eg: i32) {
         self.nonlinear_mg += mg;
         self.nonlinear_eg += eg;
+    }
+    fn scale(&mut self, scale: i32) {
+        self.scale = scale;
     }
 }
 
@@ -1117,6 +1241,9 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     s.add(P::Mobility, white_mob - black_mob);
 
     let mut score = taper_score(s.mg, s.eg, phase);
+    let scale = endgame_scale(board, score);
+    s.t.scale(scale);
+    score = score * scale / SCALE_NORMAL;
     if board.side_to_move == Color::White {
         score += TEMPO;
     } else {
@@ -1162,7 +1289,13 @@ mod tests {
             "6k1/5p2/8/8/8/8/1R3PP1/r5K1 w - - 0 40",
             "4k3/8/8/8/8/8/8/1Q2K3 b - - 0 1",
             "2n1k3/1P6/8/8/8/8/8/N3K2B w - - 0 1",
+            // Endgame-scaled positions: OCB, single rooks, wrong bishop, KB vs K.
+            "4k3/5pp1/4b3/8/8/2B5/5PPP/4K3 w - - 0 1",
+            "4k3/r4pp1/8/8/8/8/R4PPP/4K3 b - - 0 1",
+            "7k/8/8/7P/8/8/2B5/4K3 w - - 0 1",
+            "8/8/4k3/8/8/2B5/8/4K3 b - - 0 1",
         ];
+        let mut scaled = 0;
         let mut board = Board::new();
         for fen in fens {
             board.set_fen(fen);
@@ -1176,8 +1309,54 @@ mod tests {
             }
             let tempo = if board.side_to_move == Color::White { TEMPO } else { -TEMPO };
             let phase = board.eval_acc.phase.clamp(0, 24);
-            assert_eq!(taper_score(mg, eg, phase) + tempo, score, "{fen}");
+            // The endgame scale is applied after tapering, so the trace
+            // records the factor and the rebuild applies it the same way.
+            if t.scale != SCALE_NORMAL {
+                scaled += 1;
+            }
+            assert_eq!(
+                taper_score(mg, eg, phase) * t.scale / SCALE_NORMAL + tempo,
+                score,
+                "{fen}"
+            );
         }
+        assert!(scaled >= 4, "scaled positions exercised: {scaled}");
+    }
+
+    fn eval_fen(fen: &str) -> i32 {
+        let mut board = Board::new();
+        board.set_fen(fen);
+        evaluate(&board)
+    }
+
+    #[test]
+    fn insufficient_material_scales_to_near_zero() {
+        for fen in [
+            "8/8/4k3/8/8/2B5/8/4K3 w - - 0 1",   // KB vs K
+            "8/8/4k3/8/8/2N5/8/4K3 b - - 0 1",   // KN vs K
+            "8/8/4k3/8/8/2NN4/8/4K3 w - - 0 1",  // KNN vs K
+            "8/8/4k3/3n4/8/2B5/8/4K3 w - - 0 1", // KB vs KN
+            "8/8/4k3/3p4/8/2B5/8/4K3 w - - 0 1", // KB vs KP
+        ] {
+            let s = eval_fen(fen);
+            assert!(s.abs() <= 2 * TEMPO, "{fen}: {s}");
+        }
+    }
+
+    #[test]
+    fn opposite_bishops_are_scaled_but_pawn_edge_kept() {
+        // OCB, white a pawn up.
+        let ocb = eval_fen("4k3/5pp1/4b3/8/8/2B5/5PPP/4K3 w - - 0 1");
+        // Same-coloured bishops, white a pawn up.
+        let scb = eval_fen("4k3/5pp1/3b4/8/8/2B5/5PPP/4K3 w - - 0 1");
+        assert!(ocb > 0 && ocb < scb, "ocb {ocb} scb {scb}");
+        // KBP vs K with a central pawn stays clearly winning.
+        assert!(eval_fen("8/8/4k3/8/3P4/2B5/8/4K3 w - - 0 1") > 300);
+        // Wrong-coloured bishop + h-pawn with the defender in the corner: draw.
+        let wrong = eval_fen("7k/8/8/7P/8/8/2B5/4K3 w - - 0 1");
+        // Right-coloured bishop: still winning.
+        assert!(eval_fen("7k/8/8/7P/8/8/1B6/4K3 w - - 0 1") > 300);
+        assert!(wrong.abs() <= 2 * TEMPO, "wrong bishop {wrong}");
     }
 
     #[test]
