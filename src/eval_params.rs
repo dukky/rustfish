@@ -33,116 +33,116 @@ macro_rules! eval_params {
 
 eval_params! {
     // Bishop pair, per side with >= 2 bishops.
-    BishopPair = (14, 67),
+    BishopPair = (15, 64),
 
     // Development (only applied while phase >= 12; mg only).
-    DevUndevelopedMinor = (-6, 0),    // penalty per minor on its start square
-    DevKingHomeUndeveloped = (1, 0),  // penalty: king at home with >= 2 undeveloped
-    DevKingCastled = (16, 0),         // bonus: king on a castled square
+    DevUndevelopedMinor = (-12, 0),   // penalty per minor on its start square
+    DevKingHomeUndeveloped = (-4, 0), // penalty: king at home with >= 2 undeveloped
+    DevKingCastled = (23, 0),         // bonus: king on a castled square
 
     // Pawn structure.
-    Doubled = (2, 7),                 // penalty per pawn on a file with > 1 own pawn
+    Doubled = (6, 6),                 // penalty per pawn on a file with > 1 own pawn
     Isolated = (4, 10),               // penalty per pawn with no own pawns on adjacent files
-    Connected = (1, -6),              // bonus per phalanx/supported-chain pawn
-    Backward = (7, 5),                // penalty per backward pawn
+    Connected = (0, -6),              // bonus per phalanx/supported-chain pawn
+    Backward = (2, 6),                // penalty per backward pawn
 
     // Passed pawns: per-rank tables, R2..R7 = relative rank of the passer.
     // Base bonus per rank.
-    PassedR2 = (-22, 9),
-    PassedR3 = (-22, 20),
-    PassedR4 = (-22, 31),
-    PassedR5 = (-22, 42),
-    PassedR6 = (-22, 53),
-    PassedR7 = (-22, 64),
+    PassedR2 = (3, 38),
+    PassedR3 = (-10, 14),
+    PassedR4 = (-28, 24),
+    PassedR5 = (-8, 19),
+    PassedR6 = (28, -9),
+    PassedR7 = (-11, 14),
     // Free path: every square from the stop square to promotion is empty.
-    PassedFreeR2 = (0, 0),
-    PassedFreeR3 = (0, 2),
-    PassedFreeR4 = (0, 5),
-    PassedFreeR5 = (0, 10),
-    PassedFreeR6 = (0, 20),
-    PassedFreeR7 = (0, 30),
+    PassedFreeR2 = (-6, 13),
+    PassedFreeR3 = (-11, 8),
+    PassedFreeR4 = (-4, 14),
+    PassedFreeR5 = (13, 12),
+    PassedFreeR6 = (25, 7),
+    PassedFreeR7 = (45, 51),
     // Safe push: stop square empty and not attacked by the enemy.
-    PassedSafePushR2 = (0, 0),
-    PassedSafePushR3 = (0, 2),
-    PassedSafePushR4 = (0, 5),
-    PassedSafePushR5 = (0, 10),
-    PassedSafePushR6 = (0, 20),
-    PassedSafePushR7 = (0, 30),
+    PassedSafePushR2 = (-9, 8),
+    PassedSafePushR3 = (3, 7),
+    PassedSafePushR4 = (0, 12),
+    PassedSafePushR5 = (-13, 35),
+    PassedSafePushR6 = (6, 68),
+    PassedSafePushR7 = (4, 135),
     // Blocked: an enemy piece stands on the stop square (bonus; tunes negative).
-    PassedBlockedR2 = (0, 0),
-    PassedBlockedR3 = (0, 0),
-    PassedBlockedR4 = (0, -5),
-    PassedBlockedR5 = (0, -10),
-    PassedBlockedR6 = (0, -15),
-    PassedBlockedR7 = (0, -20),
+    PassedBlockedR2 = (-6, 12),
+    PassedBlockedR3 = (-7, -8),
+    PassedBlockedR4 = (-31, -6),
+    PassedBlockedR5 = (-17, 5),
+    PassedBlockedR6 = (-2, -14),
+    PassedBlockedR7 = (-15, 19),
     // * min(own king distance to the stop square, 5) (tunes negative).
-    PassedOwnKingDistR2 = (0, 0),
-    PassedOwnKingDistR3 = (0, 0),
-    PassedOwnKingDistR4 = (0, -2),
-    PassedOwnKingDistR5 = (0, -4),
-    PassedOwnKingDistR6 = (0, -6),
-    PassedOwnKingDistR7 = (0, -8),
+    PassedOwnKingDistR2 = (1, -1),
+    PassedOwnKingDistR3 = (1, -4),
+    PassedOwnKingDistR4 = (9, -14),
+    PassedOwnKingDistR5 = (-3, -18),
+    PassedOwnKingDistR6 = (0, -17),
+    PassedOwnKingDistR7 = (-2, -26),
     // * min(enemy king distance to the stop square, 5).
-    PassedEnemyKingDistR2 = (0, 0),
-    PassedEnemyKingDistR3 = (0, 0),
-    PassedEnemyKingDistR4 = (0, 5),
-    PassedEnemyKingDistR5 = (0, 10),
-    PassedEnemyKingDistR6 = (0, 15),
-    PassedEnemyKingDistR7 = (0, 20),
+    PassedEnemyKingDistR2 = (0, -3),
+    PassedEnemyKingDistR3 = (-1, 4),
+    PassedEnemyKingDistR4 = (-8, 17),
+    PassedEnemyKingDistR5 = (7, 28),
+    PassedEnemyKingDistR6 = (-2, 45),
+    PassedEnemyKingDistR7 = (23, 41),
     // Connected: defended by an own pawn or with an own pawn beside it.
-    PassedConnectedR2 = (-8, -48),
-    PassedConnectedR3 = (-3, -27),
-    PassedConnectedR4 = (2, -6),
-    PassedConnectedR5 = (7, 15),
-    PassedConnectedR6 = (12, 36),
-    PassedConnectedR7 = (17, 57),
-    PasserEnemyKingFar = (2, 28),     // * (enemy king promo distance - remaining)
-    PasserRookBehind = (8, 10),       // own rook behind the passer, same file
-    PasserRookFront = (-8, -26),      // penalty: own rook in front of the passer
+    PassedConnectedR2 = (-20, -39),
+    PassedConnectedR3 = (4, -22),
+    PassedConnectedR4 = (0, -13),
+    PassedConnectedR5 = (5, 22),
+    PassedConnectedR6 = (35, 51),
+    PassedConnectedR7 = (31, 85),
+    PasserEnemyKingFar = (-3, 0),     // * (enemy king promo distance - remaining)
+    PasserRookBehind = (10, 24),      // own rook behind the passer, same file
+    PasserRookFront = (-7, -35),      // penalty: own rook in front of the passer
 
     // Candidate passers (no enemy pawn ahead on the same file).
-    CandidateBase = (-16, -13),
-    CandidateRank = (6, 5),
-    CandidateLever = (-32, -17),
-    CandidateLeverRank = (4, 10),
-    CandidateSupported = (16, 11),
+    CandidateBase = (-20, -12),
+    CandidateRank = (6, 3),
+    CandidateLever = (-41, -25),
+    CandidateLeverRank = (6, 14),
+    CandidateSupported = (18, 13),
 
     // Pawn attacks on central squares (files c..f, relative ranks 2..4).
-    PawnCenterControl = (7, 23),
+    PawnCenterControl = (9, 26),
 
     // Rooks.
-    RookOpenFile = (47, -4),
-    RookSemiOpenFile = (11, 20),
-    RookSeventh = (6, 33),
+    RookOpenFile = (49, -6),
+    RookSemiOpenFile = (16, 13),
+    RookSeventh = (4, 43),
 
     // Minor pieces.
     KnightOutpost = (38, 6),
-    BishopOutpost = (34, 11),
-    Mobility = (1, 3),                // per pseudo-legal move, all pieces
+    BishopOutpost = (36, 12),
+    Mobility = (0, 3),                // per pseudo-legal move, all pieces
     BishopMobilityExtra = (2, 0),     // additional per bishop move
 
     // Trapped pieces: weight * severity, severity = 3 - mobility (rook: 4 - mobility).
-    TrappedKnightCorner = (8, -10),
-    TrappedKnightEdge = (0, 2),
-    TrappedBishopEdge = (1, 7),
-    TrappedBishopCornerExtra = (15, 19),
-    TrappedRookByKing = (-3, 9),
+    TrappedKnightCorner = (22, -4),
+    TrappedKnightEdge = (2, 3),
+    TrappedBishopEdge = (0, 11),
+    TrappedBishopCornerExtra = (29, 25),
+    TrappedRookByKing = (-3, 12),
 
     // Endgame: mop-up with a >= 500 non-pawn material edge, * (14 - king distance).
-    MopUpKingDistance = (45, -9),
+    MopUpKingDistance = (32, -8),
 
     // Pawn endgames (no non-pawn material).
-    PawnEndgameOpposition = (0, 25),
-    RaceUnstoppable = (0, 81),        // + (8 - moves) * RaceUnstoppableSpeed
-    RaceUnstoppableSpeed = (0, 33),
-    RaceAhead = (0, 63),              // + (moves gap) * RaceAheadGap
-    RaceAheadGap = (0, 66),
+    PawnEndgameOpposition = (0, 26),
+    RaceUnstoppable = (0, 70),        // + (8 - moves) * RaceUnstoppableSpeed
+    RaceUnstoppableSpeed = (0, 34),
+    RaceAhead = (0, 74),              // + (moves gap) * RaceAheadGap
+    RaceAheadGap = (0, 92),
 
     // Single-rook endgames (one rook each, no queens).
-    RookEgEnemyKingClose = (0, 0),    // * (7 - distance to enemy king)
-    RookEgBehindPasser = (0, 4),
-    RookEgFrontOfPasser = (0, 31),    // penalty
-    RookEgBehindEnemyPasser = (0, 23),
+    RookEgEnemyKingClose = (0, -1),   // * (7 - distance to enemy king)
+    RookEgBehindPasser = (0, 5),
+    RookEgFrontOfPasser = (0, 28),    // penalty
+    RookEgBehindEnemyPasser = (0, 44),
 }
 
 /// mg weight of a parameter.
