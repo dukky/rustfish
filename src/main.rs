@@ -26,7 +26,6 @@ use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_
 const MATE_SCORE: i32 = 30_000;
 const INF: i32 = 1_000_000;
 const MAX_PLY: usize = 128;
-const ASPIRATION_WINDOW: i32 = 35;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) enum BookStyle {
