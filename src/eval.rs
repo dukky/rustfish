@@ -41,13 +41,6 @@ impl PieceList {
         }
     }
 
-    fn push(&mut self, sq: u8, piece: Piece) {
-        if self.len < self.data.len() {
-            self.data[self.len] = (sq, piece);
-            self.len += 1;
-        }
-    }
-
     fn as_slice(&self) -> &[(u8, Piece)] {
         &self.data[..self.len]
     }
@@ -607,6 +600,50 @@ fn relative_rank(color: Color, sq: u8) -> i32 {
     }
 }
 
+/// Appends the pieces of side `c` and kind index `k` (pawn..king) to
+/// `pieces` and their attack sets to `atts` (both capped at 16), calling
+/// `each` for every square of the kind. Returns the union of the appended
+/// attack sets.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn push_kind(
+    pieces: &mut PieceList,
+    atts: &mut [u64; 16],
+    board: &Board,
+    c: usize,
+    k: usize,
+    occ: u64,
+    mut each: impl FnMut(u8),
+) -> u64 {
+    const KINDS: [PieceType; 6] = [
+        PieceType::Pawn,
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+        PieceType::King,
+    ];
+    let color = if c == 0 { Color::White } else { Color::Black };
+    let piece = Piece { color, kind: KINDS[k] };
+    let mut union = 0;
+    let mut bits = board.bb.pieces[c][k];
+    let mut len = pieces.len;
+    while bits != 0 {
+        let sq = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        each(sq);
+        if len < pieces.data.len() {
+            let a = piece_attacks(sq, piece, occ);
+            pieces.data[len] = (sq, piece);
+            atts[len] = a;
+            len += 1;
+            union |= a;
+        }
+    }
+    pieces.len = len;
+    union
+}
+
 /// Squares attacked by one side, split by attacker class. Shared by king
 /// safety, mobility and threats.
 #[derive(Clone, Copy, Default)]
@@ -618,22 +655,6 @@ struct AttackMaps {
     no_king: u64,
     /// Every attacker, king included.
     all: u64,
-}
-
-impl AttackMaps {
-    #[inline(always)]
-    fn record(&mut self, kind: PieceType, attacks: u64) {
-        match kind {
-            PieceType::Pawn => self.pawn |= attacks,
-            PieceType::Knight | PieceType::Bishop => self.minor |= attacks,
-            PieceType::Rook => self.rook |= attacks,
-            _ => {}
-        }
-        if kind != PieceType::King {
-            self.no_king |= attacks;
-        }
-        self.all |= attacks;
-    }
 }
 
 /// Threats by the side with attack maps `us` against the pieces of `them_idx`
@@ -798,6 +819,64 @@ impl<T: Tracer> Score<'_, T> {
     }
 }
 
+/// Mobility (returned), outposts, bishop mobility and trapped pieces for one
+/// side; `sign` is +1 for White, -1 for Black. `pieces` / `atts` are in kind
+/// order with `ends[k]` the list length after kind `k`; `own_occ` is the
+/// side's occupancy.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn mobility_side<T: Tracer>(
+    s: &mut Score<'_, T>,
+    sign: i32,
+    color: Color,
+    pieces: &[(u8, Piece)],
+    atts: &[u64; 16],
+    ends: &[usize; 6],
+    own_occ: u64,
+    white_min_pawn_rank: &[i8; 8],
+    black_max_pawn_rank: &[i8; 8],
+    own_king: Option<u8>,
+) -> i32 {
+    let white = color == Color::White;
+    let mob = |i: usize| (atts[i] & !own_occ).count_ones() as i32;
+    let mut total = 0;
+    // Pawns, queens and king: mobility only (no outpost or trapped terms).
+    for i in (0..ends[0]).chain(ends[3]..ends[5]) {
+        total += mob(i);
+    }
+    let outpost = |sq: u8| {
+        let r = sq / 8;
+        (if white { r >= 3 } else { r <= 4 })
+            && is_outpost_square(sq, color, white_min_pawn_rank, black_max_pawn_rank)
+    };
+    for i in ends[0]..ends[1] {
+        let mobility = mob(i);
+        total += mobility;
+        let (sq, piece) = pieces[i];
+        if outpost(sq) {
+            s.add(P::KnightOutpost, sign);
+        }
+        trapped_piece_penalty(s, sign, sq, piece, mobility, own_king);
+    }
+    for i in ends[1]..ends[2] {
+        let mobility = mob(i);
+        total += mobility;
+        let (sq, piece) = pieces[i];
+        if outpost(sq) {
+            s.add(P::BishopOutpost, sign);
+        }
+        s.add(P::BishopMobilityExtra, sign * mobility);
+        trapped_piece_penalty(s, sign, sq, piece, mobility, own_king);
+    }
+    for i in ends[2]..ends[3] {
+        let mobility = mob(i);
+        total += mobility;
+        let (sq, piece) = pieces[i];
+        trapped_piece_penalty(s, sign, sq, piece, mobility, own_king);
+    }
+    total
+}
+
 pub(crate) fn evaluate(board: &Board) -> i32 {
     evaluate_with(board, &mut NoTrace)
 }
@@ -828,70 +907,63 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
     let black_has_queen = acc.queens[1] > 0;
     let phase = acc.phase;
 
-    for c in 0..2usize {
-        let color = if c == 0 { Color::White } else { Color::Black };
-        for kind in [
-            PieceType::Pawn,
-            PieceType::Knight,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::Queen,
-            PieceType::King,
-        ] {
-            let piece = Piece { color, kind };
-            let mut bits = board.bb.pieces[c][crate::bitboard::kind_index(kind)];
-            while bits != 0 {
-                let sq = bits.trailing_zeros() as u8;
-                bits &= bits - 1;
-                if c == 0 {
-                    white_pieces.push(sq, piece);
-                } else {
-                    black_pieces.push(sq, piece);
-                }
-                match kind {
-                    PieceType::Pawn => {
-                        let f = (sq % 8) as usize;
-                        let rank = (sq / 8) as i8;
-                        if c == 0 {
-                            white_pawns.push(sq);
-                            white_pawn_files[f] += 1;
-                            white_pawn_masks[f] |= 1u8 << rank;
-                            white_min_pawn_rank[f] = white_min_pawn_rank[f].min(rank);
-                        } else {
-                            black_pawns.push(sq);
-                            black_pawn_files[f] += 1;
-                            black_pawn_masks[f] |= 1u8 << rank;
-                            black_max_pawn_rank[f] = black_max_pawn_rank[f].max(rank);
-                        }
-                    }
-                    PieceType::Rook => {
-                        if c == 0 {
-                            white_rooks.push(sq);
-                        } else {
-                            black_rooks.push(sq);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Per-piece attack sets and per-side attack maps, shared by passed pawns,
-    // king safety, mobility and threats.
+    // Piece lists in kind order (pawns..king) with per-piece attack sets and
+    // per-side attack maps, shared by passed pawns, king safety, mobility and
+    // threats. `ends[c][k]` is the list length after kind `k`.
     let occ = board.bb.occ_all();
     let mut white_atts = [0u64; 16];
     let mut black_atts = [0u64; 16];
     let mut att = [AttackMaps::default(); 2];
-    for (i, &(sq, piece)) in white_pieces.as_slice().iter().enumerate() {
-        let a = piece_attacks(sq, piece, occ);
-        white_atts[i] = a;
-        att[0].record(piece.kind, a);
+    let mut ends = [[0usize; 6]; 2];
+    for c in 0..2usize {
+        let (pieces, atts) = if c == 0 {
+            (&mut white_pieces, &mut white_atts)
+        } else {
+            (&mut black_pieces, &mut black_atts)
+        };
+        let pawn = push_kind(pieces, atts, board, c, 0, occ, |sq| {
+            if c == 0 {
+                white_pawns.push(sq);
+            } else {
+                black_pawns.push(sq);
+            }
+        });
+        ends[c][0] = pieces.len;
+        let knight = push_kind(pieces, atts, board, c, 1, occ, |_| {});
+        ends[c][1] = pieces.len;
+        let bishop = push_kind(pieces, atts, board, c, 2, occ, |_| {});
+        ends[c][2] = pieces.len;
+        let rook = push_kind(pieces, atts, board, c, 3, occ, |sq| {
+            if c == 0 {
+                white_rooks.push(sq);
+            } else {
+                black_rooks.push(sq);
+            }
+        });
+        ends[c][3] = pieces.len;
+        let queen = push_kind(pieces, atts, board, c, 4, occ, |_| {});
+        ends[c][4] = pieces.len;
+        let king = push_kind(pieces, atts, board, c, 5, occ, |_| {});
+        ends[c][5] = pieces.len;
+        let no_king = pawn | knight | bishop | rook | queen;
+        att[c] = AttackMaps { pawn, minor: knight | bishop, rook, no_king, all: no_king | king };
     }
-    for (i, &(sq, piece)) in black_pieces.as_slice().iter().enumerate() {
-        let a = piece_attacks(sq, piece, occ);
-        black_atts[i] = a;
-        att[1].record(piece.kind, a);
+    // Per-file pawn counts, rank masks (bit r = pawn on rank r) and the
+    // White-most-backward / Black-most-advanced pawn ranks (8 / -1 if none).
+    let (wp, bp) = (board.bb.pieces[0][0], board.bb.pieces[1][0]);
+    for f in 0..8 {
+        let w = (wp >> f) & FILE_A;
+        let b = (bp >> f) & FILE_A;
+        white_pawn_files[f] = w.count_ones() as i32;
+        black_pawn_files[f] = b.count_ones() as i32;
+        white_pawn_masks[f] = (w.wrapping_mul(0x0102_0408_1020_4080) >> 56) as u8;
+        black_pawn_masks[f] = (b.wrapping_mul(0x0102_0408_1020_4080) >> 56) as u8;
+        if w != 0 {
+            white_min_pawn_rank[f] = (w.trailing_zeros() / 8) as i8;
+        }
+        if b != 0 {
+            black_max_pawn_rank[f] = ((63 - b.leading_zeros()) / 8) as i8;
+        }
     }
 
     if acc.bishops[0] >= 2 {
@@ -1204,56 +1276,30 @@ pub(crate) fn evaluate_with<T: Tracer>(board: &Board, t: &mut T) -> i32 {
         );
     }
 
-    let mut white_mob = 0;
-    let mut black_mob = 0;
-    for (i, &(sq, piece)) in white_pieces.as_slice().iter().enumerate() {
-        let mobility = (white_atts[i] & !board.bb.occ[0]).count_ones() as i32;
-        white_mob += mobility;
-        let r = sq / 8;
-        match piece.kind {
-            PieceType::Knight => {
-                if r >= 3
-                    && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::KnightOutpost, 1);
-                }
-            }
-            PieceType::Bishop => {
-                if r >= 3
-                    && is_outpost_square(sq, Color::White, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::BishopOutpost, 1);
-                }
-                s.add(P::BishopMobilityExtra, mobility);
-            }
-            _ => {}
-        }
-        trapped_piece_penalty(&mut s, 1, sq, piece, mobility, white_king);
-    }
-    for (i, &(sq, piece)) in black_pieces.as_slice().iter().enumerate() {
-        let mobility = (black_atts[i] & !board.bb.occ[1]).count_ones() as i32;
-        black_mob += mobility;
-        let r = sq / 8;
-        match piece.kind {
-            PieceType::Knight => {
-                if r <= 4
-                    && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::KnightOutpost, -1);
-                }
-            }
-            PieceType::Bishop => {
-                if r <= 4
-                    && is_outpost_square(sq, Color::Black, &white_min_pawn_rank, &black_max_pawn_rank)
-                {
-                    s.add(P::BishopOutpost, -1);
-                }
-                s.add(P::BishopMobilityExtra, -mobility);
-            }
-            _ => {}
-        }
-        trapped_piece_penalty(&mut s, -1, sq, piece, mobility, black_king);
-    }
+    let white_mob = mobility_side(
+        &mut s,
+        1,
+        Color::White,
+        white_pieces.as_slice(),
+        &white_atts,
+        &ends[0],
+        board.bb.occ[0],
+        &white_min_pawn_rank,
+        &black_max_pawn_rank,
+        white_king,
+    );
+    let black_mob = mobility_side(
+        &mut s,
+        -1,
+        Color::Black,
+        black_pieces.as_slice(),
+        &black_atts,
+        &ends[1],
+        board.bb.occ[1],
+        &white_min_pawn_rank,
+        &black_max_pawn_rank,
+        black_king,
+    );
     s.add(P::Mobility, white_mob - black_mob);
 
     threats(&mut s, 1, board, &att[0], &att[1], 1);
