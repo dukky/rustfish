@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "speed-eval-body",
+      "mode": "speedup"
+    },
+    {
       "branch": "speed-board",
       "mode": "speedup"
     },
