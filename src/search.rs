@@ -1053,17 +1053,9 @@ fn negamax(
 
     if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
         let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
-        let mut has_non_pawn = false;
         let side_c = color_index(board.side_to_move);
-        for pi in 0..board.piece_cnt[side_c] {
-            let sq = board.piece_sqs[side_c][pi];
-            if let Some(p) = board.squares[sq as usize] {
-                if p.kind != PieceType::Pawn && p.kind != PieceType::King {
-                    has_non_pawn = true;
-                    break;
-                }
-            }
-        }
+        let side_pcs = &board.bb.pieces[side_c];
+        let has_non_pawn = (side_pcs[1] | side_pcs[2] | side_pcs[3] | side_pcs[4]) != 0;
         if has_non_pawn && static_eval.map(|se| se >= beta - null_margin).unwrap_or(false) {
             let old_ep = board.en_passant;
             let old_halfmove = board.halfmove_clock;
@@ -1175,6 +1167,7 @@ fn negamax(
 
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
+        engine.tt.prefetch(child_key);
         rep_stack.push(child_key);
         let gives_check = board.is_in_check(board.side_to_move);
 
@@ -1448,6 +1441,7 @@ fn quiescence(
 
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
+        engine.tt.prefetch(child_key);
         rep_stack.push(child_key);
         let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1);
         rep_stack.pop();

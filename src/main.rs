@@ -143,34 +143,97 @@ struct EvalAcc {
     bishops: [i8; 2],
 }
 
+/// Non-pawn material (`search::piece_value` for N/B/R/Q, 0 for P/K) and game
+/// phase weight, indexed by `PieceType as usize`.
+const ACC_NPM: [i32; 6] = [0, 320, 330, 500, 900, 0];
+const ACC_PHASE: [i32; 6] = [0, 1, 1, 2, 4, 0];
+
 impl EvalAcc {
+    #[inline]
     fn apply(&mut self, sq: u8, p: Piece, sign: i32) {
+        let k = p.kind as usize;
         let rel = if p.color == Color::White { sq } else { sq ^ 56 } as usize;
-        let mg = psqt::PSQT_MG[p.kind as usize][rel];
-        let eg = psqt::PSQT_EG[p.kind as usize][rel];
+        let mg = psqt::PSQT_MG[k][rel];
+        let eg = psqt::PSQT_EG[k][rel];
         let side_sign = if p.color == Color::White { sign } else { -sign };
         self.mg += side_sign * mg;
         self.eg += side_sign * eg;
 
         let c = color_index(p.color);
-        match p.kind {
-            PieceType::Knight | PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
-                self.npm[c] += sign * search::piece_value(p.kind);
-            }
-            _ => {}
+        self.npm[c] += sign * ACC_NPM[k];
+        self.phase += sign * ACC_PHASE[k];
+        self.queens[c] += sign as i8 * (p.kind == PieceType::Queen) as i8;
+        self.bishops[c] += sign as i8 * (p.kind == PieceType::Bishop) as i8;
+    }
+
+    /// Same result as `apply(from, p, -1)` then `apply(to, p, 1)`: material
+    /// and phase cancel, only the PSQT delta remains (exact integer sums).
+    #[inline]
+    fn shift(&mut self, from: u8, to: u8, p: Piece) {
+        let k = p.kind as usize;
+        let (f, t) = if p.color == Color::White {
+            (from as usize, to as usize)
+        } else {
+            ((from ^ 56) as usize, (to ^ 56) as usize)
+        };
+        let dmg = psqt::PSQT_MG[k][t] - psqt::PSQT_MG[k][f];
+        let deg = psqt::PSQT_EG[k][t] - psqt::PSQT_EG[k][f];
+        if p.color == Color::White {
+            self.mg += dmg;
+            self.eg += deg;
+        } else {
+            self.mg -= dmg;
+            self.eg -= deg;
         }
-        self.phase += sign
-            * match p.kind {
+    }
+}
+
+#[cfg(test)]
+mod eval_acc_tests {
+    use super::*;
+
+    const KINDS: [PieceType; 6] = [
+        PieceType::Pawn,
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+        PieceType::King,
+    ];
+
+    #[test]
+    fn tables_match_piece_value_and_phase() {
+        for kind in KINDS {
+            let minor_major = !matches!(kind, PieceType::Pawn | PieceType::King);
+            let npm = if minor_major { search::piece_value(kind) } else { 0 };
+            assert_eq!(ACC_NPM[kind as usize], npm);
+            let phase = match kind {
                 PieceType::Knight | PieceType::Bishop => 1,
                 PieceType::Rook => 2,
                 PieceType::Queen => 4,
                 _ => 0,
             };
-        if p.kind == PieceType::Queen {
-            self.queens[c] += sign as i8;
+            assert_eq!(ACC_PHASE[kind as usize], phase);
         }
-        if p.kind == PieceType::Bishop {
-            self.bishops[c] += sign as i8;
+    }
+
+    #[test]
+    fn shift_equals_remove_then_add() {
+        let base = EvalAcc { mg: 17, eg: -9, phase: 12, npm: [1000, 2000], queens: [1, 1], bishops: [2, 1] };
+        for color in [Color::White, Color::Black] {
+            for kind in KINDS {
+                let p = Piece { color, kind };
+                for from in 0..64u8 {
+                    for to in 0..64u8 {
+                        let mut a = base;
+                        a.apply(from, p, -1);
+                        a.apply(to, p, 1);
+                        let mut b = base;
+                        b.shift(from, to, p);
+                        assert_eq!(a, b);
+                    }
+                }
+            }
         }
     }
 }
@@ -185,9 +248,6 @@ struct Board {
     fullmove_number: u32,
     white_king_sq: Option<u8>,
     black_king_sq: Option<u8>,
-    piece_sqs: [[u8; 16]; 2],
-    piece_cnt: [usize; 2],
-    sq_to_pl: [u8; 64],
     eval_acc: EvalAcc,
     bb: bitboard::BoardBB,
 }
@@ -216,9 +276,6 @@ impl Board {
             fullmove_number: 1,
             white_king_sq: None,
             black_king_sq: None,
-            piece_sqs: [[0; 16]; 2],
-            piece_cnt: [0; 2],
-            sq_to_pl: [255; 64],
             eval_acc: EvalAcc::default(),
             bb: bitboard::BoardBB::default(),
         };
@@ -234,6 +291,16 @@ impl Board {
     fn acc_remove(&mut self, sq: u8, p: Piece) {
         self.eval_acc.apply(sq, p, -1);
         self.bb.toggle(sq, p);
+    }
+
+    /// `acc_remove(from, p)` + `acc_add(to, p)` in one step.
+    #[inline]
+    fn acc_shift(&mut self, from: u8, to: u8, p: Piece) {
+        self.eval_acc.shift(from, to, p);
+        let bits = square_mask(from) | square_mask(to);
+        let c = color_index(p.color);
+        self.bb.pieces[c][p.kind as usize] ^= bits;
+        self.bb.occ[c] ^= bits;
     }
 
     fn recompute_eval_acc(&self) -> EvalAcc {
@@ -256,33 +323,6 @@ impl Board {
         bb
     }
 
-    fn pl_add(&mut self, sq: u8, color: Color) {
-        let c = color_index(color);
-        let idx = self.piece_cnt[c];
-        self.piece_sqs[c][idx] = sq;
-        self.sq_to_pl[sq as usize] = idx as u8;
-        self.piece_cnt[c] += 1;
-    }
-
-    fn pl_remove(&mut self, sq: u8, color: Color) {
-        let c = color_index(color);
-        let idx = self.sq_to_pl[sq as usize] as usize;
-        self.piece_cnt[c] -= 1;
-        let last = self.piece_cnt[c];
-        let last_sq = self.piece_sqs[c][last];
-        self.piece_sqs[c][idx] = last_sq;
-        self.sq_to_pl[last_sq as usize] = idx as u8;
-        self.sq_to_pl[sq as usize] = 255;
-    }
-
-    fn pl_move(&mut self, from: u8, to: u8, color: Color) {
-        let c = color_index(color);
-        let idx = self.sq_to_pl[from as usize] as usize;
-        self.piece_sqs[c][idx] = to;
-        self.sq_to_pl[to as usize] = idx as u8;
-        self.sq_to_pl[from as usize] = 255;
-    }
-
     fn set_startpos(&mut self) {
         self.set_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     }
@@ -295,9 +335,6 @@ impl Board {
         self.fullmove_number = 1;
         self.white_king_sq = None;
         self.black_king_sq = None;
-        self.piece_sqs = [[0; 16]; 2];
-        self.piece_cnt = [0; 2];
-        self.sq_to_pl = [255; 64];
 
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() < 4 {
@@ -334,7 +371,6 @@ impl Board {
             if rank >= 0 && rank < 8 && file >= 0 && file < 8 {
                 let sq = (rank * 8 + file) as usize;
                 self.squares[sq] = Some(Piece { color, kind });
-                self.pl_add(sq as u8, color);
                 if kind == PieceType::King {
                     if color == Color::White {
                         self.white_king_sq = Some(sq as u8);
@@ -494,7 +530,6 @@ impl Board {
         }
 
         self.squares[mv.from as usize] = None;
-        let enemy = moving_piece.color.opposite();
 
         if mv.is_en_passant {
             let cap_sq = if moving_piece.color == Color::White {
@@ -508,20 +543,18 @@ impl Board {
                 self.acc_remove(cap_sq, cp);
             }
             self.squares[cap_sq as usize] = None;
-            self.pl_remove(cap_sq, enemy);
         } else if let Some(cp) = captured {
             self.acc_remove(mv.to, cp);
-            self.pl_remove(mv.to, enemy);
         }
-
-        self.pl_move(mv.from, mv.to, moving_piece.color);
 
         let mut placed = moving_piece;
         if let Some(promo) = mv.promotion {
             placed.kind = promo;
+            self.acc_remove(mv.from, moving_piece);
+            self.acc_add(mv.to, placed);
+        } else {
+            self.acc_shift(mv.from, mv.to, moving_piece);
         }
-        self.acc_remove(mv.from, moving_piece);
-        self.acc_add(mv.to, placed);
         self.squares[mv.to as usize] = Some(placed);
         if moving_piece.kind == PieceType::King {
             if moving_piece.color == Color::White {
@@ -546,9 +579,7 @@ impl Board {
                 };
                 self.squares[rook_from as usize] = None;
                 self.squares[rook_to as usize] = Some(rook);
-                self.acc_remove(rook_from, rook);
-                self.acc_add(rook_to, rook);
-                self.pl_move(rook_from, rook_to, rook_color);
+                self.acc_shift(rook_from, rook_to, rook);
             }
         }
 
@@ -632,14 +663,15 @@ impl Board {
         self.halfmove_clock = undo.halfmove_clock;
         self.fullmove_number = undo.fullmove_number;
 
-        let mut placed = undo.moved_piece;
         if let Some(promo) = mv.promotion {
+            let mut placed = undo.moved_piece;
             placed.kind = promo;
+            self.acc_remove(mv.to, placed);
+            self.acc_add(mv.from, undo.moved_piece);
+        } else {
+            self.acc_shift(mv.to, mv.from, undo.moved_piece);
         }
-        self.acc_remove(mv.to, placed);
-        self.acc_add(mv.from, undo.moved_piece);
 
-        self.pl_move(mv.to, mv.from, undo.moved_piece.color);
         self.squares[mv.to as usize] = None;
         self.squares[mv.from as usize] = Some(undo.moved_piece);
         if undo.moved_piece.kind == PieceType::King {
@@ -665,16 +697,13 @@ impl Board {
                 };
                 self.squares[rook_to as usize] = None;
                 self.squares[rook_from as usize] = Some(rook);
-                self.acc_remove(rook_to, rook);
-                self.acc_add(rook_from, rook);
-                self.pl_move(rook_to, rook_from, rook_color);
+                self.acc_shift(rook_to, rook_from, rook);
             }
         }
 
         if let Some(cp) = undo.captured {
             if let Some(cs) = undo.captured_sq {
                 self.squares[cs as usize] = Some(cp);
-                self.pl_add(cs, cp.color);
                 self.acc_add(cs, cp);
             }
         }

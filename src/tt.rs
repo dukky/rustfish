@@ -216,6 +216,28 @@ impl TransTable {
         &self.inner.buckets[key as usize & self.inner.mask]
     }
 
+    /// Hint the CPU to start loading `key`'s bucket so the child node's
+    /// probe does not stall on a cache miss. Pure performance hint: no
+    /// architectural effect on memory or search results.
+    #[inline(always)]
+    pub(crate) fn prefetch(&self, key: u64) {
+        let ptr = self.bucket(key) as *const Bucket;
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: PRFM is a hint; it never faults or writes memory, and
+        // `ptr` points into the live bucket array anyway.
+        unsafe {
+            std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, readonly, preserves_flags));
+        }
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: PREFETCHT0 is a hint (SSE, part of the x86-64 baseline);
+        // it never faults or writes memory.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(ptr as *const i8);
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let _ = ptr;
+    }
+
     pub(crate) fn probe(&self, key: u64) -> Option<TTEntry> {
         for slot in self.bucket(key).slots.iter() {
             let data = slot.data.load(Ordering::Relaxed);
@@ -335,17 +357,10 @@ pub(crate) fn splitmix64(seed: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+#[inline]
 pub(crate) fn piece_index(piece: Piece) -> usize {
-    let color_idx = if piece.color == Color::White { 0 } else { 6 };
-    let kind_idx = match piece.kind {
-        PieceType::Pawn => 0,
-        PieceType::Knight => 1,
-        PieceType::Bishop => 2,
-        PieceType::Rook => 3,
-        PieceType::Queen => 4,
-        PieceType::King => 5,
-    };
-    color_idx + kind_idx
+    // Color::White = 0 / Black = 1 and PieceType Pawn..King = 0..5.
+    piece.color as usize * 6 + piece.kind as usize
 }
 
 pub(crate) fn board_hash(board: &Board, zobrist: &Zobrist) -> u64 {
