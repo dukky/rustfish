@@ -202,6 +202,10 @@ jobs:
               for k, v in fields.items():
                   cmd += ["-f", f"{k}={v}"]
               subprocess.run(cmd, check=True)
+          elif cfg.get("callback") == "queue":
+              # Tests started by the merge queue hand their verdict back to it.
+              subprocess.run(["gh", "workflow", "run", "queue.yml", "--ref", os.environ["REF"],
+                              "-f", f"result={json.dumps(res)}"], check=True)
           EOF
       - uses: actions/upload-artifact@v4
         with:

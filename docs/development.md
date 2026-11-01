@@ -112,6 +112,26 @@ python3 scripts/ci.py sprt <idea-name> --nonreg   # simplifications
 - Commit the updated `tests/*.jsonl` to `main` along with the merge, or in a
   periodic "Record test results" commit.
 
+## Merge queue (unattended)
+
+`.github/workflows/queue.yml` + `scripts/queue.py` run candidates through the
+whole loop on GitHub with no laptop or LLM in the loop: rebase onto `main`,
+build/test/perft/selftest/bench (refreshing the `Bench:` trailer), push, run
+the SPRT, and fast-forward `main` on a pass. One candidate at a time, always
+against the current `main`, so a stale base can't happen.
+
+- State lives on the `queue-state` branch: `queue.json` (`pending` list of
+  `{branch, mode}`, plus the in-flight `current`) and `log.jsonl` (every
+  outcome: merged / rejected / needs-human / skipped).
+- Modes: `stc` (gainer `[0, 10]`), `nonreg` (`[-5, 0]`), `ltc-gainer`
+  (`[0, 10]` at 60+0.6), `speedup` (no SPRT; merges only if bench nodes equal
+  `main`'s).
+- To add work: push the branch, append it to `pending` on `queue-state`, and
+  run `gh workflow run queue.yml` if the queue is idle.
+- `needs-human` entries (rebase conflict, failed checks) are skipped; fix the
+  branch and re-add it.
+- Bot merges don't trigger `ci.yml`; the queue runs the same checks itself.
+
 ## Periodic checks (protection against slow erosion)
 
 SPRTs at STC catch most regressions, but some things only show up at longer

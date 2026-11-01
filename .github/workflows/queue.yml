@@ -1,0 +1,40 @@
+name: Merge queue
+
+# Serial merge queue (scripts/queue.py). Rebases the next candidate onto main,
+# checks it, and launches its SPRT; sprt.yml calls back here with the final
+# result, and passing candidates are fast-forwarded into main. State and log
+# live on the `queue-state` branch. Start or resume with:
+#   gh workflow run queue.yml
+
+on:
+  workflow_dispatch:
+    inputs:
+      result:
+        description: "Final SPRT result JSON (sent by sprt.yml; leave empty to start/resume)"
+        default: ""
+
+concurrency:
+  group: merge-queue
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # push rebased candidates, fast-forward main, update queue-state
+  actions: write    # dispatch sprt.yml
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Advance the queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ inputs.result }}
+        run: |
+          git config user.name "rustfish-queue"
+          git config user.email "rustfish-queue@users.noreply.github.com"
+          python3 scripts/queue.py advance
