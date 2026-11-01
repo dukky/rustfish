@@ -109,8 +109,24 @@ fn king_safety<T: Tracer>(
     let mut attackers = 0;
     let mut units = 0;
     let mut tropism = 0;
-    for (&(from, piece), &att) in enemy_pieces.iter().zip(enemy_atts) {
+    // Pawns (listed first in `enemy_pieces`) only feed `pairs[0]`; each pawn
+    // has at most one attack per diagonal direction, so the per-pawn sum of
+    // zone hits equals the zone hits of the two shifted pawn sets.
+    let enemy_pawns_bb = board.bb.pieces[1 - ci][0];
+    let (east, west) = if color == Color::White {
+        ((enemy_pawns_bb & !(FILE_A << 7)) >> 7, (enemy_pawns_bb & !FILE_A) >> 9)
+    } else {
+        ((enemy_pawns_bb & !(FILE_A << 7)) << 9, (enemy_pawns_bb & !FILE_A) << 7)
+    };
+    pairs[0] = ((east & zone).count_ones() + (west & zone).count_ones()) as i32;
+    let npawns = (enemy_pawns_bb.count_ones() as usize).min(enemy_pieces.len());
+    debug_assert!(enemy_pieces[..npawns].iter().all(|&(_, p)| p.kind == PieceType::Pawn));
+    for (&(from, piece), &att) in enemy_pieces[npawns..].iter().zip(&enemy_atts[npawns..]) {
         let k = kind_index(piece.kind);
+        if k == 5 {
+            // The king feeds no king-safety term.
+            continue;
+        }
         kind_att[k] |= att;
         let hits = (att & zone).count_ones() as i32;
         pairs[k] += hits;
@@ -417,6 +433,7 @@ fn passed_pawn_score<T: Tracer>(
 }
 
 /// Trapped-piece penalty; `sign` is +1 for White, -1 for Black.
+#[inline(always)]
 fn trapped_piece_penalty<T: Tracer>(
     s: &mut Score<'_, T>,
     sign: i32,
@@ -425,36 +442,35 @@ fn trapped_piece_penalty<T: Tracer>(
     mobility: i32,
     own_king: Option<u8>,
 ) {
-    let f = (sq % 8) as i32;
-    let r = (sq / 8) as i32;
-    let on_edge = f == 0 || f == 7 || r == 0 || r == 7;
-    let in_corner = (f == 0 || f == 7) && (r == 0 || r == 7);
+    const EDGE: u64 = 0xFF81_8181_8181_81FF;
+    const CORNER: u64 = 0x8100_0000_0000_0081;
+    // Files a, b, g, h on ranks 1, 2, 7, 8.
+    const ROOK_TRAP: u64 = 0xC3C3_0000_0000_C3C3;
+    let bit = 1u64 << sq;
 
     match piece.kind {
         PieceType::Knight => {
-            if in_corner && mobility <= 2 {
-                s.add(P::TrappedKnightCorner, -sign * (3 - mobility));
-            } else if on_edge && mobility <= 2 {
-                s.add(P::TrappedKnightEdge, -sign * (3 - mobility));
+            if mobility <= 2 && bit & EDGE != 0 {
+                let p = if bit & CORNER != 0 { P::TrappedKnightCorner } else { P::TrappedKnightEdge };
+                s.add(p, -sign * (3 - mobility));
             }
         }
         PieceType::Bishop => {
-            if on_edge && mobility <= 2 {
+            if mobility <= 2 && bit & EDGE != 0 {
                 s.add(P::TrappedBishopEdge, -sign * (3 - mobility));
-                if in_corner {
+                if bit & CORNER != 0 {
                     s.add(P::TrappedBishopCornerExtra, -sign);
                 }
             }
         }
         PieceType::Rook => {
-            if mobility <= 3 {
+            if mobility <= 3 && bit & ROOK_TRAP != 0 {
                 if let Some(king_sq) = own_king {
-                    let same_rank = king_sq / 8 == sq / 8;
-                    let king_file = (king_sq % 8) as i32;
-                    let back_rank = r <= 1 || r >= 6;
-                    let king_between = same_rank
-                        && ((f <= 1 && king_file > f) || (f >= 6 && king_file < f));
-                    if back_rank && king_between {
+                    // The king sits on the rook's rank, between it and the centre.
+                    let f = sq % 8;
+                    let king_file = king_sq % 8;
+                    if king_sq / 8 == sq / 8 && ((f <= 1 && king_file > f) || (f >= 6 && king_file < f))
+                    {
                         s.add(P::TrappedRookByKing, -sign * (4 - mobility));
                     }
                 }
@@ -719,24 +735,17 @@ pub(crate) fn taper_score(mg: i32, eg: i32, phase: i32) -> i32 {
 }
 
 /// Development terms (mg only); `sign` is +1 for White, -1 for Black.
+#[inline(always)]
 fn development_score<T: Tracer>(s: &mut Score<'_, T>, sign: i32, board: &Board, color: Color) {
     let (minor_starts, king_home, king_castles) = match color {
         Color::White => (&[1u8, 2, 5, 6][..], 4u8, [2u8, 6u8]),
         Color::Black => (&[57u8, 58, 61, 62][..], 60u8, [58u8, 62u8]),
     };
 
-    let undeveloped = minor_starts
-        .iter()
-        .filter(|&&sq| {
-            matches!(
-                board.squares[sq as usize],
-                Some(Piece {
-                    color: c,
-                    kind: PieceType::Knight | PieceType::Bishop,
-                }) if c == color
-            )
-        })
-        .count() as i32;
+    let ci = color_index(color);
+    let start_mask = minor_starts.iter().fold(0u64, |m, &sq| m | (1u64 << sq));
+    let minors = board.bb.pieces[ci][1] | board.bb.pieces[ci][2];
+    let undeveloped = (minors & start_mask).count_ones() as i32;
 
     let king_sq = board.king_square(color);
     s.add_mg(P::DevUndevelopedMinor, -sign * undeveloped);
