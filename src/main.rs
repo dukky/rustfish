@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use book::{build_opening_book, try_book_move, BookEntry};
 use eval::eval_for_side;
-use movegen::{generate_pseudo_moves, in_bounds, is_square_attacked, is_square_attacked_occ, piece_attacks, move_to_uci, parse_square, parse_uci_move};
+#[cfg(test)]
+use movegen::{generate_pseudo_moves, is_square_attacked_occ};
+use movegen::{generate_legal_moves_fused, in_bounds, is_square_attacked, piece_attacks, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
@@ -252,6 +254,32 @@ struct Board {
     bb: bitboard::BoardBB,
 }
 
+#[derive(Copy, Clone, Debug)]
+struct LegalState {
+    check_count: usize,
+    evasion_mask: u64,
+    pinned: u64,
+    pin_rays: [u64; 8],
+}
+
+impl LegalState {
+    /// Legal destination mask for a non-king piece on `sq`.
+    #[inline(always)]
+    fn allowed(&self, sq: u8) -> u64 {
+        let mut allowed = self.evasion_mask;
+        let bit = square_mask(sq);
+        if self.pinned & bit != 0 {
+            for &r in &self.pin_rays {
+                if r & bit != 0 {
+                    allowed &= r;
+                    break;
+                }
+            }
+        }
+        allowed
+    }
+}
+
 impl PartialEq for Board {
     fn eq(&self, other: &Self) -> bool {
         self.squares == other.squares
@@ -431,6 +459,88 @@ impl Board {
         }
     }
 
+    /// Checkers and pins for `color`'s king, consumed by the fused legal
+    /// generator. A pinned piece's legal targets are the one `pin_rays` entry
+    /// containing it (king..pinner inclusive); `pinned` marks those pieces.
+    #[inline(always)]
+    fn legal_state(&self, color: Color) -> LegalState {
+        let mut st = LegalState {
+            check_count: 0,
+            evasion_mask: u64::MAX,
+            pinned: 0,
+            pin_rays: [0; 8],
+        };
+        let Some(king_sq) = self.king_square(color) else {
+            return st;
+        };
+        use crate::bitboard::{DIAG_RAYS, KING_ATTACKS, KNIGHT_ATTACKS, ORTHO_RAYS, PAWN_ATTACKERS};
+
+        let c = color_index(color);
+        let e = 1 - c;
+        let bb = &self.bb;
+        let k = king_sq as usize;
+        let king_bit = square_mask(king_sq);
+        let own = bb.occ[c];
+        let occ = own | bb.occ[e];
+
+        let mut leapers = (PAWN_ATTACKERS[e][k] & bb.pieces[e][0])
+            | (KNIGHT_ATTACKS[k] & bb.pieces[e][1])
+            | (KING_ATTACKS[k] & bb.pieces[e][5]);
+        while leapers != 0 {
+            let sq = leapers.trailing_zeros() as u8;
+            leapers &= leapers - 1;
+            st.check_count += 1;
+            st.evasion_mask = if st.check_count == 1 { square_mask(sq) } else { 0 };
+        }
+
+        let diag = bb.pieces[e][2] | bb.pieces[e][4];
+        let ortho = bb.pieces[e][3] | bb.pieces[e][4];
+        for (slot_base, rays, sliders) in [(0usize, &DIAG_RAYS, diag), (4usize, &ORTHO_RAYS, ortho)] {
+            if sliders == 0 {
+                continue;
+            }
+            for d in 0..4 {
+                let ray = rays[d][k];
+                if ray & sliders == 0 {
+                    continue;
+                }
+                let first_of = |b: u64| -> usize {
+                    if d < 2 {
+                        b.trailing_zeros() as usize
+                    } else {
+                        63 - b.leading_zeros() as usize
+                    }
+                };
+                let blockers = ray & occ;
+                let b1 = first_of(blockers);
+                let b1_bit = 1u64 << b1;
+                if b1_bit & own == 0 {
+                    if b1_bit & sliders != 0 {
+                        st.check_count += 1;
+                        st.evasion_mask = if st.check_count == 1 {
+                            (ray & !rays[d][b1]) | king_bit
+                        } else {
+                            0
+                        };
+                    }
+                    continue;
+                }
+                let rest = blockers & rays[d][b1];
+                if rest == 0 {
+                    continue;
+                }
+                let b2 = first_of(rest);
+                if (1u64 << b2) & sliders != 0 {
+                    st.pinned |= b1_bit;
+                    st.pin_rays[slot_base + d] = (ray & !rays[d][b2]) | king_bit;
+                }
+            }
+        }
+
+        st
+    }
+
+    #[cfg(test)]
     fn legal_filter_state(&self, color: Color) -> (usize, u64, [u64; 64]) {
         let mut pin_masks = [u64::MAX; 64];
         let mut check_count = 0usize;
@@ -710,6 +820,42 @@ impl Board {
     }
 
     fn generate_legal_moves(&mut self, captures_only: bool, buf: &mut Vec<Move>) {
+        let side = self.side_to_move;
+        let st = self.legal_state(side);
+        // En passant is the one case the pin/check masks cannot decide
+        // (both pawns leave the rank), so it keeps the make/undo test, run
+        // up front for the at most two candidate pawns.
+        let mut ep_legal_from = 0u64;
+        if let Some(ep) = self.en_passant {
+            use crate::bitboard::PAWN_ATTACKERS;
+            let c = color_index(side);
+            let ep_bit = square_mask(ep);
+            let mut pawns = self.bb.pieces[c][0];
+            while pawns != 0 {
+                let sq = pawns.trailing_zeros() as u8;
+                pawns &= pawns - 1;
+                if PAWN_ATTACKERS[1 - c][sq as usize] & ep_bit != 0 {
+                    let mv = Move {
+                        from: sq,
+                        to: ep,
+                        promotion: None,
+                        is_en_passant: true,
+                        is_castle: false,
+                    };
+                    let undo = self.make_move(mv);
+                    let legal = !self.is_in_check(side);
+                    self.undo_move(mv, undo);
+                    if legal {
+                        ep_legal_from |= square_mask(sq);
+                    }
+                }
+            }
+        }
+        generate_legal_moves_fused(self, captures_only, &st, ep_legal_from, buf);
+    }
+
+    #[cfg(test)]
+    fn generate_legal_moves_reference(&mut self, captures_only: bool, buf: &mut Vec<Move>) {
         let side = self.side_to_move;
         let (check_count, evasion_mask, pin_masks) = self.legal_filter_state(side);
         generate_pseudo_moves(self, captures_only, buf);
@@ -1080,5 +1226,69 @@ mod legal_filter_tests {
         assert_eq!(pins[12], ray_mask_inclusive(4, 60));
         assert_eq!(pins[11], ray_mask_inclusive(4, 32));
         assert_eq!(pins.iter().filter(|&&m| m != u64::MAX).count(), 2);
+    }
+
+    fn assert_same_legal_moves(board: &mut Board, ctx: &str) {
+        let mut fused = Vec::new();
+        let mut reference = Vec::new();
+        for captures_only in [false, true] {
+            let before = board.clone();
+            board.generate_legal_moves(captures_only, &mut fused);
+            board.generate_legal_moves_reference(captures_only, &mut reference);
+            assert!(*board == before, "board changed by movegen: {ctx}");
+            assert_eq!(fused, reference, "captures_only={captures_only} {ctx}");
+        }
+    }
+
+    fn walk(board: &mut Board, depth: u32, fen: &str) {
+        assert_same_legal_moves(board, fen);
+        if depth == 0 {
+            return;
+        }
+        let mut moves = Vec::new();
+        board.generate_legal_moves(false, &mut moves);
+        for mv in moves {
+            let undo = board.make_move(mv);
+            walk(board, depth - 1, fen);
+            board.undo_move(mv, undo);
+        }
+    }
+
+    /// The fused legal generator must reproduce the pseudo-generate-then-
+    /// filter reference element for element (move ordering ties depend on
+    /// the order). Walks full trees from perft/tactical positions; set
+    /// RUSTFISH_MOVEGEN_FENS to a `FEN;result` file to also check its first
+    /// 20k positions and their children.
+    #[test]
+    fn fused_legal_movegen_matches_reference() {
+        let positions: [(&str, u32); 10] = [
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3),
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 3),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 4),
+            ("r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1", 3),
+            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 3),
+            ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 2),
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", 3),
+            ("8/8/8/3pP3/8/8/8/8 w - d6 0 1", 1),
+            ("8/P7/8/8/8/8/7p/7k w - - 0 1", 3),
+            ("8/8/8/K2pP2q/8/8/8/7k w - d6 0 1", 3),
+        ];
+        let mut board = Board::new();
+        for (fen, depth) in positions {
+            board.set_fen(fen);
+            walk(&mut board, depth, fen);
+        }
+
+        if let Ok(path) = std::env::var("RUSTFISH_MOVEGEN_FENS") {
+            let text = std::fs::read_to_string(&path).expect("read RUSTFISH_MOVEGEN_FENS");
+            let mut n = 0usize;
+            for line in text.lines().take(20_000) {
+                let fen = line.split(';').next().unwrap();
+                board.set_fen(fen);
+                walk(&mut board, 1, fen);
+                n += 1;
+            }
+            eprintln!("fused movegen matched reference on {n} file positions");
+        }
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &mut Vec<Move>) {
     use crate::bitboard::{
         bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
@@ -212,6 +213,263 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
                     && !is_square_attacked(board, 60, Color::White)
                     && !is_square_attacked(board, 59, Color::White)
                     && !is_square_attacked(board, 58, Color::White)
+                {
+                    moves.push(Move {
+                        from: 60,
+                        to: 58,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castle: true,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Legal move generation: the same moves, in the same order, as
+/// `generate_pseudo_moves` followed by the legality filter, with the
+/// check/pin masks applied per piece instead of per move. En passant
+/// legality is decided by the caller (`ep_legal_from`: pawns whose en
+/// passant capture is legal); king destinations are tested with the king
+/// lifted off the board.
+pub(crate) fn generate_legal_moves_fused(
+    board: &Board,
+    captures_only: bool,
+    st: &LegalState,
+    ep_legal_from: u64,
+    moves: &mut Vec<Move>,
+) {
+    use crate::bitboard::{
+        bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS,
+    };
+
+    moves.clear();
+
+    let us = board.side_to_move;
+    let c = color_index(us);
+    let them_idx = 1 - c;
+    let bb = &board.bb;
+    let own = bb.occ[c];
+    let them = bb.occ[them_idx];
+    let occ = own | them;
+    let target_mask = if captures_only { them } else { !own };
+
+    let push_move = |moves: &mut Vec<Move>, from: u8, to: u8| {
+        moves.push(Move {
+            from,
+            to,
+            promotion: None,
+            is_en_passant: false,
+            is_castle: false,
+        });
+    };
+    let push_promos = |moves: &mut Vec<Move>, from: u8, to: u8| {
+        for promo in [
+            PieceType::Queen,
+            PieceType::Rook,
+            PieceType::Bishop,
+            PieceType::Knight,
+        ] {
+            moves.push(Move {
+                from,
+                to,
+                promotion: Some(promo),
+                is_en_passant: false,
+                is_castle: false,
+            });
+        }
+    };
+
+    // Double check: only king moves (and en passant, which the caller has
+    // already tested via make/undo) can be legal.
+    let non_king = st.check_count < 2;
+
+    let ep_bit = board.en_passant.map(|e| 1u64 << e).unwrap_or(0);
+    let promo_from_rank: u8 = if us == Color::White { 6 } else { 1 };
+    let start_rank: u8 = if us == Color::White { 1 } else { 6 };
+
+    let mut pawns = bb.pieces[c][0];
+    while pawns != 0 {
+        let sq = pawns.trailing_zeros() as u8;
+        pawns &= pawns - 1;
+        let r = sq / 8;
+        let is_promo = r == promo_from_rank;
+        let allowed = if non_king { st.allowed(sq) } else { 0 };
+
+        if !captures_only {
+            let one = if us == Color::White { sq + 8 } else { sq - 8 };
+            if occ & (1u64 << one) == 0 {
+                if is_promo {
+                    if allowed & (1u64 << one) != 0 {
+                        push_promos(moves, sq, one);
+                    }
+                } else {
+                    if allowed & (1u64 << one) != 0 {
+                        push_move(moves, sq, one);
+                    }
+                    if r == start_rank {
+                        let two = if us == Color::White { sq + 16 } else { sq - 16 };
+                        if occ & (1u64 << two) == 0 && allowed & (1u64 << two) != 0 {
+                            push_move(moves, sq, two);
+                        }
+                    }
+                }
+            }
+        }
+
+        let attacks = PAWN_ATTACKERS[them_idx][sq as usize];
+        let mut caps = attacks & them & allowed;
+        while caps != 0 {
+            let to = caps.trailing_zeros() as u8;
+            caps &= caps - 1;
+            if is_promo {
+                push_promos(moves, sq, to);
+            } else {
+                push_move(moves, sq, to);
+            }
+        }
+        if attacks & ep_bit != 0 && ep_legal_from & (1u64 << sq) != 0 {
+            moves.push(Move {
+                from: sq,
+                to: ep_bit.trailing_zeros() as u8,
+                promotion: None,
+                is_en_passant: true,
+                is_castle: false,
+            });
+        }
+    }
+
+    if non_king {
+        // A pinned knight never has a legal move.
+        let mut knights = bb.pieces[c][1] & !st.pinned;
+        while knights != 0 {
+            let sq = knights.trailing_zeros() as u8;
+            knights &= knights - 1;
+            let mut targets = KNIGHT_ATTACKS[sq as usize] & target_mask & st.evasion_mask;
+            while targets != 0 {
+                let to = targets.trailing_zeros() as u8;
+                targets &= targets - 1;
+                push_move(moves, sq, to);
+            }
+        }
+
+        for kind in [PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
+            let mut sliders = bb.pieces[c][crate::bitboard::kind_index(kind)];
+            while sliders != 0 {
+                let sq = sliders.trailing_zeros() as u8;
+                sliders &= sliders - 1;
+                let attacks = match kind {
+                    PieceType::Bishop => bishop_attacks(sq as usize, occ),
+                    PieceType::Rook => rook_attacks(sq as usize, occ),
+                    _ => bishop_attacks(sq as usize, occ) | rook_attacks(sq as usize, occ),
+                };
+                let mut targets = attacks & target_mask & st.allowed(sq);
+                while targets != 0 {
+                    let to = targets.trailing_zeros() as u8;
+                    targets &= targets - 1;
+                    push_move(moves, sq, to);
+                }
+            }
+        }
+    }
+
+    let kings = bb.pieces[c][5];
+    if kings != 0 {
+        let sq = kings.trailing_zeros() as u8;
+        let enemy = us.opposite();
+        // Sliders x-ray through the king's origin square.
+        let occ_no_king = occ & !(1u64 << sq);
+        let mut targets = KING_ATTACKS[sq as usize] & target_mask;
+        while targets != 0 {
+            let to = targets.trailing_zeros() as u8;
+            targets &= targets - 1;
+            if !is_square_attacked_occ(board, to, enemy, occ_no_king) {
+                push_move(moves, sq, to);
+            }
+        }
+
+        if !captures_only {
+            if us == Color::White && sq == 4 {
+                if board.castling & 1 != 0
+                    && board.squares[7]
+                        == Some(Piece {
+                            color: Color::White,
+                            kind: PieceType::Rook,
+                        })
+                    && board.squares[5].is_none()
+                    && board.squares[6].is_none()
+                    && !is_square_attacked(board, 4, Color::Black)
+                    && !is_square_attacked(board, 5, Color::Black)
+                    && !is_square_attacked(board, 6, Color::Black)
+                    && !is_square_attacked_occ(board, 6, enemy, occ_no_king)
+                {
+                    moves.push(Move {
+                        from: 4,
+                        to: 6,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castle: true,
+                    });
+                }
+                if board.castling & 2 != 0
+                    && board.squares[0]
+                        == Some(Piece {
+                            color: Color::White,
+                            kind: PieceType::Rook,
+                        })
+                    && board.squares[3].is_none()
+                    && board.squares[2].is_none()
+                    && board.squares[1].is_none()
+                    && !is_square_attacked(board, 4, Color::Black)
+                    && !is_square_attacked(board, 3, Color::Black)
+                    && !is_square_attacked(board, 2, Color::Black)
+                    && !is_square_attacked_occ(board, 2, enemy, occ_no_king)
+                {
+                    moves.push(Move {
+                        from: 4,
+                        to: 2,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castle: true,
+                    });
+                }
+            }
+            if us == Color::Black && sq == 60 {
+                if board.castling & 4 != 0
+                    && board.squares[63]
+                        == Some(Piece {
+                            color: Color::Black,
+                            kind: PieceType::Rook,
+                        })
+                    && board.squares[61].is_none()
+                    && board.squares[62].is_none()
+                    && !is_square_attacked(board, 60, Color::White)
+                    && !is_square_attacked(board, 61, Color::White)
+                    && !is_square_attacked(board, 62, Color::White)
+                    && !is_square_attacked_occ(board, 62, enemy, occ_no_king)
+                {
+                    moves.push(Move {
+                        from: 60,
+                        to: 62,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castle: true,
+                    });
+                }
+                if board.castling & 8 != 0
+                    && board.squares[56]
+                        == Some(Piece {
+                            color: Color::Black,
+                            kind: PieceType::Rook,
+                        })
+                    && board.squares[59].is_none()
+                    && board.squares[58].is_none()
+                    && board.squares[57].is_none()
+                    && !is_square_attacked(board, 60, Color::White)
+                    && !is_square_attacked(board, 59, Color::White)
+                    && !is_square_attacked(board, 58, Color::White)
+                    && !is_square_attacked_occ(board, 58, enemy, occ_no_king)
                 {
                     moves.push(Move {
                         from: 60,
