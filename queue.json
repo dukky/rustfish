@@ -1,6 +1,14 @@
 {
   "pending": [
     {
+      "branch": "speed-board",
+      "mode": "speedup"
+    },
+    {
+      "branch": "speed-eval-king",
+      "mode": "speedup"
+    },
+    {
       "branch": "speed-magics",
       "mode": "speedup"
     },
