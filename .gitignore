@@ -6,3 +6,4 @@ scripts/__pycache__/
 .claude/
 .sprt-result/
 .queue-state/
+__pycache__/
