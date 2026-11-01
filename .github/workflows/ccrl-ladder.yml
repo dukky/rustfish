@@ -99,6 +99,10 @@ jobs:
             go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
             cargo) RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path anchor-src/Cargo.toml -p "$PKG" \
                      && cp "anchor-src/target/release/$BIN" "engines/$NAME" ;;
+            # Official Stockfish; the build downloads its NNUE net. Strength is set via
+            # options in the anchor file (UCI_LimitStrength/UCI_Elo).
+            stockfish) make -C anchor-src/src -j"$(nproc)" build ARCH=x86-64-avx2 \
+                     && cp anchor-src/src/stockfish "engines/$NAME" ;;
             *)     echo "unknown kind $KIND"; exit 1 ;;
           esac
           # Sleep before quit so threaded searchers answer; grep the captured

@@ -1,0 +1,8 @@
+{
+  "_comment": "Stockfish 19 at reduced strength. Stockfish maps UCI_Elo to its internal skill level (src/search.h: 'Skill 0..19 covers CCRL Blitz Elo from 1320 to 3190, approximately'); UCI_Elo 3139 = Skill Level 17, 3057 = 15, 2786 = 10. The 'ccrl' values are Stockfish's own approximate calibration, not CCRL-measured ratings. Run: gh workflow run ccrl-ladder.yml -f anchors_file=scripts/anchors-stockfish.json",
+  "anchors": [
+    {"name": "sf19-skill10", "ccrl": 2786, "repo": "official-stockfish/Stockfish", "ref": "sf_19", "kind": "stockfish", "options": ["option.UCI_LimitStrength=true", "option.UCI_Elo=2786"]},
+    {"name": "sf19-skill15", "ccrl": 3057, "repo": "official-stockfish/Stockfish", "ref": "sf_19", "kind": "stockfish", "options": ["option.UCI_LimitStrength=true", "option.UCI_Elo=3057"]},
+    {"name": "sf19-skill17", "ccrl": 3139, "repo": "official-stockfish/Stockfish", "ref": "sf_19", "kind": "stockfish", "options": ["option.UCI_LimitStrength=true", "option.UCI_Elo=3139"]}
+  ]
+}
