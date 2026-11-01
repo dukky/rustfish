@@ -208,7 +208,7 @@ plus the LTC non-regression check. A tune is just a candidate: it is merged
 only if it passes the SPRT like any other change.
 
 ## Things to retest
-Everything in `post-2100-revised.md`'s "Rejected for now" list was tested
+Everything in `docs/archive/post-2100-revised.md`'s "Rejected for now" list was tested
 before commit 80862d0, when every timed search was silently capped at depth 8,
 and with 24-96 game samples. Those rejections are void; retest each through
 this pipeline before ruling it out again.
@@ -228,4 +228,6 @@ this pipeline before ruling it out again.
 | `tests/sprt-log.jsonl`, `tests/ladder-log.jsonl` | the record of every result |
 
 Capacity: GitHub runs about 20 jobs at once for this account. An STC wave uses
-16 and a ladder uses about 20, so run them one at a time.
+19 (plus one build job) and a ladder uses about 20, so run them one at a time.
+SPRT binaries are built once per wave with `-C target-cpu=x86-64-v3` and shared
+with the shards.

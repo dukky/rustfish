@@ -30,7 +30,7 @@ LOG_DIR = os.path.join(ROOT, "tests")
 
 PROFILES = {
     # rounds_per_shard is the first wave; each later wave doubles up to the max.
-    "stc": {"tc": "10+0.1", "hash": 16, "shards": 16, "rounds_per_shard": 16, "max_rounds_per_shard": 64},
+    "stc": {"tc": "10+0.1", "hash": 16, "shards": 19, "rounds_per_shard": 16, "max_rounds_per_shard": 64},
     "ltc": {"tc": "60+0.6", "hash": 64, "shards": 20, "rounds_per_shard": 6, "max_rounds_per_shard": 24},
 }
 

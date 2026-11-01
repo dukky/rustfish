@@ -60,23 +60,19 @@ jobs:
           echo "base_sha=$(resolve "$BASE")" >> "$GITHUB_OUTPUT"
           echo "shards=$(python3 -c "import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$SHARDS")" >> "$GITHUB_OUTPUT"
 
-  play:
+  # Build once per wave and share the binaries, instead of every shard spending
+  # minutes on two LTO builds. x86-64-v3 (AVX2/BMI2/POPCNT) runs on every
+  # GitHub runner, unlike target-cpu=native binaries.
+  build:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 340
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
-    name: shard ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Build candidate and base
         env:
-          RUSTFLAGS: -C target-cpu=native
+          RUSTFLAGS: -C target-cpu=x86-64-v3
           CAND: ${{ needs.plan.outputs.candidate_sha }}
           BASE: ${{ needs.plan.outputs.base_sha }}
         run: |
@@ -88,14 +84,37 @@ jobs:
             cp "wt-$name/target/release/rustfish" "engines/$name"
             printf 'bench\nquit\n' | "engines/$name" | grep 'Nodes searched'
           done
-
       - name: Fetch fastchess and openings
         run: |
           curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
           mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
           install -m 755 "$(find fastchess-dist -type f -name fastchess | head -1)" engines/fastchess
           curl -sSL -o book.zip "https://github.com/official-stockfish/books/raw/master/$BOOK.zip"
-          unzip -q book.zip
+          unzip -q book.zip -d engines
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engines
+          path: engines
+          retention-days: 3
+
+  play:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: engines
+          path: engines
+      - name: Prepare
+        run: |
+          chmod +x engines/cand engines/base engines/fastchess
+          mv "engines/$BOOK" .
 
       - name: Play
         env:
@@ -131,10 +150,10 @@ jobs:
           if-no-files-found: warn
 
   report:
-    needs: [plan, play]
+    needs: [plan, build, play]
     # !cancelled(): a cancelled wave must not report or dispatch the next one;
     # individual shard failures still report on the shards that finished.
-    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

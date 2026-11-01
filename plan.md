@@ -1,175 +1,172 @@
-# Rustfish Long-Term Plan (No Dependencies)
+# Rustfish roadmap
 
-Goal: keep improving this engine until it can challenge very strong Stockfish settings.
+The single source of truth for what is running, what is next and why. Process
+rules live in `docs/development.md`; results live in `tests/*.jsonl` and the
+`queue-state` branch. Update this file whenever work starts, lands or dies.
 
-## Phase 0 — Foundation (done)
-- [x] Create a no-dependency Rust UCI engine skeleton
-- [x] Implement board representation + FEN parsing
-- [x] Implement legal move generation (castling, en passant, promotions)
-- [x] Implement make/undo move
-- [x] Implement alpha-beta negamax + iterative deepening
-- [x] Implement quiescence search
-- [x] Implement baseline static evaluation (material + PST + mobility)
+_Last updated: 2026-11-01._
 
-## Phase 1 — First Strength Jump (in progress)
-- [x] Add deterministic Zobrist hashing
-- [x] Add transposition table (probe/store, bounds, best move)
-- [x] Add principal variation style search (PVS at non-root and root)
-- [x] Add aspiration windows in iterative deepening
-- [x] Add killer move heuristic
-- [x] Add history heuristic
-- [x] Add repetition detection in search tree (line-based/perpetual handling)
-- [x] Add 50-move rule draw detection in search
-- [x] Add better TT replacement strategy (depth+age hybrid)
-- [x] Store static eval in TT and reuse it for pruning/qsearch eval fallback
+## Where we are
 
-## Phase 2 — Search Quality
-- [x] Null-move pruning
-- [x] Late move reductions (LMR)
-- [x] Basic late move pruning (LMP)
-- [x] Basic futility pruning (shallow, non-PV)
-- [x] Basic reverse futility pruning
-- [x] Basic SEE for capture ordering + qsearch pruning
-- [x] Quiescence check handling (evasion generation when in check)
-- [x] Quiescence TT probe/store + simple delta pruning
-- [ ] SEE follow-up: pin-aware/king-safety-aware exactness improvements (rejected 2026-07-03: full-legality LVA scan cost ~14% NPS with no node reduction at fixed depth; patch archived in tmp/patches/. Revisit only with a cheap king-line pin check)
-- [x] Basic check extension
-- [x] Mate-distance pruning
-- [ ] Singular/check extension tuning follow-up
-- [x] Internal iterative deepening for move ordering when TT move is missing
-- [x] History heuristic decay per search
-- [x] Side-aware quiet history with counter-move ordering and fail-high maluses
-- [x] One-ply continuation history for quiet move ordering
-- [x] Replace full staged non-root/qsearch move sorting with staged pick-next move picker
-- [x] Pruning stability follow-up (null-move eval gate, priority-quiet LMP/LMR guards)
-- [x] Make qsearch TT mate-score handling ply-aware
-- [ ] Tune pruning margins/reductions from gauntlet data
+| | |
+|---|---|
+| Strength | **~2810 CCRL Blitz** (95% CI 2787-2833), main `859b255`, elite anchors, 120+1 |
+| Target | Stockfish 17 skill 17 (UCI_Elo 3139, ~3140 CCRL Blitz): **~330 Elo short** |
+| Speed | ~2.5M nps single thread on M3 (bench 650958 nodes) |
+| Eval | hand-crafted, Texel/jointly tuned (PSQT, king safety, threats, passers) |
+| Search | PVS, aspiration, TT (4-slot buckets), NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, check extension, mate-distance pruning |
 
-## Phase 3 — Evaluation Quality
- - [x] Tapered eval (true MG/EG interpolation for all major terms)
-- [x] Basic pawn structure (isolated, doubled, passed)
-- [x] Pawn structure follow-up (connected pawns, candidate passers)
-- [x] Pawn structure follow-up (backward pawns, passer support)
-- [x] Pawn structure follow-up (backward pawns, lever detection, passer support)
-- [x] Basic king safety (pawn shield, attacked king zone, open files near king)
-- [x] King safety follow-up (attack units by piece type)
-- [x] King safety follow-up (tropism, scaling by attacking material)
-- [x] King safety scaling by game phase/material
-- [x] Basic piece activity (bishop pair, rooks on open/semi-open files)
-- [x] Piece activity follow-up (outposts, 7th-rank rooks)
-- [x] Piece activity follow-up (space, bishop scope)
-- [x] Piece activity follow-up (opening development / castling incentives)
-- [x] Piece activity follow-up (trapped pieces)
-- [x] Endgame terms (king activity, basic mop-up / king chase)
-- [x] Endgame terms follow-up (opposition-ish heuristics, rook endings, pawn races)
-- [~] Incremental evaluation updates (faster nodes/sec) — material/PST/phase/npm/queen/bishop accumulator landed 2026-07-03 (+2.4% NPS, node-identical, selftest-enforced invariant); pawn-structure and king-safety terms still computed per eval
+Where the remaining ~330 Elo plausibly comes from (rough, overlapping estimates):
 
-## Phase 4 — Engine Correctness + Performance
-- [x] Add perft/divide commands
-- [x] Add built-in perft smoke suite (startpos d1..d4)
-- [x] Expand perft suite with additional canonical tricky positions (castling/en-passant/promotion basics)
-- [x] Add move-generation/make-undo invariant selftest command
-- [x] Expand invariants with targeted edge-case suites
-- [x] Fix castling generation to require rook presence on the rook square
-- [x] Fix repetition ancestor parity scan in search
-- [x] Preserve repetition history before the current root across `position ... moves ...`
-- [x] Wire exposed LMR UCI options into the actual reduction conditions or remove them
-- [x] Expand invariants with tactical/pin/check-regression suites
-- [x] Add regression tests for rookless castling, repetition parity/history, and qsearch mate-distance handling
-- [x] Optimize hot paths (SEE attacker lookup, bounded repetition scan, cheaper history decay cadence)
-- [x] Reduce staged move-ordering allocation churn (single scored sort instead of bucket rebuilds)
-- [x] Reduce eval rescanning overhead with piece-list reuse for king safety and mobility
-- [x] Reduce eval allocation churn and pawn-structure helper rescans
-- [x] Reduce eval duplicate mobility work (reuse bishop mobility in main mobility pass)
-- [x] Reduce legal-move filtering cost with exact pin/check-based legality filtering
-- [x] Reuse move buffers across legal move generation and search callers
-- [x] Add experimental root-split `Threads` support with conservative gating for longer/deeper searches
-- [x] Recover `Threads` with a shared-TT lazy-SMP style search path
-- [ ] Add optional bitboard backend for speed comparison
-- [x] Add benchmark harness script (nodes/sec by depth/position set)
+| Source | Expected | Confidence |
+|---|---|---|
+| Standard search features still missing (queue below) | +60..120 | medium: each is proven elsewhere, several failed here before for implementation reasons |
+| NPS (eval is 60% of time) | +15..40 | high for the speed, Elo from speed is ~+50..70 per doubling at blitz |
+| SPSA of search parameters | +15..40 | medium |
+| Eval retune on far more (self-play) data | +10..30 | medium |
+| **NNUE** (own trainer + inference, std only) | **+150..300** | high: the largest single jump every HCE engine at this level has made |
 
-## Phase 4.5 — Refactor / Maintainability
-- [x] Split engine into modules (`book`, `eval`, `movegen`, `search`, `tt`, `uci`)
-- [x] Keep behavior intact through refactor (perft/selftest/UCI/gauntlet smoke verified)
-- [ ] Consider further split of `main.rs` into `board` / `types` modules
-- [ ] Add module-local unit tests as code stabilizes
+So: the queue and speed work keep us moving, but **reaching 3139 almost
+certainly needs NNUE**. That is the long-term project and should start soon,
+because its data generation can run on CI in the gaps.
 
-## Phase 5 — Practical Strength Tooling
-- [x] Add basic built-in opening book support
-- [x] Add OwnBook UCI option
-- [x] Expand built-in opening book depth
-- [x] Add book-style option for repertoire experiments
-- [x] Add opening book external plain-text support
-- [ ] Add simple endgame tablebase probing (optional local files)
-- [ ] Add self-play tuning loop (no external crate dependency)
-- [x] Add basic gauntlet script vs fixed opponents (UCI, no deps)
-- [x] Add frozen-binary A/B gauntlet mode with parallel workers
-- [x] Add opening-suite support for paired A/B gauntlets
-- [x] Add SPRT-style statistical decision logic to gauntlet
-- [x] Add automatic Elo confidence intervals / ladder summary to gauntlet
-- [x] Add machine-readable gauntlet result logging
-- [x] Add sweep driver for candidate variants
-- [x] Add two-stage sweep flow (parallel fixed-length screens, then SPRT confirmation)
-- [x] Add single-command validation runner
-- [x] Expose core pruning/reduction knobs as UCI options for sweep-based tuning
-- [x] Track Elo progression over frozen-binary versions with a local round-robin rating pool
+## Short term (running now / this week)
 
-## Current Focus
-1. Pay down newly identified correctness debt first: castling sanity, repetition correctness, pre-root repetition history, qsearch mate-distance consistency, and dead tuning knobs.
-2. Improve search efficiency: keep pushing post-2100 structural work, including the new shared-TT SMP path and the next round of single-thread eval/search cleanup.
-3. Improve evaluation stability: keep accepted MG/EG terms and only add changes that survive A/B gauntlets.
-4. Improve measurement quality: frozen-binary gauntlets, JSONL logs, confidence bounds, early-stop logic, sweepable UCI tuning knobs, and direct option-vs-option head-to-head checks.
+**Merge queue (GitHub, unattended).** 22 items, serial, each rebased onto the
+latest `main` and SPRT'd; passes fast-forward `main` automatically. Order:
 
-## Post-2100 Review
-- Accepted from the post-2100 structural path:
-  - TT static eval reuse (`f4143cd`)
-  - staged pick-next non-root/qsearch move picker (`9b0b346`)
-  - move-buffer reuse for pseudo/legal generation and search-side move collection (bench-positive, strength-neutral)
-  - shared-TT lazy-SMP recovery with a unique-owner scalar TT fast path (throughput-positive for `Threads>1`)
-- Long confirmation that the new structural baseline is real:
-  - `9b0b346` vs `f4143cd`, `96g / 100ms / parallel 2`: `41/37/18`, score `62.0%`, about `+84.9 Elo`
-- External confidence progress:
-  - `9b0b346` vs Stockfish `2100`, `96g / 100ms / parallel 2`: `59/9/28`, score `66.1%`, about `+116.4 Elo`
-  - `9b0b346` vs Stockfish `2200`, `96g / 100ms / parallel 2`: `44/12/40`, score `52.1%`, about `+14.5 Elo`
-  - `9b0b346` vs Stockfish `2300`, `96g / 100ms / parallel 2`: `46/8/42`, score `52.1%`, about `+14.5 Elo`
-  - those `2200` / `2300` results are suspiciously similar, so frozen A/B plus a local pool is a better anchor than over-interpreting `UCI_LimitStrength`
-- Calibrated strength estimate (2026-07-03, `fd90bf1`-equivalent build):
-  - 5-level `UCI_Elo` ladder at `500ms/move` (closer to the limiter's calibrated regime than the old `20-100ms` runs), `20g` per level, fixed openings, `Hash=256`, `OwnBook=false`, `Threads=1`
-  - scores: `1900: 72.5%`, `2050: 72.5%`, `2200: 42.5%`, `2350: 20.0%`, `2500: 5.0%` — monotone, so the levels differentiate properly at this TC
-  - maximum-likelihood fit across all levels (`scripts/fit_rating.py`): **~2129, 95% CI 2049-2208** on the SF `UCI_Elo` scale
-  - caveat: still anchored to Stockfish's self-reported limiter scale; an external CCRL-anchored pool would be the next rigor step
-- Structural ideas tried and rejected so far:
-  - clustered TT
-  - pawn hash / pawn-eval cache groundwork
-  - capture history
-  - correction history
-  - ProbCut
-  - singular extension variants tried so far
-- Best remaining post-2100 priorities:
-  - incremental eval groundwork
-  - better endgame knowledge / scaling
-  - another genuinely different search-concept upgrade, not more local margin tuning
+1. `lmr-priority-quiets` (in flight; passed twice before at +21), `history-gravity` (passed at +24)
+2. `improving-rfp`, `lmp-improving`, `insufficient-material` (nonreg), `tm-budget` (LTC gainer)
+3. `endgame-scale`, `see-quiets`, `correction-history`, `singular-ext`, `futility-moves`,
+   `followup-history`, `probcut`, `see-pruning`, `qsearch-see`, `capture-history`,
+   `aspiration-widen`, `extensions`, `lmr-pv-captures`, `lmr-history-scale`
+4. `eval-mobility` (pre-dates the joint retune, likely conflicts), `pawn-hash` (speedup)
 
-## Working Protocol
-- Keep this file current.
-- Check off completed tasks immediately.
-- Add new tasks when needed.
-- Prioritize search strength + correctness before fancy features.
+Most of group 3 showed big losses earlier, but those results were invalid (the
+base had just gained +79 from the eval merge), so they get a clean retest.
+At ~45-90 min per test this is about 1-2 days of CI.
 
-## Current Blocker
-- Recent pruning-parameter sweeps are mostly neutral or negative. SMP throughput is now meaningfully better with shared TT, but strength is still unvalidated and stronger worker coordination is the next follow-up target.
+**Speed work (laptop, 7 agents).** Exact speedups: same bench at two depths,
+bit-identical eval on 50k positions, ≥2% median NPS in interleaved pairs.
+Branches `speed-magics`, `speed-eval-king`, `speed-eval-body`, `speed-movegen`,
+`speed-picker`, `speed-board`, `speed-eval-calls`. Survivors are combined and
+queued as `speedup` at the front (no SPRT needed).
 
-## SMP Recovery
-- Replaced the old static root-split worker assignment with a shared-TT lazy-SMP style path:
-  - all workers search the same root
-  - workers share TT and zobrist state
-  - workers keep thread-local history / killers / continuation data
-  - root move order is diversified slightly per worker instead of statically partitioned
-- Fixed shared TT sizing so the atomic slot table uses its true slot size instead of the old compact entry size.
-- Current throughput snapshot on the local depth-7 fixed bench (`Hash=256`):
-  - shared-TT SMP candidate with unique-owner scalar TT fast path: `Threads=1` `786750 nps`, `Threads=2` `1247254 nps`, `Threads=4` `1887917 nps`, `Threads=8` `3187421 nps`
-  - old root-split baseline `9b0b346`: `Threads=1` `808576 nps`, `Threads=2` `905173 nps`, `Threads=4` `1256173 nps`
-- Practical read:
-  - scalar cost is now small (`-2.7%` vs `9b0b346` at `Threads=1`)
-  - the recovered SMP path is materially stronger on throughput (`+37.8%` at `Threads=2`, `+50.3%` at `Threads=4`)
-  - the next obvious SMP target is worker lifecycle / coordination efficiency, not another return to static root splitting
+**Measurement.** Stockfish 17 skill 10/15/17 ladder (`anchors-stockfish.json`)
+running, to cross-check the CCRL number against the actual target.
+
+## Known problems (not fixed yet)
+
+- **Stockfish 17 at skill 17 is measured only by formula**, not by games (the
+  ladder above fixes this).
+- **The anchors top out at 2956.** The next ladder needs 3000-3200 anchors
+  (e.g. stronger Stash/Velvet/Reckless releases) or the estimate will drift.
+- **SPRT bounds `[0, 10]` reject real +2..5 patches.** Correct for now (big
+  gains still available), switch to `[0, 5]` once typical passes drop below +10.
+- **Each SPRT shard builds both engines** (~2-3 min of LTO builds per shard per
+  wave): ~15-20% of CI time is compiling, not playing. And 4 of the 20 runners
+  sit idle during an SPRT (fixed next, see process).
+- **Periodic checks are manual**: the LTC non-regression after ~5 merges and
+  the CCRL ladder only happen when someone remembers.
+- **Bot merges skip `ci.yml`** (GitHub token pushes don't trigger workflows);
+  the queue runs the same checks itself, so this is cosmetic.
+- **Queue logs live on `queue-state`**, not `tests/sprt-log.jsonl`; both are
+  records now, the queue's is authoritative for queue tests.
+- **Time management** is only tested at 60+0.6; CCRL is 120+1 / 40/15 and
+  Lichess games are often longer. `tm-budget` is in the queue.
+- **Lazy SMP is untested for strength** (CCRL blitz is 1 thread, so it only
+  matters for the Lichess bot and 4-CPU lists).
+
+## Medium term (next 2-6 weeks), in priority order
+
+1. **CI throughput** (see process audit): build once per wave, use all runners,
+   automate periodic checks. Cheap, and multiplies everything else.
+2. **Land the speed branches.** Then the next structural speedups: incremental
+   attack maps or per-piece attack caching shared by eval terms, staged move
+   generation (captures first; skip quiet generation on TT/capture cutoffs),
+   TT prefetch on x86 (std::arch).
+3. **SPSA run on the search parameters** (infra exists: `spsa.yml`). Run once the
+   queue's search features have landed, since they shift the optima. Then again
+   after each large search change.
+4. **Self-play data generation on CI** (`datagen.rs` exists). Gives (a) a much
+   larger Texel retune set than the 445k positions we have, and (b) the NNUE
+   training set. Target 100M+ positions. Run in the gaps when the queue is
+   idle or with low priority.
+5. **Search features not yet written** (each its own branch → queue):
+   - 2-ply continuation history and history-based LMR (partly in `lmr-history-scale`)
+   - NMP verification search at high depth, razoring
+   - multi-cut / double extensions on top of a working singular extension
+   - QS futility and better QS evasion ordering
+   - TT cutoff refinements (no cutoffs at PV nodes, halfmove-clock guard)
+   - correction history done properly (pawn + material keys), if `correction-history` fails again
+6. **Draw and endgame knowledge**: insufficient material, KPK bitbase (generated
+   at startup, std only), opposite-colour bishop scaling, fortress-ish scaling.
+7. **Lichess bot live** on the Dokku box (needs the bot account and token from
+   the user, set with `dokku config:set`). Gives a public, continuous rating.
+8. **CCRL submission** (`docs/ccrl-submission.md`): needs a licence decision and
+   a tagged release; their games are the most credible independent rating.
+
+## Long term (the path to beating Stockfish 17 skill 17)
+
+1. **NNUE, std only.**
+   - Inference: (768 → N)x2 → 1 with king buckets later, int16 quantized,
+     incremental accumulator in make/undo, SIMD via `std::arch` (AVX2 on CI,
+     NEON on M3) behind a scalar fallback. Net embedded with `include_bytes!`.
+   - Trainer: our own Rust trainer (`tools/` crate or `src/bin`, still no
+     dependencies): Adam, WDL+eval blended loss, multithreaded with std threads.
+     Train on CI (6 h job limit, checkpoint + resume) or locally overnight.
+   - Data: self-play at fixed nodes from the current engine (HCE first), then
+     retrain on data from the first net (the usual bootstrap).
+   - Acceptance: an STC SPRT like everything else; expect the first net to be
+     the largest jump the project has had.
+2. **Syzygy probing** (std only, read-only of user-supplied files): small
+   blitz gain, matters more for CCRL 40/15 and correct endgame conversion.
+3. **Lazy SMP strength** (for the bot and the 4-CPU lists).
+4. **Search refinements that only pay off with NNUE** (more eval-dependent
+   pruning, correction history on a better eval).
+
+## Process audit (2026-11-01)
+
+What works:
+- `main` only moves through an SPRT against the current `main`, now enforced by
+  the queue rather than by discipline. The stale-base mistake that voided 14
+  tests is structurally impossible.
+- Waves stop clear results at 512 games; pentanomial LLR; pinned SHAs.
+- Absolute strength comes from a CCRL anchor ladder, not `UCI_Elo` guesses.
+
+What to change (ordered by payoff / effort):
+
+| # | Change | Why | Who decides |
+|---|---|---|---|
+| 1 | Build both engines once per test (plan job, `target-cpu=x86-64-v3`) and pass binaries to shards as artifacts | ~15-20% more games per CI hour; `-C target-cpu=native` binaries can't be shared across runner CPUs, v3 (AVX2/BMI2) can | done next |
+| 2 | Use 19 shards for SPRTs while no ladder runs | 4 idle runners = +20% throughput | done next |
+| 3 | Queue runs the periodic checks itself: LTC non-regression of `main` vs the `main` 5 merges back, and a weekly CCRL ladder (cron) | regression protection without anyone remembering | build |
+| 4 | Queue retries infra failures once before `needs-human` | transient GitHub/network errors shouldn't drop a candidate | build |
+| 5 | Keep the queue ≥ 24 h deep; refill in batches from the medium-term list | CI is the bottleneck, it should never idle; LLM time goes into writing candidates, not watching tests | process |
+| 6 | Combine exact speedups into one `speedup` item | no SPRT, no conflicts with each other in the queue | process |
+| 7 | Optional: a scheduled cloud agent that refills the queue when it drops below ~8 items | fully hands-off idea generation; costs LLM tokens on a schedule | user |
+| 8 | Optional: more compute: a self-hosted runner (a rented many-core box, or this laptop overnight) | CI time is the binding constraint; a 16-core box roughly doubles test throughput | user (cost) |
+
+Division of labour, explicitly:
+- **GitHub Actions**: every game played for acceptance or rating, the queue,
+  data generation, SPSA, later NNUE training.
+- **Laptop**: writing candidates, correctness gates, deterministic bench
+  checks, speed work (NPS comparison is valid locally; Elo is not).
+- **Dokku box (2 shared cores)**: the Lichess bot only; too small for testing.
+- **LLM**: ideas, implementation, triage of `needs-human` items, and this
+  plan. Not polling, not merging, not logging: the queue does those.
+
+Is it enough in parallel? CI throughput is compute-bound, so running several
+SPRTs at once would not finish them sooner, only make each slower; serial is
+right. The parallelism worth adding is on the *input* side (more candidates
+ready, so the queue never idles) and in *non-game* work that doesn't compete
+for runners: speedups, data generation tooling, the NNUE code.
+
+## History
+
+- Jul 2026: plan and strategy notes in `docs/archive/plan-2026-07.md` and
+  `docs/archive/post-2100-revised.md` (pre-pipeline; their rejections are void).
+- 2026-10-29: depth-8 cap fixed (+221), SPRT pipeline and CCRL ladder built: ~2081.
+- 2026-10-31: IIR, SEE fix, TT review, eval rework (king safety, threats,
+  passers, joint retune): ~2624 → ~2810.
+- 2026-11-01: unattended merge queue.

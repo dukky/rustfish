@@ -43,9 +43,8 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 - `scripts/test_change.py` — one-command validation for correctness, bench, and A/B smoke
 - `scripts/rating_pool.py` — run a local round-robin rating pool across fixed engine binaries
 - `scripts/openings.txt` — reusable opening suite for diversified gauntlets
-- `plan.md` — project roadmap / progress tracking
-- `post-2100-revised.md` — current strategic direction (what was tried, what was rejected, what to do next); read this before picking new work
-- `docs/archive/` — superseded planning/review notes kept for history; do **not** treat their recommendations as current (several of their priorities were later tested and rejected — see `post-2100-revised.md`)
+- `plan.md` — the roadmap: current status, what is running, short/medium/long-term plans, known problems and the process audit; read this before picking new work and update it when work starts, lands or dies
+- `docs/archive/` — superseded planning/review notes kept for history (including the July 2026 plan and `post-2100-revised.md`); do **not** treat their recommendations as current
 
 ---
 
