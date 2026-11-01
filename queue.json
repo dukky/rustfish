@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "improving-rfp",
-      "mode": "stc"
-    },
-    {
       "branch": "lmp-improving",
       "mode": "stc"
     },
@@ -82,14 +78,14 @@
     }
   ],
   "current": {
-    "branch": "history-gravity",
+    "branch": "improving-rfp",
     "mode": "stc",
-    "test_id": "q-history-gravity-1101-2034",
-    "sha": "c54ce02a5900cea9705d46c641203f836b099ea5",
-    "base_sha": "c2078de76ef2bcf46afc5a573626a55a2bf23853",
-    "started": "2026-11-01T20:34:11Z",
-    "bench": 626791
+    "test_id": "q-improving-rfp-1101-2054",
+    "sha": "56dccb839241bb021e96d64e0880d9ee660a7d4b",
+    "base_sha": "c54ce02a5900cea9705d46c641203f836b099ea5",
+    "started": "2026-11-01T20:54:34Z",
+    "bench": 572638
   },
   "check_base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
-  "merges_since_check": 1
+  "merges_since_check": 2
 }

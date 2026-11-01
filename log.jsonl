@@ -6,3 +6,5 @@
 {"branch": "speed-magics", "logged_at": "2026-11-01T20:33:11Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "30b00e5a9eb8d5f46da05db2753f48141fde15b7"}
 {"branch": "speed-movegen", "logged_at": "2026-11-01T20:33:41Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "c2078de76ef2bcf46afc5a573626a55a2bf23853"}
 {"base_sha": "c2078de76ef2bcf46afc5a573626a55a2bf23853", "branch": "history-gravity", "logged_at": "2026-11-01T20:34:11Z", "mode": "stc", "outcome": "dispatched", "sha": "c54ce02a5900cea9705d46c641203f836b099ea5", "test_id": "q-history-gravity-1101-2034"}
+{"branch": "history-gravity", "elo": 22.32, "elo_ci95": [10.53, 34.15], "games": 1824, "llr": 4.802, "logged_at": "2026-11-01T20:54:02Z", "mode": "stc", "outcome": "merged", "sha": "c54ce02a5900cea9705d46c641203f836b099ea5", "test_id": "q-history-gravity-1101-2034", "verdict": "H1"}
+{"base_sha": "c54ce02a5900cea9705d46c641203f836b099ea5", "branch": "improving-rfp", "logged_at": "2026-11-01T20:54:34Z", "mode": "stc", "outcome": "dispatched", "sha": "56dccb839241bb021e96d64e0880d9ee660a7d4b", "test_id": "q-improving-rfp-1101-2054"}
