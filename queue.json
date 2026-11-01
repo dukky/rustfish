@@ -1,30 +1,6 @@
 {
   "pending": [
     {
-      "branch": "speed-eval-body",
-      "mode": "speedup"
-    },
-    {
-      "branch": "speed-board",
-      "mode": "speedup"
-    },
-    {
-      "branch": "speed-eval-king",
-      "mode": "speedup"
-    },
-    {
-      "branch": "speed-magics",
-      "mode": "speedup"
-    },
-    {
-      "branch": "speed-movegen",
-      "mode": "speedup"
-    },
-    {
-      "branch": "history-gravity",
-      "mode": "stc"
-    },
-    {
       "branch": "improving-rfp",
       "mode": "stc"
     },
@@ -106,11 +82,14 @@
     }
   ],
   "current": {
-    "branch": "lmr-priority-quiets",
+    "branch": "history-gravity",
     "mode": "stc",
-    "test_id": "q-lmr-priority-quiets-1101-1929",
-    "sha": "e704bccb5afafa224dc5e4fe2d000bcb59789083",
-    "base_sha": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
-    "started": "2026-11-01T19:29:36Z"
-  }
+    "test_id": "q-history-gravity-1101-2034",
+    "sha": "c54ce02a5900cea9705d46c641203f836b099ea5",
+    "base_sha": "c2078de76ef2bcf46afc5a573626a55a2bf23853",
+    "started": "2026-11-01T20:34:11Z",
+    "bench": 626791
+  },
+  "check_base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
+  "merges_since_check": 1
 }
