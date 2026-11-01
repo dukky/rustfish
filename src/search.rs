@@ -20,6 +20,11 @@ const RFP_MAX_DEPTH: i32 = 7;
 const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
+// Null move: one extra ply of reduction per this many cp of static eval above beta
+// (capped at NULL_EVAL_MAX), and a verification search from this depth up.
+const NULL_EVAL_DIV: i32 = 250;
+const NULL_EVAL_MAX: i32 = 2;
+const NULL_VERIFY_DEPTH: i32 = 12;
 
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
@@ -112,6 +117,10 @@ pub(crate) struct Search {
     // Static eval per ply (NO_EVAL when in check), for the improving heuristic.
     static_evals: [i32; MAX_PLY],
     move_buf: Vec<Move>,
+    // During a null-move verification search, `nmp_color` may not null-move
+    // again before this ply (0 = no verification active).
+    nmp_min_ply: usize,
+    nmp_color: Color,
 }
 
 impl Search {
@@ -124,6 +133,8 @@ impl Search {
             killers: [[None; 2]; MAX_PLY],
             static_evals: [NO_EVAL; MAX_PLY],
             move_buf: Vec::with_capacity(256),
+            nmp_min_ply: 0,
+            nmp_color: Color::White,
         }
     }
 
@@ -1141,7 +1152,12 @@ fn negamax(
         depth -= 1;
     }
 
-    if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
+    if allow_null
+        && depth >= 3
+        && !in_check
+        && beta - alpha <= 1
+        && (ply >= search.nmp_min_ply || board.side_to_move != search.nmp_color)
+    {
         let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
         let side_c = color_index(board.side_to_move);
         let side_pcs = &board.bb.pieces[side_c];
@@ -1161,7 +1177,11 @@ fn negamax(
 
             let child_key = null_move_hash(key, old_ep, &engine.zobrist);
             rep_stack.push(child_key);
-            let reduction = params.null_reduction_base + depth / params.null_reduction_depth_div;
+            let eval_reduction = static_eval
+                .map(|se| ((se - beta) / NULL_EVAL_DIV).clamp(0, NULL_EVAL_MAX))
+                .unwrap_or(0);
+            let reduction =
+                params.null_reduction_base + depth / params.null_reduction_depth_div + eval_reduction;
             let score = -negamax(
                 board,
                 depth - 1 - reduction,
@@ -1186,7 +1206,36 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
-                return score;
+                // Never return an unproven mate from a null-move search.
+                let score = if score >= MATE_SCORE - 1000 { beta } else { score };
+                if depth < NULL_VERIFY_DEPTH || search.nmp_min_ply != 0 {
+                    return score;
+                }
+                // Deep nodes: verify with a normal reduced search in which this
+                // side may not null-move for the next 3/4 of the remaining plies.
+                let verify_depth = (depth - 1 - reduction).max(1);
+                search.nmp_min_ply = ply + (3 * verify_depth / 4) as usize;
+                search.nmp_color = board.side_to_move;
+                let verified = negamax(
+                    board,
+                    verify_depth,
+                    beta - 1,
+                    beta,
+                    ply,
+                    search,
+                    engine,
+                    rep_stack,
+                    key,
+                    prev_move,
+                    false,
+                );
+                search.nmp_min_ply = 0;
+                if search.stop {
+                    return 0;
+                }
+                if verified >= beta {
+                    return score;
+                }
             }
         }
     }
