@@ -137,7 +137,11 @@ against the current `main`, so a stale base can't happen.
   `Cargo.*`), a passing candidate is replayed onto `main` without a retest;
   any engine change in between requeues it.
 - `needs-human` entries (rebase conflict, failed checks) are skipped; fix the
-  branch and re-add it.
+  branch and re-add it. Infrastructure failures (an SPRT run that ends with no
+  report, a queue error) are retried once first.
+- Every 5 merges the queue puts an `ltc-check` at the front: LTC `[-5, 0]` of
+  `main` vs the `main` from 5 merges back. If it fails the queue pauses
+  (`regression-alert` in the log) until `gh workflow run queue.yml -f unpause=true`.
 - Bot merges don't trigger `ci.yml`; the queue runs the same checks itself.
 
 ## Periodic checks (protection against slow erosion)

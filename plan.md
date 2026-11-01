@@ -63,11 +63,8 @@ running, to cross-check the CCRL number against the actual target.
   (e.g. stronger Stash/Velvet/Reckless releases) or the estimate will drift.
 - **SPRT bounds `[0, 10]` reject real +2..5 patches.** Correct for now (big
   gains still available), switch to `[0, 5]` once typical passes drop below +10.
-- **Each SPRT shard builds both engines** (~2-3 min of LTO builds per shard per
-  wave): ~15-20% of CI time is compiling, not playing. And 4 of the 20 runners
-  sit idle during an SPRT (fixed next, see process).
-- **Periodic checks are manual**: the LTC non-regression after ~5 merges and
-  the CCRL ladder only happen when someone remembers.
+- **The CCRL ladder is manual**: it only runs when someone remembers (the LTC
+  non-regression is now automatic every 5 merges).
 - **Bot merges skip `ci.yml`** (GitHub token pushes don't trigger workflows);
   the queue runs the same checks itself, so this is cosmetic.
 - **Queue logs live on `queue-state`**, not `tests/sprt-log.jsonl`; both are
@@ -138,10 +135,10 @@ What to change (ordered by payoff / effort):
 
 | # | Change | Why | Who decides |
 |---|---|---|---|
-| 1 | Build both engines once per test (plan job, `target-cpu=x86-64-v3`) and pass binaries to shards as artifacts | ~15-20% more games per CI hour; `-C target-cpu=native` binaries can't be shared across runner CPUs, v3 (AVX2/BMI2) can | done next |
-| 2 | Use 19 shards for SPRTs while no ladder runs | 4 idle runners = +20% throughput | done next |
-| 3 | Queue runs the periodic checks itself: LTC non-regression of `main` vs the `main` 5 merges back, and a weekly CCRL ladder (cron) | regression protection without anyone remembering | build |
-| 4 | Queue retries infra failures once before `needs-human` | transient GitHub/network errors shouldn't drop a candidate | build |
+| 1 | Build both engines once per wave (`target-cpu=x86-64-v3`) and pass binaries to shards as artifacts | ~15-20% more games per CI hour; `-C target-cpu=native` binaries can't be shared across runner CPUs, v3 (AVX2/BMI2) can | **done** |
+| 2 | Use 19 shards for STC SPRTs | 4 idle runners = +20% throughput | **done** |
+| 3 | Queue runs the LTC non-regression of `main` vs the `main` 5 merges back itself, and pauses on a regression | regression protection without anyone remembering | **done**; weekly CCRL ladder cron still to build (needs result logging on CI) |
+| 4 | Queue retries infra failures once before `needs-human`; a heartbeat recovers lost callbacks | transient GitHub/network errors shouldn't drop a candidate or stall the queue | **done** |
 | 5 | Keep the queue ≥ 24 h deep; refill in batches from the medium-term list | CI is the bottleneck, it should never idle; LLM time goes into writing candidates, not watching tests | process |
 | 6 | Combine exact speedups into one `speedup` item | no SPRT, no conflicts with each other in the queue | process |
 | 7 | Optional: a scheduled cloud agent that refills the queue when it drops below ~8 items | fully hands-off idea generation; costs LLM tokens on a schedule | user |

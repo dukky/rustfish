@@ -25,6 +25,10 @@ on:
         description: "Put added items at the front of the queue"
         type: boolean
         default: false
+      unpause:
+        description: "Resume after a regression alert from the periodic LTC check"
+        type: boolean
+        default: false
 
 concurrency:
   group: merge-queue
@@ -49,6 +53,7 @@ jobs:
           RESULT: ${{ inputs.result }}
           ADD: ${{ inputs.add }}
           FRONT: ${{ inputs.front }}
+          UNPAUSE: ${{ inputs.unpause }}
         run: |
           git config user.name "rustfish-queue"
           git config user.email "rustfish-queue@users.noreply.github.com"
