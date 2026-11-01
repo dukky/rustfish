@@ -1,0 +1,93 @@
+{
+  "pending": [
+    {
+      "branch": "lmr-priority-quiets",
+      "mode": "stc"
+    },
+    {
+      "branch": "history-gravity",
+      "mode": "stc"
+    },
+    {
+      "branch": "improving-rfp",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmp-improving",
+      "mode": "stc"
+    },
+    {
+      "branch": "insufficient-material",
+      "mode": "nonreg"
+    },
+    {
+      "branch": "tm-budget",
+      "mode": "ltc-gainer"
+    },
+    {
+      "branch": "endgame-scale",
+      "mode": "stc"
+    },
+    {
+      "branch": "see-quiets",
+      "mode": "stc"
+    },
+    {
+      "branch": "correction-history",
+      "mode": "stc"
+    },
+    {
+      "branch": "singular-ext",
+      "mode": "stc"
+    },
+    {
+      "branch": "futility-moves",
+      "mode": "stc"
+    },
+    {
+      "branch": "followup-history",
+      "mode": "stc"
+    },
+    {
+      "branch": "probcut",
+      "mode": "stc"
+    },
+    {
+      "branch": "see-pruning",
+      "mode": "stc"
+    },
+    {
+      "branch": "qsearch-see",
+      "mode": "stc"
+    },
+    {
+      "branch": "capture-history",
+      "mode": "stc"
+    },
+    {
+      "branch": "aspiration-widen",
+      "mode": "stc"
+    },
+    {
+      "branch": "extensions",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-pv-captures",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-history-scale",
+      "mode": "stc"
+    },
+    {
+      "branch": "eval-mobility",
+      "mode": "stc"
+    },
+    {
+      "branch": "pawn-hash",
+      "mode": "speedup"
+    }
+  ],
+  "current": null
+}
