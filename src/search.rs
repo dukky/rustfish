@@ -1073,7 +1073,10 @@ fn negamax(
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
-        if entry.depth as i32 >= depth {
+        // No cutoffs at PV nodes (keeps the PV intact and lets exact scores be
+        // re-verified), nor close to the 50-move rule, where the stored score
+        // cannot know the draw is near.
+        if entry.depth as i32 >= depth && beta - alpha <= 1 && board.halfmove_clock < 90 {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => return tt_score,
