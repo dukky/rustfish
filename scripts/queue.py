@@ -58,11 +58,40 @@ def now():
 
 
 def load_state():
+    """queue.json plus any requests waiting in inbox/ (consumed here, removed on save).
+
+    Additions arrive as inbox files rather than workflow inputs: GitHub keeps
+    only one pending run per concurrency group and cancels the rest, which
+    would silently drop an input, while a file stays until a run reads it."""
     sh("git", "fetch", "-q", "origin", STATE_BRANCH)
     if not os.path.isdir(STATE):
         sh("git", "worktree", "add", "-q", "-B", "qs", STATE, f"origin/{STATE_BRANCH}")
     with open(os.path.join(STATE, "queue.json")) as fh:
-        return json.load(fh)
+        state = json.load(fh)
+    inbox = os.path.join(STATE, "inbox")
+    for name in sorted(os.listdir(inbox)) if os.path.isdir(inbox) else []:
+        path = os.path.join(inbox, name)
+        with open(path) as fh:
+            req = json.load(fh)
+        adds = parse_adds(req.get("add", ""))
+        if req.get("front"):
+            state["pending"][:0] = adds
+        else:
+            state["pending"] += adds
+        if req.get("unpause"):
+            state.pop("paused", None)
+        os.remove(path)
+        print(f"inbox {name}: {req}")
+    return state
+
+
+def push_state():
+    """Push queue-state, rebasing over inbox files that arrived meanwhile."""
+    for _ in range(5):
+        if sh("git", "push", "-q", "origin", f"HEAD:{STATE_BRANCH}", cwd=STATE, check=False).returncode == 0:
+            return
+        sh("git", "pull", "-q", "--rebase", "origin", STATE_BRANCH, cwd=STATE)
+    raise RuntimeError("could not push queue-state")
 
 
 def save_state(state, message):
@@ -72,7 +101,33 @@ def save_state(state, message):
     sh("git", "add", "-A", cwd=STATE)
     if sh("git", "diff", "--cached", "--quiet", cwd=STATE, check=False).returncode != 0:
         sh("git", "commit", "-q", "-m", message, cwd=STATE)
-        sh("git", "push", "-q", "origin", f"HEAD:{STATE_BRANCH}", cwd=STATE)
+        push_state()
+
+
+def request(req):
+    """Local helper: drop a request into queue-state's inbox and nudge the queue."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="queue-inbox-")
+    sh("git", "fetch", "-q", "origin", STATE_BRANCH)
+    sh("git", "worktree", "add", "-q", "--detach", tmp, f"origin/{STATE_BRANCH}")
+    try:
+        os.makedirs(os.path.join(tmp, "inbox"), exist_ok=True)
+        name = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%f") + ".json"
+        with open(os.path.join(tmp, "inbox", name), "w") as fh:
+            json.dump(req, fh)
+        sh("git", "add", "-A", cwd=tmp)
+        sh("git", "commit", "-q", "-m", f"queue request: {req}", cwd=tmp)
+        for _ in range(5):
+            if sh("git", "push", "-q", "origin", f"HEAD:{STATE_BRANCH}", cwd=tmp, check=False).returncode == 0:
+                break
+            sh("git", "pull", "-q", "--rebase", "origin", STATE_BRANCH, cwd=tmp)
+        else:
+            raise SystemExit("could not push the request")
+    finally:
+        sh("git", "worktree", "remove", "--force", tmp, check=False)
+    # A nudge; if it is cancelled in the concurrency group, the heartbeat picks the request up.
+    sh("gh", "workflow", "run", "queue.yml", check=False)
+    print(f"requested {req}")
 
 
 def log(entry):
@@ -231,16 +286,6 @@ def advance():
     state = load_state()
     raw = os.environ.get("RESULT", "").strip()
     cur = state.get("current")
-    if os.environ.get("UNPAUSE") == "true" and state.pop("paused", None):
-        print("unpaused")
-    adds = parse_adds(os.environ.get("ADD", ""))
-    if adds:
-        # Additions go through this workflow so they are serialized with the queue.
-        if os.environ.get("FRONT") == "true":
-            state["pending"][:0] = adds
-        else:
-            state["pending"] += adds
-        print(f"added {adds}")
     if not raw and cur:
         found = find_result(cur["test_id"])
         if found:
@@ -285,7 +330,7 @@ def advance():
         return
 
     if state.get("paused"):
-        print(f"paused: {state['paused']} (resume with -f unpause=true)")
+        print(f"paused: {state['paused']} (resume with: python3 scripts/queue.py unpause)")
     while state["pending"] and not state.get("current") and not state.get("paused"):
         item = state["pending"].pop(0)
         try:
@@ -328,6 +373,15 @@ def schedule_check(state, base_sha):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] != ["advance"]:
-        sys.exit("usage: queue.py advance  (RESULT env = final SPRT result JSON, optional)")
-    advance()
+    args = sys.argv[1:]
+    if args == ["advance"]:
+        advance()
+    elif len(args) >= 2 and args[0] == "add" and set(args[2:]) <= {"--front"}:
+        parse_adds(args[1])  # validate before pushing
+        request({"add": args[1], "front": "--front" in args})
+    elif args == ["unpause"]:
+        request({"unpause": True})
+    else:
+        sys.exit("usage: queue.py advance            (CI; RESULT env = final SPRT result JSON)\n"
+                 "       queue.py add <branch:mode,...> [--front]\n"
+                 "       queue.py unpause")

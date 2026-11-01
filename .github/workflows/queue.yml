@@ -5,10 +5,11 @@ name: Merge queue
 # result, and passing candidates are fast-forwarded into main. State and log
 # live on the `queue-state` branch. Start or resume with:
 #   gh workflow run queue.yml
-# Add work (serialized with the queue):
-#   gh workflow run queue.yml -f add=branch:stc,other:speedup [-f front=true]
-# The schedule is a heartbeat: if a callback was lost (only one run can wait in
-# the concurrency group), it finds the current test's final result itself.
+# Add work with `python3 scripts/queue.py add branch:stc,other:speedup [--front]`
+# (writes a request file to queue-state's inbox/; never pass work as workflow
+# inputs, since GitHub cancels all but one pending run per concurrency group).
+# The schedule is a heartbeat: it picks up inbox requests and, if a callback was
+# lost, finds the current test's final result itself.
 
 on:
   schedule:
@@ -18,17 +19,6 @@ on:
       result:
         description: "Final SPRT result JSON (sent by sprt.yml; leave empty to start/resume)"
         default: ""
-      add:
-        description: "Items to queue: branch:mode[,branch:mode] (modes: stc, nonreg, ltc-gainer, speedup)"
-        default: ""
-      front:
-        description: "Put added items at the front of the queue"
-        type: boolean
-        default: false
-      unpause:
-        description: "Resume after a regression alert from the periodic LTC check"
-        type: boolean
-        default: false
 
 concurrency:
   group: merge-queue
@@ -51,9 +41,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ inputs.result }}
-          ADD: ${{ inputs.add }}
-          FRONT: ${{ inputs.front }}
-          UNPAUSE: ${{ inputs.unpause }}
         run: |
           git config user.name "rustfish-queue"
           git config user.email "rustfish-queue@users.noreply.github.com"

@@ -127,12 +127,14 @@ against the current `main`, so a stale base can't happen.
   (`[0, 10]` at 60+0.6), `speedup` (no SPRT; merges only if bench nodes equal
   `main`'s).
 - To add work: push the branch, then
-  `gh workflow run queue.yml -f add=<branch>:<mode>[,<branch>:<mode>]`
-  (`-f front=true` to jump the queue, e.g. for speedups). Going through the
-  workflow serializes the edit with the queue; don't edit `queue-state` by hand
-  while a queue run is active.
-- A schedule runs the queue every 30 minutes as a heartbeat: if the SPRT
-  callback was lost, it finds the current test's final result itself.
+  `python3 scripts/queue.py add <branch>:<mode>[,<branch>:<mode>]` (`--front`
+  to jump the queue, e.g. for speedups). This drops a request file in
+  `queue-state`'s `inbox/`, which the next queue run consumes. Don't pass work
+  as workflow inputs or edit `queue.json` by hand: GitHub cancels all but one
+  pending run per concurrency group, so inputs can silently vanish.
+- A schedule runs the queue every 30 minutes as a heartbeat: it picks up inbox
+  requests, and if the SPRT callback was lost it finds the current test's final
+  result itself.
 - If `main` moved during a test only outside the engine sources (`src/`,
   `Cargo.*`), a passing candidate is replayed onto `main` without a retest;
   any engine change in between requeues it.
@@ -141,7 +143,7 @@ against the current `main`, so a stale base can't happen.
   report, a queue error) are retried once first.
 - Every 5 merges the queue puts an `ltc-check` at the front: LTC `[-5, 0]` of
   `main` vs the `main` from 5 merges back. If it fails the queue pauses
-  (`regression-alert` in the log) until `gh workflow run queue.yml -f unpause=true`.
+  (`regression-alert` in the log) until `python3 scripts/queue.py unpause`.
 - Bot merges don't trigger `ci.yml`; the queue runs the same checks itself.
 
 ## Periodic checks (protection against slow erosion)
