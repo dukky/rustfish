@@ -1,6 +1,14 @@
 {
   "pending": [
     {
+      "branch": "speed-magics",
+      "mode": "speedup"
+    },
+    {
+      "branch": "speed-movegen",
+      "mode": "speedup"
+    },
+    {
       "branch": "history-gravity",
       "mode": "stc"
     },
