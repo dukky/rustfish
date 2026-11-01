@@ -126,8 +126,16 @@ against the current `main`, so a stale base can't happen.
 - Modes: `stc` (gainer `[0, 10]`), `nonreg` (`[-5, 0]`), `ltc-gainer`
   (`[0, 10]` at 60+0.6), `speedup` (no SPRT; merges only if bench nodes equal
   `main`'s).
-- To add work: push the branch, append it to `pending` on `queue-state`, and
-  run `gh workflow run queue.yml` if the queue is idle.
+- To add work: push the branch, then
+  `gh workflow run queue.yml -f add=<branch>:<mode>[,<branch>:<mode>]`
+  (`-f front=true` to jump the queue, e.g. for speedups). Going through the
+  workflow serializes the edit with the queue; don't edit `queue-state` by hand
+  while a queue run is active.
+- A schedule runs the queue every 30 minutes as a heartbeat: if the SPRT
+  callback was lost, it finds the current test's final result itself.
+- If `main` moved during a test only outside the engine sources (`src/`,
+  `Cargo.*`), a passing candidate is replayed onto `main` without a retest;
+  any engine change in between requeues it.
 - `needs-human` entries (rebase conflict, failed checks) are skipped; fix the
   branch and re-add it.
 - Bot merges don't trigger `ci.yml`; the queue runs the same checks itself.

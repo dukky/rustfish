@@ -5,13 +5,26 @@ name: Merge queue
 # result, and passing candidates are fast-forwarded into main. State and log
 # live on the `queue-state` branch. Start or resume with:
 #   gh workflow run queue.yml
+# Add work (serialized with the queue):
+#   gh workflow run queue.yml -f add=branch:stc,other:speedup [-f front=true]
+# The schedule is a heartbeat: if a callback was lost (only one run can wait in
+# the concurrency group), it finds the current test's final result itself.
 
 on:
+  schedule:
+    - cron: "17,47 * * * *"
   workflow_dispatch:
     inputs:
       result:
         description: "Final SPRT result JSON (sent by sprt.yml; leave empty to start/resume)"
         default: ""
+      add:
+        description: "Items to queue: branch:mode[,branch:mode] (modes: stc, nonreg, ltc-gainer, speedup)"
+        default: ""
+      front:
+        description: "Put added items at the front of the queue"
+        type: boolean
+        default: false
 
 concurrency:
   group: merge-queue
@@ -34,6 +47,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ inputs.result }}
+          ADD: ${{ inputs.add }}
+          FRONT: ${{ inputs.front }}
         run: |
           git config user.name "rustfish-queue"
           git config user.email "rustfish-queue@users.noreply.github.com"

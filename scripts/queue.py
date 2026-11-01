@@ -92,11 +92,29 @@ def run_engine(cmds):
                           capture_output=True, text=True).stdout
 
 
-def fast_forward_main(sha):
+ENGINE_PATHS = ["src", "Cargo.toml", "Cargo.lock", "build.rs"]
+
+
+def fast_forward_main(sha, base_sha=None, branch=None):
+    """Move main to the tested sha. If main moved since base_sha but only outside
+    the engine sources (tooling, docs, logs), the tested binary is unchanged, so
+    replay the candidate on top of main instead of retesting."""
     sh("git", "fetch", "-q", "origin", "main")
     main_sha = out("git", "rev-parse", "origin/main")
     if sh("git", "merge-base", "--is-ancestor", main_sha, sha, check=False).returncode != 0:
-        return False
+        if not base_sha or sh("git", "diff", "--quiet", base_sha, main_sha, "--",
+                              *ENGINE_PATHS, check=False).returncode != 0:
+            return False
+        sh("git", "checkout", "-q", "-B", "replay", sha)
+        if sh("git", "rebase", "-q", main_sha, check=False).returncode != 0:
+            sh("git", "rebase", "--abort", check=False)
+            return False
+        if sh("git", "diff", "--quiet", sha, "replay", "--", *ENGINE_PATHS,
+              check=False).returncode != 0:
+            return False
+        sha = out("git", "rev-parse", "replay")
+        if branch:
+            sh("git", "push", "-q", "--force", "origin", f"replay:{branch}")
     sh("git", "push", "-q", "origin", f"{sha}:refs/heads/main")
     return True
 
@@ -158,21 +176,71 @@ def start(item):
     return dict(base, test_id=test_id, sha=sha, base_sha=main_sha, started=now())
 
 
+def find_result(test_id):
+    """Final SPRT result for test_id from its runs, or None while it is still going.
+
+    Lets a scheduled or manual run recover if the sprt.yml callback was lost
+    (e.g. a pending queue run superseded in the concurrency group)."""
+    runs = json.loads(out("gh", "run", "list", "--workflow", "sprt.yml", "--limit", "200",
+                          "--json", "databaseId,displayTitle,status,conclusion"))
+    waves = [(int(m.group(1)), r) for r in runs
+             if (m := re.fullmatch(rf"SPRT {re.escape(test_id)} wave (\d+)", r["displayTitle"]))]
+    if not waves:
+        return None
+    _, run = max(waves, key=lambda w: w[0])
+    if run["status"] != "completed" or run["conclusion"] != "success":
+        return None
+    tmp = os.path.join(REPO, ".sprt-result")
+    sh("rm", "-rf", tmp)
+    if sh("gh", "run", "download", str(run["databaseId"]), "-n", "sprt-result", "-D", tmp,
+          check=False).returncode != 0:
+        return None
+    with open(os.path.join(tmp, "sprt-result.json")) as fh:
+        res = json.load(fh)
+    return res if res.get("final") else None
+
+
+def parse_adds(spec):
+    """'branch:mode,branch2:mode2' -> pending items (mode defaults to stc)."""
+    items = []
+    for part in filter(None, (p.strip() for p in spec.split(","))):
+        branch, _, mode = part.partition(":")
+        mode = mode or "stc"
+        if mode not in SETTINGS and mode != "speedup":
+            raise SystemExit(f"unknown mode {mode!r} for {branch}")
+        items.append({"branch": branch, "mode": mode})
+    return items
+
+
 def advance():
     state = load_state()
     raw = os.environ.get("RESULT", "").strip()
     cur = state.get("current")
+    adds = parse_adds(os.environ.get("ADD", ""))
+    if adds:
+        # Additions go through this workflow so they are serialized with the queue.
+        if os.environ.get("FRONT") == "true":
+            state["pending"][:0] = adds
+        else:
+            state["pending"] += adds
+        print(f"added {adds}")
+    if not raw and cur:
+        found = find_result(cur["test_id"])
+        if found:
+            print(f"recovered final result for {cur['test_id']}")
+            raw = json.dumps(found)
     if raw:
         res = json.loads(raw)
         if not cur or res.get("test_id") != cur["test_id"]:
             print(f"ignoring result for {res.get('test_id')}: not the current item")
+            save_state(state, "queue: add items")
             return
         verdict = res.get("status")
         record = {k: cur[k] for k in ("branch", "mode", "test_id", "sha")}
         record.update(elo=res.get("elo"), elo_ci95=res.get("elo_ci95"), games=res.get("games"),
                       llr=res.get("llr"), verdict=verdict)
         if verdict == "H1":
-            if fast_forward_main(cur["sha"]):
+            if fast_forward_main(cur["sha"], cur.get("base_sha"), cur["branch"]):
                 log(dict(record, outcome="merged"))
             else:
                 log(dict(record, outcome="requeued", reason="main moved during test"))
@@ -182,6 +250,7 @@ def advance():
         state["current"] = None
     elif cur:
         print(f"{cur['test_id']} still in flight; nothing to do")
+        save_state(state, "queue: add items")
         return
 
     while state["pending"] and not state.get("current"):
