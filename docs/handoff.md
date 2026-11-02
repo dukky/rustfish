@@ -78,9 +78,9 @@ queued, or rejected. Values are conventional starting points; one branch each.
 1. **ttcapture-lmr**: in negamax's LMR, if the TT move is a capture, reduce quiet
    moves one ply more (`r += 1`).
 2. **check-lmr**: reduce one ply less for moves that give check (if not already).
-3. **rfp-blend**: when reverse futility pruning fires, return `(eval + beta) / 2`
+3. _(queued 2026-11-02 as `rfp-blend`)_ **rfp-blend**: when reverse futility pruning fires, return `(eval + beta) / 2`
    instead of `eval` (non-mate scores only).
-4. **nmp-tt-guard**: skip null-move pruning when the TT entry has an upper bound
+4. _(queued 2026-11-02 as `nmp-tt-guard`)_ **nmp-tt-guard**: skip null-move pruning when the TT entry has an upper bound
    (or exact score) below beta.
 5. **aspiration-failhigh-depth**: on an aspiration fail-high, re-search at depth
    `depth - 1` (not below 1) while widening, resetting to full depth when the
