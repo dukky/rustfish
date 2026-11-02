@@ -14,6 +14,8 @@ const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
+// Expected cut-nodes this deep with no TT move are reduced one ply more.
+const IIR_CUT_MIN_DEPTH: i32 = 8;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
 // margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
@@ -918,6 +920,7 @@ fn search_root(
                 child_key,
                 Some(mv),
                 true,
+                false,
             );
         } else {
             score = -negamax(
@@ -931,6 +934,7 @@ fn search_root(
                 rep_stack,
                 child_key,
                 Some(mv),
+                true,
                 true,
             );
             if score > alpha && score < beta {
@@ -946,6 +950,7 @@ fn search_root(
                     child_key,
                     Some(mv),
                     true,
+                    false,
                 );
             }
         }
@@ -1023,6 +1028,7 @@ fn negamax(
     key: u64,
     prev_move: Option<Move>,
     allow_null: bool,
+    cut_node: bool,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1135,7 +1141,9 @@ fn negamax(
     // (and IIR_MIN_DEPTH > 3 keeps them from triggering on reduced depth here),
     // but before null move so its reduction and the main loop use the cheaper depth.
     if tt_move.is_none() && depth >= IIR_MIN_DEPTH {
-        depth -= 1;
+        // An expected cut-node without a TT move is usually refuted by any
+        // reasonable move; spend even less on it.
+        depth -= if cut_node && depth >= IIR_CUT_MIN_DEPTH { 2 } else { 1 };
     }
 
     if allow_null && depth >= 3 && !in_check && beta - alpha <= 1 {
@@ -1171,6 +1179,7 @@ fn negamax(
                 child_key,
                 None,
                 false,
+                !cut_node,
             );
             rep_stack.pop();
 
@@ -1286,6 +1295,7 @@ fn negamax(
                 child_key,
                 Some(mv),
                 true,
+                beta - alpha <= 1 && !cut_node,
             );
         } else {
             let reduction = if quiet
@@ -1331,6 +1341,7 @@ fn negamax(
                 child_key,
                 Some(mv),
                 true,
+                reduced || !cut_node,
             );
 
             if reduced && score > alpha {
@@ -1346,6 +1357,7 @@ fn negamax(
                     child_key,
                     Some(mv),
                     true,
+                    !cut_node,
                 );
             }
 
@@ -1362,6 +1374,7 @@ fn negamax(
                     child_key,
                     Some(mv),
                     true,
+                    false,
                 );
             }
         }
