@@ -14,6 +14,14 @@ const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
+// Per-move futility pruning: in non-PV, not-in-check nodes at depth <= this,
+// late quiet non-checking non-priority moves are skipped when the static eval
+// plus FUT_MOVE_BASE + FUT_MOVE_PER_DEPTH * depth can't reach alpha.
+const FUT_MOVE_MAX_DEPTH: i32 = 6;
+const FUT_MOVE_BASE: i32 = 80;
+const FUT_MOVE_PER_DEPTH: i32 = 90;
+// Scores at or beyond this magnitude are mate scores; never futility-prune around them.
+const MATE_BOUND: i32 = MATE_SCORE - 1000;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
 // margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
@@ -1262,15 +1270,33 @@ fn negamax(
             continue;
         }
 
+        // Per-move futility: only decided once the move is made, since
+        // gives_check is computed after make_move.
+        let futility_candidate = quiet
+            && !priority_quiet
+            && !in_check
+            && beta - alpha <= 1
+            && idx > 0
+            && depth <= FUT_MOVE_MAX_DEPTH
+            && alpha.abs() < MATE_BOUND
+            && best > -MATE_BOUND
+            && static_eval
+                .is_some_and(|se| se + FUT_MOVE_BASE + FUT_MOVE_PER_DEPTH * depth <= alpha);
+
+        let undo = board.make_move(mv);
+        let gives_check = board.is_in_check(board.side_to_move);
+        if futility_candidate && !gives_check {
+            board.undo_move(mv, undo);
+            continue;
+        }
+
         if quiet {
             quiets_tried.push(mv);
         }
 
-        let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
         rep_stack.push(child_key);
-        let gives_check = board.is_in_check(board.side_to_move);
 
         let mut score;
         if idx == 0 {
