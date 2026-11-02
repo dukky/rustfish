@@ -23,7 +23,7 @@ use movegen::{generate_pseudo_moves, is_square_attacked_occ};
 use movegen::{generate_legal_moves_fused, in_bounds, is_square_attacked, piece_attacks, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go};
 use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
-use uci::{flush_stdout, handle_bench, handle_divide, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
+use uci::{flush_stdout, handle_bench, handle_divide, handle_evalhash, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 
 const MATE_SCORE: i32 = 30_000;
 const INF: i32 = 1_000_000;
@@ -1179,6 +1179,10 @@ fn main() {
         }
         if cmd.starts_with("tune ") {
             tune::handle_tune(cmd);
+            continue;
+        }
+        if cmd.starts_with("evalhash") {
+            handle_evalhash(cmd, &mut board);
             continue;
         }
         if cmd.starts_with("bench") {

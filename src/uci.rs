@@ -544,6 +544,52 @@ pub(crate) fn handle_bench(cmd: &str, board: &mut Board, engine: &mut EngineStat
     flush_stdout();
 }
 
+/// Hash of the static eval over a fixed, deterministic set of positions: seeded
+/// random walks from BENCH_FENS, evaluating every legal child along the way.
+/// Bench node counts only show search behaviour at bench depth; this shows
+/// the eval itself is unchanged, which is what an exact speedup must keep.
+/// `evalhash [walks_per_fen] [plies]`; the merge queue compares candidate and
+/// main with the defaults.
+pub(crate) fn handle_evalhash(cmd: &str, board: &mut Board) {
+    let mut args = cmd.split_whitespace().skip(1).map(|a| a.parse::<usize>().ok());
+    let walks = args.next().flatten().unwrap_or(8);
+    let plies = args.next().flatten().unwrap_or(60);
+    let mut seed = 0x5eed_e7a1_u64;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut count = 0u64;
+    let mut mix = |v: i32| {
+        hash = (hash ^ (v as u32 as u64)).wrapping_mul(0x0100_0000_01b3);
+        count += 1;
+    };
+    let mut moves = Vec::new();
+    let mut children = Vec::new();
+    for fen in BENCH_FENS {
+        for _ in 0..walks {
+            board.set_fen(fen);
+            for _ in 0..plies {
+                mix(eval::eval_for_side(board));
+                board.generate_legal_moves(false, &mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+                children.clear();
+                children.extend_from_slice(&moves);
+                for &mv in &children {
+                    let undo = board.make_move(mv);
+                    mix(eval::eval_for_side(board));
+                    board.undo_move(mv, undo);
+                }
+                let mv = children[(tt::splitmix64(&mut seed) % children.len() as u64) as usize];
+                board.make_move(mv);
+            }
+        }
+    }
+    board.set_startpos();
+    println!("Evals hashed    : {}", count);
+    println!("Eval hash       : {:016x}", hash);
+    flush_stdout();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

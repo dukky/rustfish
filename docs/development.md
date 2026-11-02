@@ -25,7 +25,7 @@ sanity; GitHub Actions (public repo, free) does every strength measurement.
 | Change | Bench | Gate | Bounds |
 |---|---|---|---|
 | Refactor, cleanup, tooling, docs | must be unchanged | CI | none |
-| Pure speedup (same nodes, faster) | must be unchanged | CI + interleaved local bench NPS | optional `--nonreg` if large |
+| Pure speedup (same nodes, faster) | must be unchanged, and `evalhash` must match `main`'s | CI + interleaved local bench NPS (or CPU cycles via `/usr/bin/time -l`) | none; anything that changes the eval goes through an SPRT instead |
 | New eval or search idea, parameter change | new `Bench:` trailer | STC SPRT | `[0, 10]` (default; `--elo1 5` later) |
 | Search changes, in batches | — | LTC non-regression of `main` vs `main` ~5 merges back | `[-5, 0]` with `--ltc --base <sha>` |
 | Simplification (removes code/terms) | new `Bench:` trailer | STC non-regression | `[-5, 0]` via `--nonreg` |
@@ -125,7 +125,9 @@ against the current `main`, so a stale base can't happen.
   outcome: merged / rejected / needs-human / skipped).
 - Modes: `stc` (gainer `[0, 10]`), `nonreg` (`[-5, 0]`), `ltc-gainer`
   (`[0, 10]` at 60+0.6), `speedup` (no SPRT; merges only if bench nodes equal
-  `main`'s).
+  `main`'s and the `evalhash` command gives the same hash as a `main` build:
+  bench alone can't see an eval change that happens not to alter the bench
+  tree).
 - To add work: push the branch, then
   `python3 scripts/queue.py add <branch>:<mode>[,<branch>:<mode>]` (`--front`
   to jump the queue, e.g. for speedups). This drops a request file in
@@ -223,6 +225,7 @@ this pipeline before ruling it out again.
 | Tool | Purpose |
 |---|---|
 | `bench [depth]` (UCI command) | deterministic node count + NPS |
+| `evalhash` (UCI command) | hash of the static eval over ~190k fixed positions; must match `main` for a speedup |
 | `scripts/check_bench.py` | bench vs last `Bench:` trailer (CI + local) |
 | `scripts/ci.py sprt/ladder/status` | dispatch and follow GitHub tests, log results |
 | `scripts/sprt.py` | LLR / Elo from pentanomial counts (used by the workflow) |

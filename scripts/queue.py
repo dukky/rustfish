@@ -214,8 +214,12 @@ def start(item):
     sh("git", "push", "-q", "--force", "origin", f"candidate:{branch}")
 
     if mode == "speedup":
+        mismatch = None if nodes != mnodes else eval_mismatch()
         if nodes != mnodes:
             log(dict(base, outcome="needs-human", reason=f"speedup changed bench {mnodes} -> {nodes}"))
+        elif mismatch:
+            log(dict(base, outcome="needs-human", reason=f"speedup changed the eval ({mismatch}); "
+                     "eval changes need an SPRT: re-add as stc or nonreg"))
         elif fast_forward_main(sha):
             log(dict(base, outcome="merged", sha=sha, reason="speedup, bench identical"))
         else:
@@ -223,6 +227,33 @@ def start(item):
         return None
 
     return dict(dispatch(base, sha, out("git", "rev-parse", "origin/main"), branch), bench=nodes)
+
+
+def eval_hash(binary):
+    res = subprocess.run([binary], input="evalhash\nquit\n", capture_output=True, text=True)
+    m = re.search(r"Eval hash\s*:\s*([0-9a-f]+)", res.stdout)
+    return m.group(1) if m else None
+
+
+def eval_mismatch():
+    """Compare the candidate's `evalhash` with origin/main's. Bench nodes only
+    cover search at bench depth; a speedup must also leave the eval itself
+    bit-identical. Returns a description of the mismatch, or None."""
+    cand = eval_hash(os.path.join(REPO, "target", "release", "rustfish"))
+    wt = os.path.join(REPO, ".main-build")
+    sh("git", "worktree", "remove", "--force", wt, check=False)
+    sh("git", "worktree", "add", "-q", "--detach", wt, "origin/main")
+    try:
+        sh("cargo", "build", "--release", "-q", cwd=wt)
+        main = eval_hash(os.path.join(wt, "target", "release", "rustfish"))
+    finally:
+        sh("git", "worktree", "remove", "--force", wt, check=False)
+    if main is None:
+        print("main has no evalhash command yet; skipping the eval check")
+        return None
+    if cand != main:
+        return f"evalhash {main} -> {cand}"
+    return None
 
 
 def dispatch(base, sha, base_sha, name):
