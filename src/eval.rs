@@ -1035,10 +1035,13 @@ impl<T: Tracer> Score<'_, T> {
     }
 }
 
-/// Mobility (returned), outposts, bishop mobility and trapped pieces for one
-/// side; `sign` is +1 for White, -1 for Black. `pieces` / `atts` are in kind
-/// order with `ends[k]` the list length after kind `k`; `own_occ` is the
-/// side's occupancy.
+/// Safe-square mobility, outposts and trapped pieces for one side; `sign` is
+/// +1 for White, -1 for Black. `pieces` / `atts` are in kind order with
+/// `ends[k]` the list length after kind `k`; `own_occ` is the side's
+/// occupancy. Mobility counts, per knight/bishop/rook/queen, the attacked
+/// squares inside `mob_area` (not attacked by an enemy pawn, not holding an
+/// own pawn or the own king); pawns and kings score no mobility. Trapped-piece
+/// checks keep using the plain pseudo-legal count (attacks minus own-occupied).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn mobility_side<T: Tracer>(
@@ -1049,51 +1052,54 @@ fn mobility_side<T: Tracer>(
     atts: &[u64; 16],
     ends: &[usize; 6],
     own_occ: u64,
+    mob_area: u64,
     white_min_pawn_rank: &[i8; 8],
     black_max_pawn_rank: &[i8; 8],
     own_king: Option<u8>,
-) -> i32 {
+) {
     let white = color == Color::White;
     let mob = |a: u64| (a & !own_occ).count_ones() as i32;
-    // Pieces of kinds `from..to` (indices into `ends`, 0 = pawn) with attacks.
-    let kinds = |from: usize, to: usize| {
-        let lo = if from == 0 { 0 } else { ends[from - 1] };
-        let hi = ends[to - 1];
+    let safe = |a: u64| (a & mob_area).count_ones() as i32;
+    // Pieces of kind `k` (index into `ends`, 0 = pawn) with attacks.
+    let kind = |k: usize| {
+        let lo = if k == 0 { 0 } else { ends[k - 1] };
+        let hi = ends[k];
         pieces[lo..hi].iter().zip(&atts[lo..hi])
     };
-    let mut total = 0;
-    // Pawns, queens and king: mobility only (no outpost or trapped terms).
-    for (_, &a) in kinds(0, 1).chain(kinds(4, 6)) {
-        total += mob(a);
-    }
     let outpost = |sq: u8| {
         let r = sq / 8;
         (if white { r >= 3 } else { r <= 4 })
             && is_outpost_square(sq, color, white_min_pawn_rank, black_max_pawn_rank)
     };
-    for (&(sq, piece), &a) in kinds(1, 2) {
-        let mobility = mob(a);
-        total += mobility;
+    let mut knight_mob = 0;
+    for (&(sq, piece), &a) in kind(1) {
+        knight_mob += safe(a);
         if outpost(sq) {
             s.add(P::KnightOutpost, sign);
         }
-        trapped_piece_penalty(s, sign, sq, piece, mobility, own_king);
+        trapped_piece_penalty(s, sign, sq, piece, mob(a), own_king);
     }
-    for (&(sq, piece), &a) in kinds(2, 3) {
-        let mobility = mob(a);
-        total += mobility;
+    s.add(P::KnightMobility, sign * knight_mob);
+    let mut bishop_mob = 0;
+    for (&(sq, piece), &a) in kind(2) {
+        bishop_mob += safe(a);
         if outpost(sq) {
             s.add(P::BishopOutpost, sign);
         }
-        s.add(P::BishopMobilityExtra, sign * mobility);
-        trapped_piece_penalty(s, sign, sq, piece, mobility, own_king);
+        trapped_piece_penalty(s, sign, sq, piece, mob(a), own_king);
     }
-    for (&(sq, piece), &a) in kinds(3, 4) {
-        let mobility = mob(a);
-        total += mobility;
-        trapped_piece_penalty(s, sign, sq, piece, mobility, own_king);
+    s.add(P::BishopMobility, sign * bishop_mob);
+    let mut rook_mob = 0;
+    for (&(sq, piece), &a) in kind(3) {
+        rook_mob += safe(a);
+        trapped_piece_penalty(s, sign, sq, piece, mob(a), own_king);
     }
-    total
+    s.add(P::RookMobility, sign * rook_mob);
+    let mut queen_mob = 0;
+    for (_, &a) in kind(4) {
+        queen_mob += safe(a);
+    }
+    s.add(P::QueenMobility, sign * queen_mob);
 }
 
 pub(crate) fn evaluate(board: &Board) -> i32 {
@@ -1407,7 +1413,13 @@ fn evaluate_impl<T: Tracer>(board: &Board, t: &mut T, pawns: Option<&mut PawnTab
         );
     }
 
-    let white_mob = mobility_side(
+    // Mobility area: squares not attacked by enemy pawns and not holding an
+    // own pawn or king.
+    let mob_area = [
+        !(att[1].pawn | board.bb.pieces[0][0] | board.bb.pieces[0][5]),
+        !(att[0].pawn | board.bb.pieces[1][0] | board.bb.pieces[1][5]),
+    ];
+    mobility_side(
         &mut s,
         1,
         Color::White,
@@ -1415,11 +1427,12 @@ fn evaluate_impl<T: Tracer>(board: &Board, t: &mut T, pawns: Option<&mut PawnTab
         &white_atts,
         &ends[0],
         board.bb.occ[0],
+        mob_area[0],
         &white_min_pawn_rank,
         &black_max_pawn_rank,
         white_king,
     );
-    let black_mob = mobility_side(
+    mobility_side(
         &mut s,
         -1,
         Color::Black,
@@ -1427,11 +1440,11 @@ fn evaluate_impl<T: Tracer>(board: &Board, t: &mut T, pawns: Option<&mut PawnTab
         &black_atts,
         &ends[1],
         board.bb.occ[1],
+        mob_area[1],
         &white_min_pawn_rank,
         &black_max_pawn_rank,
         black_king,
     );
-    s.add(P::Mobility, white_mob - black_mob);
 
     threats(&mut s, 1, board, &att[0], &att[1], 1);
     threats(&mut s, -1, board, &att[1], &att[0], 0);
