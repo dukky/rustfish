@@ -1140,7 +1140,7 @@ fn negamax(
                 margin -= margin / 4;
             }
             if se - margin >= beta {
-                return se;
+                return if se.abs() < MATE_SCORE - 1000 { (se + beta) / 2 } else { se };
             }
         }
     }
