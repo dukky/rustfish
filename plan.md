@@ -71,6 +71,10 @@ measure runner speed, then a first training run and an SPRT.
   the queue runs the same checks itself, so this is cosmetic.
 - **Queue logs live on `queue-state`**, not `tests/sprt-log.jsonl`; both are
   records now, the queue's is authoritative for queue tests.
+- **No NNUE training workflow yet.** `tools/nnue-trainer` is ready
+  (checkpoint/resume, measured throughput), but `nnue-train.yml` has to be
+  added by a human (workflow files need an SSH push). Until then, training
+  runs locally on a downloaded datagen artifact.
 - **Time management** is only tested at 60+0.6; CCRL is 120+1 / 40/15 and
   Lichess games are often longer. `tm-budget` is in the queue.
 - **Lazy SMP is untested for strength** (CCRL blitz is 1 thread, so it only
