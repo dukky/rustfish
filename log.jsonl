@@ -36,3 +36,7 @@
 {"branch": "lmr-history-scale", "logged_at": "2026-11-02T03:47:37Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
 {"branch": "eval-mobility", "logged_at": "2026-11-02T03:47:37Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
 {"branch": "pawn-hash", "logged_at": "2026-11-02T03:47:38Z", "mode": "speedup", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "pawn-hash-r2", "logged_at": "2026-11-02T14:34:36Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "e30a1b34c473a98127fa95265412b2654f9a8b50"}
+{"branch": "datagen-ci", "logged_at": "2026-11-02T14:35:15Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11"}
+{"branch": "nnue-inference", "logged_at": "2026-11-02T14:35:15Z", "mode": "speedup", "outcome": "needs-human", "reason": "rebase conflict"}
+{"base_sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11", "branch": "history-pruning", "logged_at": "2026-11-02T14:35:43Z", "mode": "stc", "outcome": "dispatched", "sha": "ad04266916255b2e55a6d5ccb00627dad8d38c62", "test_id": "q-history-pruning-1102-1435"}

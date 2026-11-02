@@ -1,6 +1,91 @@
 {
-  "pending": [],
-  "current": null,
+  "pending": [
+    {
+      "branch": "iir-cutnode",
+      "mode": "stc"
+    },
+    {
+      "branch": "aspiration-widen-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "correction-history-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "endgame-scale-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "see-pruning-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "razoring",
+      "mode": "stc"
+    },
+    {
+      "branch": "nmp-tune",
+      "mode": "stc"
+    },
+    {
+      "branch": "tt-cutoff-guards",
+      "mode": "stc"
+    },
+    {
+      "branch": "kpk-bitbase",
+      "mode": "stc"
+    },
+    {
+      "branch": "extensions-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-pv-captures-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-history-scale-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "singular-ext-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "futility-moves-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "followup-history-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "probcut-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "eval-mobility-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "rfp-blend",
+      "mode": "stc"
+    },
+    {
+      "branch": "nmp-tt-guard",
+      "mode": "stc"
+    }
+  ],
+  "current": {
+    "branch": "history-pruning",
+    "mode": "stc",
+    "test_id": "q-history-pruning-1102-1435",
+    "sha": "ad04266916255b2e55a6d5ccb00627dad8d38c62",
+    "base_sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11",
+    "started": "2026-11-02T14:35:43Z",
+    "bench": 518405
+  },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 0
 }
