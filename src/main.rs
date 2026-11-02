@@ -988,10 +988,14 @@ struct EngineState {
     position_history: Vec<u64>,
     last_search_nodes: u64,
     move_overhead: u64,
-    /// Net loaded from `EvalFile`; used only when `use_nnue` is set.
+    /// Net loaded from `EvalFile`; `UseNNUE` selects whether search uses it.
     nnue_net: Option<std::sync::Arc<nnue::Network>>,
     use_nnue: bool,
 }
+
+/// First net trained on HCE self-play (3.3M positions, seed 1 at 5000 nodes, 10 epochs)
+/// with `tools/nnue-trainer`; embedded so the engine is NNUE by default.
+const EMBEDDED_NET: &[u8] = include_bytes!("../net/nnue.bin");
 
 impl EngineState {
     fn new() -> Self {
@@ -1018,8 +1022,10 @@ impl EngineState {
             position_history: Vec::new(),
             last_search_nodes: 0,
             move_overhead: 10,
-            nnue_net: None,
-            use_nnue: false,
+            nnue_net: Some(std::sync::Arc::new(
+                nnue::Network::from_bytes(EMBEDDED_NET).expect("embedded NNUE net"),
+            )),
+            use_nnue: true,
         }
     }
 
@@ -1144,7 +1150,7 @@ fn main() {
             println!("option name BookStyle type combo default normal var normal var grinder var chaos");
             println!("option name BookFile type string default");
             println!("option name EvalFile type string default");
-            println!("option name UseNNUE type check default false");
+            println!("option name UseNNUE type check default true");
             println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
