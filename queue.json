@@ -71,6 +71,10 @@
     {
       "branch": "ttcapture-lmr",
       "mode": "stc"
+    },
+    {
+      "branch": "nnue-first-net",
+      "mode": "stc"
     }
   ],
   "current": {
