@@ -3,6 +3,7 @@ mod book;
 mod datagen;
 mod eval;
 mod evalcache;
+mod kpk;
 mod eval_params;
 mod movegen;
 mod nnue;
