@@ -121,6 +121,40 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         return;
     }
 
+    if n == "evalfile" {
+        let path = value.trim();
+        if path.is_empty() || path.eq_ignore_ascii_case("none") || path == "-" {
+            engine.nnue_net = None;
+        } else {
+            match crate::nnue::Network::load(path) {
+                Ok(net) => {
+                    engine.nnue_net = Some(std::sync::Arc::new(net));
+                    println!("info string loaded NNUE {path}");
+                }
+                Err(e) => {
+                    engine.nnue_net = None;
+                    println!("info string EvalFile error: {e}");
+                }
+            }
+            flush_stdout();
+        }
+        // Cached static evals belong to the previous evaluator.
+        engine.eval_cache.clear();
+        engine.tt.clear();
+        return;
+    }
+    if n == "usennue" {
+        let v = value.trim().to_ascii_lowercase();
+        engine.use_nnue = v == "true" || v == "1" || v == "on";
+        if engine.use_nnue && engine.nnue_net.is_none() {
+            println!("info string UseNNUE set but no EvalFile loaded; using HCE");
+            flush_stdout();
+        }
+        engine.eval_cache.clear();
+        engine.tt.clear();
+        return;
+    }
+
     if let Ok(v) = value.trim().parse::<i32>() {
         match n.as_str() {
             "futilitymargind1" => engine.search_params.futility_margin_d1 = v.clamp(0, 500),

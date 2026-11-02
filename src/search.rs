@@ -483,6 +483,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             return Some(book);
         }
     }
+    // Attach (fresh refresh) or detach the NNUE accumulators for this search.
+    board.attach_nnue(engine.active_net());
 
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
     let mut depth: Option<i32> = None;

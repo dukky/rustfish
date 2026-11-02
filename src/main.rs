@@ -5,6 +5,7 @@ mod eval;
 mod evalcache;
 mod eval_params;
 mod movegen;
+mod nnue;
 mod psqt;
 mod search;
 mod tt;
@@ -252,6 +253,9 @@ struct Board {
     black_king_sq: Option<u8>,
     eval_acc: EvalAcc,
     bb: bitboard::BoardBB,
+    /// NNUE accumulator stack; `None` (the default) costs one branch per
+    /// make/undo and leaves the HCE path untouched.
+    nnue: Option<Box<nnue::NnueState>>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -306,6 +310,7 @@ impl Board {
             black_king_sq: None,
             eval_acc: EvalAcc::default(),
             bb: bitboard::BoardBB::default(),
+            nnue: None,
         };
         b.set_startpos();
         b
@@ -442,6 +447,15 @@ impl Board {
 
         self.eval_acc = self.recompute_eval_acc();
         self.bb = self.recompute_bb();
+        if let Some(mut st) = self.nnue.take() {
+            st.refresh(self);
+            self.nnue = Some(st);
+        }
+    }
+
+    /// Attach (refreshing from scratch) or detach the NNUE accumulators.
+    fn attach_nnue(&mut self, net: Option<std::sync::Arc<nnue::Network>>) {
+        self.nnue = net.map(|n| Box::new(nnue::NnueState::new(n, self)));
     }
 
     fn king_square(&self, color: Color) -> Option<u8> {
@@ -619,6 +633,10 @@ impl Board {
     }
 
     fn make_move(&mut self, mv: Move) -> Undo {
+        if let Some(mut st) = self.nnue.take() {
+            st.push_move(self, mv);
+            self.nnue = Some(st);
+        }
         let moving_piece = self.squares[mv.from as usize].unwrap();
         let mut captured = self.squares[mv.to as usize];
         let mut captured_sq = if captured.is_some() { Some(mv.to) } else { None };
@@ -767,6 +785,9 @@ impl Board {
     }
 
     fn undo_move(&mut self, mv: Move, undo: Undo) {
+        if let Some(st) = self.nnue.as_mut() {
+            st.pop();
+        }
         self.side_to_move = self.side_to_move.opposite();
         self.castling = undo.castling;
         self.en_passant = undo.en_passant;
@@ -967,6 +988,9 @@ struct EngineState {
     position_history: Vec<u64>,
     last_search_nodes: u64,
     move_overhead: u64,
+    /// Net loaded from `EvalFile`; used only when `use_nnue` is set.
+    nnue_net: Option<std::sync::Arc<nnue::Network>>,
+    use_nnue: bool,
 }
 
 impl EngineState {
@@ -994,6 +1018,17 @@ impl EngineState {
             position_history: Vec::new(),
             last_search_nodes: 0,
             move_overhead: 10,
+            nnue_net: None,
+            use_nnue: false,
+        }
+    }
+
+    /// The net search should evaluate with, if NNUE is enabled and loaded.
+    fn active_net(&self) -> Option<std::sync::Arc<nnue::Network>> {
+        if self.use_nnue {
+            self.nnue_net.clone()
+        } else {
+            None
         }
     }
 
@@ -1078,6 +1113,8 @@ impl EngineState {
             position_history: self.position_history.clone(),
             last_search_nodes: 0,
             move_overhead: self.move_overhead,
+            nnue_net: self.nnue_net.clone(),
+            use_nnue: self.use_nnue,
         }
     }
 }
@@ -1106,6 +1143,8 @@ fn main() {
             println!("option name OwnBook type check default true");
             println!("option name BookStyle type combo default normal var normal var grinder var chaos");
             println!("option name BookFile type string default");
+            println!("option name EvalFile type string default");
+            println!("option name UseNNUE type check default false");
             println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
