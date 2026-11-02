@@ -55,6 +55,10 @@
     {
       "branch": "endgame-scale-r3",
       "mode": "stc"
+    },
+    {
+      "branch": "nnue-inference-r2",
+      "mode": "speedup"
     }
   ],
   "current": {
