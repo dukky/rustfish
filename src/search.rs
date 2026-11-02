@@ -38,6 +38,9 @@ fn stop_requested() -> bool {
 // is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
 const SEE_QUIET_MAX_DEPTH: i32 = 8;
 const SEE_QUIET_MARGIN: i32 = 20;
+// Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
+const SEE_PRUNE_MAX_DEPTH: i32 = 6;
+const SEE_PRUNE_CAPTURE_MARGIN: i32 = 100;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
@@ -1258,6 +1261,17 @@ fn negamax(
             && depth <= SEE_QUIET_MAX_DEPTH
             && best > -(MATE_SCORE - 1000)
             && see(board, mv) < -SEE_QUIET_MARGIN * depth * depth
+        {
+            continue;
+        }
+
+        if stage == Stage::BadCapture
+            && !in_check
+            && beta - alpha <= 1
+            && depth <= SEE_PRUNE_MAX_DEPTH
+            && idx > 0
+            && best > -(MATE_SCORE - 1000)
+            && see(board, mv) < -SEE_PRUNE_CAPTURE_MARGIN * depth
         {
             continue;
         }
