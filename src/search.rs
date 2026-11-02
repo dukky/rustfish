@@ -1231,6 +1231,9 @@ fn negamax(
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
     let mut idx = 0usize;
+    // Captures are searched before quiets, so a capturing TT move signals that
+    // the quiet moves after it are less likely to be best.
+    let tt_move_is_capture = tt_move.is_some_and(|m| is_capture_move(board, m));
 
     while let Some((mv, stage)) = picker.next() {
         if Some(mv) == excluded {
@@ -1375,6 +1378,11 @@ fn negamax(
                 // Killers, counter-moves and positive-history quiets reduce one ply less.
                 if priority_quiet {
                     r -= 1;
+                }
+                // A capturing TT move means the quiet moves come after a
+                // capture was already preferred: reduce them one ply more.
+                if tt_move_is_capture {
+                    r += 1;
                 }
                 // Reduce more for moves with bad history
                 if quiet_history < -LMR_HISTORY_THRESHOLD {
