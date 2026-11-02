@@ -1,39 +1,6 @@
 {
-  "pending": [
-    {
-      "branch": "aspiration-widen",
-      "mode": "stc"
-    },
-    {
-      "branch": "extensions",
-      "mode": "stc"
-    },
-    {
-      "branch": "lmr-pv-captures",
-      "mode": "stc"
-    },
-    {
-      "branch": "lmr-history-scale",
-      "mode": "stc"
-    },
-    {
-      "branch": "eval-mobility",
-      "mode": "stc"
-    },
-    {
-      "branch": "pawn-hash",
-      "mode": "speedup"
-    }
-  ],
-  "current": {
-    "branch": "capture-history",
-    "mode": "stc",
-    "test_id": "q-capture-history-1102-0253",
-    "sha": "36a332728d7e904192a8906f184904d2e9efc549",
-    "base_sha": "04440e473f78315d0897eab02d062dfd717f4637",
-    "started": "2026-11-02T02:53:44Z",
-    "bench": 533534
-  },
+  "pending": [],
+  "current": null,
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 0
 }
