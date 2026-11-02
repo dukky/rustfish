@@ -1,0 +1,159 @@
+name: Datagen
+
+# Self-play training data (NNUE + Texel) on GitHub runners. Shard s plays games
+# [s * games_per_shard, (s + 1) * games_per_shard) of one seed, so the merged
+# file is exactly what a single `datagen` run over all games would write, and a
+# rerun with the same inputs and ref reproduces it byte for byte. Manual trigger
+# only; it competes with the SPRT queue for runners, so cap max_parallel when
+# the queue is busy. See docs/nnue.md ("Data generation").
+
+run-name: "Datagen ${{ inputs.ref }} seed ${{ inputs.seed }} (${{ inputs.shards }}x${{ inputs.games_per_shard }} games, ${{ inputs.nodes }} nodes)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Engine ref (branch, tag or SHA) to generate with"
+        default: "main"
+      shards:
+        description: "Number of parallel jobs"
+        default: "20"
+      games_per_shard:
+        description: "Games per shard (est. ~36k games/h on a 4-vCPU runner at 5000 nodes)"
+        default: "40000"
+      nodes:
+        description: "Search nodes per move"
+        default: "5000"
+      seed:
+        description: "RNG seed; use a new one for every run you want to add to the pool"
+        default: "1"
+      max_parallel:
+        description: "Max shards running at once (leave runners for the SPRT queue)"
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - id: plan
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          python3 -c "import json,sys; print('shards=' + json.dumps(list(range(int(sys.argv[1])))))" "$SHARDS" >> "$GITHUB_OUTPUT"
+
+  # Build once and share the binary. x86-64-v3 (AVX2/BMI2/POPCNT) runs on every
+  # GitHub runner, unlike target-cpu=native binaries.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Build rustfish
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          cargo build --release
+          mkdir -p engines && cp target/release/rustfish engines/rustfish
+          printf 'bench\nquit\n' | engines/rustfish | grep 'Nodes searched'
+          git rev-parse HEAD > engines/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datagen-engine
+          path: engines
+          retention-days: 3
+
+  generate:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: datagen-engine
+          path: engines
+      - name: Generate
+        env:
+          SHARD: ${{ matrix.shard }}
+          GAMES: ${{ inputs.games_per_shard }}
+          NODES: ${{ inputs.nodes }}
+          SEED: ${{ inputs.seed }}
+        run: |
+          chmod +x engines/rustfish
+          first=$((SHARD * GAMES))
+          name=$(printf 'shard-%04d' "$SHARD")
+          mkdir -p out && touch out/raw.txt
+          # Hard stop well inside the 6h job limit. Output is written in game
+          # order through a buffer, so a killed run may end in a partial line;
+          # the filter below keeps only complete records.
+          echo "datagen out/raw.txt $GAMES $NODES $(nproc) $SEED $first" \
+            | timeout 320m engines/rustfish 2>&1 | tee out/log.txt || echo "datagen exited early (timeout?)"
+          { grep -E ' \| -?[0-9]+ \| (1\.0|0\.5|0\.0)$' out/raw.txt || true; } | gzip -6 > "out/$name.txt.gz"
+          rm out/raw.txt
+          positions=$(zcat "out/$name.txt.gz" | wc -l)
+          echo "$name: $positions positions; $(grep 'datagen done' out/log.txt || echo 'did not finish (timeout)')" | tee "out/$name.stats"
+          rm out/log.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datagen-shard-${{ matrix.shard }}
+          path: out
+          compression-level: 0   # already gzipped
+          retention-days: 3
+
+  merge:
+    needs: [build, generate]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: datagen-shard-*
+          path: shards
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: datagen-engine
+          path: engines
+      - name: Concatenate
+        env:
+          SEED: ${{ inputs.seed }}
+          NODES: ${{ inputs.nodes }}
+          GAMES: ${{ inputs.games_per_shard }}
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          mkdir -p merged
+          out="merged/datagen-s${SEED}-n${NODES}.txt.gz"
+          # gzip members concatenate into one valid gzip stream; shard names
+          # are zero-padded, so this is game order.
+          cat $(ls shards/shard-*.txt.gz | sort) > "$out"
+          total=$(zcat "$out" | wc -l)
+          {
+            echo "## Datagen seed $SEED, $NODES nodes/move"
+            echo
+            echo "- engine: \`$(cat engines/sha.txt)\`"
+            echo "- shards finished: $(ls shards/shard-*.txt.gz | wc -l) / $SHARDS ($GAMES games each)"
+            echo "- positions: $total"
+            echo "- file: \`$(basename "$out")\`, $(du -h "$out" | cut -f1) gzipped"
+            echo
+            echo '```'
+            cat $(ls shards/shard-*.stats | sort)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datagen-s${{ inputs.seed }}-n${{ inputs.nodes }}
+          path: merged
+          compression-level: 0
+          retention-days: 90
