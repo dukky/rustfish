@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "correction-history-r2",
-      "mode": "stc"
-    },
-    {
       "branch": "endgame-scale-r2",
       "mode": "stc"
     },
@@ -70,13 +66,13 @@
     }
   ],
   "current": {
-    "branch": "aspiration-widen-r2",
+    "branch": "correction-history-r2",
     "mode": "stc",
-    "test_id": "q-aspiration-widen-r2-1102-1617",
-    "sha": "c08e069f736f90a99ba905a6606054a1d256165b",
+    "test_id": "q-correction-history-r2-1102-1654",
+    "sha": "9629fc4d0aaf30fc87c0f66313360c5b37df3ce2",
     "base_sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11",
-    "started": "2026-11-02T16:17:56Z",
-    "bench": 567574
+    "started": "2026-11-02T16:54:32Z",
+    "bench": 517055
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 0
