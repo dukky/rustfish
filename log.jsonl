@@ -40,3 +40,5 @@
 {"branch": "datagen-ci", "logged_at": "2026-11-02T14:35:15Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11"}
 {"branch": "nnue-inference", "logged_at": "2026-11-02T14:35:15Z", "mode": "speedup", "outcome": "needs-human", "reason": "rebase conflict"}
 {"base_sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11", "branch": "history-pruning", "logged_at": "2026-11-02T14:35:43Z", "mode": "stc", "outcome": "dispatched", "sha": "ad04266916255b2e55a6d5ccb00627dad8d38c62", "test_id": "q-history-pruning-1102-1435"}
+{"branch": "history-pruning", "elo": 0.36, "elo_ci95": [-5.7, 6.43], "games": 6688, "llr": -4.835, "logged_at": "2026-11-02T15:39:49Z", "mode": "stc", "outcome": "rejected", "sha": "ad04266916255b2e55a6d5ccb00627dad8d38c62", "test_id": "q-history-pruning-1102-1435", "verdict": "H0"}
+{"base_sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11", "branch": "iir-cutnode", "logged_at": "2026-11-02T15:40:40Z", "mode": "stc", "outcome": "dispatched", "sha": "728da5e4fb39c14c432f0561667a3c2e27ee7b50", "test_id": "q-iir-cutnode-1102-1540"}

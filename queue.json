@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "iir-cutnode",
-      "mode": "stc"
-    },
-    {
       "branch": "aspiration-widen-r2",
       "mode": "stc"
     },
@@ -78,13 +74,13 @@
     }
   ],
   "current": {
-    "branch": "history-pruning",
+    "branch": "iir-cutnode",
     "mode": "stc",
-    "test_id": "q-history-pruning-1102-1435",
-    "sha": "ad04266916255b2e55a6d5ccb00627dad8d38c62",
+    "test_id": "q-iir-cutnode-1102-1540",
+    "sha": "728da5e4fb39c14c432f0561667a3c2e27ee7b50",
     "base_sha": "523542c07bd5a61dec60b478fb2fc8247ed38f11",
-    "started": "2026-11-02T14:35:43Z",
-    "bench": 518405
+    "started": "2026-11-02T15:40:40Z",
+    "bench": 516618
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 0
