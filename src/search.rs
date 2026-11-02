@@ -116,6 +116,10 @@ pub(crate) struct Search {
     static_evals: [i32; MAX_PLY],
     /// Move skipped by a singular-extension verification search at this ply.
     excluded: [Option<Move>; MAX_PLY],
+    /// `moves[ply]` is the move that led to the node at `ply` (None at the
+    /// root and after a null move); `moves[ply - 1]` is therefore the side to
+    /// move's own previous move, which keys the follow-up history.
+    moves: [Option<Move>; MAX_PLY],
     move_buf: Vec<Move>,
 }
 
@@ -129,6 +133,7 @@ impl Search {
             killers: [[None; 2]; MAX_PLY],
             static_evals: [NO_EVAL; MAX_PLY],
             excluded: [None; MAX_PLY],
+            moves: [None; MAX_PLY],
             move_buf: Vec::with_capacity(256),
         }
     }
@@ -215,6 +220,45 @@ fn apply_continuation_history_delta(
     };
     let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
         [mv.to as usize];
+    apply_gravity(h, delta);
+}
+
+/// Follow-up (2-ply) continuation history: keyed by the side to move's own
+/// previous move (`followup`, played two plies ago) and the current move.
+fn followup_history_score(
+    engine: &EngineState,
+    side: Color,
+    followup: Option<Move>,
+    mv: Move,
+) -> i32 {
+    followup
+        .map(|prev2| {
+            engine.followup_history[followup_index(
+                color_index(side),
+                prev2.to as usize,
+                mv.from as usize,
+                mv.to as usize,
+            )]
+        })
+        .unwrap_or(0)
+}
+
+fn apply_followup_history_delta(
+    engine: &mut EngineState,
+    side: Color,
+    followup: Option<Move>,
+    mv: Move,
+    delta: i32,
+) {
+    let Some(prev2) = followup else {
+        return;
+    };
+    let h = &mut engine.followup_history[followup_index(
+        color_index(side),
+        prev2.to as usize,
+        mv.from as usize,
+        mv.to as usize,
+    )];
     apply_gravity(h, delta);
 }
 
@@ -331,6 +375,7 @@ impl MovePicker {
         tt_move: Option<Move>,
         counter_move: Option<Move>,
         prev_move: Option<Move>,
+        followup: Option<Move>,
         killers: &[Option<Move>; 2],
         history: &HistoryTable,
         captures_only: bool,
@@ -377,7 +422,8 @@ impl MovePicker {
                 continue;
             }
 
-            let score = quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
+            let score =
+                quiet_stage_score(engine, side, mv, counter_move, prev_move, followup, killers);
             if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
                 picker.bufs.priority_quiets.push((mv, score));
             } else {
@@ -1043,6 +1089,8 @@ fn negamax(
     if ply >= MAX_PLY - 1 {
         return eval_for_side(board);
     }
+    search.moves[ply] = prev_move;
+    let followup = if ply >= 1 { search.moves[ply - 1] } else { None };
 
     if board.halfmove_clock >= 100 {
         return 0;
@@ -1214,6 +1262,7 @@ fn negamax(
         tt_move,
         counter_move,
         prev_move,
+        followup,
         &killers,
         &engine.history,
         false,
@@ -1465,10 +1514,12 @@ fn negamax(
                 }
                 apply_history_delta(engine, side, mv, bonus);
                 apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                apply_followup_history_delta(engine, side, followup, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, tried, -bonus);
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_followup_history_delta(engine, side, followup, tried, -bonus);
                     }
                 }
             }
@@ -1583,6 +1634,7 @@ fn quiescence(
         board,
         engine,
         tt_move,
+        None,
         None,
         None,
         &[None, None],
@@ -1708,10 +1760,12 @@ fn quiet_stage_score(
     mv: Move,
     counter_move: Option<Move>,
     prev_move: Option<Move>,
+    followup: Option<Move>,
     killers: &[Option<Move>; 2],
 ) -> i32 {
     let mut score = history_score(&engine.history, side, mv)
-        + continuation_history_score(engine, side, prev_move, mv) / 2;
+        + continuation_history_score(engine, side, prev_move, mv) / 2
+        + followup_history_score(engine, side, followup, mv) / 2;
     if Some(mv) == killers[0] {
         score += 30_000;
     } else if Some(mv) == counter_move {
