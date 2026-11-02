@@ -146,6 +146,11 @@ against the current `main`, so a stale base can't happen.
 - Every 5 merges the queue puts an `ltc-check` at the front: LTC `[-5, 0]` of
   `main` vs the `main` from 5 merges back. If it fails the queue pauses
   (`regression-alert` in the log) until `python3 scripts/queue.py unpause`.
+- Every 5 merges (`ladder_every` in `scripts/queue-settings.json`) it also runs
+  a CCRL ladder on `main` (elite anchors, 120+1, ~2 h). The ladder workflow
+  appends the fitted rating to `tests/ladder-log.jsonl` on `main` itself, so the
+  dashboard chart updates with no one involved. Run one sooner with
+  `python3 scripts/queue.py add main:ladder --front`.
 - Bot merges don't trigger `ci.yml`; the queue runs the same checks itself.
 
 ## Periodic checks (protection against slow erosion)

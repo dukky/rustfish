@@ -1,7 +1,11 @@
 name: CCRL ladder
 
 # Plays rustfish against CCRL-rated anchors (scripts/anchors.json) with
-# fastchess and fits one CCRL Blitz-scale rating. Manual trigger only.
+# fastchess and fits one CCRL Blitz-scale rating. Started by hand, or by the
+# merge queue every few merges (`test_id` set): then the report job also
+# appends the result to tests/ladder-log.jsonl on main and calls the queue back.
+
+run-name: "CCRL ladder ${{ inputs.test_id }}"
 
 on:
   workflow_dispatch:
@@ -21,6 +25,13 @@ on:
       anchors_file:
         description: "Anchor list (scripts/anchors-high.json for 2300-2600)"
         default: "scripts/anchors.json"
+      test_id:
+        description: "Set by the merge queue: log the result and call the queue back"
+        default: ""
+
+permissions:
+  contents: write   # append to tests/ladder-log.jsonl when started by the queue
+  actions: write    # call the queue back
 
 env:
   FASTCHESS_VERSION: v1.8.2-alpha
@@ -175,3 +186,38 @@ jobs:
           path: |
             results.json
             all-games.pgn
+      - name: Log the result and call the queue back
+        if: ${{ always() && inputs.test_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_ID: ${{ inputs.test_id }}
+          ANCHORS_FILE: ${{ inputs.anchors_file }}
+          TC: ${{ inputs.tc }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'EOF'
+          import datetime, json, os, subprocess
+          tid = os.environ["TEST_ID"]
+          res = {"test_id": tid, "status": "broken", "final": True}
+          if os.path.exists("results.json"):
+              fit = json.load(open("results.json"))
+              row = dict(fit, anchors_file=os.environ["ANCHORS_FILE"], tc=os.environ["TC"],
+                         sha=os.environ["GITHUB_SHA"][:7], url=os.environ["URL"],
+                         logged_at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M"),
+                         note=f"automatic ladder from the merge queue ({tid})")
+              git = lambda *a: subprocess.run(["git", *a], check=True)
+              git("config", "user.name", "rustfish-queue")
+              git("config", "user.email", "rustfish-queue@users.noreply.github.com")
+              for attempt in range(5):
+                  git("fetch", "-q", "origin", "main")
+                  git("checkout", "-q", "-B", "main", "origin/main")
+                  with open("tests/ladder-log.jsonl", "a") as fh:
+                      fh.write(json.dumps(row, sort_keys=True) + "\n")
+                  git("commit", "-q", "-am", f"Log CCRL ladder: ~{fit['rating']:.0f} on {row['sha']} ({tid})")
+                  if subprocess.run(["git", "push", "-q", "origin", "main"]).returncode == 0:
+                      break
+              res = {"test_id": tid, "status": "ladder", "final": True, "rating": fit.get("rating"),
+                     "ci": fit.get("ci"), "games": fit.get("games")}
+          subprocess.run(["gh", "workflow", "run", "queue.yml", "--ref", "main",
+                          "-f", f"result={json.dumps(res)}"], check=True)
+          EOF

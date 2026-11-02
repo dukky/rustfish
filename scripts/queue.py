@@ -35,6 +35,9 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue-settin
     _CFG = json.load(_fh)
 SETTINGS = _CFG["modes"]
 CHECK_EVERY = _CFG["check_every"]
+# A CCRL ladder on main every LADDER_EVERY merges (ccrl-ladder.yml logs it).
+LADDER_EVERY = _CFG["ladder_every"]
+LADDER = _CFG["ladder"]
 
 
 def sh(*cmd, cwd=REPO, check=True):
@@ -179,6 +182,13 @@ def start(item):
     base = {"branch": branch, "mode": mode}
     if mode == "ltc-check":
         return dispatch(base, out("git", "rev-parse", "origin/main"), item["base"], "main-ltc-check")
+    if mode == "ladder":
+        main_sha = out("git", "rev-parse", "origin/main")
+        test_id = f"q-ladder-{datetime.datetime.utcnow().strftime('%m%d-%H%M')}"
+        sh("gh", "workflow", "run", "ccrl-ladder.yml", "--ref", "main", "-f", f"test_id={test_id}",
+           *[a for k, v in LADDER.items() for a in ("-f", f"{k}={v}")])
+        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha))
+        return dict(base, test_id=test_id, sha=main_sha, base_sha=main_sha, started=now())
     sh("git", "fetch", "-q", "origin", "main", branch)
     sh("git", "checkout", "-q", "-B", "candidate", f"origin/{branch}")
     if sh("git", "rebase", "-q", "origin/main", check=False).returncode != 0:
@@ -275,10 +285,14 @@ def find_result(test_id):
     (e.g. a pending queue run superseded in the concurrency group). A last wave
     that finished without a report (build failure, cancellation) yields
     status "broken"."""
-    runs = json.loads(out("gh", "run", "list", "--workflow", "sprt.yml", "--limit", "200",
+    ladder = test_id.startswith("q-ladder-")
+    runs = json.loads(out("gh", "run", "list", "--workflow",
+                          "ccrl-ladder.yml" if ladder else "sprt.yml", "--limit", "200",
                           "--json", "databaseId,displayTitle,status"))
-    waves = [(int(m.group(1)), r) for r in runs
-             if (m := re.fullmatch(rf"SPRT {re.escape(test_id)} wave (\d+)", r["displayTitle"]))]
+    pattern = rf"CCRL ladder {re.escape(test_id)}()" if ladder else \
+        rf"SPRT {re.escape(test_id)} wave (\d+)"
+    waves = [(int(m.group(1) or 1), r) for r in runs
+             if (m := re.fullmatch(pattern, r["displayTitle"]))]
     if not waves:
         return None
     _, run = max(waves, key=lambda w: w[0])
@@ -288,9 +302,15 @@ def find_result(test_id):
     sh("rm", "-rf", tmp)
     # Shard failures can fail the run while its report still succeeded, so
     # judge by the report artifact rather than the run conclusion.
-    if sh("gh", "run", "download", str(run["databaseId"]), "-n", "sprt-result", "-D", tmp,
+    name = "ccrl-ladder-results" if ladder else "sprt-result"
+    if sh("gh", "run", "download", str(run["databaseId"]), "-n", name, "-D", tmp,
           check=False).returncode != 0:
         return {"test_id": test_id, "status": "broken", "final": True}
+    if ladder:
+        with open(os.path.join(tmp, "results.json")) as fh:
+            fit = json.load(fh)
+        return {"test_id": test_id, "status": "ladder", "final": True, "rating": fit.get("rating"),
+                "ci": fit.get("ci"), "games": fit.get("games")}
     with open(os.path.join(tmp, "sprt-result.json")) as fh:
         res = json.load(fh)
     return res if res.get("final") else None
@@ -302,7 +322,7 @@ def parse_adds(spec):
     for part in filter(None, (p.strip() for p in spec.split(","))):
         branch, _, mode = part.partition(":")
         mode = mode or "stc"
-        if mode not in SETTINGS and mode != "speedup" or mode == "ltc-check":
+        if mode not in SETTINGS and mode not in ("speedup", "ladder") or mode == "ltc-check":
             raise SystemExit(f"unknown mode {mode!r} for {branch}")
         items.append({"branch": branch, "mode": mode})
     return items
@@ -334,6 +354,8 @@ def advance():
                 log(dict(record, outcome="retrying", reason="SPRT run ended without a report"))
             else:
                 log(dict(record, outcome="needs-human", reason="SPRT run ended without a report, twice"))
+        elif cur["mode"] == "ladder":
+            log(dict(record, outcome="ladder-logged", rating=res.get("rating"), ci=res.get("ci")))
         elif cur["mode"] == "ltc-check":
             if verdict == "H0":
                 state["paused"] = f"LTC check {cur['test_id']} failed: main regressed vs {cur['base_sha'][:7]}"
@@ -391,6 +413,10 @@ def schedule_check(state, base_sha):
     main from CHECK_EVERY merges back (the slow-erosion check in development.md)."""
     state.setdefault("check_base", base_sha)
     state["merges_since_check"] = state.get("merges_since_check", 0) + 1
+    state["merges_since_ladder"] = state.get("merges_since_ladder", 0) + 1
+    if state["merges_since_ladder"] >= LADDER_EVERY:
+        state["pending"].insert(0, {"branch": "main", "mode": "ladder"})
+        state["merges_since_ladder"] = 0
     if state["merges_since_check"] >= CHECK_EVERY:
         state["pending"].insert(0, {"branch": "main", "mode": "ltc-check", "base": state["check_base"]})
         sh("git", "fetch", "-q", "origin", "main")

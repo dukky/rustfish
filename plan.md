@@ -58,8 +58,9 @@ lost). First datagen run: small, to measure runner speed, when the queue is idle
   (e.g. stronger Stash/Velvet/Reckless releases) or the estimate will drift.
 - **SPRT bounds `[0, 10]` reject real +2..5 patches.** Correct for now (big
   gains still available), switch to `[0, 5]` once typical passes drop below +10.
-- **The CCRL ladder is manual**: it only runs when someone remembers (the LTC
-  non-regression is now automatic every 5 merges).
+- **Ladder cost**: the queue now runs a CCRL ladder every 5 merges (logged
+  automatically), which pauses SPRTs for ~2 h each time. Raise `ladder_every`
+  if that overhead outweighs the value of the fresher number.
 - **Bot merges skip `ci.yml`** (GitHub token pushes don't trigger workflows);
   the queue runs the same checks itself, so this is cosmetic.
 - **Queue logs live on `queue-state`**, not `tests/sprt-log.jsonl`; both are
