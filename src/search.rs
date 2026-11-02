@@ -1156,7 +1156,16 @@ fn negamax(
         depth -= 1;
     }
 
-    if allow_null && excluded.is_none() && depth >= 3 && !in_check && beta - alpha <= 1 {
+    let tt_says_fail_low = tt_entry.map_or(false, |e| {
+        e.bound != Bound::Lower && score_from_tt(e.score, ply) < beta
+    });
+    if allow_null
+        && excluded.is_none()
+        && depth >= 3
+        && !in_check
+        && beta - alpha <= 1
+        && !tt_says_fail_low
+    {
         let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
         let side_c = color_index(board.side_to_move);
         let side_pcs = &board.bb.pieces[side_c];
