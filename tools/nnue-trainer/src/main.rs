@@ -678,6 +678,7 @@ fn main() {
     let mut loss_count: u64 = 0;
     let mut overall_loss = 0.0f64;
     let mut overall_count: u64 = 0;
+    let mut last_ckpt: u64 = 0;
 
     'epochs: for epoch in 1..=args.epochs {
         shuffler.rewind();
@@ -720,9 +721,10 @@ fn main() {
                 total_loss = 0.0;
                 loss_count = 0;
             }
-            if args.checkpoint_every > 0 && seen % args.checkpoint_every == 0 {
+            if args.checkpoint_every > 0 && seen - last_ckpt >= args.checkpoint_every {
                 let path = args.checkpoint.clone().unwrap_or_else(|| PathBuf::from("checkpoint.bin"));
                 save_checkpoint(&path, &net, &opt).unwrap();
+                last_ckpt = seen;
                 println!("checkpoint {}", path.display());
             }
             if args.max_positions.is_some() && limit == 0 {
