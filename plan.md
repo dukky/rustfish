@@ -40,6 +40,10 @@ because its data generation can run on CI in the gaps.
 KPK bitbase, and the 13 older branches re-applied on the new main (`-r2`), plus
 infra that merges without an SPRT once bench is identical (`nnue-inference`,
 `datagen-ci`). About a day of CI. Live order and results: the dashboard.
+Two backlog ideas were added on 2026-11-02: `ttcapture-lmr` and
+`aspiration-failhigh-depth`. `check-lmr` needs no branch (LMR already skips
+checking moves) and `cutnode-lmr` has no `cut_node` flag (`iir-cutnode`
+was rejected).
 
 Done Nov 1-2: merged `lmr-priority-quiets` (+13), `history-gravity` (+22),
 `improving-rfp` (+17), `see-quiets` (+9), `insufficient-material` (nonreg) and five
