@@ -627,6 +627,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
         let mut alpha = -INF;
         let mut beta = INF;
+        let mut search_depth = d;
         if d >= 4 {
             alpha = best_score - ASPIRATION_WINDOW;
             beta = best_score + ASPIRATION_WINDOW;
@@ -643,7 +644,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 }
                 let result = search_root_parallel(
                     board,
-                    d,
+                    search_depth,
                     alpha,
                     beta,
                     hash,
@@ -661,6 +662,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 }
                 if result.0 >= beta {
                     beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    search_depth = search_depth.saturating_sub(1).max(1);
                     continue;
                 }
                 break (result.0, result.1, result.2, result.3);
@@ -668,7 +670,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 let nodes_before = search.nodes;
                 let result = search_root(
                     board,
-                    d,
+                    search_depth,
                     alpha,
                     beta,
                     hash,
@@ -687,6 +689,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 }
                 if result.0 >= beta {
                     beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    search_depth = search_depth.saturating_sub(1).max(1);
                     continue;
                 }
                 break (result.0, result.1, result.2, nodes_after - nodes_before);
