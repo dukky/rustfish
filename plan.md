@@ -42,7 +42,16 @@ infra that merges without an SPRT once bench is identical (`nnue-inference`,
 `datagen-ci`). About a day of CI. Live order and results: the dashboard.
 Two `needs-human` rebase conflicts were re-applied on 2026-11-02 and queued:
 `endgame-scale-r3` (stc) and `nnue-inference-r2` (speedup, plus an eval-cache
-bypass so an attached net actually drives search).
+bypass so an attached net actually drives search). Two backlog ideas were
+added then: `ttcapture-lmr` and `aspiration-failhigh-depth`. `check-lmr` needs
+no branch (LMR already skips checking moves) and `cutnode-lmr` has no
+`cut_node` flag (`iir-cutnode` was rejected).
+
+Five more rebase conflicts appeared after `singular-ext-r2` merged and were
+re-applied on 2026-11-03: `nmp-tt-guard-r2`, `futility-moves-r3`,
+`followup-history-r3`, `probcut-r3`, `extensions-r3` (the last reconciles the
+pawn-push extension with the singular-extension `extension` variable instead
+of shadowing it).
 
 Done Nov 1-2: merged `lmr-priority-quiets` (+13), `history-gravity` (+22),
 `improving-rfp` (+17), `see-quiets` (+9), `insufficient-material` (nonreg) and five
@@ -51,12 +60,12 @@ exact speedups; rejected `lmp-improving`, `tm-budget`, `qsearch-see`,
 
 **Measurement.** Elite CCRL ladder on the new main (after the merges above).
 
-**NNUE groundwork.** Inference (off by default) and CI self-play datagen are
-built; datagen merged, inference requeued as `nnue-inference-r2` after the
-rebase. The trainer is now written (`tools/nnue-trainer`, std-only Adam with
-WDL+score loss, checkpoint/resume, measured ~94k pos/s on the 2-core box;
-~11 min per 65M-position pass). Still to do: a first small datagen run to
-measure runner speed, then a first training run and an SPRT.
+**NNUE.** Inference and the trainer are merged (`nnue-inference-r2`,
+`nnue-trainer`). The first datagen run produced 3,295,473 positions from 40k
+games at 5000 nodes in ~17 min per shard (794-1160 pos/s per runner). The
+first net (10 epochs, lr 0.02, 33M samples; eval-vs-search-score r=0.95 on
+training positions) is queued as `nnue-first-net`, stacked on the inference
+merge. Next: a 65M-position run and a retrain once the SPRT verdict is in.
 
 ## Known problems (not fixed yet)
 
