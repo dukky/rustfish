@@ -63,6 +63,18 @@
     {
       "branch": "nnue-trainer",
       "mode": "speedup"
+    },
+    {
+      "branch": "anchors-3000",
+      "mode": "speedup"
+    },
+    {
+      "branch": "aspiration-failhigh-depth",
+      "mode": "stc"
+    },
+    {
+      "branch": "ttcapture-lmr",
+      "mode": "stc"
     }
   ],
   "current": {
