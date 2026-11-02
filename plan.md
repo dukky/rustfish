@@ -60,8 +60,9 @@ measure runner speed, then a first training run and an SPRT.
 
 ## Known problems (not fixed yet)
 
-- **The anchors top out at 2956.** The next ladder needs 3000-3200 anchors
-  (e.g. stronger Stash/Velvet/Reckless releases) or the estimate will drift.
+- **Ladder anchors now reach 3208** (`viridithas-4.0.0`, `stash-28/30/31`,
+  `black-marlin-4.0` added 2026-11-02; all built and smoke-tested locally).
+  The ladder runs ~50% longer with 15 anchors, so watch `ladder_every`.
 - **SPRT bounds `[0, 10]` reject real +2..5 patches.** Correct for now (big
   gains still available), switch to `[0, 5]` once typical passes drop below +10.
 - **Ladder cost**: the queue now runs a CCRL ladder every 5 merges (logged
