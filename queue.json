@@ -58,14 +58,14 @@
     }
   ],
   "current": {
-    "branch": "see-quiets",
-    "mode": "stc",
-    "test_id": "q-see-quiets-1102-0049",
+    "branch": "main",
+    "mode": "ltc-check",
+    "base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
+    "test_id": "q-main-ltc-check-1102-0143",
     "sha": "04440e473f78315d0897eab02d062dfd717f4637",
-    "base_sha": "15c2235db51958fd56309d72a1261912cc1e8e3f",
-    "started": "2026-11-02T00:49:06Z",
-    "bench": 518405
+    "base_sha": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
+    "started": "2026-11-02T01:43:07Z"
   },
-  "check_base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
-  "merges_since_check": 4
+  "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
+  "merges_since_check": 0
 }
