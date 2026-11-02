@@ -1,14 +1,6 @@
 {
   "pending": [
     {
-      "branch": "endgame-scale",
-      "mode": "stc"
-    },
-    {
-      "branch": "see-quiets",
-      "mode": "stc"
-    },
-    {
       "branch": "correction-history",
       "mode": "stc"
     },
@@ -66,13 +58,13 @@
     }
   ],
   "current": {
-    "branch": "tm-budget",
-    "mode": "ltc-gainer",
-    "test_id": "q-tm-budget-1102-0012",
-    "sha": "22ec36f7dae371427bcb21b7663e1291303b0263",
+    "branch": "see-quiets",
+    "mode": "stc",
+    "test_id": "q-see-quiets-1102-0049",
+    "sha": "04440e473f78315d0897eab02d062dfd717f4637",
     "base_sha": "15c2235db51958fd56309d72a1261912cc1e8e3f",
-    "started": "2026-11-02T00:12:55Z",
-    "bench": 572638
+    "started": "2026-11-02T00:49:06Z",
+    "bench": 518405
   },
   "check_base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
   "merges_since_check": 4
