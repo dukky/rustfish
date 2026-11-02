@@ -1,34 +1,6 @@
 {
   "pending": [
     {
-      "branch": "correction-history",
-      "mode": "stc"
-    },
-    {
-      "branch": "singular-ext",
-      "mode": "stc"
-    },
-    {
-      "branch": "futility-moves",
-      "mode": "stc"
-    },
-    {
-      "branch": "followup-history",
-      "mode": "stc"
-    },
-    {
-      "branch": "probcut",
-      "mode": "stc"
-    },
-    {
-      "branch": "see-pruning",
-      "mode": "stc"
-    },
-    {
-      "branch": "qsearch-see",
-      "mode": "stc"
-    },
-    {
       "branch": "capture-history",
       "mode": "stc"
     },
@@ -58,13 +30,13 @@
     }
   ],
   "current": {
-    "branch": "main",
-    "mode": "ltc-check",
-    "base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
-    "test_id": "q-main-ltc-check-1102-0143",
-    "sha": "04440e473f78315d0897eab02d062dfd717f4637",
-    "base_sha": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
-    "started": "2026-11-02T01:43:07Z"
+    "branch": "qsearch-see",
+    "mode": "stc",
+    "test_id": "q-qsearch-see-1102-0218",
+    "sha": "866c0f8175b8f8501ec7189c7f3a77b057cc3d66",
+    "base_sha": "04440e473f78315d0897eab02d062dfd717f4637",
+    "started": "2026-11-02T02:18:49Z",
+    "bench": 516665
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 0

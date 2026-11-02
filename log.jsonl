@@ -19,3 +19,11 @@
 {"base_sha": "15c2235db51958fd56309d72a1261912cc1e8e3f", "branch": "see-quiets", "logged_at": "2026-11-02T00:49:06Z", "mode": "stc", "outcome": "dispatched", "sha": "04440e473f78315d0897eab02d062dfd717f4637", "test_id": "q-see-quiets-1102-0049"}
 {"branch": "see-quiets", "elo": 9.15, "elo_ci95": [3.05, 15.25], "games": 6688, "llr": 4.285, "logged_at": "2026-11-02T01:43:05Z", "mode": "stc", "outcome": "merged", "sha": "04440e473f78315d0897eab02d062dfd717f4637", "test_id": "q-see-quiets-1102-0049", "verdict": "H1"}
 {"base_sha": "4f19f3773e93d6a4ae211b296f030d79009ca39b", "branch": "main", "logged_at": "2026-11-02T01:43:07Z", "mode": "ltc-check", "outcome": "dispatched", "sha": "04440e473f78315d0897eab02d062dfd717f4637", "test_id": "q-main-ltc-check-1102-0143"}
+{"branch": "main", "elo": 118.25, "elo_ci95": [99.8, 137.36], "games": 720, "llr": 7.976, "logged_at": "2026-11-02T02:18:15Z", "mode": "ltc-check", "outcome": "check-passed", "sha": "04440e473f78315d0897eab02d062dfd717f4637", "test_id": "q-main-ltc-check-1102-0143", "verdict": "H1"}
+{"branch": "correction-history", "logged_at": "2026-11-02T02:18:15Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "singular-ext", "logged_at": "2026-11-02T02:18:16Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "futility-moves", "logged_at": "2026-11-02T02:18:16Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "followup-history", "logged_at": "2026-11-02T02:18:16Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "probcut", "logged_at": "2026-11-02T02:18:16Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "see-pruning", "logged_at": "2026-11-02T02:18:16Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"base_sha": "04440e473f78315d0897eab02d062dfd717f4637", "branch": "qsearch-see", "logged_at": "2026-11-02T02:18:49Z", "mode": "stc", "outcome": "dispatched", "sha": "866c0f8175b8f8501ec7189c7f3a77b057cc3d66", "test_id": "q-qsearch-see-1102-0218"}
