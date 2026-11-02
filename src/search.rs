@@ -14,6 +14,11 @@ const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
+// History pruning: at non-PV nodes up to this depth, a late non-priority quiet
+// whose butterfly + continuation history is below -HISTORY_PRUNE_MARGIN * depth
+// is skipped.
+const HISTORY_PRUNE_MAX_DEPTH: i32 = 4;
+const HISTORY_PRUNE_MARGIN: i32 = 2048;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
 // margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
@@ -1258,6 +1263,20 @@ fn negamax(
             && depth <= SEE_QUIET_MAX_DEPTH
             && best > -(MATE_SCORE - 1000)
             && see(board, mv) < -SEE_QUIET_MARGIN * depth * depth
+        {
+            continue;
+        }
+
+        // History pruning: quiets that have repeatedly failed to cut here are
+        // very unlikely to raise alpha in a shallow non-PV node.
+        if quiet
+            && !priority_quiet
+            && !in_check
+            && beta - alpha <= 1
+            && idx > 0
+            && depth <= HISTORY_PRUNE_MAX_DEPTH
+            && best > -(MATE_SCORE - 1000)
+            && quiet_history + quiet_continuation < -HISTORY_PRUNE_MARGIN * depth
         {
             continue;
         }
