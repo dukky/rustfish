@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nmp-tune",
-      "mode": "stc"
-    },
-    {
       "branch": "tt-cutoff-guards",
       "mode": "stc"
     },
@@ -78,13 +74,13 @@
     }
   ],
   "current": {
-    "branch": "razoring",
+    "branch": "nmp-tune",
     "mode": "stc",
-    "test_id": "q-razoring-1102-2024",
-    "sha": "d4e7e9aaa30718b5c6a242d50ddf501bd0fe7a2a",
+    "test_id": "q-nmp-tune-1102-2248",
+    "sha": "dd1a053760ed75b6dd8ed4736c476a98ba038946",
     "base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
-    "started": "2026-11-02T20:24:21Z",
-    "bench": 453451
+    "started": "2026-11-02T22:48:55Z",
+    "bench": 472012
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 1,
