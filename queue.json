@@ -59,6 +59,10 @@
     {
       "branch": "nnue-inference-r2",
       "mode": "speedup"
+    },
+    {
+      "branch": "nnue-trainer",
+      "mode": "speedup"
     }
   ],
   "current": {
