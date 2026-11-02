@@ -6,7 +6,7 @@
 //! stored and compared, so this never changes search behavior beyond the
 //! zobrist-collision risk the TT already carries.
 
-use crate::eval::{eval_for_side_cached, PawnTable};
+use crate::eval::{eval_for_side_cached, evaluate, PawnTable};
 use crate::Board;
 
 const EVAL_CACHE_BITS: u32 = 17;
@@ -41,6 +41,11 @@ impl EvalCache {
     /// `key` must be the zobrist key of `board` (as maintained by search).
     #[inline]
     pub(crate) fn eval(&mut self, board: &Board, key: u64) -> i32 {
+        // With a net attached the eval is not a function of the HCE inputs the
+        // key covers alone, so bypass the memo (NNUE is off by default).
+        if board.nnue.is_some() {
+            return evaluate(board);
+        }
         let slot = &mut self.entries[key as usize & EVAL_CACHE_MASK];
         if slot.key == key && key != EMPTY_KEY {
             return slot.eval;

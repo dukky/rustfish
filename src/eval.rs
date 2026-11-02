@@ -1103,6 +1103,10 @@ fn mobility_side<T: Tracer>(
 }
 
 pub(crate) fn evaluate(board: &Board) -> i32 {
+    if let Some(st) = board.nnue.as_ref() {
+        let s = st.evaluate(board.side_to_move);
+        return if board.side_to_move == Color::White { s } else { -s };
+    }
     evaluate_impl(board, &mut NoTrace, None)
 }
 
