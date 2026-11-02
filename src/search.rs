@@ -38,6 +38,9 @@ fn stop_requested() -> bool {
 // is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
 const SEE_QUIET_MAX_DEPTH: i32 = 8;
 const SEE_QUIET_MARGIN: i32 = 20;
+// Move-loop extensions (pawn push to the 7th) only apply below this ply, which
+// bounds how far extended lines can grow past the nominal depth.
+const EXTENSION_MAX_PLY: usize = 48;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
@@ -1271,12 +1274,31 @@ fn negamax(
         engine.tt.prefetch(child_key);
         rep_stack.push(child_key);
         let gives_check = board.is_in_check(board.side_to_move);
+        // Pawn-push extension: a non-promoting pawn push to the relative 7th
+        // rank gets one extra ply so the promotion threat is resolved inside
+        // the horizon. Skipped when the move gives check (the child's in-check
+        // extension already adds a ply), so extensions never stack per move.
+        let extension = if !gives_check
+            && ply < EXTENSION_MAX_PLY
+            && mv.promotion.is_none()
+            && board.squares[mv.to as usize].is_some_and(|p| {
+                p.kind == PieceType::Pawn
+                    && match p.color {
+                        Color::White => mv.to / 8 == 6,
+                        Color::Black => mv.to / 8 == 1,
+                    }
+            }) {
+            1
+        } else {
+            0
+        };
+        let new_depth = depth - 1 + extension;
 
         let mut score;
         if idx == 0 {
             score = -negamax(
                 board,
-                depth - 1,
+                new_depth,
                 -beta,
                 -alpha,
                 ply + 1,
@@ -1291,6 +1313,7 @@ fn negamax(
             let reduction = if quiet
                 && !in_check
                 && !gives_check
+                && extension == 0
                 && depth >= params.lmr_min_depth
                 && idx >= params.lmr_min_move_index
             {
@@ -1317,7 +1340,7 @@ fn negamax(
                 0
             };
             let reduced = reduction > 0;
-            let reduced_depth = (depth - 1 - reduction).max(0);
+            let reduced_depth = (new_depth - reduction).max(0);
 
             score = -negamax(
                 board,
@@ -1336,7 +1359,7 @@ fn negamax(
             if reduced && score > alpha {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    new_depth,
                     -alpha - 1,
                     -alpha,
                     ply + 1,
@@ -1352,7 +1375,7 @@ fn negamax(
             if score > alpha && score < beta {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    new_depth,
                     -beta,
                     -alpha,
                     ply + 1,
