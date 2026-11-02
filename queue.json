@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "razoring",
-      "mode": "stc"
-    },
-    {
       "branch": "nmp-tune",
       "mode": "stc"
     },
@@ -58,14 +54,15 @@
     }
   ],
   "current": {
-    "branch": "see-pruning-r2",
+    "branch": "razoring",
     "mode": "stc",
-    "test_id": "q-see-pruning-r2-1102-1947",
-    "sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
-    "base_sha": "243da3008fad60ae30a022f18dcca837476f215f",
-    "started": "2026-11-02T19:47:26Z",
-    "bench": 475285
+    "test_id": "q-razoring-1102-2024",
+    "sha": "d4e7e9aaa30718b5c6a242d50ddf501bd0fe7a2a",
+    "base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
+    "started": "2026-11-02T20:24:21Z",
+    "bench": 453451
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
-  "merges_since_check": 0
+  "merges_since_check": 1,
+  "merges_since_ladder": 1
 }
