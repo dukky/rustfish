@@ -30,9 +30,9 @@ TTL_RUNS = 180
 TTL_JOBS = 180
 TTL_COMMITS = 600
 
-# Rounds per shard per wave mirror scripts/queue.py SETTINGS (waves start at
-# rounds_per_shard and double up to max_rounds_per_shard). Used only to
-# estimate games played so far in the in-flight SPRT.
+# Fallback rounds per shard per wave, used only if scripts/queue-settings.json
+# can't be fetched (waves start at rounds_per_shard and double up to
+# max_rounds_per_shard). Used only to estimate games played in the in-flight SPRT.
 ROUNDS = {"stc": (16, 64), "nonreg": (16, 64), "ltc-gainer": (6, 24), "ltc-check": (6, 24)}
 
 
@@ -145,6 +145,10 @@ def build_status():
     runs = (fetch("runs", f"{API}/actions/runs?per_page=50", TTL_RUNS, json.loads) or {}) \
         .get("workflow_runs", [])
     commits = fetch("commits", f"{API}/commits?sha=main&per_page=25", TTL_COMMITS, json.loads) or []
+    # Wave sizes per queue mode, from the file scripts/queue.py itself reads.
+    qcfg = fetch("queue_settings", f"{RAW}/main/scripts/queue-settings.json", TTL_RAW, json.loads) or {}
+    rounds = {m: (s["rounds_per_shard"], s.get("max_rounds_per_shard", s["rounds_per_shard"]))
+              for m, s in qcfg.get("modes", {}).items()} or ROUNDS
 
     # Strength over time.
     points = []
@@ -224,7 +228,7 @@ def build_status():
             done = sum(1 for j in shards if j.get("status") == "completed")
             running = sum(1 for j in shards if j.get("status") == "in_progress")
             inflight.update(shards_total=len(shards), shards_done=done, shards_running=running)
-            base, cap = ROUNDS.get(current.get("mode"), (None, None))
+            base, cap = rounds.get(current.get("mode"), (None, None))
             if base and shards:
                 rpw = [min(cap, base * 2 ** i) for i in range(wave)]
                 prior = sum(len(shards) * r * 2 for r in rpw[:-1])

@@ -4,15 +4,18 @@ The single source of truth for what is running, what is next and why. Process
 rules live in `docs/development.md`; results live in `tests/*.jsonl` and the
 `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-01._
+_Last updated: 2026-11-02._ Live state (current test, queue, results, strength
+chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**; this file holds
+the plan, not the live state.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **~2810 CCRL Blitz** (95% CI 2787-2833), main `859b255`, elite anchors, 120+1 |
-| Target | Stockfish 17 skill 17 (UCI_Elo 3139, ~3140 CCRL Blitz): **~330 Elo short** |
-| Speed | ~2.5M nps single thread on M3 (bench 650958 nodes) |
+| Strength | **~2810 CCRL Blitz** (95% CI 2787-2833) on `859b255`, before the Nov 1-2 merges (5 search gains and ~+25% speed; LTC check: +118 vs 5 merges back). New ladder running. |
+| Stockfish cross-check | ~2881 on Stockfish's UCI_Elo scale: 61% vs skill 10, 25% vs skill 15, 22% vs skill 17 (`tests/stockfish-log.jsonl`) |
+| Target | Stockfish 17 skill 17 (UCI_Elo 3139, ~3140 CCRL Blitz) |
+| Speed | ~3.0M nps single thread on M3 after the exact speedups (magics, fused movegen, make/undo, eval) |
 | Eval | hand-crafted, Texel/jointly tuned (PSQT, king safety, threats, passers) |
 | Search | PVS, aspiration, TT (4-slot buckets), NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, check extension, mate-distance pruning |
 
@@ -32,33 +35,25 @@ because its data generation can run on CI in the gaps.
 
 ## Short term (running now / this week)
 
-**Merge queue (GitHub, unattended).** 22 items, serial, each rebased onto the
-latest `main` and SPRT'd; passes fast-forward `main` automatically. Order:
+**Merge queue (GitHub, unattended).** ~25 candidates: the new search ideas
+(history pruning, IIR at cut-nodes, razoring, NMP tuning, TT cutoff guards),
+KPK bitbase, and the 13 older branches re-applied on the new main (`-r2`), plus
+infra that merges without an SPRT once bench is identical (`nnue-inference`,
+`datagen-ci`). About a day of CI. Live order and results: the dashboard.
 
-1. `lmr-priority-quiets` (in flight; passed twice before at +21), `history-gravity` (passed at +24)
-2. `improving-rfp`, `lmp-improving`, `insufficient-material` (nonreg), `tm-budget` (LTC gainer)
-3. `endgame-scale`, `see-quiets`, `correction-history`, `singular-ext`, `futility-moves`,
-   `followup-history`, `probcut`, `see-pruning`, `qsearch-see`, `capture-history`,
-   `aspiration-widen`, `extensions`, `lmr-pv-captures`, `lmr-history-scale`
-4. `eval-mobility` (pre-dates the joint retune, likely conflicts), `pawn-hash` (speedup)
+Done Nov 1-2: merged `lmr-priority-quiets` (+13), `history-gravity` (+22),
+`improving-rfp` (+17), `see-quiets` (+9), `insufficient-material` (nonreg) and five
+exact speedups; rejected `lmp-improving`, `tm-budget`, `qsearch-see`,
+`capture-history`.
 
-Most of group 3 showed big losses earlier, but those results were invalid (the
-base had just gained +79 from the eval merge), so they get a clean retest.
-At ~45-90 min per test this is about 1-2 days of CI.
+**Measurement.** Elite CCRL ladder on the new main (after the merges above).
 
-**Speed work (laptop, 7 agents).** Exact speedups: same bench at two depths,
-bit-identical eval on 50k positions, ≥2% median NPS in interleaved pairs.
-Branches `speed-magics`, `speed-eval-king`, `speed-eval-body`, `speed-movegen`,
-`speed-picker`, `speed-board`, `speed-eval-calls`. Survivors are combined and
-queued as `speedup` at the front (no SPRT needed).
-
-**Measurement.** Stockfish 17 skill 10/15/17 ladder (`anchors-stockfish.json`)
-running, to cross-check the CCRL number against the actual target.
+**NNUE groundwork.** Inference (off by default) and CI self-play datagen are
+built and queued; the trainer still has to be written (its first attempt was
+lost). First datagen run: small, to measure runner speed, when the queue is idle.
 
 ## Known problems (not fixed yet)
 
-- **Stockfish 17 at skill 17 is measured only by formula**, not by games (the
-  ladder above fixes this).
 - **The anchors top out at 2956.** The next ladder needs 3000-3200 anchors
   (e.g. stronger Stash/Velvet/Reckless releases) or the estimate will drift.
 - **SPRT bounds `[0, 10]` reject real +2..5 patches.** Correct for now (big

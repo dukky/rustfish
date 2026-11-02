@@ -28,18 +28,13 @@ REPO = os.getcwd()
 STATE = os.path.join(REPO, ".queue-state")
 STATE_BRANCH = "queue-state"
 
-SETTINGS = {
-    "stc": {"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 10, "shards": 19,
-            "rounds_per_shard": 16, "max_rounds_per_shard": 64, "max_waves": 10},
-    "nonreg": {"tc": "10+0.1", "hash": 16, "elo0": -5, "elo1": 0, "shards": 19,
-               "rounds_per_shard": 16, "max_rounds_per_shard": 64, "max_waves": 10},
-    "ltc-gainer": {"tc": "60+0.6", "hash": 64, "elo0": 0, "elo1": 10, "shards": 20,
-                   "rounds_per_shard": 6, "max_rounds_per_shard": 24, "max_waves": 8},
-    # Periodic check, queued automatically: main vs main CHECK_EVERY merges back.
-    "ltc-check": {"tc": "60+0.6", "hash": 64, "elo0": -5, "elo1": 0, "shards": 20,
-                  "rounds_per_shard": 6, "max_rounds_per_shard": 24, "max_waves": 8},
-}
-CHECK_EVERY = 5
+# Per-mode SPRT settings, shared with the dashboard (deploy/dashboard). The
+# ltc-check mode is the periodic check queued automatically: main vs main
+# CHECK_EVERY merges back.
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue-settings.json")) as _fh:
+    _CFG = json.load(_fh)
+SETTINGS = _CFG["modes"]
+CHECK_EVERY = _CFG["check_every"]
 
 
 def sh(*cmd, cwd=REPO, check=True):
