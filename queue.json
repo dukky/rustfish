@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "tm-budget",
-      "mode": "ltc-gainer"
-    },
-    {
       "branch": "endgame-scale",
       "mode": "stc"
     },
@@ -70,14 +66,14 @@
     }
   ],
   "current": {
-    "branch": "insufficient-material",
-    "mode": "nonreg",
-    "test_id": "q-insufficient-material-1101-2300",
-    "sha": "15c2235db51958fd56309d72a1261912cc1e8e3f",
-    "base_sha": "56dccb839241bb021e96d64e0880d9ee660a7d4b",
-    "started": "2026-11-01T23:00:54Z",
+    "branch": "tm-budget",
+    "mode": "ltc-gainer",
+    "test_id": "q-tm-budget-1102-0012",
+    "sha": "22ec36f7dae371427bcb21b7663e1291303b0263",
+    "base_sha": "15c2235db51958fd56309d72a1261912cc1e8e3f",
+    "started": "2026-11-02T00:12:55Z",
     "bench": 572638
   },
   "check_base": "4f19f3773e93d6a4ae211b296f030d79009ca39b",
-  "merges_since_check": 3
+  "merges_since_check": 4
 }
