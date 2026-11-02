@@ -40,6 +40,9 @@ because its data generation can run on CI in the gaps.
 KPK bitbase, and the 13 older branches re-applied on the new main (`-r2`), plus
 infra that merges without an SPRT once bench is identical (`nnue-inference`,
 `datagen-ci`). About a day of CI. Live order and results: the dashboard.
+Two `needs-human` rebase conflicts were re-applied on 2026-11-02 and queued:
+`endgame-scale-r3` (stc) and `nnue-inference-r2` (speedup, plus an eval-cache
+bypass so an attached net actually drives search).
 
 Done Nov 1-2: merged `lmr-priority-quiets` (+13), `history-gravity` (+22),
 `improving-rfp` (+17), `see-quiets` (+9), `insufficient-material` (nonreg) and five
@@ -49,8 +52,11 @@ exact speedups; rejected `lmp-improving`, `tm-budget`, `qsearch-see`,
 **Measurement.** Elite CCRL ladder on the new main (after the merges above).
 
 **NNUE groundwork.** Inference (off by default) and CI self-play datagen are
-built and queued; the trainer still has to be written (its first attempt was
-lost). First datagen run: small, to measure runner speed, when the queue is idle.
+built; datagen merged, inference requeued as `nnue-inference-r2` after the
+rebase. The trainer is now written (`tools/nnue-trainer`, std-only Adam with
+WDL+score loss, checkpoint/resume, measured ~94k pos/s on the 2-core box;
+~11 min per 65M-position pass). Still to do: a first small datagen run to
+measure runner speed, then a first training run and an SPRT.
 
 ## Known problems (not fixed yet)
 

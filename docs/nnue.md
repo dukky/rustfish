@@ -103,3 +103,29 @@ artifact storage is not billed; the per-shard artifacts expire after 3 days.
 Node count trades quality for quantity roughly linearly: 5000 nodes is the
 usual starting point for a first net; later runs can use the first net's
 engine and more nodes.
+
+## Trainer
+
+`tools/nnue-trainer` is the std-only Rust trainer for the inference network in
+`src/nnue.rs` (`(768 -> 256) x 2 -> 1`, SCReLU). It reads the text format
+above and writes the raw little-endian i16 net file `EvalFile` expects; the
+hidden size is fixed at 256 and no float-to-quantized rescaling is needed
+because training runs in the same accumulator units as inference.
+
+```bash
+cd tools/nnue-trainer && cargo build --release
+gunzip -c datagen-s1-n5000.gz > data.txt          # artifacts are gzipped
+./target/release/nnue-trainer --data data.txt --out net.bin \
+  --epochs 1 --batch 1024 --lr 0.001 --threads 4
+```
+
+Loss is `lambda * (sigmoid(eval/400) - result)^2 + (1-lambda) *
+((eval - score)/400)^2`, trained with Adam. `--checkpoint`/`--resume` make the
+run restartable inside CI's 6 h job limit, and `--max-positions` bounds a pass.
+Measured on this (2-core) box: ~94k positions/s including text parsing, so a
+65M-position pass is ~11 minutes of compute; four CI cores should roughly halve
+that. Reading `.gz` directly is not supported (std only) — gunzip first.
+
+Training data for the first net comes from HCE self-play at 5000 nodes; after
+that, the usual bootstrap is to regenerate with the first net and retrain.
+Acceptance is an STC SPRT like every other engine change.
