@@ -15,7 +15,7 @@ Actions, so it never needs updating by hand; redeploy only when
 | Strength | see the dashboard; history in `tests/ladder-log.jsonl` (CCRL Blitz scale) |
 | Roadmap | [`plan.md`](plan.md) |
 | How changes are tested and merged | [`docs/development.md`](docs/development.md) |
-| Working on the code | [`AGENTS.md`](AGENTS.md) |
+| Working on the code | [`AGENTS.md`](AGENTS.md), and [`docs/handoff.md`](docs/handoff.md) for a new agent |
 | NNUE (in progress) | [`docs/nnue.md`](docs/nnue.md) |
 
 ## Build and run

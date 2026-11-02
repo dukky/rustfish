@@ -9,6 +9,10 @@ Dependencies: none beyond Rust stdlib and project-local scripts using Python std
 
 ---
 
+## New to this project?
+Start with `docs/handoff.md`: the loop to follow, what is safe to do, what
+never to do, and a backlog of precisely specified ideas.
+
 ## Development workflow (read first)
 `docs/development.md` is the authoritative process: `main` is the champion,
 every engine change goes through a branch + SPRT on GitHub Actions
