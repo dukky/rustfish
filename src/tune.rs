@@ -5,6 +5,7 @@
 //! `tune <data.txt> <out_psqt.rs> <out_eval_params.rs> [epochs]` jointly fits
 //! PSQT_MG/PSQT_EG and the linear eval_params weights by logistic regression
 //! of game result on eval, and writes new src/psqt.rs and src/eval_params.rs.
+//! It also reads datagen's `fen | score | result` lines (score ignored).
 //!
 //! Material/PST enter the eval linearly through the tapered accumulator, and
 //! `eval::evaluate_with` traces the coefficient of every eval_params weight,
@@ -550,7 +551,12 @@ pub(crate) fn handle_tune(cmd: &str) {
     let mut data = Dataset::new();
     let mut board = Board::new();
     for line in text.lines() {
-        let Some((fen, res)) = line.rsplit_once(';') else { continue };
+        // `fen;result` (extract) or `fen | score | result` (datagen).
+        let parsed = match line.split_once(" | ") {
+            Some((fen, rest)) => rest.rsplit_once(" | ").map(|(_, res)| (fen, res)),
+            None => line.rsplit_once(';'),
+        };
+        let Some((fen, res)) = parsed else { continue };
         let Ok(result) = res.trim().parse::<f32>() else { continue };
         board.set_fen(fen);
         data.push(&board, result);

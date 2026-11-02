@@ -239,6 +239,7 @@ this pipeline before ruling it out again.
 | `.github/workflows/ccrl-ladder.yml` | CCRL-scale rating vs anchors |
 | `.github/workflows/release.yml` | release binaries on tag `v*` (docs/ccrl-submission.md) |
 | `.github/workflows/spsa.yml`, `scripts/spsa.py`, `tune/spsa-params.json` | SPSA tuning of search options |
+| `.github/workflows/datagen.yml` | sharded self-play training data (docs/nnue.md) |
 | `tests/sprt-log.jsonl`, `tests/ladder-log.jsonl` | the record of every result |
 
 Capacity: GitHub runs about 20 jobs at once for this account. An STC wave uses

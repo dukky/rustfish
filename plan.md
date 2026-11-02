@@ -84,7 +84,9 @@ lost). First datagen run: small, to measure runner speed, when the queue is idle
 4. **Self-play data generation on CI** (`datagen.rs` exists). Gives (a) a much
    larger Texel retune set than the 445k positions we have, and (b) the NNUE
    training set. Target 100M+ positions. Run in the gaps when the queue is
-   idle or with low priority.
+   idle or with low priority. Built on branch `datagen-ci`: deterministic
+   sharded `datagen.yml` (~65M positions per 20-shard run, estimated);
+   see docs/nnue.md "Data generation".
 5. **Search features not yet written** (each its own branch → queue):
    - 2-ply continuation history and history-based LMR (partly in `lmr-history-scale`)
    - NMP verification search at high depth, razoring
