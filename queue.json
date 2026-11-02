@@ -51,6 +51,10 @@
     {
       "branch": "nmp-tt-guard",
       "mode": "stc"
+    },
+    {
+      "branch": "endgame-scale-r3",
+      "mode": "stc"
     }
   ],
   "current": {
