@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "capture-history",
-      "mode": "stc"
-    },
-    {
       "branch": "aspiration-widen",
       "mode": "stc"
     },
@@ -30,13 +26,13 @@
     }
   ],
   "current": {
-    "branch": "qsearch-see",
+    "branch": "capture-history",
     "mode": "stc",
-    "test_id": "q-qsearch-see-1102-0218",
-    "sha": "866c0f8175b8f8501ec7189c7f3a77b057cc3d66",
+    "test_id": "q-capture-history-1102-0253",
+    "sha": "36a332728d7e904192a8906f184904d2e9efc549",
     "base_sha": "04440e473f78315d0897eab02d062dfd717f4637",
-    "started": "2026-11-02T02:18:49Z",
-    "bench": 516665
+    "started": "2026-11-02T02:53:44Z",
+    "bench": 533534
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 0
