@@ -23,6 +23,10 @@
     {
       "branch": "probcut-r3",
       "mode": "stc"
+    },
+    {
+      "branch": "extensions-r3",
+      "mode": "stc"
     }
   ],
   "current": {
