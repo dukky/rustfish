@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-first-net",
-      "mode": "stc"
-    },
-    {
       "branch": "nmp-tt-guard-r2",
       "mode": "stc"
     },
@@ -30,13 +26,13 @@
     }
   ],
   "current": {
-    "branch": "ttcapture-lmr",
+    "branch": "nnue-first-net",
     "mode": "stc",
-    "test_id": "q-ttcapture-lmr-1103-0954",
-    "sha": "adbedcbd8fe4eefa41d71c6165d60fa3e60cedc9",
+    "test_id": "q-nnue-first-net-1103-1206",
+    "sha": "122f3026c1539b16d296264b1d252d26c0710aea",
     "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T09:54:44Z",
-    "bench": 600369
+    "started": "2026-11-03T12:06:30Z",
+    "bench": 10104315
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
