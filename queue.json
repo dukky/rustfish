@@ -23,6 +23,10 @@
     {
       "branch": "nnue-first-net",
       "mode": "stc"
+    },
+    {
+      "branch": "nmp-tt-guard-r2",
+      "mode": "stc"
     }
   ],
   "current": {
