@@ -74,3 +74,8 @@
 {"branch": "rfp-blend", "elo": -1.51, "elo_ci95": [-7.52, 4.5], "games": 6688, "llr": -6.919, "logged_at": "2026-11-03T06:23:15Z", "mode": "stc", "outcome": "rejected", "sha": "05cb806d5121eeaf1df2896a4675d2ede7c037fc", "test_id": "q-rfp-blend-1103-0527", "verdict": "H0"}
 {"branch": "nmp-tt-guard", "logged_at": "2026-11-03T06:23:16Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
 {"base_sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb", "branch": "endgame-scale-r3", "logged_at": "2026-11-03T06:23:50Z", "mode": "stc", "outcome": "dispatched", "sha": "805dc71ad4dd9eac0a690170b11dd45d48f193bc", "test_id": "q-endgame-scale-r3-1103-0623"}
+{"branch": "endgame-scale-r3", "elo": 4.02, "elo_ci95": [0.88, 7.16], "games": 21280, "llr": -3.831, "logged_at": "2026-11-03T09:15:41Z", "mode": "stc", "outcome": "rejected", "sha": "805dc71ad4dd9eac0a690170b11dd45d48f193bc", "test_id": "q-endgame-scale-r3-1103-0623", "verdict": "H0"}
+{"branch": "nnue-inference-r2", "logged_at": "2026-11-03T09:16:29Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "3f47546e613f1bb1f771e38f740f6dfd8d40d75f"}
+{"branch": "nnue-trainer", "logged_at": "2026-11-03T09:17:15Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de"}
+{"branch": "anchors-3000", "logged_at": "2026-11-03T09:17:15Z", "mode": "speedup", "outcome": "needs-human", "reason": "rebase conflict"}
+{"base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de", "branch": "aspiration-failhigh-depth", "logged_at": "2026-11-03T09:17:48Z", "mode": "stc", "outcome": "dispatched", "sha": "56747549d6aa11e9d88c4a844aa05bd81f008011", "test_id": "q-aspiration-failhigh-depth-1103-0917"}
