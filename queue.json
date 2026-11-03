@@ -1,15 +1,7 @@
 {
   "pending": [],
-  "current": {
-    "branch": "nnue-first-net-r2",
-    "mode": "stc",
-    "test_id": "q-nnue-first-net-r2-1103-1654",
-    "sha": "e2fd5fd40a1021413b0081fdbdd9ae5544602877",
-    "base_sha": "3079d3d4770ef23d97152f1447ef6065b614da26",
-    "started": "2026-11-03T16:54:37Z",
-    "bench": 568074
-  },
+  "current": null,
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
-  "merges_since_check": 3,
-  "merges_since_ladder": 3
+  "merges_since_check": 4,
+  "merges_since_ladder": 4
 }
