@@ -1,14 +1,6 @@
 {
   "pending": [
     {
-      "branch": "extensions-r2",
-      "mode": "stc"
-    },
-    {
-      "branch": "lmr-pv-captures-r2",
-      "mode": "stc"
-    },
-    {
       "branch": "lmr-history-scale-r2",
       "mode": "stc"
     },
@@ -70,13 +62,13 @@
     }
   ],
   "current": {
-    "branch": "kpk-bitbase",
+    "branch": "lmr-pv-captures-r2",
     "mode": "stc",
-    "test_id": "q-kpk-bitbase-1103-0209",
-    "sha": "350f728118b87c56612e8930281e62dce79a88cc",
+    "test_id": "q-lmr-pv-captures-r2-1103-0304",
+    "sha": "b75c6b08a373b0bc6568a3d6c1427a1eaae15aca",
     "base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
-    "started": "2026-11-03T02:09:35Z",
-    "bench": 475285
+    "started": "2026-11-03T03:04:17Z",
+    "bench": 467693
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 1,
