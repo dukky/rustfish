@@ -1,26 +1,12 @@
 {
-  "pending": [
-    {
-      "branch": "nnue-runtime-avx2",
-      "mode": "speedup"
-    },
-    {
-      "branch": "nnue-wide-avx2",
-      "mode": "speedup"
-    },
-    {
-      "branch": "main",
-      "mode": "ladder"
-    }
-  ],
+  "pending": [],
   "current": {
     "branch": "main",
-    "mode": "ltc-check",
-    "base": "04440e473f78315d0897eab02d062dfd717f4637",
-    "test_id": "q-main-ltc-check-1103-2345",
-    "sha": "7159f91f53ec20999c0d851aceb827b10bceade2",
-    "base_sha": "04440e473f78315d0897eab02d062dfd717f4637",
-    "started": "2026-11-03T23:45:15Z"
+    "mode": "ladder",
+    "test_id": "q-ladder-1103-2359",
+    "sha": "030df6831141d63b4017cb6231cdb01157830dd0",
+    "base_sha": "030df6831141d63b4017cb6231cdb01157830dd0",
+    "started": "2026-11-03T23:59:19Z"
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 0,
