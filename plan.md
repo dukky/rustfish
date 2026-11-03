@@ -12,7 +12,7 @@ the plan, not the live state.
 
 | | |
 |---|---|
-| Strength | **~2810 CCRL Blitz** (95% CI 2787-2833) on `859b255`, before the Nov 1-2 merges (5 search gains and ~+25% speed; LTC check: +118 vs 5 merges back). New ladder running. |
+| Strength | **3025.5 CCRL Blitz** (95% CI 3004.8-3046.3), 1440 games, 0 time losses, measured 2026-11-03 on the first NNUE net + singular extensions + mobility (15 anchors, 120+1). |
 | Stockfish cross-check | ~2881 on Stockfish's UCI_Elo scale: 61% vs skill 10, 25% vs skill 15, 22% vs skill 17 (`tests/stockfish-log.jsonl`) |
 | Target | Stockfish 17 skill 17 (UCI_Elo 3139, ~3140 CCRL Blitz) |
 | Speed | ~3.0M nps single thread on M3 after the exact speedups (magics, fused movegen, make/undo, eval) |
@@ -185,6 +185,8 @@ for runners: speedups, data generation tooling, the NNUE code.
 - 2026-10-29: depth-8 cap fixed (+221), SPRT pipeline and CCRL ladder built: ~2081.
 - 2026-10-31: IIR, SEE fix, TT review, eval rework (king safety, threats,
   passers, joint retune): ~2624 → ~2810.
+- 2026-11-03: crossed 3000 CCRL Blitz: **3025.5** (CI 3004.8-3046.3) on the
+  first NNUE net, after 2889.1 on the previous ladder (+136).
 - 2026-11-03: queue wave: singular extensions +23.7 and per-piece mobility
   +35.8 merged; first NNUE net +51.2 merged (after fixing the eval-cache
   stm-POV sign); anchors extended to 3208. Rejected: probcut (+5.0,
