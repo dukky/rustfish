@@ -42,6 +42,8 @@ struct Sample {
     stm_white: bool,
     score: f32,
     result: f32,
+    /// Held out from training for validation (set by parse_line).
+    val: bool,
 }
 
 struct Rng(u64);
@@ -91,6 +93,7 @@ fn parse_fen(fen: &str) -> Option<(Sample, bool)> {
         stm_white,
         score: 0.0,
         result: 0.0,
+        val: false,
     };
     let mut file = 0i32;
     let mut rank = 7i32;
@@ -139,8 +142,19 @@ fn parse_fen(fen: &str) -> Option<(Sample, bool)> {
     Some((sample, stm_white))
 }
 
+/// Stable FNV-1a over the FEN, used to hold out the same positions every pass.
+fn fnv1a(s: &str) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
 /// A line of datagen output: `FEN | score_cp (White POV) | result (White POV)`.
-fn parse_line(line: &str) -> Option<Sample> {
+/// `val_every` > 0 holds out one line in every `val_every` (by FEN hash).
+fn parse_line(line: &str, val_every: u32) -> Option<Sample> {
     let mut parts = line.split('|');
     let fen = parts.next()?.trim();
     let score: f32 = parts.next()?.trim().parse().ok()?;
@@ -157,6 +171,7 @@ fn parse_line(line: &str) -> Option<Sample> {
         sample.score = -score;
         sample.result = 1.0 - result;
     }
+    sample.val = val_every > 0 && fnv1a(fen) % val_every as u64 == 0;
     Some(sample)
 }
 
@@ -199,16 +214,18 @@ struct Shuffler {
     reader: LineReader,
     rng: Rng,
     capacity: usize,
+    val_every: u32,
     skipped: u64,
 }
 
 impl Shuffler {
-    fn new(files: Vec<PathBuf>, capacity: usize, seed: u64) -> Self {
+    fn new(files: Vec<PathBuf>, capacity: usize, seed: u64, val_every: u32) -> Self {
         Self {
             buf: Vec::with_capacity(capacity),
             reader: LineReader::new(files),
             rng: Rng::new(seed),
             capacity,
+            val_every,
             skipped: 0,
         }
     }
@@ -216,7 +233,7 @@ impl Shuffler {
     fn fill(&mut self) {
         while self.buf.len() < self.capacity {
             match self.reader.next_line() {
-                Some(line) => match parse_line(&line) {
+                Some(line) => match parse_line(&line, self.val_every) {
                     Some(s) => self.buf.push(s),
                     None => self.skipped += 1,
                 },
@@ -246,7 +263,7 @@ impl Shuffler {
         let mut line = self.reader.next_line();
         loop {
             match line {
-                Some(l) => match parse_line(&l) {
+                Some(l) => match parse_line(&l, self.val_every) {
                     Some(s) => {
                         self.buf[i] = s;
                         break;
@@ -601,6 +618,9 @@ struct Args {
     checkpoint: Option<PathBuf>,
     resume: Option<PathBuf>,
     log_every: u64,
+    val_every: u32,
+    val_max: usize,
+    lr_min: f32,
 }
 
 impl Args {
@@ -620,6 +640,9 @@ impl Args {
             checkpoint: None,
             resume: None,
             log_every: 10000,
+            val_every: 0,
+            val_max: 20000,
+            lr_min: 0.0,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -639,13 +662,16 @@ impl Args {
                 "--checkpoint" => a.checkpoint = Some(PathBuf::from(value())),
                 "--resume" => a.resume = Some(PathBuf::from(value())),
                 "--log-every" => a.log_every = value().parse().unwrap(),
+                "--val-every" => a.val_every = value().parse().unwrap(),
+                "--val-max" => a.val_max = value().parse().unwrap(),
+                "--lr-min" => a.lr_min = value().parse().unwrap(),
                 "--help" | "-h" => {
                     println!(
                         "usage: nnue-trainer --data FILE [--data FILE...] --out net.bin\n\
                          \t[--epochs N] [--batch N] [--lr F] [--lambda F] [--threads N]\n\
                          \t[--shuffle-buffer N] [--max-positions N] [--seed N]\n\
                          \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE]\n\
-                         \t[--log-every N]\n\n\
+                         \t[--log-every N] [--val-every N] [--val-max N] [--lr-min F]\n\n\
                          Data is plain text from `gunzip -c datagen-*.gz` in the format\n\
                          `<FEN> | <score_cp White POV> | <result White POV>`."
                     );
@@ -660,7 +686,7 @@ impl Args {
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
     let mut rng = Rng::new(args.seed);
     let mut net = Net::new(&mut rng);
     let mut opt = Opt::new();
@@ -669,7 +695,11 @@ fn main() {
         println!("resumed from {} at step {}", path.display(), opt.step);
     }
 
-    let mut shuffler = Shuffler::new(args.data.clone(), args.buffer, args.seed);
+    if args.lr_min <= 0.0 {
+        args.lr_min = args.lr;
+    }
+    let mut val_buf: Vec<Sample> = Vec::new();
+    let mut shuffler = Shuffler::new(args.data.clone(), args.buffer, args.seed, args.val_every);
     let mut grads: Vec<Grad> = (0..args.threads).map(|_| Grad::new()).collect();
     let mut batch: Vec<Sample> = Vec::with_capacity(args.batch);
     let started = Instant::now();
@@ -683,13 +713,25 @@ fn main() {
     'epochs: for epoch in 1..=args.epochs {
         shuffler.rewind();
         let mut limit = args.max_positions.unwrap_or(u64::MAX);
+        let lr = if args.epochs > 1 {
+            let t = (epoch - 1) as f32 / (args.epochs - 1) as f32;
+            args.lr * (args.lr_min / args.lr).powf(t)
+        } else {
+            args.lr
+        };
         loop {
             batch.clear();
             while batch.len() < args.batch && limit > 0 {
                 match shuffler.next() {
                     Some(s) => {
-                        batch.push(s);
                         limit -= 1;
+                        if s.val {
+                            if val_buf.len() < args.val_max {
+                                val_buf.push(s);
+                            }
+                        } else {
+                            batch.push(s);
+                        }
                     }
                     None => break,
                 }
@@ -702,7 +744,7 @@ fn main() {
             for g in rest {
                 add_grad(first, g);
             }
-            opt.update(&mut net, first, batch.len(), args.lr);
+            opt.update(&mut net, first, batch.len(), lr);
             seen += batch.len() as u64;
             total_loss += loss;
             loss_count += batch.len() as u64;
@@ -731,6 +773,13 @@ fn main() {
                 continue 'epochs;
             }
         }
+        if !val_buf.is_empty() {
+            let (vloss, mae) = validation(&net, &val_buf, args.lambda);
+            println!(
+                "epoch {epoch} validation: loss {vloss:.6}, MAE {mae:.1} cp, {} positions, lr {lr:.6}",
+                val_buf.len()
+            );
+        }
     }
 
     println!(
@@ -741,6 +790,22 @@ fn main() {
     );
     export(&net, &args.out).unwrap();
     println!("skipped {} malformed lines", shuffler.skipped);
+}
+
+/// Held-out loss and mean absolute error (centipawns) for the current net.
+fn validation(net: &Net, samples: &[Sample], lambda: f32) -> (f64, f64) {
+    let mut loss = 0.0f64;
+    let mut mae = 0.0f64;
+    for s in samples {
+        let e = net.eval(s);
+        let p = 1.0 / (1.0 + (-e / 400.0).exp());
+        let wdl = (p - s.result) * (p - s.result);
+        let ev = ((e - s.score) / 400.0) * ((e - s.score) / 400.0);
+        loss += (lambda * wdl + (1.0 - lambda) * ev) as f64;
+        mae += (e - s.score).abs() as f64;
+    }
+    let n = samples.len().max(1) as f64;
+    (loss / n, mae / n)
 }
 
 fn add_grad(dst: &mut Grad, src: &Grad) {
@@ -785,11 +850,11 @@ mod tests {
 
     #[test]
     fn black_to_move_data_is_mirrored() {
-        let s = parse_line("4k3/8/8/8/8/8/8/4K3 b - - 0 1 | 50 | 1.0").unwrap();
+        let s = parse_line("4k3/8/8/8/8/8/8/4K3 b - - 0 1 | 50 | 1.0", 0).unwrap();
         assert!(!s.stm_white);
         assert_eq!(s.score, -50.0);
         assert_eq!(s.result, 0.0);
-        let s = parse_line("4k3/8/8/8/8/8/8/4K3 w - - 0 1 | -30 | 0.0").unwrap();
+        let s = parse_line("4k3/8/8/8/8/8/8/4K3 w - - 0 1 | -30 | 0.0", 0).unwrap();
         assert_eq!(s.score, -30.0);
         assert_eq!(s.result, 0.0);
     }
