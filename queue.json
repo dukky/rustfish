@@ -1,26 +1,13 @@
 {
-  "pending": [
-    {
-      "branch": "anchors-3000-r2",
-      "mode": "speedup"
-    },
-    {
-      "branch": "nnue-eval-sign",
-      "mode": "speedup"
-    },
-    {
-      "branch": "nnue-first-net-r2",
-      "mode": "stc"
-    }
-  ],
+  "pending": [],
   "current": {
-    "branch": "extensions-r3",
+    "branch": "nnue-first-net-r2",
     "mode": "stc",
-    "test_id": "q-extensions-r3-1103-1615",
-    "sha": "1d789986f5d0298fa9b115fa64777c48082f2838",
-    "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T16:15:28Z",
-    "bench": 673992
+    "test_id": "q-nnue-first-net-r2-1103-1654",
+    "sha": "e2fd5fd40a1021413b0081fdbdd9ae5544602877",
+    "base_sha": "3079d3d4770ef23d97152f1447ef6065b614da26",
+    "started": "2026-11-03T16:54:37Z",
+    "bench": 568074
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
