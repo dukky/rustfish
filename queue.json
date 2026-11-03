@@ -1,22 +1,6 @@
 {
   "pending": [
     {
-      "branch": "futility-moves-r2",
-      "mode": "stc"
-    },
-    {
-      "branch": "followup-history-r2",
-      "mode": "stc"
-    },
-    {
-      "branch": "probcut-r2",
-      "mode": "stc"
-    },
-    {
-      "branch": "eval-mobility-r2",
-      "mode": "stc"
-    },
-    {
       "branch": "rfp-blend",
       "mode": "stc"
     },
@@ -54,15 +38,15 @@
     }
   ],
   "current": {
-    "branch": "singular-ext-r2",
+    "branch": "eval-mobility-r2",
     "mode": "stc",
-    "test_id": "q-singular-ext-r2-1103-0453",
-    "sha": "f1e0ad437a249333415c207e9923a73002d05c3a",
-    "base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
-    "started": "2026-11-03T04:53:28Z",
-    "bench": 632563
+    "test_id": "q-eval-mobility-r2-1103-0510",
+    "sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb",
+    "base_sha": "f1e0ad437a249333415c207e9923a73002d05c3a",
+    "started": "2026-11-03T05:10:35Z",
+    "bench": 635086
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1
+  "merges_since_check": 2,
+  "merges_since_ladder": 2
 }

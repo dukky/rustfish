@@ -64,3 +64,8 @@
 {"base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970", "branch": "lmr-history-scale-r2", "logged_at": "2026-11-03T04:36:12Z", "mode": "stc", "outcome": "dispatched", "sha": "de7ebdbfcfec0b2bef19abe400f4c40fcb4cff2d", "test_id": "q-lmr-history-scale-r2-1103-0436"}
 {"branch": "lmr-history-scale-r2", "elo": -13.15, "elo_ci95": [-25.13, -1.2], "games": 1824, "llr": -4.883, "logged_at": "2026-11-03T04:52:54Z", "mode": "stc", "outcome": "rejected", "sha": "de7ebdbfcfec0b2bef19abe400f4c40fcb4cff2d", "test_id": "q-lmr-history-scale-r2-1103-0436", "verdict": "H0"}
 {"base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970", "branch": "singular-ext-r2", "logged_at": "2026-11-03T04:53:28Z", "mode": "stc", "outcome": "dispatched", "sha": "f1e0ad437a249333415c207e9923a73002d05c3a", "test_id": "q-singular-ext-r2-1103-0453"}
+{"branch": "singular-ext-r2", "elo": 23.66, "elo_ci95": [12.0, 35.36], "games": 1824, "llr": 5.294, "logged_at": "2026-11-03T05:09:51Z", "mode": "stc", "outcome": "merged", "sha": "f1e0ad437a249333415c207e9923a73002d05c3a", "test_id": "q-singular-ext-r2-1103-0453", "verdict": "H1"}
+{"branch": "futility-moves-r2", "logged_at": "2026-11-03T05:09:51Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "followup-history-r2", "logged_at": "2026-11-03T05:09:51Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "probcut-r2", "logged_at": "2026-11-03T05:09:52Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"base_sha": "f1e0ad437a249333415c207e9923a73002d05c3a", "branch": "eval-mobility-r2", "logged_at": "2026-11-03T05:10:35Z", "mode": "stc", "outcome": "dispatched", "sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb", "test_id": "q-eval-mobility-r2-1103-0510"}
