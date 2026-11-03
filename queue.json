@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "extensions-r3",
-      "mode": "stc"
-    },
-    {
       "branch": "anchors-3000-r2",
       "mode": "speedup"
     },
@@ -18,13 +14,13 @@
     }
   ],
   "current": {
-    "branch": "probcut-r3",
+    "branch": "extensions-r3",
     "mode": "stc",
-    "test_id": "q-probcut-r3-1103-1325",
-    "sha": "e5521a1b694f03ea907f35ac009935bcaa07e551",
+    "test_id": "q-extensions-r3-1103-1615",
+    "sha": "1d789986f5d0298fa9b115fa64777c48082f2838",
     "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T13:25:03Z",
-    "bench": 614612
+    "started": "2026-11-03T16:15:28Z",
+    "bench": 673992
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
