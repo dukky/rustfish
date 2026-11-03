@@ -11,6 +11,10 @@
     {
       "branch": "nnue-eval-sign",
       "mode": "speedup"
+    },
+    {
+      "branch": "nnue-first-net-r2",
+      "mode": "stc"
     }
   ],
   "current": {
