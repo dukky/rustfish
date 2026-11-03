@@ -993,8 +993,9 @@ struct EngineState {
     use_nnue: bool,
 }
 
-/// First net trained on HCE self-play (3.3M positions, seed 1 at 5000 nodes, 10 epochs)
-/// with `tools/nnue-trainer`; embedded so the engine is NNUE by default.
+/// Second net trained on 63M positions of net self-play (seed 2 at 5000 nodes,
+/// 2 epochs) plus 232k local seed-3 positions, with `tools/nnue-trainer`;
+/// embedded so the engine is NNUE by default.
 const EMBEDDED_NET: &[u8] = include_bytes!("../net/nnue.bin");
 
 impl EngineState {
