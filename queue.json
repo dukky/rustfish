@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "followup-history-r3",
-      "mode": "stc"
-    },
-    {
       "branch": "probcut-r3",
       "mode": "stc"
     },
@@ -18,13 +14,13 @@
     }
   ],
   "current": {
-    "branch": "futility-moves-r3",
+    "branch": "followup-history-r3",
     "mode": "stc",
-    "test_id": "q-futility-moves-r3-1103-1249",
-    "sha": "acdfaea7d6e4626dd155c6cb1f0dc1213e813b73",
+    "test_id": "q-followup-history-r3-1103-1307",
+    "sha": "2223a30fea5dcd135e5055178d7cea6f28f16a76",
     "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T12:49:41Z",
-    "bench": 634962
+    "started": "2026-11-03T13:07:46Z",
+    "bench": 641846
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
