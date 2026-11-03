@@ -1,14 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nmp-tt-guard",
-      "mode": "stc"
-    },
-    {
-      "branch": "endgame-scale-r3",
-      "mode": "stc"
-    },
-    {
       "branch": "nnue-inference-r2",
       "mode": "speedup"
     },
@@ -34,13 +26,13 @@
     }
   ],
   "current": {
-    "branch": "rfp-blend",
+    "branch": "endgame-scale-r3",
     "mode": "stc",
-    "test_id": "q-rfp-blend-1103-0527",
-    "sha": "05cb806d5121eeaf1df2896a4675d2ede7c037fc",
+    "test_id": "q-endgame-scale-r3-1103-0623",
+    "sha": "805dc71ad4dd9eac0a690170b11dd45d48f193bc",
     "base_sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb",
-    "started": "2026-11-03T05:28:01Z",
-    "bench": 608705
+    "started": "2026-11-03T06:23:50Z",
+    "bench": 637765
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
