@@ -482,9 +482,127 @@ pub(crate) mod simd {
     }
 }
 
-#[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "avx2"))))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) mod simd {
     pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update};
+}
+
+/// x86-64 builds without AVX2 enabled at compile time (the default
+/// `cargo build`): detect AVX2 once and use the same kernels at runtime,
+/// falling back to scalar on pre-Haswell CPUs.
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+pub(crate) mod simd {
+    use super::{H, QA};
+    use std::arch::x86_64::*;
+    use std::sync::OnceLock;
+
+    #[inline]
+    fn avx2() -> bool {
+        static HAVE: OnceLock<bool> = OnceLock::new();
+        *HAVE.get_or_init(|| is_x86_feature_detected!("avx2"))
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn update_avx2(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        let mut i = 0;
+        while i < H {
+            let mut v = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            for a in adds {
+                v = _mm256_add_epi16(v, _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i));
+            }
+            for s in subs {
+                v = _mm256_sub_epi16(v, _mm256_loadu_si256(s.as_ptr().add(i) as *const __m256i));
+            }
+            _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, v);
+            i += 16;
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        if avx2() {
+            // SAFETY: the feature was detected above and all slices cover H i16s.
+            unsafe { update_avx2(out, src, adds, subs) }
+        } else {
+            super::scalar::update(out, src, adds, subs)
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn screlu_dot_avx2(acc: &[i16; H], w: &[i16; H]) -> i32 {
+        let zero = _mm256_setzero_si256();
+        let qa = _mm256_set1_epi16(QA as i16);
+        let mut sum = _mm256_setzero_si256();
+        let mut i = 0;
+        while i < H {
+            let a = _mm256_loadu_si256(acc.as_ptr().add(i) as *const __m256i);
+            let c = _mm256_min_epi16(_mm256_max_epi16(a, zero), qa);
+            let wv = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
+            let cw = _mm256_mullo_epi16(c, wv);
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(cw, c));
+            i += 16;
+        }
+        let lo = _mm256_castsi256_si128(sum);
+        let hi = _mm256_extracti128_si256(sum, 1);
+        let s = _mm_add_epi32(lo, hi);
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
+        _mm_cvtsi128_si32(s)
+    }
+
+    #[inline(always)]
+    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i32 {
+        if avx2() {
+            // SAFETY: detected above; |w| <= 127 bound as in the scalar path.
+            unsafe { screlu_dot_avx2(acc, w) }
+        } else {
+            super::scalar::screlu_dot(acc, w)
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn screlu_dot_wide_avx2(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        let zero = _mm256_setzero_si256();
+        let qa = _mm256_set1_epi16(QA as i16);
+        let mut sum = _mm256_setzero_si256();
+        let mut i = 0;
+        while i < H {
+            let a = _mm256_loadu_si256(acc.as_ptr().add(i) as *const __m256i);
+            let c16 = _mm256_min_epi16(_mm256_max_epi16(a, zero), qa);
+            let w16 = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
+            let c_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(c16));
+            let c_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(c16, 1));
+            let w_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(w16));
+            let w_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(w16, 1));
+            let cc_lo = _mm256_mullo_epi32(c_lo, c_lo);
+            let cc_hi = _mm256_mullo_epi32(c_hi, c_hi);
+            let p_lo = _mm256_add_epi64(
+                _mm256_mul_epi32(cc_lo, w_lo),
+                _mm256_mul_epi32(_mm256_srli_epi64(cc_lo, 32), _mm256_srli_epi64(w_lo, 32)),
+            );
+            let p_hi = _mm256_add_epi64(
+                _mm256_mul_epi32(cc_hi, w_hi),
+                _mm256_mul_epi32(_mm256_srli_epi64(cc_hi, 32), _mm256_srli_epi64(w_hi, 32)),
+            );
+            sum = _mm256_add_epi64(sum, _mm256_add_epi64(p_lo, p_hi));
+            i += 16;
+        }
+        let lo = _mm256_castsi256_si128(sum);
+        let hi = _mm256_extracti128_si256(sum, 1);
+        let s = _mm_add_epi64(lo, hi);
+        let s = _mm_add_epi64(s, _mm_unpackhi_epi64(s, s));
+        _mm_cvtsi128_si64(s)
+    }
+
+    #[inline(always)]
+    pub(crate) fn screlu_dot_wide(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        if avx2() {
+            // SAFETY: detected above; products fit i32 as documented.
+            unsafe { screlu_dot_wide_avx2(acc, w) }
+        } else {
+            super::scalar::screlu_dot_wide(acc, w)
+        }
+    }
 }
 
 #[cfg(test)]
