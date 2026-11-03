@@ -27,6 +27,10 @@
     {
       "branch": "extensions-r3",
       "mode": "stc"
+    },
+    {
+      "branch": "anchors-3000-r2",
+      "mode": "speedup"
     }
   ],
   "current": {
