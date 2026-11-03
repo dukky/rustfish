@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "singular-ext-r2",
-      "mode": "stc"
-    },
-    {
       "branch": "futility-moves-r2",
       "mode": "stc"
     },
@@ -58,13 +54,13 @@
     }
   ],
   "current": {
-    "branch": "lmr-history-scale-r2",
+    "branch": "singular-ext-r2",
     "mode": "stc",
-    "test_id": "q-lmr-history-scale-r2-1103-0436",
-    "sha": "de7ebdbfcfec0b2bef19abe400f4c40fcb4cff2d",
+    "test_id": "q-singular-ext-r2-1103-0453",
+    "sha": "f1e0ad437a249333415c207e9923a73002d05c3a",
     "base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
-    "started": "2026-11-03T04:36:12Z",
-    "bench": 488543
+    "started": "2026-11-03T04:53:28Z",
+    "bench": 632563
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 1,
