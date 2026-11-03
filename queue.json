@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "tt-cutoff-guards",
-      "mode": "stc"
-    },
-    {
       "branch": "kpk-bitbase",
       "mode": "stc"
     },
@@ -78,13 +74,13 @@
     }
   ],
   "current": {
-    "branch": "nmp-tune",
+    "branch": "tt-cutoff-guards",
     "mode": "stc",
-    "test_id": "q-nmp-tune-1102-2248",
-    "sha": "dd1a053760ed75b6dd8ed4736c476a98ba038946",
+    "test_id": "q-tt-cutoff-guards-1103-0021",
+    "sha": "4e5e690c7a1f1b161338209521dd9ed49df679e0",
     "base_sha": "ed87b4e3ade7aba158d607e338d789d244b29970",
-    "started": "2026-11-02T22:48:55Z",
-    "bench": 472012
+    "started": "2026-11-03T00:21:16Z",
+    "bench": 475382
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 1,
