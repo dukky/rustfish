@@ -19,6 +19,10 @@
     {
       "branch": "followup-history-r3",
       "mode": "stc"
+    },
+    {
+      "branch": "probcut-r3",
+      "mode": "stc"
     }
   ],
   "current": {
