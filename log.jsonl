@@ -79,3 +79,5 @@
 {"branch": "nnue-trainer", "logged_at": "2026-11-03T09:17:15Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de"}
 {"branch": "anchors-3000", "logged_at": "2026-11-03T09:17:15Z", "mode": "speedup", "outcome": "needs-human", "reason": "rebase conflict"}
 {"base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de", "branch": "aspiration-failhigh-depth", "logged_at": "2026-11-03T09:17:48Z", "mode": "stc", "outcome": "dispatched", "sha": "56747549d6aa11e9d88c4a844aa05bd81f008011", "test_id": "q-aspiration-failhigh-depth-1103-0917"}
+{"branch": "aspiration-failhigh-depth", "elo": -0.08, "elo_ci95": [-7.07, 6.91], "games": 4256, "llr": -3.992, "logged_at": "2026-11-03T09:54:03Z", "mode": "stc", "outcome": "rejected", "sha": "56747549d6aa11e9d88c4a844aa05bd81f008011", "test_id": "q-aspiration-failhigh-depth-1103-0917", "verdict": "H0"}
+{"base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de", "branch": "ttcapture-lmr", "logged_at": "2026-11-03T09:54:44Z", "mode": "stc", "outcome": "dispatched", "sha": "adbedcbd8fe4eefa41d71c6165d60fa3e60cedc9", "test_id": "q-ttcapture-lmr-1103-0954"}

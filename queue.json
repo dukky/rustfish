@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "ttcapture-lmr",
-      "mode": "stc"
-    },
-    {
       "branch": "nnue-first-net",
       "mode": "stc"
     },
@@ -34,13 +30,13 @@
     }
   ],
   "current": {
-    "branch": "aspiration-failhigh-depth",
+    "branch": "ttcapture-lmr",
     "mode": "stc",
-    "test_id": "q-aspiration-failhigh-depth-1103-0917",
-    "sha": "56747549d6aa11e9d88c4a844aa05bd81f008011",
+    "test_id": "q-ttcapture-lmr-1103-0954",
+    "sha": "adbedcbd8fe4eefa41d71c6165d60fa3e60cedc9",
     "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T09:17:48Z",
-    "bench": 593470
+    "started": "2026-11-03T09:54:44Z",
+    "bench": 600369
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
