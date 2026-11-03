@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nmp-tt-guard-r2",
-      "mode": "stc"
-    },
-    {
       "branch": "futility-moves-r3",
       "mode": "stc"
     },
@@ -26,13 +22,13 @@
     }
   ],
   "current": {
-    "branch": "nnue-first-net",
+    "branch": "nmp-tt-guard-r2",
     "mode": "stc",
-    "test_id": "q-nnue-first-net-1103-1206",
-    "sha": "122f3026c1539b16d296264b1d252d26c0710aea",
+    "test_id": "q-nmp-tt-guard-r2-1103-1210",
+    "sha": "25da6475235be659e39db6cbde687ac4442dae14",
     "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T12:06:30Z",
-    "bench": 10104315
+    "started": "2026-11-03T12:11:01Z",
+    "bench": 633719
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
