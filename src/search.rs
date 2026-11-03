@@ -5,6 +5,11 @@ const MIN_PARALLEL_DEPTH: i32 = 6;
 // Singular extensions: minimum depth, and singular-beta margin per ply of depth.
 const SE_MIN_DEPTH: i32 = 8;
 const SE_MARGIN_PER_DEPTH: i32 = 2;
+// Verification search after a high-depth null-move cutoff: the reduced search
+// can be fooled by zugzwang-ish positions, so re-search at a lower depth with
+// null move disabled and trust the cutoff only if it still fails high.
+const NMP_VERIFY_MIN_DEPTH: i32 = 12;
+const NMP_VERIFY_EXTRA_REDUCTION: i32 = 4;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
@@ -1206,7 +1211,31 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
-                return score;
+                if depth < NMP_VERIFY_MIN_DEPTH {
+                    return score;
+                }
+                // Verification search: same position, null move disabled. If it
+                // also fails high the reduced null-move cutoff was sound.
+                let verify_depth = (depth - reduction - NMP_VERIFY_EXTRA_REDUCTION).max(1);
+                let v = -negamax(
+                    board,
+                    verify_depth,
+                    -beta,
+                    -beta + 1,
+                    ply,
+                    search,
+                    engine,
+                    rep_stack,
+                    key,
+                    prev_move,
+                    false,
+                );
+                if search.stop {
+                    return 0;
+                }
+                if v >= beta {
+                    return score;
+                }
             }
         }
     }
