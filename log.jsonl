@@ -69,3 +69,5 @@
 {"branch": "followup-history-r2", "logged_at": "2026-11-03T05:09:51Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
 {"branch": "probcut-r2", "logged_at": "2026-11-03T05:09:52Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
 {"base_sha": "f1e0ad437a249333415c207e9923a73002d05c3a", "branch": "eval-mobility-r2", "logged_at": "2026-11-03T05:10:35Z", "mode": "stc", "outcome": "dispatched", "sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb", "test_id": "q-eval-mobility-r2-1103-0510"}
+{"branch": "eval-mobility-r2", "elo": 35.75, "elo_ci95": [23.4, 48.18], "games": 1824, "llr": 7.837, "logged_at": "2026-11-03T05:27:22Z", "mode": "stc", "outcome": "merged", "sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb", "test_id": "q-eval-mobility-r2-1103-0510", "verdict": "H1"}
+{"base_sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb", "branch": "rfp-blend", "logged_at": "2026-11-03T05:28:01Z", "mode": "stc", "outcome": "dispatched", "sha": "05cb806d5121eeaf1df2896a4675d2ede7c037fc", "test_id": "q-rfp-blend-1103-0527"}

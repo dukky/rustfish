@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "rfp-blend",
-      "mode": "stc"
-    },
-    {
       "branch": "nmp-tt-guard",
       "mode": "stc"
     },
@@ -38,15 +34,15 @@
     }
   ],
   "current": {
-    "branch": "eval-mobility-r2",
+    "branch": "rfp-blend",
     "mode": "stc",
-    "test_id": "q-eval-mobility-r2-1103-0510",
-    "sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb",
-    "base_sha": "f1e0ad437a249333415c207e9923a73002d05c3a",
-    "started": "2026-11-03T05:10:35Z",
-    "bench": 635086
+    "test_id": "q-rfp-blend-1103-0527",
+    "sha": "05cb806d5121eeaf1df2896a4675d2ede7c037fc",
+    "base_sha": "78e81816f82f9ccf7df5ede42df108f5251ee9eb",
+    "started": "2026-11-03T05:28:01Z",
+    "bench": 608705
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2
+  "merges_since_check": 3,
+  "merges_since_ladder": 3
 }
