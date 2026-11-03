@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "futility-moves-r3",
-      "mode": "stc"
-    },
-    {
       "branch": "followup-history-r3",
       "mode": "stc"
     },
@@ -22,13 +18,13 @@
     }
   ],
   "current": {
-    "branch": "nmp-tt-guard-r2",
+    "branch": "futility-moves-r3",
     "mode": "stc",
-    "test_id": "q-nmp-tt-guard-r2-1103-1210",
-    "sha": "25da6475235be659e39db6cbde687ac4442dae14",
+    "test_id": "q-futility-moves-r3-1103-1249",
+    "sha": "acdfaea7d6e4626dd155c6cb1f0dc1213e813b73",
     "base_sha": "0d06d6b2e10831ffc0782a777bfee33f0a3df2de",
-    "started": "2026-11-03T12:11:01Z",
-    "bench": 633719
+    "started": "2026-11-03T12:49:41Z",
+    "bench": 634962
   },
   "check_base": "04440e473f78315d0897eab02d062dfd717f4637",
   "merges_since_check": 3,
