@@ -5,6 +5,10 @@ const MIN_PARALLEL_DEPTH: i32 = 6;
 // Singular extensions: minimum depth, and singular-beta margin per ply of depth.
 const SE_MIN_DEPTH: i32 = 8;
 const SE_MARGIN_PER_DEPTH: i32 = 2;
+// Double extension: a singular TT move whose alternative search falls this far
+// below singular_beta is extended by two plies, at most this many times per line.
+const SE_DOUBLE_MARGIN: i32 = 20;
+const DOUBLE_EXTENSION_LIMIT: u8 = 6;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
@@ -121,6 +125,8 @@ pub(crate) struct Search {
     static_evals: [i32; MAX_PLY],
     /// Move skipped by a singular-extension verification search at this ply.
     excluded: [Option<Move>; MAX_PLY],
+    /// Double extensions already used on the current line (capped).
+    double_ext: [u8; MAX_PLY],
     move_buf: Vec<Move>,
 }
 
@@ -134,6 +140,7 @@ impl Search {
             killers: [[None; 2]; MAX_PLY],
             static_evals: [NO_EVAL; MAX_PLY],
             excluded: [None; MAX_PLY],
+            double_ext: [0; MAX_PLY],
             move_buf: Vec::with_capacity(256),
         }
     }
@@ -1084,6 +1091,7 @@ fn negamax(
     // Singular verification search: same node, minus this move. The TT entry
     // describes the full node, so it must not cut off or be overwritten here.
     let excluded = search.excluded[ply];
+    search.double_ext[ply] = if ply >= 1 { search.double_ext[ply - 1] } else { 0 };
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
 
@@ -1353,6 +1361,13 @@ fn negamax(
                     }
                     if s < singular_beta {
                         extension = 1;
+                        if s < singular_beta - SE_DOUBLE_MARGIN
+                            && beta - alpha > 1
+                            && search.double_ext[ply] < DOUBLE_EXTENSION_LIMIT
+                        {
+                            extension = 2;
+                            search.double_ext[ply] += 1;
+                        }
                     } else if singular_beta >= beta && beta - alpha <= 1 {
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
