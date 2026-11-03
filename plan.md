@@ -60,12 +60,13 @@ exact speedups; rejected `lmp-improving`, `tm-budget`, `qsearch-see`,
 
 **Measurement.** Elite CCRL ladder on the new main (after the merges above).
 
-**NNUE.** Inference and the trainer are merged (`nnue-inference-r2`,
-`nnue-trainer`). The first datagen run produced 3,295,473 positions from 40k
-games at 5000 nodes in ~17 min per shard (794-1160 pos/s per runner). The
-first net (10 epochs, lr 0.02, 33M samples; eval-vs-search-score r=0.95 on
-training positions) is queued as `nnue-first-net`, stacked on the inference
-merge. Next: a 65M-position run and a retrain once the SPRT verdict is in.
+**NNUE.** Inference, the trainer and the first net are merged. The first
+datagen run produced 3,295,473 positions from 40k games at 5000 nodes in
+~17 min per shard (794-1160 pos/s per runner); the net (10 epochs, lr 0.02,
+33M samples) passed its first SPRT at **+51.2 Elo (95% CI +27.7..+75.3**,
+608 games) once the stm-POV eval-cache sign bug was fixed (`nnue-eval-sign`).
+The buggy first attempt lost all 608 games, so this is the real first result.
+Next: a 65M-position run, retrain, and a second net (the usual bootstrap).
 
 ## Known problems (not fixed yet)
 
@@ -184,4 +185,8 @@ for runners: speedups, data generation tooling, the NNUE code.
 - 2026-10-29: depth-8 cap fixed (+221), SPRT pipeline and CCRL ladder built: ~2081.
 - 2026-10-31: IIR, SEE fix, TT review, eval rework (king safety, threats,
   passers, joint retune): ~2624 → ~2810.
+- 2026-11-03: queue wave: singular extensions +23.7 and per-piece mobility
+  +35.8 merged; first NNUE net +51.2 merged (after fixing the eval-cache
+  stm-POV sign); anchors extended to 3208. Rejected: probcut (+5.0,
+  inconclusive), extensions, ttcapture-lmr, aspiration fail-high depth.
 - 2026-11-01: unattended merge queue.
