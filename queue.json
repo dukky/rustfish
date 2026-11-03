@@ -1,6 +1,14 @@
 {
   "pending": [
     {
+      "branch": "nnue-runtime-avx2",
+      "mode": "speedup"
+    },
+    {
+      "branch": "nnue-wide-avx2",
+      "mode": "speedup"
+    },
+    {
       "branch": "main",
       "mode": "ladder"
     }
