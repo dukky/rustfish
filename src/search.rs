@@ -95,8 +95,10 @@ pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
                 }
                 result
             };
-            // Base reduction: ln(d) * ln(m) / 2.0
-            table[d][m] = (ln_d * ln_m / 2.0 + 0.5) as i32;
+            // Base reduction: ln(d) * ln(m) / 1.8 — slightly more aggressive
+            // than the classic /2.0, matching the deeper trees the NNUE eval
+            // now allows.
+            table[d][m] = (ln_d * ln_m / 1.8 + 0.5) as i32;
         }
     }
     table
