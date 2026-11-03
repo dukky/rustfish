@@ -289,7 +289,7 @@ fn output_sum(net: &Network, us: &[i16; H], them: &[i16; H]) -> i64 {
     if net.small_out {
         simd::screlu_dot(us, w_us) as i64 + simd::screlu_dot(them, w_them) as i64
     } else {
-        scalar::screlu_dot_wide(us, w_us) + scalar::screlu_dot_wide(them, w_them)
+        simd::screlu_dot_wide(us, w_us) + simd::screlu_dot_wide(them, w_them)
     }
 }
 
@@ -343,6 +343,7 @@ pub(crate) mod scalar {
 pub(crate) mod simd {
     use super::{H, QA};
     use std::arch::aarch64::*;
+    pub(crate) use super::scalar::screlu_dot_wide;
 
     #[inline(always)]
     pub(crate) fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
@@ -437,11 +438,53 @@ pub(crate) mod simd {
             _mm_cvtsi128_si32(s)
         }
     }
+
+    /// Exact i64 screlu dot for any i16 weights (the `!small_out` path).
+    /// c^2 <= 65025 and |w| <= 32767, so each 32-bit product fits signed
+    /// i32; it is widened to i64 by `_mm256_mul_epi32` before accumulating.
+    #[inline(always)]
+    pub(crate) fn screlu_dot_wide(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        // SAFETY: AVX2 is enabled at compile time (cfg); unaligned loads at
+        // offsets < H, and the accumulator is 4 i64 lanes.
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let qa = _mm256_set1_epi16(QA as i16);
+            let mut sum = _mm256_setzero_si256();
+            let mut i = 0;
+            while i < H {
+                let a = _mm256_loadu_si256(acc.as_ptr().add(i) as *const __m256i);
+                let c16 = _mm256_min_epi16(_mm256_max_epi16(a, zero), qa);
+                let w16 = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
+                let c_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(c16));
+                let c_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(c16, 1));
+                let w_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(w16));
+                let w_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(w16, 1));
+                let cc_lo = _mm256_mullo_epi32(c_lo, c_lo);
+                let cc_hi = _mm256_mullo_epi32(c_hi, c_hi);
+                // Even/odd 32-bit lanes -> 64-bit products, two vectors each.
+                let p_lo = _mm256_add_epi64(
+                    _mm256_mul_epi32(cc_lo, w_lo),
+                    _mm256_mul_epi32(_mm256_srli_epi64(cc_lo, 32), _mm256_srli_epi64(w_lo, 32)),
+                );
+                let p_hi = _mm256_add_epi64(
+                    _mm256_mul_epi32(cc_hi, w_hi),
+                    _mm256_mul_epi32(_mm256_srli_epi64(cc_hi, 32), _mm256_srli_epi64(w_hi, 32)),
+                );
+                sum = _mm256_add_epi64(sum, _mm256_add_epi64(p_lo, p_hi));
+                i += 16;
+            }
+            let lo = _mm256_castsi256_si128(sum);
+            let hi = _mm256_extracti128_si256(sum, 1);
+            let s = _mm_add_epi64(lo, hi);
+            let s = _mm_add_epi64(s, _mm_unpackhi_epi64(s, s));
+            _mm_cvtsi128_si64(s)
+        }
+    }
 }
 
 #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "avx2"))))]
 pub(crate) mod simd {
-    pub(crate) use super::scalar::{screlu_dot, update};
+    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update};
 }
 
 #[cfg(test)]
