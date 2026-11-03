@@ -99,3 +99,4 @@
 {"base_sha": "3079d3d4770ef23d97152f1447ef6065b614da26", "branch": "nnue-first-net-r2", "logged_at": "2026-11-03T16:54:37Z", "mode": "stc", "outcome": "dispatched", "sha": "e2fd5fd40a1021413b0081fdbdd9ae5544602877", "test_id": "q-nnue-first-net-r2-1103-1654"}
 {"branch": "nnue-first-net-r2", "elo": 51.23, "elo_ci95": [27.67, 75.26], "games": 608, "llr": 3.258, "logged_at": "2026-11-03T17:00:39Z", "mode": "stc", "outcome": "merged", "sha": "e2fd5fd40a1021413b0081fdbdd9ae5544602877", "test_id": "q-nnue-first-net-r2-1103-1654", "verdict": "H1"}
 {"branch": "sprt-bounds-5", "logged_at": "2026-11-03T19:39:13Z", "mode": "speedup", "outcome": "needs-human", "reason": "rebase conflict"}
+{"base_sha": "48ec7d621d9f5bda747dfe9f2a0191594174c052", "branch": "nnue-net2", "logged_at": "2026-11-03T23:39:11Z", "mode": "stc", "outcome": "dispatched", "sha": "7159f91f53ec20999c0d851aceb827b10bceade2", "test_id": "q-nnue-net2-1103-2339"}
