@@ -11,6 +11,14 @@
     {
       "branch": "nmp-tt-guard-r2",
       "mode": "stc"
+    },
+    {
+      "branch": "futility-moves-r3",
+      "mode": "stc"
+    },
+    {
+      "branch": "followup-history-r3",
+      "mode": "stc"
     }
   ],
   "current": {
