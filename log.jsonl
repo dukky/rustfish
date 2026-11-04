@@ -106,3 +106,4 @@
 {"branch": "nnue-runtime-avx2", "logged_at": "2026-11-03T23:59:17Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "030df6831141d63b4017cb6231cdb01157830dd0"}
 {"branch": "nnue-wide-avx2", "logged_at": "2026-11-03T23:59:18Z", "mode": "speedup", "outcome": "skipped", "reason": "no commits beyond main"}
 {"branch": "main", "logged_at": "2026-11-03T23:59:19Z", "mode": "ladder", "outcome": "dispatched", "sha": "030df6831141d63b4017cb6231cdb01157830dd0", "test_id": "q-ladder-1103-2359"}
+{"branch": "main", "ci": [3151.1, 3197.6], "elo": null, "elo_ci95": null, "games": 1440, "llr": null, "logged_at": "2026-11-04T02:22:30Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3174.1, "sha": "030df6831141d63b4017cb6231cdb01157830dd0", "test_id": "q-ladder-1103-2359", "verdict": "ladder"}
