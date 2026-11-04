@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn position_moves_preserve_repetition_history() {
         thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(16 * 1024 * 1024)
             .spawn(|| {
                 let mut board = Board::new();
                 let mut engine = EngineState::new();
