@@ -95,6 +95,10 @@ Next: a 65M-position run, retrain, and a second net (the usual bootstrap).
   (checkpoint/resume, measured throughput), but `nnue-train.yml` has to be
   added by a human (workflow files need an SSH push). Until then, training
   runs locally on a downloaded datagen artifact.
+- **`go nodes` is single-threaded only.** With `Threads>1` the node limit is
+  not enforced by the helper searches, so a `go nodes N` can run to the depth
+  cap instead of stopping. CCRL is 1 CPU, so this does not affect submission,
+  but it is a UCI correctness gap for GUI users.
 - **Time management** is only tested at 60+0.6; CCRL is 120+1 / 40/15 and
   Lichess games are often longer. `tm-budget` is in the queue.
 - **Lazy SMP is untested for strength** (CCRL blitz is 1 thread, so it only
