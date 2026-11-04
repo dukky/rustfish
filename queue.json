@@ -1,6 +1,47 @@
 {
-  "pending": [],
-  "current": null,
+  "pending": [
+    {
+      "branch": "correction-history-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "endgame-scale-r3",
+      "mode": "stc"
+    },
+    {
+      "branch": "ttcapture-lmr",
+      "mode": "stc"
+    },
+    {
+      "branch": "razoring",
+      "mode": "stc"
+    },
+    {
+      "branch": "tt-cutoff-guards",
+      "mode": "stc"
+    },
+    {
+      "branch": "kpk-bitbase",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-pv-captures-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmp-improving",
+      "mode": "stc"
+    }
+  ],
+  "current": {
+    "branch": "probcut-r3",
+    "mode": "stc",
+    "test_id": "q-probcut-r3-1104-0719",
+    "sha": "ab495c3c44b5e5242b799ef74a07466e6b71da4d",
+    "base_sha": "4033ab0d09cf621a08c8360dc80d5ea256352305",
+    "started": "2026-11-04T07:19:23Z",
+    "bench": 626250
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 0,
   "merges_since_ladder": 0
