@@ -23,17 +23,25 @@ API = f"https://api.github.com/repos/{REPO}"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TARGET = {"rating": 3400, "label": "Goal: 3400 CCRL Blitz"}
 
-# Seconds each source stays fresh. API calls: ~20/h runs + ~20/h jobs + 6/h
-# commits at worst, i.e. under 50/h even with someone watching all day.
+# Seconds each source stays fresh. API calls: ~20/h runs + ~20/h jobs + ~12/h
+# datagen jobs + 6/h commits at worst, i.e. under the 60/h unauthenticated limit
+# even with someone watching all day.
 TTL_RAW = 120
 TTL_RUNS = 180
 TTL_JOBS = 180
+TTL_DATAGEN_JOBS = 300
 TTL_COMMITS = 600
 
 # Fallback rounds per shard per wave, used only if scripts/queue-settings.json
 # can't be fetched (waves start at rounds_per_shard and double up to
 # max_rounds_per_shard). Used only to estimate games played in the in-flight SPRT.
 ROUNDS = {"stc": (16, 64), "nonreg": (16, 64), "ltc-gainer": (6, 24), "ltc-check": (6, 24)}
+
+# Positions per game in the net3 datagen set (measured, not a guess).
+POSITIONS_PER_GAME = 79
+
+# The strategy switched after plan.md was written; point the roadmap at the audit.
+AUDIT_DOC = "docs/opus-audit-2026-11-04.md"
 
 
 class Cache:
@@ -150,6 +158,26 @@ def build_status():
     rounds = {m: (s["rounds_per_shard"], s.get("max_rounds_per_shard", s["rounds_per_shard"]))
               for m, s in qcfg.get("modes", {}).items()} or ROUNDS
 
+    # NNUE net chain: on main once merged, otherwise the net-chain branch.
+    chain, chain_ref, chain_err = None, None, None
+    for ref in ("main", "net-chain"):
+        data, at, err = CACHE.get(f"{RAW}/{ref}/net/chain.json", TTL_RAW, json.loads)
+        if isinstance(data, dict):
+            chain, chain_ref = data, ref
+            sources["net_chain"] = {"fetched_at": iso(at), "error": None, "ref": ref}
+            break
+        chain_err = err
+    if chain is None:
+        sources["net_chain"] = {"fetched_at": None, "error": chain_err or "no net/chain.json"}
+    nets = []
+    for n in (chain or {}).get("nets", []) if isinstance(chain, dict) else []:
+        gate = n.get("gate") or {}
+        nets.append({"net": n.get("net"), "branch": n.get("branch"), "positions": n.get("positions"),
+                     "nodes": n.get("nodes"), "seed": n.get("seed"), "epochs": n.get("epochs"),
+                     "loss": n.get("loss"), "loss_note": n.get("loss_note"), "bench": n.get("bench"),
+                     "note": n.get("note"), "gate_elo": gate.get("elo"), "gate_ci": gate.get("ci"),
+                     "gate_games": gate.get("games"), "gate_verdict": gate.get("verdict")})
+
     # Strength over time.
     points = []
     for r in ladder:
@@ -240,6 +268,39 @@ def build_status():
               for r in runs if r.get("status") in ("in_progress", "queued", "waiting", "pending")
               and r.get("name") != "CI"]
 
+    # Live datagen wave for the next net: shard progress and positions produced.
+    datagen = None
+    dg = next((r for r in runs
+               if ((r.get("name") or "").startswith("Datagen")
+                   or (r.get("display_title") or "").startswith("Datagen"))
+               and r.get("status") in ("in_progress", "queued", "waiting", "pending")), None)
+    if dg:
+        title = dg.get("display_title") or dg.get("name") or ""
+        jobs_doc = fetch("datagen_jobs", f"{API}/actions/runs/{dg['id']}/jobs?per_page=100",
+                         TTL_DATAGEN_JOBS, json.loads)
+        jobs = (jobs_doc if isinstance(jobs_doc, dict) else {}).get("jobs", [])
+        shards = [j for j in jobs if re.fullmatch(r"shard \d+", j.get("name", ""))]
+        done = sum(1 for j in shards if j.get("status") == "completed")
+        running = sum(1 for j in shards if j.get("status") == "in_progress")
+        queued = sum(1 for j in shards if j.get("status") == "queued")
+        m = re.search(r"\((\d+)x(\d+)\s+games?,\s*(\d+)\s+nodes\)", title, re.I)
+        planned = games = nodes = None
+        if m:
+            planned, games, nodes = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            mm = re.search(r"([\d,]+)\s+games?", title, re.I)
+            games = int(mm.group(1).replace(",", "")) if mm else None
+            mm = re.search(r"(\d+)\s+nodes?", title, re.I)
+            nodes = int(mm.group(1)) if mm else None
+        mm = re.search(r"Datagen\s+(\S+)\s+seed", title, re.I)
+        total = len(shards) or planned or 0
+        datagen = {"title": title, "net": mm.group(1) if mm else None,
+                   "run_url": dg.get("html_url"), "status": dg.get("status"),
+                   "started": dg.get("run_started_at") or dg.get("created_at"),
+                   "shards_total": total, "shards_done": done, "shards_running": running,
+                   "shards_queued": queued, "games_per_shard": games, "nodes": nodes,
+                   "estimated_positions": done * games * POSITIONS_PER_GAME if games else None}
+
     recent_commits = []
     for c in commits if isinstance(commits, list) else []:
         msg = (c.get("commit") or {}).get("message", "")
@@ -249,10 +310,40 @@ def build_status():
                                "bench": int(bench[-1]) if bench else None, "url": c.get("html_url")})
 
     latest = points[-1] if points else None
+    # Measured strength is the last ladder run; estimated adds the queue SPRTs
+    # merged after it. Estimated is never presented as an official CCRL rating.
+    measured = None
+    if latest:
+        measured = {k: latest[k] for k in ("rating", "ci", "when", "sha", "url", "games")}
+    components = []
+    if measured and measured.get("when"):
+        for e in events:
+            if e["outcome"] != "merged" or not e["branch"] or e["branch"] == "main":
+                continue
+            if e["elo"] is None or not e["when"] or e["when"] <= measured["when"]:
+                continue
+            components.append({"branch": e["branch"], "elo": e["elo"], "games": e["games"],
+                               "when": e["when"]})
+    components.sort(key=lambda c: c["when"])
+    delta = round(sum(c["elo"] for c in components), 1)
+    strength = None
+    if measured:
+        strength = {
+            "measured": measured,
+            "estimated": {"rating": round(measured["rating"] + delta, 1), "delta": delta,
+                          "components": components},
+            "label": "Estimated = last measured ladder rating + queue SPRT Elo merged since; "
+                     "not an official CCRL rating.",
+        }
+
     return {
         "generated_at": iso(time.time()),
         "repo": REPO,
         "target": TARGET,
+        "strength": strength,
+        "net_chain": {"nets": nets, "ref": chain_ref},
+        "datagen": datagen,
+        "roadmap": {"audit_doc": AUDIT_DOC, "plan_stale": True},
         "current": latest and {k: latest[k] for k in ("rating", "ci", "sha", "when", "url", "games")},
         "gap": latest and round(TARGET["rating"] - latest["rating"], 1),
         "ladder": points,
