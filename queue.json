@@ -1,6 +1,14 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "nnue-net4",
+    "mode": "stc",
+    "test_id": "q-nnue-net4-1104-1335",
+    "sha": "c24588c7f9d11b0544fdca4379aa41940c967d30",
+    "base_sha": "55f6c2f31cf28a053911899c16d384a9add79c98",
+    "started": "2026-11-04T13:35:06Z",
+    "bench": 489860
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 2,
   "merges_since_ladder": 2
