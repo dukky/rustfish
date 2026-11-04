@@ -1,44 +1,7 @@
 {
-  "pending": [
-    {
-      "branch": "bigbang-structural",
-      "mode": "stc"
-    },
-    {
-      "branch": "cont-hist-2ply",
-      "mode": "stc"
-    },
-    {
-      "branch": "ccrl-identity",
-      "mode": "speedup"
-    },
-    {
-      "branch": "ccrl-docs",
-      "mode": "speedup"
-    },
-    {
-      "branch": "docs/opus-audit",
-      "mode": "speedup"
-    },
-    {
-      "branch": "net-chain",
-      "mode": "speedup"
-    },
-    {
-      "branch": "dashboard-net-view",
-      "mode": "speedup"
-    }
-  ],
-  "current": {
-    "branch": "nnue-net3",
-    "mode": "stc",
-    "test_id": "q-nnue-net3-1104-1309",
-    "sha": "55f6c2f31cf28a053911899c16d384a9add79c98",
-    "base_sha": "40ecb3f8ecbd976fa6db56e5c9654522232b4633",
-    "started": "2026-11-04T13:09:14Z",
-    "bench": 683718
-  },
+  "pending": [],
+  "current": null,
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1
+  "merges_since_check": 2,
+  "merges_since_ladder": 2
 }

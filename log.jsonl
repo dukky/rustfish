@@ -111,3 +111,11 @@
 {"branch": "probcut-r3", "elo": 4.35, "elo_ci95": [0.99, 7.72], "games": 18848, "llr": 3.141, "logged_at": "2026-11-04T13:08:01Z", "mode": "stc", "outcome": "merged", "sha": "ab495c3c44b5e5242b799ef74a07466e6b71da4d", "test_id": "q-probcut-r3-1104-0719", "verdict": "H1"}
 {"branch": "net-loop", "logged_at": "2026-11-04T13:08:46Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "40ecb3f8ecbd976fa6db56e5c9654522232b4633"}
 {"base_sha": "40ecb3f8ecbd976fa6db56e5c9654522232b4633", "branch": "nnue-net3", "logged_at": "2026-11-04T13:09:14Z", "mode": "stc", "outcome": "dispatched", "sha": "55f6c2f31cf28a053911899c16d384a9add79c98", "test_id": "q-nnue-net3-1104-1309"}
+{"branch": "nnue-net3", "elo": 39.79, "elo_ci95": [28.05, 51.63], "games": 1824, "llr": 5.27, "logged_at": "2026-11-04T13:26:11Z", "mode": "stc", "outcome": "merged", "sha": "55f6c2f31cf28a053911899c16d384a9add79c98", "test_id": "q-nnue-net3-1104-1309", "verdict": "H1"}
+{"branch": "bigbang-structural", "logged_at": "2026-11-04T13:26:12Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "cont-hist-2ply", "logged_at": "2026-11-04T13:26:12Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "ccrl-identity", "logged_at": "2026-11-04T13:26:44Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
+{"branch": "ccrl-docs", "logged_at": "2026-11-04T13:27:14Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
+{"branch": "docs/opus-audit", "logged_at": "2026-11-04T13:27:45Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
+{"branch": "net-chain", "logged_at": "2026-11-04T13:28:15Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
+{"branch": "dashboard-net-view", "logged_at": "2026-11-04T13:28:46Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
