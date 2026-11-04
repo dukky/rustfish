@@ -4,7 +4,7 @@ The single source of truth for what is running, what is next and why. Process
 rules live in `docs/development.md`; results live in `tests/*.jsonl` and the
 `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-02._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-04._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**; this file holds
 the plan, not the live state.
 
@@ -12,11 +12,11 @@ the plan, not the live state.
 
 | | |
 |---|---|
-| Strength | **3025.5 CCRL Blitz** (95% CI 3004.8-3046.3), 1440 games, 0 time losses, measured 2026-11-03 on the first NNUE net + singular extensions + mobility (15 anchors, 120+1). |
+| Strength | **3174.1 CCRL Blitz** (95% CI 3151.1-3197.6), 1440 games, 0 time losses, measured 2026-11-04 on the second NNUE net + AVX2 runtime dispatch (15 anchors, 120+1). |
 | Stockfish cross-check | ~2881 on Stockfish's UCI_Elo scale: 61% vs skill 10, 25% vs skill 15, 22% vs skill 17 (`tests/stockfish-log.jsonl`) |
 | Target | Stockfish 17 skill 17 (UCI_Elo 3139, ~3140 CCRL Blitz) |
 | Speed | ~3.0M nps single thread on M3 after the exact speedups (magics, fused movegen, make/undo, eval) |
-| Eval | hand-crafted, Texel/jointly tuned (PSQT, king safety, threats, passers) |
+| Eval | NNUE (second net, 768→256×2→1, embedded) with the hand-crafted eval as fallback |
 | Search | PVS, aspiration, TT (4-slot buckets), NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, check extension, mate-distance pruning |
 
 Where the remaining ~330 Elo plausibly comes from (rough, overlapping estimates):
@@ -59,6 +59,15 @@ exact speedups; rejected `lmp-improving`, `tm-budget`, `qsearch-see`,
 `capture-history`.
 
 **Measurement.** Elite CCRL ladder on the new main (after the merges above).
+Latest: **3174.1** (CI 3151.1-3197.6) on `030df68`, 1440 games, 0 time losses.
+
+**CCRL submission (ready; not tagged).** Owner decisions 2026-11-04:
+Apache-2.0 licence, `Rustfish 1.0.0`, author `dukky`, `OwnBook=false` by
+default. `ccrl-identity` carries the identity and book-default change (queued
+as `speedup`, bench unchanged); `docs/ccrl-submission.md` has the release
+steps and the announcement draft, and `scripts/ccrl_check.py` is the
+pre-release probe. Tag `v1.0.0` only on explicit go-ahead, after the identity
+branch merges.
 
 **NNUE.** Inference, the trainer and the first net are merged. The first
 datagen run produced 3,295,473 positions from 40k games at 5000 nodes in
@@ -119,8 +128,9 @@ Next: a 65M-position run, retrain, and a second net (the usual bootstrap).
    at startup, std only), opposite-colour bishop scaling, fortress-ish scaling.
 7. **Lichess bot live** on the Dokku box (needs the bot account and token from
    the user, set with `dokku config:set`). Gives a public, continuous rating.
-8. **CCRL submission** (`docs/ccrl-submission.md`): needs a licence decision and
-   a tagged release; their games are the most credible independent rating.
+8. **CCRL submission** (`docs/ccrl-submission.md`): decisions made and release
+   tooling ready; needs `ccrl-identity` merged, a tagged release and a forum
+   announcement. Their games are the most credible independent rating.
 
 ## Long term (the path to beating Stockfish 17 skill 17)
 

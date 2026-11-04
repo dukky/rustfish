@@ -238,6 +238,7 @@ this pipeline before ruling it out again.
 | `.github/workflows/sprt.yml` | wave-based SPRT on GitHub runners |
 | `.github/workflows/ccrl-ladder.yml` | CCRL-scale rating vs anchors |
 | `.github/workflows/release.yml` | release binaries on tag `v*` (docs/ccrl-submission.md) |
+| `scripts/ccrl_check.py` | UCI/bench readiness probe for a release binary |
 | `.github/workflows/spsa.yml`, `scripts/spsa.py`, `tune/spsa-params.json` | SPSA tuning of search options |
 | `.github/workflows/datagen.yml` | sharded self-play training data (docs/nnue.md) |
 | `tests/sprt-log.jsonl`, `tests/ladder-log.jsonl` | the record of every result |
