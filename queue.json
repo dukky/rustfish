@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "nnue-net3",
+      "mode": "stc"
+    },
+    {
       "branch": "ladder-hold",
       "mode": "speedup"
     },
