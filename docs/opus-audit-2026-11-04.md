@@ -211,3 +211,25 @@ The audit agent's correction is adopted:
   gz first, gunzip/train/delete sequentially. 8.4 GB free at the start.
 - **Capacity trigger:** if the cumulative net is under +10, stop net-only
   iteration and implement output buckets / 512-wide before more datagen.
+
+## 12. Status at 17:55 UTC (for the 20:00 audit)
+
+- **Estimated strength: 3230.8** (probcut +4.35, net3 +39.79, net4 +12.58).
+  Measured still 3174.1; ladders held.
+- **Cumulative net6-r2 built**: valid pool seed 4 (79M) + seed 5 (77M) +
+  seed 6 (37.6M), one epoch each, mirror augmentation, lr 0.02 -> 0.01 ->
+  0.005. Bench **522212**, perft/selftest/tests green, branch `nnue-net6-r2`
+  committed but **not queued** until the local pre-gate clears.
+- **Local pre-gate** (fastchess 5+0.05, 200 games, base net4 vs candidate) is
+  running: 64/200 games, candidate 45.8% at 60 games. Pass threshold 45%;
+  this is a smoke filter, not a strength proof.
+- **Seed 8 datagen** (net4, 1M games): 7/20 shards done. Valid data; retained
+  for the next generation after net6-r2's gate. Seed 7 and `nnue-net6` remain
+  quarantined/void.
+- **Bootstrap rule is enforced**: no datagen is dispatched from an ungated net.
+  The cron caretaker is monitor-only; it will not train or dispatch.
+- **Queue:** docs/dashboard/net-chain/plan/trainer-mirror speedups are in the
+  inbox waiting for the 20-runner datagen to finish; nothing engine is queued.
+- **Dashboard** is live with measured vs estimated, the net chain through the
+  void net6, and datagen shard progress. The audit doc link may still point at
+  main until the docs branch merges; read `origin/docs/opus-audit-r2` if so.
