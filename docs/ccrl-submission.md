@@ -77,8 +77,25 @@ Only after the owner says go:
    The workflow creates `v1.0.0` with the five binaries attached. If a build
    fails, delete the tag (`git push --delete origin v1.0.0 && git tag -d v1.0.0`)
    and re-tag after the fix.
-4. Edit the release notes to add the strength estimate, UCI options and licence
-   (`gh release edit v1.0.0 --notes-file <file>`).
+4. Edit the release notes to add the strength estimate, UCI options and licence.
+   The workflow's auto-generated body already has the binary/bench table; keep
+   it and prepend the release summary:
+   ```bash
+   body=$(gh release view v1.0.0 --json body -q .body)
+   { cat <<'EOF'
+   Rustfish 1.0.0 — a zero-dependency UCI chess engine in Rust (Apache-2.0).
+
+   Estimated ~3174 CCRL Blitz (95% CI 3151-3198) from 1440 games at 120+1
+   against rated anchors, 0 time losses, measured on <release-sha>. This is a
+   self-measured anchor-ladder estimate, not an official CCRL rating.
+
+   No external files are needed: the NNUE net is embedded and the built-in
+   book is off by default (`OwnBook=false`). `v3` binaries need AVX2/BMI2
+   (Haswell / Zen 1 or newer); use `v2` on older CPUs.
+   EOF
+     echo; echo "$body"; } > /tmp/rustfish-release-notes.md
+   gh release edit v1.0.0 --notes-file /tmp/rustfish-release-notes.md
+   ```
 5. Post the announcement (below) on TalkChess and the CCRL Discussion Board.
 
 ## Announcement draft
