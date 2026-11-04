@@ -4,69 +4,48 @@ The single source of truth for what is running, what is next and why. Process
 rules live in `docs/development.md`; results live in `tests/*.jsonl` and the
 `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-02._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-04._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**; this file holds
 the plan, not the live state.
+
+## Strategy update (2026-11-04)
+
+NNUE is the engine and the net chain is the main line. The queue is no longer a
+general search-patch pipeline: net generations go to the front, search work is a
+filler behind them, and ladders are held until the chain plateaus.
+
+- **Measured:** 3174.1 CCRL Blitz (CI 3151.1-3197.6), last ladder on `030df68`.
+- **Estimated:** ~3230.8 = 3174.1 + probcut +4.35 + net3 +39.79 + net4 +12.58.
+  The dashboard shows measured and estimated separately.
+- **Main:** `c24588c`, NNUE net4 (768->256x2->1 SCReLU, i16).
+- **Net results so far:** net1 +51.2, net2 +149.1, net3 +39.8, net4 +12.6,
+  net5 **-66.9 rejected** (37.6M positions, below the data knee), net6 (trained
+  on rejected net5 data) **void, do not queue**.
+- **Next:** net6-r2 on seed 8 (1M games from net4, ~77M positions, 2 epochs,
+  control). Then net7 on a **mix** of net3-era and net4-era data (80M total,
+  3 epochs); if net7 does not beat net6-r2, the bottleneck is capacity, not data.
+- **Capacity after that:** output buckets first (cheap inference), then 512-wide
+  hidden, then king buckets.
+- **Runner constraint:** 20 concurrent GitHub jobs, so datagen (20 shards) and
+  SPRT (19 shards) cannot overlap; per-generation wall time is dominated by
+  datagen plus the short gate.
+- **Ladder hold:** `ladder_every` is 50 (branch `net-loop`) until the chain
+  plateaus; restore 5 at the end. `net-gate` is 5+0.05, bounds [0,10]; search
+  changes still use `stc` [0,5].
+
+Full audit trail and open questions: `docs/opus-audit-2026-11-04.md` (once the
+docs branch lands) and `net/chain.json`.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **3025.5 CCRL Blitz** (95% CI 3004.8-3046.3), 1440 games, 0 time losses, measured 2026-11-03 on the first NNUE net + singular extensions + mobility (15 anchors, 120+1). |
-| Stockfish cross-check | ~2881 on Stockfish's UCI_Elo scale: 61% vs skill 10, 25% vs skill 15, 22% vs skill 17 (`tests/stockfish-log.jsonl`) |
-| Target | Stockfish 17 skill 17 (UCI_Elo 3139, ~3140 CCRL Blitz) |
-| Speed | ~3.0M nps single thread on M3 after the exact speedups (magics, fused movegen, make/undo, eval) |
-| Eval | hand-crafted, Texel/jointly tuned (PSQT, king safety, threats, passers) |
-| Search | PVS, aspiration, TT (4-slot buckets), NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, check extension, mate-distance pruning |
-
-Where the remaining ~330 Elo plausibly comes from (rough, overlapping estimates):
-
-| Source | Expected | Confidence |
-|---|---|---|
-| Standard search features still missing (queue below) | +60..120 | medium: each is proven elsewhere, several failed here before for implementation reasons |
-| NPS (eval is 60% of time) | +15..40 | high for the speed, Elo from speed is ~+50..70 per doubling at blitz |
-| SPSA of search parameters | +15..40 | medium |
-| Eval retune on far more (self-play) data | +10..30 | medium |
-| **NNUE** (own trainer + inference, std only) | **+150..300** | high: the largest single jump every HCE engine at this level has made |
-
-So: the queue and speed work keep us moving, but **reaching 3139 almost
-certainly needs NNUE**. That is the long-term project and should start soon,
-because its data generation can run on CI in the gaps.
-
-## Short term (running now / this week)
-
-**Merge queue (GitHub, unattended).** ~25 candidates: the new search ideas
-(history pruning, IIR at cut-nodes, razoring, NMP tuning, TT cutoff guards),
-KPK bitbase, and the 13 older branches re-applied on the new main (`-r2`), plus
-infra that merges without an SPRT once bench is identical (`nnue-inference`,
-`datagen-ci`). About a day of CI. Live order and results: the dashboard.
-Two `needs-human` rebase conflicts were re-applied on 2026-11-02 and queued:
-`endgame-scale-r3` (stc) and `nnue-inference-r2` (speedup, plus an eval-cache
-bypass so an attached net actually drives search). Two backlog ideas were
-added then: `ttcapture-lmr` and `aspiration-failhigh-depth`. `check-lmr` needs
-no branch (LMR already skips checking moves) and `cutnode-lmr` has no
-`cut_node` flag (`iir-cutnode` was rejected).
-
-Five more rebase conflicts appeared after `singular-ext-r2` merged and were
-re-applied on 2026-11-03: `nmp-tt-guard-r2`, `futility-moves-r3`,
-`followup-history-r3`, `probcut-r3`, `extensions-r3` (the last reconciles the
-pawn-push extension with the singular-extension `extension` variable instead
-of shadowing it).
-
-Done Nov 1-2: merged `lmr-priority-quiets` (+13), `history-gravity` (+22),
-`improving-rfp` (+17), `see-quiets` (+9), `insufficient-material` (nonreg) and five
-exact speedups; rejected `lmp-improving`, `tm-budget`, `qsearch-see`,
-`capture-history`.
-
-**Measurement.** Elite CCRL ladder on the new main (after the merges above).
-
-**NNUE.** Inference, the trainer and the first net are merged. The first
-datagen run produced 3,295,473 positions from 40k games at 5000 nodes in
-~17 min per shard (794-1160 pos/s per runner); the net (10 epochs, lr 0.02,
-33M samples) passed its first SPRT at **+51.2 Elo (95% CI +27.7..+75.3**,
-608 games) once the stm-POV eval-cache sign bug was fixed (`nnue-eval-sign`).
-The buggy first attempt lost all 608 games, so this is the real first result.
-Next: a 65M-position run, retrain, and a second net (the usual bootstrap).
+| Strength | **3174.1 CCRL Blitz** measured (95% CI 3151.1-3197.6), 1440 games, on `030df68`; **~3230.8 estimated** from merged SPRT gains since (probcut, net3, net4). |
+| Target | 3400 (dashboard). Single-CPU list: 3400 is ~#131; top 100 is ~3500; top 50 ~3650. |
+| Speed | ~1.3M nps single thread on the dev box after the wide-output AVX2 kernel (+21%) and runtime AVX2 dispatch (+15-20% on default builds). |
+| Eval | NNUE net4 embedded and on by default; `EvalFile` overrides; HCE remains the fallback. |
+| Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions, check extension. |
+| Data | `datagen.yml` self-play, 20 shards, deterministic seeds; training local with `tools/nnue-trainer` (std only). |
 
 ## Known problems (not fixed yet)
 
@@ -93,35 +72,41 @@ Next: a 65M-position run, retrain, and a second net (the usual bootstrap).
 
 ## Medium term (next 2-6 weeks), in priority order
 
-1. **CI throughput** (see process audit): build once per wave, use all runners,
-   automate periodic checks. Cheap, and multiplies everything else.
-2. **Land the speed branches.** Then the next structural speedups: incremental
-   attack maps or per-piece attack caching shared by eval terms, staged move
-   generation (captures first; skip quiet generation on TT/capture cutoffs),
-   TT prefetch on x86 (std::arch).
-3. **SPSA run on the search parameters** (infra exists: `spsa.yml`). Run once the
-   queue's search features have landed, since they shift the optima. Then again
-   after each large search change.
-4. **Self-play data generation on CI** (`datagen.rs` exists). Gives (a) a much
-   larger Texel retune set than the 445k positions we have, and (b) the NNUE
-   training set. Target 100M+ positions. Run in the gaps when the queue is
-   idle or with low priority. Built on branch `datagen-ci`: deterministic
-   sharded `datagen.yml` (~65M positions per 20-shard run, estimated);
-   see docs/nnue.md "Data generation".
-5. **Search features not yet written** (each its own branch → queue):
-   - 2-ply continuation history and history-based LMR (partly in `lmr-history-scale`)
-   - NMP verification search at high depth, razoring
-   - multi-cut / double extensions on top of a working singular extension
-   - QS futility and better QS evasion ordering
-   - TT cutoff refinements (no cutoffs at PV nodes, halfmove-clock guard)
-   - correction history done properly (pawn + material keys), if `correction-history` fails again
-6. **Draw and endgame knowledge**: insufficient material, KPK bitbase (generated
-   at startup, std only), opposite-colour bishop scaling, fortress-ish scaling.
-7. **Lichess bot live** on the Dokku box (needs the bot account and token from
-   the user, set with `dokku config:set`). Gives a public, continuous rating.
-8. **CCRL submission** (`docs/ccrl-submission.md`): needs a licence decision and
-   a tagged release; their games are the most credible independent rating.
+1. **Net chain (primary).** Keep 1M-game datasets; do not drop below ~75M
+   positions per generation until a mixed-data experiment proves smaller sets
+   hold. Train on mixed generations (latest + previous, 50/50) to avoid the
+   self-play collapse that net5 exposed. Add mirror augmentation and 3-4 epochs
+   with decay once the mixing baseline is measured.
+2. **Capacity (engine + trainer).** Output buckets (8 material buckets):
+   output layer only, negligible NPS cost, typically +10-20. Then a 512-wide
+   hidden layer (2x accumulator, ~15% NPS cost, +20-30) and king buckets.
+   Measure each with the same net-gate.
+3. **Search fillers (behind the nets).** Rebase and queue `bigbang-structural`
+   (ProbCut + razoring + qsearch futility + double extensions + NMP verification)
+   and `cont-hist-2ply` when the net chain pauses or the queue is idle. Both hit
+   rebase conflicts when main moved; they are parked, not rejected.
+4. **SPSA** on search parameters once the search-filler wave lands; it consumes
+   the same runners as SPRTs, so run it as a scheduled block, not in parallel.
+5. **CCRL submission.** `ccrl-identity` and `ccrl-docs` are ready as speedups;
+   the release/licence decision is the owner's. Until then all ratings are
+   internal ladders.
+6. **Lichess bot** and **Syzygy** as public/endgame work after the net chain.
 
+### Data-size decision rule
+
+For each generation measure `G(40M) / T(40M)` against `G(80M) / T(80M)`.
+If the smaller set delivers at least ~55% of the larger set's gain, it wins on
+Elo/hour. Net5 failed at 37.6M (-66.9), so the working answer is **80M minimum**
+unless a mixed 40M set proves otherwise. Record the test in `net/chain.json`.
+
+## Long term (the path to beating Stockfish 17 skill 17)
+
+1. **NNUE, std only.** Inference is (768 -> N)x2 -> 1 with king buckets still to
+   come; trainer is std-only Adam with WDL+score loss, checkpoint/resume. Data
+   is self-play at fixed nodes, mixed across generations; acceptance is the same
+   SPRT gate as everything else.
+2. **Syzygy probing** (std only, read-only of user-supplied files): small
+   blitz gain, matters more for CCRL 40/15 and correct endgame conversion.
 ## Long term (the path to beating Stockfish 17 skill 17)
 
 1. **NNUE, std only.**
