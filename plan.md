@@ -21,9 +21,14 @@ filler behind them, and ladders are held until the chain plateaus.
 - **Net results so far:** net1 +51.2, net2 +149.1, net3 +39.8, net4 +12.6,
   net5 **-66.9 rejected** (37.6M positions, below the data knee), net6 (trained
   on rejected net5 data) **void, do not queue**.
-- **Next:** net6-r2 on seed 8 (1M games from net4, ~77M positions, 2 epochs,
-  control). Then net7 on a **mix** of net3-era and net4-era data (80M total,
-  3 epochs); if net7 does not beat net6-r2, the bottleneck is capacity, not data.
+- **Next:** retrain net6 from net4 on the **cumulative valid pool** (seed 4 +
+  seed 5 + seed 6 = ~194M positions, one epoch per dataset, mirror augmentation,
+  lr 0.02 -> 0.01 -> 0.005). Seed 7 and `nnue-net6` are quarantined/void. If the
+  cumulative net is under +10, stop net-only iteration and add capacity.
+- **Bootstrap rule:** never generate the next dataset from an ungated net.
+  Order is train -> short gate -> SPRT/merge -> datagen from the merged net.
+  This is what prevented net6 (trained on rejected net5 data) from poisoning
+  the chain; seed 7 is quarantined.
 - **Capacity after that:** output buckets first (cheap inference), then 512-wide
   hidden, then king buckets.
 - **Runner constraint:** 20 concurrent GitHub jobs, so datagen (20 shards) and
@@ -73,10 +78,11 @@ docs branch lands) and `net/chain.json`.
 ## Medium term (next 2-6 weeks), in priority order
 
 1. **Net chain (primary).** Keep 1M-game datasets; do not drop below ~75M
-   positions per generation until a mixed-data experiment proves smaller sets
-   hold. Train on mixed generations (latest + previous, 50/50) to avoid the
-   self-play collapse that net5 exposed. Add mirror augmentation and 3-4 epochs
-   with decay once the mixing baseline is measured.
+   positions per generation. Retrain on the cumulative **valid** pool (every
+   dataset whose generating net passed its gate), not only the latest net, to
+   avoid the self-play collapse that net5 and net6 exposed. Mirror augmentation
+   is available (`tools/nnue-trainer --mirror`). Gate before generating the next
+   dataset. If a cumulative retrain is under +10, capacity is the bottleneck.
 2. **Capacity (engine + trainer).** Output buckets (8 material buckets):
    output layer only, negligible NPS cost, typically +10-20. Then a 512-wide
    hidden layer (2x accumulator, ~15% NPS cost, +20-30) and king buckets.
