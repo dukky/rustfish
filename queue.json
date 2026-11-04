@@ -1,14 +1,6 @@
 {
   "pending": [
     {
-      "branch": "net-loop",
-      "mode": "speedup"
-    },
-    {
-      "branch": "nnue-net3",
-      "mode": "stc"
-    },
-    {
       "branch": "bigbang-structural",
       "mode": "stc"
     },
@@ -38,15 +30,15 @@
     }
   ],
   "current": {
-    "branch": "probcut-r3",
+    "branch": "nnue-net3",
     "mode": "stc",
-    "test_id": "q-probcut-r3-1104-0719",
-    "sha": "ab495c3c44b5e5242b799ef74a07466e6b71da4d",
-    "base_sha": "4033ab0d09cf621a08c8360dc80d5ea256352305",
-    "started": "2026-11-04T07:19:23Z",
-    "bench": 626250
+    "test_id": "q-nnue-net3-1104-1309",
+    "sha": "55f6c2f31cf28a053911899c16d384a9add79c98",
+    "base_sha": "40ecb3f8ecbd976fa6db56e5c9654522232b4633",
+    "started": "2026-11-04T13:09:14Z",
+    "bench": 683718
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
-  "merges_since_check": 0,
-  "merges_since_ladder": 0
+  "merges_since_check": 1,
+  "merges_since_ladder": 1
 }
