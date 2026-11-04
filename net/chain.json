@@ -1,0 +1,75 @@
+{
+  "note": "NNUE generation history for the dashboard and audit trail. Values are training-data facts from the run that produced each net; gate values come from the merge queue.",
+  "nets": [
+    {
+      "net": 1,
+      "branch": "nnue-first-net",
+      "positions": 3300000,
+      "nodes": 5000,
+      "seed": 1,
+      "epochs": 4,
+      "loss": null,
+      "bench": 568074,
+      "gate": {
+        "elo": 51.2,
+        "ci": null,
+        "games": null,
+        "verdict": "merged"
+      }
+    },
+    {
+      "net": 2,
+      "branch": "nnue-net2",
+      "positions": 62933760,
+      "nodes": 5000,
+      "seed": 2,
+      "epochs": 2,
+      "loss": 0.1103,
+      "loss_note": "held-out",
+      "bench": 628895,
+      "gate": {
+        "elo": 149.1,
+        "ci": [
+          126.5,
+          173.0
+        ],
+        "games": 608,
+        "verdict": "merged"
+      }
+    },
+    {
+      "net": 3,
+      "branch": "nnue-net3",
+      "positions": 79068682,
+      "nodes": 8000,
+      "seed": 4,
+      "epochs": 2,
+      "loss": 0.1052,
+      "loss_note": "epoch 2 train; epoch 1 0.1176",
+      "bench": 728084,
+      "gate": {
+        "elo": null,
+        "ci": null,
+        "games": null,
+        "verdict": "in queue"
+      }
+    },
+    {
+      "net": 4,
+      "branch": null,
+      "positions": null,
+      "nodes": 8000,
+      "seed": 5,
+      "epochs": null,
+      "loss": null,
+      "bench": null,
+      "gate": {
+        "elo": null,
+        "ci": null,
+        "games": null,
+        "verdict": "datagen"
+      },
+      "note": "1M games from nnue-net3, seed 5; 20 shards"
+    }
+  ]
+}
