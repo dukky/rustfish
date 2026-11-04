@@ -44,8 +44,20 @@ const SEE_QUIET_MARGIN: i32 = 20;
 // Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
 const SEE_PRUNE_MAX_DEPTH: i32 = 6;
 const SEE_PRUNE_CAPTURE_MARGIN: i32 = 100;
+// Verified razoring at depths 3..=RAZOR_MAX_DEPTH (depths 1-2 already drop into
+// qsearch through futility): margin continues the d1/d2 margins' +100 cp per ply.
+const RAZOR_MAX_DEPTH: i32 = 4;
+const RAZOR_MARGIN_BASE: i32 = 20;
+const RAZOR_MARGIN_DEPTH: i32 = 100;
 // ProbCut: minimum depth, margin over beta, and depth reduction for the
 // verification search (child searched at depth - 1 - PROBCUT_REDUCTION).
+// A singular move that beats every alternative by this much more extends a
+// second ply (PV nodes only), up to DOUBLE_EXTENSION_LIMIT per ply.
+const SE_DOUBLE_MARGIN: i32 = 20;
+const DOUBLE_EXTENSION_LIMIT: u8 = 6;
+// Null-move cutoffs at this depth or deeper are verified by a null-disabled
+// search before they are believed.
+const NMP_VERIFY_MIN_DEPTH: i32 = 12;
 const PROBCUT_MIN_DEPTH: i32 = 5;
 const PROBCUT_MARGIN: i32 = 190;
 const PROBCUT_REDUCTION: i32 = 3;
@@ -121,6 +133,8 @@ pub(crate) struct Search {
     static_evals: [i32; MAX_PLY],
     /// Move skipped by a singular-extension verification search at this ply.
     excluded: [Option<Move>; MAX_PLY],
+    /// Double extensions used at this ply (bounded so they cannot run away).
+    double_ext: [u8; MAX_PLY],
     move_buf: Vec<Move>,
 }
 
@@ -134,6 +148,7 @@ impl Search {
             killers: [[None; 2]; MAX_PLY],
             static_evals: [NO_EVAL; MAX_PLY],
             excluded: [None; MAX_PLY],
+            double_ext: [0; MAX_PLY],
             move_buf: Vec::with_capacity(256),
         }
     }
@@ -1084,6 +1099,7 @@ fn negamax(
     // Singular verification search: same node, minus this move. The TT entry
     // describes the full node, so it must not cut off or be overwritten here.
     let excluded = search.excluded[ply];
+    search.double_ext[ply] = if ply >= 1 { search.double_ext[ply - 1] } else { 0 };
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
 
@@ -1130,6 +1146,20 @@ fn negamax(
             };
             if se + margin <= alpha {
                 return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply);
+            }
+        }
+
+        // Razoring: far below alpha, a qsearch that also fails low is trusted.
+        if beta - alpha <= 1
+            && (3..=RAZOR_MAX_DEPTH).contains(&depth)
+            && se + RAZOR_MARGIN_BASE + RAZOR_MARGIN_DEPTH * depth <= alpha
+        {
+            let score = quiescence(board, alpha, beta, search, engine, rep_stack, key, ply);
+            if search.stop {
+                return 0;
+            }
+            if score <= alpha {
+                return score;
             }
         }
 
@@ -1206,7 +1236,33 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
-                return score;
+                // Verification: at high depth a null-move cutoff could come
+                // from zugzwang or an unlucky verification. Re-search the same
+                // node with null moves disabled and only trust the cutoff if
+                // that also fails high.
+                if depth >= NMP_VERIFY_MIN_DEPTH {
+                    let verify = negamax(
+                        board,
+                        depth - 1 - reduction,
+                        beta - 1,
+                        beta,
+                        ply,
+                        search,
+                        engine,
+                        rep_stack,
+                        key,
+                        prev_move,
+                        false,
+                    );
+                    if search.stop {
+                        return 0;
+                    }
+                    if verify >= beta {
+                        return score;
+                    }
+                } else {
+                    return score;
+                }
             }
         }
     }
@@ -1353,6 +1409,14 @@ fn negamax(
                     }
                     if s < singular_beta {
                         extension = 1;
+                        // Much better than every alternative: extend twice.
+                        if s < singular_beta - SE_DOUBLE_MARGIN
+                            && beta - alpha > 1
+                            && search.double_ext[ply] < DOUBLE_EXTENSION_LIMIT
+                        {
+                            extension = 2;
+                            search.double_ext[ply] += 1;
+                        }
                     } else if singular_beta >= beta && beta - alpha <= 1 {
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
@@ -1701,6 +1765,13 @@ fn quiescence(
             };
             if let Some(stand_pat) = static_eval {
                 if alpha > -INF / 2 && stand_pat + victim + 150 < alpha {
+                    continue;
+                }
+                // Futility base: when even stand pat plus a margin cannot
+                // reach alpha, a capture that does not win material (SEE <= 0)
+                // cannot raise the score either. The picker's bucket only
+                // proves SEE >= 0, so redo SEE in this minority branch.
+                if alpha > -INF / 2 && stand_pat + 150 <= alpha && see(board, mv) <= 0 {
                     continue;
                 }
             }
