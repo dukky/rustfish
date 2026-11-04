@@ -1,6 +1,6 @@
 {
   "check_every": 5,
-  "ladder_every": 5,
+  "ladder_every": 50,
   "ladder": {"games_per_anchor": "96", "tc": "120+1", "anchors_file": "scripts/anchors-elite.json"},
   "modes": {
     "stc": {"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 5, "shards": 19,
