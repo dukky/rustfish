@@ -1,0 +1,137 @@
+{
+  "note": "NNUE generation history. Values are training-data facts from the run that produced each net; gate values come from the merge queue. Net6 is void: it was trained on data from rejected net5 and must not be queued.",
+  "nets": [
+    {
+      "net": 1,
+      "branch": "nnue-first-net",
+      "positions": 3300000,
+      "nodes": 5000,
+      "seed": 1,
+      "epochs": 4,
+      "loss": null,
+      "bench": 568074,
+      "gate": {
+        "elo": 51.2,
+        "ci": null,
+        "games": null,
+        "verdict": "merged"
+      }
+    },
+    {
+      "net": 2,
+      "branch": "nnue-net2",
+      "positions": 62933760,
+      "nodes": 5000,
+      "seed": 2,
+      "epochs": 2,
+      "loss": 0.1103,
+      "loss_note": "held-out",
+      "bench": 628895,
+      "gate": {
+        "elo": 149.1,
+        "ci": [
+          126.5,
+          173.0
+        ],
+        "games": 608,
+        "verdict": "merged"
+      }
+    },
+    {
+      "net": 3,
+      "branch": "nnue-net3",
+      "positions": 79068682,
+      "nodes": 8000,
+      "seed": 4,
+      "epochs": 2,
+      "loss": 0.1052,
+      "loss_note": "epoch 2 train; epoch 1 0.1176",
+      "bench": 683718,
+      "gate": {
+        "elo": 39.79,
+        "ci": [
+          28.05,
+          51.63
+        ],
+        "games": 1824,
+        "verdict": "merged"
+      }
+    },
+    {
+      "net": 4,
+      "branch": "nnue-net4",
+      "positions": 77360000,
+      "nodes": 8000,
+      "seed": 5,
+      "epochs": 2,
+      "loss": 0.1104,
+      "loss_note": "epoch 2 train; epoch 1 0.1254",
+      "bench": 489860,
+      "gate": {
+        "elo": 12.58,
+        "ci": [
+          5.33,
+          19.83
+        ],
+        "games": 4256,
+        "verdict": "merged"
+      }
+    },
+    {
+      "net": 5,
+      "branch": "nnue-net5",
+      "positions": 37596558,
+      "nodes": 8000,
+      "seed": 6,
+      "epochs": 2,
+      "loss": 0.1222,
+      "loss_note": "epoch 2 train; epoch 1 0.1479; half-size experiment",
+      "bench": 525677,
+      "gate": {
+        "elo": -66.91,
+        "ci": [
+          -78.63,
+          -55.34
+        ],
+        "games": 1824,
+        "verdict": "rejected"
+      },
+      "note": "40M positions is below the data knee; never use this net."
+    },
+    {
+      "net": 6,
+      "branch": "nnue-net6",
+      "positions": 36005134,
+      "nodes": 8000,
+      "seed": 7,
+      "epochs": 2,
+      "loss": 0.1316,
+      "loss_note": "trained on rejected net5 self-play",
+      "bench": 383063,
+      "gate": {
+        "elo": null,
+        "ci": null,
+        "games": null,
+        "verdict": "void"
+      },
+      "note": "VOID: data came from rejected net5; do not queue."
+    },
+    {
+      "net": 6,
+      "branch": "nnue-net6-r2",
+      "positions": null,
+      "nodes": 8000,
+      "seed": 8,
+      "epochs": 2,
+      "loss": null,
+      "bench": null,
+      "gate": {
+        "elo": null,
+        "ci": null,
+        "games": null,
+        "verdict": "datagen"
+      },
+      "note": "1M games from net4 (main); replacement for the void net6"
+    }
+  ]
+}
