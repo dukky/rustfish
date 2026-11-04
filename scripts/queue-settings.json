@@ -1,15 +1,61 @@
 {
   "check_every": 5,
-  "ladder_every": 5,
-  "ladder": {"games_per_anchor": "96", "tc": "120+1", "anchors_file": "scripts/anchors-elite.json"},
+  "ladder_every": 50,
+  "ladder": {
+    "games_per_anchor": "96",
+    "tc": "120+1",
+    "anchors_file": "scripts/anchors-elite.json"
+  },
   "modes": {
-    "stc": {"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 5, "shards": 19,
-            "rounds_per_shard": 16, "max_rounds_per_shard": 64, "max_waves": 10},
-    "nonreg": {"tc": "10+0.1", "hash": 16, "elo0": -5, "elo1": 0, "shards": 19,
-               "rounds_per_shard": 16, "max_rounds_per_shard": 64, "max_waves": 10},
-    "ltc-gainer": {"tc": "60+0.6", "hash": 64, "elo0": 0, "elo1": 10, "shards": 20,
-                   "rounds_per_shard": 6, "max_rounds_per_shard": 24, "max_waves": 8},
-    "ltc-check": {"tc": "60+0.6", "hash": 64, "elo0": -5, "elo1": 0, "shards": 20,
-                  "rounds_per_shard": 6, "max_rounds_per_shard": 24, "max_waves": 8}
+    "stc": {
+      "tc": "10+0.1",
+      "hash": 16,
+      "elo0": 0,
+      "elo1": 5,
+      "shards": 19,
+      "rounds_per_shard": 16,
+      "max_rounds_per_shard": 64,
+      "max_waves": 10
+    },
+    "nonreg": {
+      "tc": "10+0.1",
+      "hash": 16,
+      "elo0": -5,
+      "elo1": 0,
+      "shards": 19,
+      "rounds_per_shard": 16,
+      "max_rounds_per_shard": 64,
+      "max_waves": 10
+    },
+    "ltc-gainer": {
+      "tc": "60+0.6",
+      "hash": 64,
+      "elo0": 0,
+      "elo1": 10,
+      "shards": 20,
+      "rounds_per_shard": 6,
+      "max_rounds_per_shard": 24,
+      "max_waves": 8
+    },
+    "ltc-check": {
+      "tc": "60+0.6",
+      "hash": 64,
+      "elo0": -5,
+      "elo1": 0,
+      "shards": 20,
+      "rounds_per_shard": 6,
+      "max_rounds_per_shard": 24,
+      "max_waves": 8
+    },
+    "net-gate": {
+      "tc": "5+0.05",
+      "hash": 16,
+      "elo0": 0,
+      "elo1": 10,
+      "shards": 19,
+      "rounds_per_shard": 8,
+      "max_rounds_per_shard": 16,
+      "max_waves": 4
+    }
   }
 }
