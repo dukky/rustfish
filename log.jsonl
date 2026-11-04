@@ -129,3 +129,4 @@
 {"branch": "dashboard-net-view-r2", "logged_at": "2026-11-04T17:14:05Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "35d823bc22194bcfc289d82f6ccae8e7026096b0"}
 {"branch": "trainer-mirror", "logged_at": "2026-11-04T17:14:20Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "c93756ab361f70de4b854e4f2aabbc2560896127"}
 {"branch": "capacity-pivot", "logged_at": "2026-11-04T18:30:44Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "d08c97bc5bae84eb44c1e00f40d1c5c5ce590fb6"}
+{"branch": "main", "logged_at": "2026-11-04T19:07:03Z", "mode": "ladder", "outcome": "dispatched", "sha": "d08c97bc5bae84eb44c1e00f40d1c5c5ce590fb6", "test_id": "q-ladder-1104-1907"}
