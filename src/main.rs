@@ -924,7 +924,8 @@ impl Board {
 
 type HistoryTable = [[[i32; 64]; 64]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
-type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// Two continuation slots: the move one ply up (opponent) and two plies up.
+type ContinuationHistoryTable = [[[[[i32; 64]; 64]; 64]; 2]; 2];
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -1010,7 +1011,7 @@ impl EngineState {
             eval_cache: evalcache::EvalCache::new(),
             history: [[[0; 64]; 64]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
-            continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            continuation_history: [[[[[0; 64]; 64]; 64]; 2]; 2],
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
             searches_since_decay: 0,
@@ -1053,7 +1054,7 @@ impl EngineState {
         self.eval_cache.clear();
         self.history = [[[0; 64]; 64]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
-        self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.continuation_history = [[[[[0; 64]; 64]; 64]; 2]; 2];
         self.searches_since_decay = 0;
         self.position_history.clear();
     }
@@ -1084,7 +1085,8 @@ impl EngineState {
                 for to in 0..64 {
                     self.history[side][from][to] /= 2;
                     for next_to in 0..64 {
-                        self.continuation_history[side][to][from][next_to] /= 2;
+                        self.continuation_history[0][side][to][from][next_to] /= 2;
+                        self.continuation_history[1][side][to][from][next_to] /= 2;
                     }
                 }
             }
@@ -1127,6 +1129,18 @@ impl EngineState {
 }
 
 fn main() {
+    // The search carries the picker state inline; with two continuation
+    // history slots and pooled buffers the per-frame footprint outgrew the
+    // default 8 MB main-thread stack.
+    let main_thread = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run)
+        .expect("spawn main thread");
+    let _ = main_thread.join();
+}
+
+fn run() {
     let input = spawn_input_reader();
     let mut board = Board::new();
     board.set_startpos();
