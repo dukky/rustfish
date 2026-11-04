@@ -63,8 +63,8 @@ Latest: **3174.1** (CI 3151.1-3197.6) on `030df68`, 1440 games, 0 time losses.
 
 **CCRL submission (ready; not tagged).** Owner decisions 2026-11-04:
 Apache-2.0 licence, `Rustfish 1.0.0`, author `dukky`, `OwnBook=false` by
-default. `ccrl-identity` carries the identity and book-default change (queued
-as `speedup`, bench unchanged); `docs/ccrl-submission.md` has the release
+default. `ccrl-identity` carries the identity and book-default change
+(speedup, bench unchanged); `docs/ccrl-submission.md` has the release
 steps and the announcement draft, and `scripts/ccrl_check.py` is the
 pre-release probe. Tag `v1.0.0` only on explicit go-ahead, after the identity
 branch merges.
