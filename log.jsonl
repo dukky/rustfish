@@ -120,3 +120,5 @@
 {"branch": "net-chain", "logged_at": "2026-11-04T13:28:15Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
 {"branch": "dashboard-net-view", "logged_at": "2026-11-04T13:28:46Z", "mode": "speedup", "outcome": "needs-human", "reason": "speedup changed bench 626250 -> 683718"}
 {"base_sha": "55f6c2f31cf28a053911899c16d384a9add79c98", "branch": "nnue-net4", "logged_at": "2026-11-04T13:35:06Z", "mode": "stc", "outcome": "dispatched", "sha": "c24588c7f9d11b0544fdca4379aa41940c967d30", "test_id": "q-nnue-net4-1104-1335"}
+{"branch": "nnue-net4", "elo": 12.58, "elo_ci95": [5.33, 19.83], "games": 4256, "llr": 3.692, "logged_at": "2026-11-04T15:25:25Z", "mode": "stc", "outcome": "merged", "sha": "c24588c7f9d11b0544fdca4379aa41940c967d30", "test_id": "q-nnue-net4-1104-1335", "verdict": "H1"}
+{"base_sha": "c24588c7f9d11b0544fdca4379aa41940c967d30", "branch": "nnue-net5", "logged_at": "2026-11-04T15:26:24Z", "mode": "stc", "outcome": "dispatched", "sha": "18221580bb0ce0e0719babc27d5939320ac18070", "test_id": "q-nnue-net5-1104-1526"}
