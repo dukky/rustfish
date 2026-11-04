@@ -31,6 +31,22 @@
     {
       "branch": "lmp-improving",
       "mode": "stc"
+    },
+    {
+      "branch": "cont-hist-2ply",
+      "mode": "stc"
+    },
+    {
+      "branch": "ccrl-identity",
+      "mode": "speedup"
+    },
+    {
+      "branch": "see-calib",
+      "mode": "stc"
+    },
+    {
+      "branch": "ccrl-docs",
+      "mode": "speedup"
     }
   ],
   "current": {
