@@ -140,6 +140,17 @@ fn parse_fen(fen: &str) -> Option<(Sample, bool)> {
 }
 
 /// A line of datagen output: `FEN | score_cp (White POV) | result (White POV)`.
+/// Horizontal mirror augmentation: flipping the board left-right is a
+/// symmetry of chess, and in this feature layout it is exactly `sq ^ 7` for
+/// both perspectives (the low three bits are the file).
+fn mirror_sample(s: &mut Sample) {
+    for p in 0..2 {
+        for i in 0..s.counts[p] as usize {
+            s.feats[p][i] ^= 7;
+        }
+    }
+}
+
 fn parse_line(line: &str) -> Option<Sample> {
     let mut parts = line.split('|');
     let fen = parts.next()?.trim();
@@ -601,6 +612,8 @@ struct Args {
     checkpoint: Option<PathBuf>,
     resume: Option<PathBuf>,
     log_every: u64,
+    /// Randomly mirror each sample horizontally (file ^ 7) while training.
+    mirror: bool,
 }
 
 impl Args {
@@ -620,6 +633,7 @@ impl Args {
             checkpoint: None,
             resume: None,
             log_every: 10000,
+            mirror: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -639,12 +653,13 @@ impl Args {
                 "--checkpoint" => a.checkpoint = Some(PathBuf::from(value())),
                 "--resume" => a.resume = Some(PathBuf::from(value())),
                 "--log-every" => a.log_every = value().parse().unwrap(),
+                "--mirror" => a.mirror = true,
                 "--help" | "-h" => {
                     println!(
                         "usage: nnue-trainer --data FILE [--data FILE...] --out net.bin\n\
                          \t[--epochs N] [--batch N] [--lr F] [--lambda F] [--threads N]\n\
                          \t[--shuffle-buffer N] [--max-positions N] [--seed N]\n\
-                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE]\n\
+                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE] [--mirror]\n\
                          \t[--log-every N]\n\n\
                          Data is plain text from `gunzip -c datagen-*.gz` in the format\n\
                          `<FEN> | <score_cp White POV> | <result White POV>`."
@@ -672,6 +687,7 @@ fn main() {
     let mut shuffler = Shuffler::new(args.data.clone(), args.buffer, args.seed);
     let mut grads: Vec<Grad> = (0..args.threads).map(|_| Grad::new()).collect();
     let mut batch: Vec<Sample> = Vec::with_capacity(args.batch);
+    let mut mirror_rng = Rng::new(args.seed ^ 0x5EED_1234);
     let started = Instant::now();
     let mut seen: u64 = 0;
     let mut total_loss = 0.0f64;
@@ -696,6 +712,13 @@ fn main() {
             }
             if batch.is_empty() {
                 break;
+            }
+            if args.mirror {
+                for s in batch.iter_mut() {
+                    if mirror_rng.below(2) == 1 {
+                        mirror_sample(s);
+                    }
+                }
             }
             let loss = run_batch(&net, &batch, &mut grads, args.lambda);
             let (first, rest) = grads.split_first_mut().unwrap();
@@ -781,6 +804,15 @@ mod tests {
         // perspective 384 + (8 ^ 56 = 48) = 432.
         assert!(s.feats[0][..32].contains(&8));
         assert!(s.feats[1][..32].contains(&432));
+    }
+
+    #[test]
+    fn mirror_is_an_involution() {
+        let (mut s, _) = parse_fen("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3").unwrap();
+        let original = s.feats;
+        mirror_sample(&mut s);
+        mirror_sample(&mut s);
+        assert_eq!(original, s.feats);
     }
 
     #[test]
