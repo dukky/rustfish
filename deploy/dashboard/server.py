@@ -21,7 +21,7 @@ REPO = os.environ.get("REPO", "dukky/rustfish")
 RAW = f"https://raw.githubusercontent.com/{REPO}"
 API = f"https://api.github.com/repos/{REPO}"
 HERE = os.path.dirname(os.path.abspath(__file__))
-TARGET = {"rating": 3139, "label": "Stockfish 17 skill 17 (UCI_Elo 3139)"}
+TARGET = {"rating": 3400, "label": "Goal: 3400 CCRL Blitz"}
 
 # Seconds each source stays fresh. API calls: ~20/h runs + ~20/h jobs + 6/h
 # commits at worst, i.e. under 50/h even with someone watching all day.
