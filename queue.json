@@ -1,14 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "nnue-net5",
-    "mode": "stc",
-    "test_id": "q-nnue-net5-1104-1526",
-    "sha": "18221580bb0ce0e0719babc27d5939320ac18070",
-    "base_sha": "c24588c7f9d11b0544fdca4379aa41940c967d30",
-    "started": "2026-11-04T15:26:24Z",
-    "bench": 525677
-  },
+  "current": null,
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
