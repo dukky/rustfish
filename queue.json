@@ -41,10 +41,6 @@
       "mode": "speedup"
     },
     {
-      "branch": "see-calib",
-      "mode": "stc"
-    },
-    {
       "branch": "ccrl-docs",
       "mode": "speedup"
     }
