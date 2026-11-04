@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "net-loop",
+      "mode": "speedup"
+    },
+    {
       "branch": "nnue-net3",
       "mode": "stc"
     },
@@ -18,6 +22,18 @@
     },
     {
       "branch": "ccrl-docs",
+      "mode": "speedup"
+    },
+    {
+      "branch": "docs/opus-audit",
+      "mode": "speedup"
+    },
+    {
+      "branch": "net-chain",
+      "mode": "speedup"
+    },
+    {
+      "branch": "dashboard-net-view",
       "mode": "speedup"
     }
   ],
