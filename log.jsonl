@@ -130,3 +130,4 @@
 {"branch": "trainer-mirror", "logged_at": "2026-11-04T17:14:20Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "c93756ab361f70de4b854e4f2aabbc2560896127"}
 {"branch": "capacity-pivot", "logged_at": "2026-11-04T18:30:44Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "d08c97bc5bae84eb44c1e00f40d1c5c5ce590fb6"}
 {"branch": "main", "logged_at": "2026-11-04T19:07:03Z", "mode": "ladder", "outcome": "dispatched", "sha": "d08c97bc5bae84eb44c1e00f40d1c5c5ce590fb6", "test_id": "q-ladder-1104-1907"}
+{"branch": "main", "ci": [3175.9, 3223.8], "elo": null, "elo_ci95": null, "games": 1440, "llr": null, "logged_at": "2026-11-04T21:28:31Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3199.6, "sha": "d08c97bc5bae84eb44c1e00f40d1c5c5ce590fb6", "test_id": "q-ladder-1104-1907", "verdict": "ladder"}
