@@ -5,10 +5,6 @@
       "mode": "stc"
     },
     {
-      "branch": "ladder-hold",
-      "mode": "speedup"
-    },
-    {
       "branch": "bigbang-structural",
       "mode": "stc"
     },
