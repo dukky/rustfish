@@ -32,6 +32,25 @@ Testers run Windows GUIs (Cute Chess, Arena, Banksia) and normally download a
   allowed;
 - Blitz and 40/15 lists are separate; single-CPU lists are the target.
 
+## What CCRL asks you to state
+
+The CCRL "How to get your engine tested" sticky asks for these details with the
+download link:
+
+- engine name and version number;
+- estimated strength;
+- your name and nationality;
+- whether it is open source, and a homepage;
+- credit where it is due (required for closed source, good practice anyway);
+- **whether it was coded on your own or AI assisted**.
+
+Rustfish's answers: **Rustfish 1.0.0**; **~3174 CCRL Blitz** estimate; **dukky,
+United Kingdom**; open source under **Apache-2.0** at
+https://github.com/dukky/rustfish; **AI assisted** — the code was written with
+AI coding agents under the author's direction, and all design, testing, tuning
+and release decisions are the author's. Provide the release URL with Windows
+AVX2 and SSE4.2 executables (the sticky says testers use AVX2).
+
 ## What is ready
 
 - Public repository and public release downloads.
@@ -110,7 +129,11 @@ Only after the owner says go:
 >
 > - Download (Windows x86-64 `v3`/`v2`, Linux x86-64 `v3`/`v2`, macOS arm64):
 >   https://github.com/dukky/rustfish/releases/tag/v1.0.0
-> - Source and licence (Apache-2.0): https://github.com/dukky/rustfish
+> - Author: dukky (United Kingdom). Open source, Apache-2.0; source at
+>   https://github.com/dukky/rustfish.
+> - Coded on your own or AI assisted: **AI assisted** — the code was written
+>   with AI coding agents under my direction; all design, testing, tuning and
+>   release decisions are mine.
 > - Protocol: UCI. Single-threaded by default (`Threads=1`), `Hash=64`.
 > - No external book or network file; the built-in book is off by default
 >   (`OwnBook=false`), so a GUI book is used.
