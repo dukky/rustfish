@@ -1,38 +1,6 @@
 {
   "pending": [
     {
-      "branch": "correction-history-r2",
-      "mode": "stc"
-    },
-    {
-      "branch": "endgame-scale-r3",
-      "mode": "stc"
-    },
-    {
-      "branch": "ttcapture-lmr",
-      "mode": "stc"
-    },
-    {
-      "branch": "razoring",
-      "mode": "stc"
-    },
-    {
-      "branch": "tt-cutoff-guards",
-      "mode": "stc"
-    },
-    {
-      "branch": "kpk-bitbase",
-      "mode": "stc"
-    },
-    {
-      "branch": "lmr-pv-captures-r2",
-      "mode": "stc"
-    },
-    {
-      "branch": "lmp-improving",
-      "mode": "stc"
-    },
-    {
       "branch": "cont-hist-2ply",
       "mode": "stc"
     },
