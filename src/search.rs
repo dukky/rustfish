@@ -1710,11 +1710,8 @@ fn quiet_stage_score(
     prev_move: Option<Move>,
     killers: &[Option<Move>; 2],
 ) -> i32 {
-    // Continuation history carries the same units as the main table but
-    // changes with context; weight it fully so a good follow-up outranks a
-    // merely generic good quiet.
     let mut score = history_score(&engine.history, side, mv)
-        + continuation_history_score(engine, side, prev_move, mv);
+        + continuation_history_score(engine, side, prev_move, mv) / 2;
     if Some(mv) == killers[0] {
         score += 30_000;
     } else if Some(mv) == counter_move {
