@@ -1,5 +1,5 @@
 {
-  "note": "NNUE generation history. Values are training-data facts from the run that produced each net; gate values come from the merge queue. Net6 is void: it was trained on data from rejected net5 and must not be queued.",
+  "note": "NNUE generation history. Net6-r2 was rejected by the local pre-gate (49.25%, -5.2 Elo over 200 games) and never queued; capacity work is next.",
   "nets": [
     {
       "net": 1,
@@ -119,19 +119,23 @@
     {
       "net": 6,
       "branch": "nnue-net6-r2",
-      "positions": null,
+      "positions": 194000000,
       "nodes": 8000,
-      "seed": 8,
-      "epochs": 2,
-      "loss": null,
-      "bench": null,
+      "seed": "4+5+6",
+      "epochs": 3,
+      "loss": 0.116266,
+      "loss_note": "final epoch on seed 6; one epoch per dataset; mirror on",
+      "bench": 522212,
       "gate": {
-        "elo": null,
-        "ci": null,
-        "games": null,
-        "verdict": "datagen"
+        "elo": -5.21,
+        "ci": [
+          -41.16,
+          30.74
+        ],
+        "games": 200,
+        "verdict": "pre-gate flat"
       },
-      "note": "1M games from net4 (main); replacement for the void net6"
+      "note": "Cumulative valid pool; local 5+0.05 pre-gate 200 games 49.25%, no gain. Not queued; capacity pivot."
     }
   ]
 }

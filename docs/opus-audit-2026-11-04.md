@@ -211,3 +211,22 @@ The audit agent's correction is adopted:
   gz first, gunzip/train/delete sequentially. 8.4 GB free at the start.
 - **Capacity trigger:** if the cumulative net is under +10, stop net-only
   iteration and implement output buckets / 512-wide before more datagen.
+
+
+## 13. 18:30 UTC — the cumulative net is flat; capacity pivot
+
+- **net6-r2** (cumulative valid pool: seed 4 + seed 5 + seed 6 = ~194M
+  positions, one epoch each with mirror, lr 0.02/0.01/0.005) built with bench
+  **522212** and passed perft/selftest/tests.
+- **Local pre-gate:** 200 games at 5+0.05 vs net4 main — **49.25%,
+  -5.21 Elo (CI roughly -41..+31)**. Flat, not a gain. It was **not queued**;
+  no CI runners were spent on it.
+- **Conclusion adopted:** the 256-wide architecture is saturated. Net-only
+  iteration pauses; the next work is **capacity**: output buckets first, then
+  512-wide, then king buckets.
+- **Data:** seed 8 (net4, 1M games) completed 20/20 and is valid; keep it for
+  the first capacity-net training set. Seed 7 and `nnue-net6` remain
+  quarantined/void.
+- **Queue/docs:** audit, dashboard, plan and trainer-mirror speedups merged on
+  main. Queue is idle, not paused. Estimated strength remains 3230.8; measured
+  3174.1, ladders held.

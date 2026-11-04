@@ -21,10 +21,10 @@ filler behind them, and ladders are held until the chain plateaus.
 - **Net results so far:** net1 +51.2, net2 +149.1, net3 +39.8, net4 +12.6,
   net5 **-66.9 rejected** (37.6M positions, below the data knee), net6 (trained
   on rejected net5 data) **void, do not queue**.
-- **Next:** retrain net6 from net4 on the **cumulative valid pool** (seed 4 +
-  seed 5 + seed 6 = ~194M positions, one epoch per dataset, mirror augmentation,
-  lr 0.02 -> 0.01 -> 0.005). Seed 7 and `nnue-net6` are quarantined/void. If the
-  cumulative net is under +10, stop net-only iteration and add capacity.
+- **Result:** the cumulative retrain (194M valid positions, mirror, lr
+  0.02/0.01/0.005) scored **49.25%, -5.2 Elo (CI -41..+31) over 200 local
+  5+0.05 games** — flat. It was not queued. 256-wide is saturated; **capacity
+  is now the critical path**: output buckets, then 512-wide, then king buckets.
 - **Bootstrap rule:** never generate the next dataset from an ungated net.
   Order is train -> short gate -> SPRT/merge -> datagen from the merged net.
   This is what prevented net6 (trained on rejected net5 data) from poisoning
@@ -77,12 +77,13 @@ docs branch lands) and `net/chain.json`.
 
 ## Medium term (next 2-6 weeks), in priority order
 
-1. **Net chain (primary).** Keep 1M-game datasets; do not drop below ~75M
-   positions per generation. Retrain on the cumulative **valid** pool (every
-   dataset whose generating net passed its gate), not only the latest net, to
-   avoid the self-play collapse that net5 and net6 exposed. Mirror augmentation
-   is available (`tools/nnue-trainer --mirror`). Gate before generating the next
-   dataset. If a cumulative retrain is under +10, capacity is the bottleneck.
+1. **Capacity (primary).** 256-wide is saturated: the cumulative 194M-position
+   retrain was flat. Implement **output buckets** (8 material buckets, output
+   layer only) first, then a 512-wide hidden layer, then king buckets. Measure
+   each with the same net gate and keep the valid-data pool for training.
+2. **Net chain (resumes after capacity).** Keep 1M-game datasets; do not drop
+   below ~75M positions. Train on the cumulative valid pool, not only the latest
+   net, with mirror augmentation. Gate before generating the next dataset.
 2. **Capacity (engine + trainer).** Output buckets (8 material buckets):
    output layer only, negligible NPS cost, typically +10-20. Then a 512-wide
    hidden layer (2x accumulator, ~15% NPS cost, +20-30) and king buckets.
