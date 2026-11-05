@@ -993,9 +993,8 @@ struct EngineState {
     use_nnue: bool,
 }
 
-/// Fourth net trained on 77M positions of net3 self-play (seed 5 at 8000
-/// nodes, 2 epochs) with `tools/nnue-trainer`; embedded so the engine is
-/// NNUE by default.
+/// Net8c: 256-wide, trained on ~7.3M seed-10 positions at 5000 nodes for
+/// ten epochs without mirror augmentation. Control for net8/net8b.
 const EMBEDDED_NET: &[u8] = include_bytes!("../net/nnue.bin");
 
 impl EngineState {
