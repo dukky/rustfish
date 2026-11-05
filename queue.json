@@ -1,6 +1,14 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "nnue-net8-fast",
+    "mode": "net-gate",
+    "test_id": "q-nnue-net8-fast-1105-1629",
+    "sha": "1732b689dae66ad5b258eaac1bcecc12539ca4d4",
+    "base_sha": "94ab3bea08ebef8156a2bde33456538cab4999da",
+    "started": "2026-11-05T16:29:06Z",
+    "bench": 696333
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3

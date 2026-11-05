@@ -154,3 +154,4 @@
 {"branch": "kpk-bitbase", "elo": -0.45, "elo_ci95": [-3.98, 3.08], "games": 13984, "llr": -4.548, "logged_at": "2026-11-05T16:17:44Z", "mode": "stc", "outcome": "rejected", "sha": "93ebb3eeff0813b4ab63e34c9c056e2fd2413639", "test_id": "q-kpk-bitbase-1105-1419", "verdict": "H0"}
 {"branch": "trainer-fixes", "logged_at": "2026-11-05T16:18:33Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "2d06bf49067e84fbeb2f2bcb4993c8ca60df8318"}
 {"branch": "ladder-restore", "logged_at": "2026-11-05T16:18:51Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "94ab3bea08ebef8156a2bde33456538cab4999da"}
+{"base_sha": "94ab3bea08ebef8156a2bde33456538cab4999da", "branch": "nnue-net8-fast", "logged_at": "2026-11-05T16:29:06Z", "mode": "net-gate", "outcome": "dispatched", "sha": "1732b689dae66ad5b258eaac1bcecc12539ca4d4", "test_id": "q-nnue-net8-fast-1105-1629"}
