@@ -303,6 +303,34 @@ impl Net {
         Self { w, b: vec![0.0; H], ow, ob: 0.0 }
     }
 
+    /// Load an existing i16 net so we can fine-tune it instead of starting
+    /// from random weights. Layout must match `src/nnue.rs`.
+    fn load(path: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let expected = (INPUTS * H + H + 2 * H + 1) * 2;
+        if bytes.len() != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("net is {} bytes, expected {}", bytes.len(), expected),
+            ));
+        }
+        let mut words = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]));
+        let mut w = Vec::with_capacity(INPUTS * H);
+        for _ in 0..INPUTS * H {
+            w.push(words.next().unwrap() as f32);
+        }
+        let mut b = Vec::with_capacity(H);
+        for _ in 0..H {
+            b.push(words.next().unwrap() as f32);
+        }
+        let mut ow = Vec::with_capacity(2 * H);
+        for _ in 0..2 * H {
+            ow.push(words.next().unwrap() as f32);
+        }
+        let ob = words.next().unwrap() as f32;
+        Ok(Self { w, b, ow, ob })
+    }
+
     /// Inference in trainer units; used by tests and handy for sanity checks.
     #[allow(dead_code)]
     fn eval(&self, s: &Sample) -> f32 {
@@ -630,6 +658,8 @@ struct Args {
     /// Clamp output weights to this magnitude on export (e.g. 127 keeps the
     /// fast i32 path at H=256).
     clip_out: Option<i16>,
+    /// Start from this existing net instead of random weights.
+    init: Option<PathBuf>,
 }
 
 impl Args {
@@ -651,6 +681,7 @@ impl Args {
             log_every: 10000,
             mirror: false,
             clip_out: None,
+            init: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -672,12 +703,13 @@ impl Args {
                 "--log-every" => a.log_every = value().parse().unwrap(),
                 "--mirror" => a.mirror = true,
                 "--clip-out" => a.clip_out = Some(value().parse().unwrap()),
+                "--init" => a.init = Some(PathBuf::from(value())),
                 "--help" | "-h" => {
                     println!(
                         "usage: nnue-trainer --data FILE [--data FILE...] --out net.bin\n\
                          \t[--epochs N] [--batch N] [--lr F] [--lambda F] [--threads N]\n\
                          \t[--shuffle-buffer N] [--max-positions N] [--seed N]\n\
-                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE] [--mirror] [--clip-out N]\n\
+                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE] [--mirror] [--clip-out N] [--init FILE]\n\
                          \t[--log-every N]\n\n\
                          Data is plain text from `gunzip -c datagen-*.gz` in the format\n\
                          `<FEN> | <score_cp White POV> | <result White POV>`."
@@ -695,7 +727,14 @@ impl Args {
 fn main() {
     let args = Args::parse();
     let mut rng = Rng::new(args.seed);
-    let mut net = Net::new(&mut rng);
+    let mut net = match &args.init {
+        Some(path) => {
+            let net = Net::load(path).unwrap_or_else(|e| panic!("init {path:?}: {e}"));
+            println!("initialised from {}", path.display());
+            net
+        }
+        None => Net::new(&mut rng),
+    };
     let mut opt = Opt::new();
     if let Some(path) = &args.resume {
         load_checkpoint(path, &mut net, &mut opt).unwrap_or_else(|e| panic!("resume {path:?}: {e}"));
