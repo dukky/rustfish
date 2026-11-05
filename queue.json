@@ -1,6 +1,14 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "cont-hist-r2",
+    "mode": "stc",
+    "test_id": "q-cont-hist-r2-1105-0813",
+    "sha": "56f020b7682348be3ca2743376ff42d55f15bf16",
+    "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
+    "started": "2026-11-05T08:13:54Z",
+    "bench": 558050
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
