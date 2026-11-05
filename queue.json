@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "capture-history",
-      "mode": "stc"
-    },
-    {
       "branch": "lmr-history-scale-r2",
       "mode": "stc"
     },
@@ -22,13 +18,13 @@
     }
   ],
   "current": {
-    "branch": "lmr-table-1.8",
+    "branch": "capture-history",
     "mode": "stc",
-    "test_id": "q-lmr-table-1.8-1105-1039",
-    "sha": "3f9be7698e11e4e42a1c79808a1d6ef3f3a1aae4",
+    "test_id": "q-capture-history-1105-1212",
+    "sha": "4eaeb79415e6ed61c1dc702153e00366caf4b27b",
     "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
-    "started": "2026-11-05T10:39:49Z",
-    "bench": 436275
+    "started": "2026-11-05T12:12:04Z",
+    "bench": 509650
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
