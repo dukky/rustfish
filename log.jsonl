@@ -133,3 +133,4 @@
 {"branch": "main", "ci": [3175.9, 3223.8], "elo": null, "elo_ci95": null, "games": 1440, "llr": null, "logged_at": "2026-11-04T21:28:31Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3199.6, "sha": "d08c97bc5bae84eb44c1e00f40d1c5c5ce590fb6", "test_id": "q-ladder-1104-1907", "verdict": "ladder"}
 {"base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827", "branch": "nnue-512", "logged_at": "2026-11-05T07:43:53Z", "mode": "stc", "outcome": "dispatched", "sha": "bfcd956e98fbd599a4c5a6a1668473a6e2da848e", "test_id": "q-nnue-512-1105-0743"}
 {"branch": "nnue-512", "elo": -29.98, "elo_ci95": [-41.91, -18.12], "games": 1824, "llr": -4.465, "logged_at": "2026-11-05T07:59:49Z", "mode": "stc", "outcome": "rejected", "sha": "bfcd956e98fbd599a4c5a6a1668473a6e2da848e", "test_id": "q-nnue-512-1105-0743", "verdict": "H0"}
+{"branch": "cont-hist-r2", "logged_at": "2026-11-05T08:10:44Z", "mode": "stc", "outcome": "needs-human", "reason": "build failed after rebase"}
