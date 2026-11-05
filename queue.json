@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "bigbang-main",
+      "mode": "stc"
+    },
+    {
       "branch": "nmp-verify",
       "mode": "stc"
     },
