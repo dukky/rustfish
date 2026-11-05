@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "lmr-table-1.8",
-      "mode": "stc"
-    },
-    {
       "branch": "capture-history",
       "mode": "stc"
     },
@@ -26,13 +22,13 @@
     }
   ],
   "current": {
-    "branch": "nmp-verify",
+    "branch": "lmr-table-1.8",
     "mode": "stc",
-    "test_id": "q-nmp-verify-1105-0945",
-    "sha": "d555f8672b4443bb0aa7500f24ab64178fa73993",
+    "test_id": "q-lmr-table-1.8-1105-1039",
+    "sha": "3f9be7698e11e4e42a1c79808a1d6ef3f3a1aae4",
     "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
-    "started": "2026-11-05T09:45:18Z",
-    "bench": 489860
+    "started": "2026-11-05T10:39:49Z",
+    "bench": 436275
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
