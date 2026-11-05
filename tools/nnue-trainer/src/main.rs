@@ -563,7 +563,7 @@ fn take_f32(bytes: &[u8], pos: &mut usize, n: usize) -> Vec<f32> {
 }
 
 /// Round to the runtime's little-endian i16 layout and report what got clipped.
-fn net_bytes(net: &Net) -> (Vec<u8>, usize, bool) {
+fn net_bytes(net: &Net, clip_out: Option<i16>) -> (Vec<u8>, usize, bool) {
     let mut out = Vec::with_capacity(NET_BYTES);
     let mut clipped = 0usize;
     let mut small_out = true;
@@ -582,7 +582,11 @@ fn net_bytes(net: &Net) -> (Vec<u8>, usize, bool) {
     for &x in &net.b {
         push(x, &mut out, &mut clipped);
     }
-    for &x in &net.ow {
+    for &x0 in &net.ow {
+        let x = match clip_out {
+            Some(limit) => x0.clamp(-(limit as f32), limit as f32),
+            None => x0,
+        };
         let q = push(x, &mut out, &mut clipped);
         if !(-127..=127).contains(&q) {
             small_out = false;
@@ -593,8 +597,8 @@ fn net_bytes(net: &Net) -> (Vec<u8>, usize, bool) {
     (out, clipped, small_out)
 }
 
-fn export(net: &Net, path: &PathBuf) -> std::io::Result<()> {
-    let (out, clipped, small_out) = net_bytes(net);
+fn export(net: &Net, path: &PathBuf, clip_out: Option<i16>) -> std::io::Result<()> {
+    let (out, clipped, small_out) = net_bytes(net, clip_out);
     File::create(path)?.write_all(&out)?;
     println!(
         "wrote {} ({} bytes): {} values clipped to i16, output weights {}",
@@ -623,6 +627,9 @@ struct Args {
     log_every: u64,
     /// Randomly mirror each sample horizontally (file ^ 7) while training.
     mirror: bool,
+    /// Clamp output weights to this magnitude on export (e.g. 127 keeps the
+    /// fast i32 path at H=256).
+    clip_out: Option<i16>,
 }
 
 impl Args {
@@ -643,6 +650,7 @@ impl Args {
             resume: None,
             log_every: 10000,
             mirror: false,
+            clip_out: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -663,12 +671,13 @@ impl Args {
                 "--resume" => a.resume = Some(PathBuf::from(value())),
                 "--log-every" => a.log_every = value().parse().unwrap(),
                 "--mirror" => a.mirror = true,
+                "--clip-out" => a.clip_out = Some(value().parse().unwrap()),
                 "--help" | "-h" => {
                     println!(
                         "usage: nnue-trainer --data FILE [--data FILE...] --out net.bin\n\
                          \t[--epochs N] [--batch N] [--lr F] [--lambda F] [--threads N]\n\
                          \t[--shuffle-buffer N] [--max-positions N] [--seed N]\n\
-                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE] [--mirror]\n\
+                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE] [--mirror] [--clip-out N]\n\
                          \t[--log-every N]\n\n\
                          Data is plain text from `gunzip -c datagen-*.gz` in the format\n\
                          `<FEN> | <score_cp White POV> | <result White POV>`."
@@ -771,7 +780,7 @@ fn main() {
         started.elapsed().as_secs_f64(),
         if overall_count > 0 { overall_loss / overall_count as f64 } else { 0.0 }
     );
-    export(&net, &args.out).unwrap();
+    export(&net, &args.out, args.clip_out).unwrap();
     println!("skipped {} malformed lines", shuffler.skipped);
 }
 
@@ -849,7 +858,7 @@ mod tests {
         net.b[0] = -300.4;
         net.ow[0] = 200.0; // outside the fast i32 output path
         net.ob = 123.0;
-        let (bytes, clipped, small_out) = net_bytes(&net);
+        let (bytes, clipped, small_out) = net_bytes(&net, None);
         assert_eq!(bytes.len(), NET_BYTES);
         assert_eq!(clipped, 1);
         assert!(!small_out);
