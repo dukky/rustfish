@@ -155,3 +155,4 @@
 {"branch": "trainer-fixes", "logged_at": "2026-11-05T16:18:33Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "2d06bf49067e84fbeb2f2bcb4993c8ca60df8318"}
 {"branch": "ladder-restore", "logged_at": "2026-11-05T16:18:51Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "94ab3bea08ebef8156a2bde33456538cab4999da"}
 {"base_sha": "94ab3bea08ebef8156a2bde33456538cab4999da", "branch": "nnue-net8-fast", "logged_at": "2026-11-05T16:29:06Z", "mode": "net-gate", "outcome": "dispatched", "sha": "1732b689dae66ad5b258eaac1bcecc12539ca4d4", "test_id": "q-nnue-net8-fast-1105-1629"}
+{"branch": "nnue-net8-fast", "elo": -313.27, "elo_ci95": [-369.99, -267.37], "games": 304, "llr": -16.299, "logged_at": "2026-11-05T16:31:38Z", "mode": "net-gate", "outcome": "rejected", "sha": "1732b689dae66ad5b258eaac1bcecc12539ca4d4", "test_id": "q-nnue-net8-fast-1105-1629", "verdict": "H0"}
