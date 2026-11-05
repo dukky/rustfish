@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "lmr-history-scale-r2",
-      "mode": "stc"
-    },
-    {
       "branch": "kpk-bitbase",
       "mode": "stc"
     },
@@ -18,13 +14,13 @@
     }
   ],
   "current": {
-    "branch": "nnue-net7",
+    "branch": "lmr-history-scale-r2",
     "mode": "stc",
-    "test_id": "q-nnue-net7-1105-1326",
-    "sha": "cab3af3f9a3ae77f3b6b9c08616d7d92bae476d3",
+    "test_id": "q-lmr-history-scale-r2-1105-1343",
+    "sha": "cdcecfa9347fc875d5ac8c01a273a79750e930a6",
     "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
-    "started": "2026-11-05T13:26:03Z",
-    "bench": 550181
+    "started": "2026-11-05T13:43:11Z",
+    "bench": 472403
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
