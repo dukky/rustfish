@@ -174,34 +174,40 @@ fn parse_line(line: &str) -> Option<Sample> {
 /// Sequential reader over one or more plain (uncompressed) data files.
 struct LineReader {
     files: Vec<PathBuf>,
-    next_file: usize,
-    reader: Option<BufReader<File>>,
+    readers: Vec<Option<BufReader<File>>>,
+    next: usize,
     line: String,
 }
 
 impl LineReader {
     fn new(files: Vec<PathBuf>) -> Self {
-        Self { files, next_file: 0, reader: None, line: String::new() }
+        let readers = (0..files.len()).map(|_| None).collect();
+        Self { files, readers, next: 0, line: String::new() }
     }
 
+    /// Round-robin across the input files. With `--data a --data b` this
+    /// interleaves generations instead of finishing one dataset before the
+    /// next, which matters when the files come from different nets.
     fn next_line(&mut self) -> Option<String> {
-        loop {
-            if self.reader.is_none() {
-                if self.next_file >= self.files.len() {
-                    return None;
-                }
-                let f = File::open(&self.files[self.next_file]).ok()?;
-                self.next_file += 1;
-                self.reader = Some(BufReader::with_capacity(1 << 20, f));
+        if self.files.is_empty() {
+            return None;
+        }
+        for _ in 0..self.files.len() {
+            let i = self.next;
+            self.next = (self.next + 1) % self.files.len();
+            if self.readers[i].is_none() {
+                let f = File::open(&self.files[i]).ok()?;
+                self.readers[i] = Some(BufReader::with_capacity(1 << 20, f));
             }
             self.line.clear();
-            let read = self.reader.as_mut().unwrap().read_line(&mut self.line).ok()?;
+            let read = self.readers[i].as_mut().unwrap().read_line(&mut self.line).ok()?;
             if read == 0 {
-                self.reader = None;
+                self.readers[i] = None;
                 continue;
             }
             return Some(self.line.clone());
         }
+        None
     }
 }
 
@@ -375,13 +381,16 @@ fn accumulate(g: &mut Grad, net: &Net, s: &Sample, lambda: f32) {
 
     let eval = (sum / QA + net.ob) * OUT_SCALE;
     let pred = sigmoid(eval / SCALE);
-    let wdl = (pred - s.result) * (pred - s.result);
-    let ev = ((eval - s.score) / SCALE) * ((eval - s.score) / SCALE);
-    g.loss += (lambda * wdl + (1.0 - lambda) * ev) as f64;
+    // Blend the game result with the engine score *in sigmoid space*. The old
+    // loss used an unbounded squared error in centipawns, so a few 2000 cp
+    // outliers could dominate a WDL term capped at 1.
+    let score_target = sigmoid(s.score / SCALE);
+    let target = lambda * s.result + (1.0 - lambda) * score_target;
+    let delta = pred - target;
+    g.loss += (delta * delta) as f64;
 
     // d loss / d eval
-    let dl_de = lambda * 2.0 * (pred - s.result) * pred * (1.0 - pred) / SCALE
-        + (1.0 - lambda) * 2.0 * (eval - s.score) / (SCALE * SCALE);
+    let dl_de = 2.0 * delta * pred * (1.0 - pred) / SCALE;
     let dsum = dl_de * OUT_SCALE / QA;
     g.ob += dl_de * OUT_SCALE;
 
@@ -626,7 +635,7 @@ impl Args {
             lr: 1e-3,
             lambda: 0.5,
             threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
-            buffer: 65536,
+            buffer: 262144,
             max_positions: None,
             seed: 1,
             checkpoint_every: 0,
