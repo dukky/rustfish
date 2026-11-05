@@ -1,6 +1,35 @@
 {
-  "pending": [],
-  "current": null,
+  "pending": [
+    {
+      "branch": "nmp-verify",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-table-1.8",
+      "mode": "stc"
+    },
+    {
+      "branch": "capture-history",
+      "mode": "stc"
+    },
+    {
+      "branch": "lmr-history-scale-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "kpk-bitbase",
+      "mode": "stc"
+    }
+  ],
+  "current": {
+    "branch": "double-extension",
+    "mode": "stc",
+    "test_id": "q-double-extension-1105-0833",
+    "sha": "7ed78a35526d091f86f2bcc652363d3aa625148b",
+    "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
+    "started": "2026-11-05T08:33:24Z",
+    "bench": 688627
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
