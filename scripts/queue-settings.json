@@ -1,6 +1,6 @@
 {
   "check_every": 5,
-  "ladder_every": 50,
+  "ladder_every": 5,
   "ladder": {
     "games_per_anchor": "96",
     "tc": "120+1",
