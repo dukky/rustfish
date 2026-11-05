@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nmp-verify",
-      "mode": "stc"
-    },
-    {
       "branch": "lmr-table-1.8",
       "mode": "stc"
     },
@@ -30,13 +26,13 @@
     }
   ],
   "current": {
-    "branch": "bigbang-main",
+    "branch": "nmp-verify",
     "mode": "stc",
-    "test_id": "q-bigbang-main-1105-0928",
-    "sha": "7833cd06fc16aa26b40632f82b640fbca5c699c5",
+    "test_id": "q-nmp-verify-1105-0945",
+    "sha": "d555f8672b4443bb0aa7500f24ab64178fa73993",
     "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
-    "started": "2026-11-05T09:28:14Z",
-    "bench": 530040
+    "started": "2026-11-05T09:45:18Z",
+    "bench": 489860
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
