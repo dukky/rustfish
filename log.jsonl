@@ -163,3 +163,4 @@
 {"base_sha": "94ab3bea08ebef8156a2bde33456538cab4999da", "branch": "nnue-net9-cumulative", "logged_at": "2026-11-05T18:04:42Z", "mode": "net-gate", "outcome": "dispatched", "sha": "204d64652a00ff3896d9b3226c461d3bee80f7de", "test_id": "q-nnue-net9-cumulative-1105-1804"}
 {"branch": "nnue-net9-cumulative", "elo": -13.26, "elo_ci95": [-26.46, -0.11], "games": 1520, "llr": -4.054, "logged_at": "2026-11-05T18:15:05Z", "mode": "net-gate", "outcome": "rejected", "sha": "204d64652a00ff3896d9b3226c461d3bee80f7de", "test_id": "q-nnue-net9-cumulative-1105-1804", "verdict": "H0"}
 {"branch": "trainer-init", "logged_at": "2026-11-05T19:17:10Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "1bacb1dcb60662c74eedd69b934102cadad11dbb"}
+{"branch": "trainer-eof-fix", "logged_at": "2026-11-05T20:02:56Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "a9fe766590aff94bccfe1cf3517f9e62cc5fd533"}
