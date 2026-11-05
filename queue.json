@@ -23,6 +23,14 @@
     {
       "branch": "kpk-bitbase",
       "mode": "stc"
+    },
+    {
+      "branch": "trainer-fixes",
+      "mode": "speedup"
+    },
+    {
+      "branch": "ladder-restore",
+      "mode": "speedup"
     }
   ],
   "current": {
