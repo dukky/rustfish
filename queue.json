@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "nnue-net7",
+      "mode": "stc"
+    },
+    {
       "branch": "lmr-history-scale-r2",
       "mode": "stc"
     },
