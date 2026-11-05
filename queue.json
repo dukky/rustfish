@@ -1,23 +1,6 @@
 {
-  "pending": [
-    {
-      "branch": "trainer-fixes",
-      "mode": "speedup"
-    },
-    {
-      "branch": "ladder-restore",
-      "mode": "speedup"
-    }
-  ],
-  "current": {
-    "branch": "kpk-bitbase",
-    "mode": "stc",
-    "test_id": "q-kpk-bitbase-1105-1419",
-    "sha": "93ebb3eeff0813b4ab63e34c9c056e2fd2413639",
-    "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
-    "started": "2026-11-05T14:19:46Z",
-    "bench": 489860
-  },
+  "pending": [],
+  "current": null,
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
