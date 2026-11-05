@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const INPUTS: usize = 768;
-const H: usize = 256;
+const H: usize = 512;
 const QA: f32 = 255.0;
 const QB: f32 = 64.0;
 const SCALE: f32 = 400.0;

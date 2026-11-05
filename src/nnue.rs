@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::{Board, Color, Move, Piece, PieceType};
 
 pub(crate) const INPUTS: usize = 768;
-pub(crate) const H: usize = 256;
+pub(crate) const H: usize = 512;
 pub(crate) const QA: i32 = 255;
 pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
@@ -64,7 +64,9 @@ impl Network {
 
     fn from_parts(ft_w: Vec<i16>, ft_b: [i16; H], out_w: [i16; 2 * H], out_b: i16) -> Self {
         assert_eq!(ft_w.len(), INPUTS * H);
-        let small_out = out_w.iter().all(|w| (-127..=127).contains(w));
+        // The i32 output kernel is only safe while H * QA^2 * max|w| fits i32.
+        let max_w = out_w.iter().map(|w| w.unsigned_abs() as u64).max().unwrap_or(0);
+        let small_out = max_w * (QA as u64) * (QA as u64) * H as u64 <= i32::MAX as u64;
         Self { ft_w, ft_b, out_w, out_b, small_out }
     }
 
@@ -737,17 +739,19 @@ mod tests {
             }
             // Accumulator values around and beyond the clamp range.
             let acc = rand_vec(400);
-            let w = rand_vec(127);
+            let safe_w = ((i32::MAX as i64) / (H as i64 * 255 * 255)).min(127) as i16;
+            let w = rand_vec(safe_w as i32);
             let s = simd::screlu_dot(&acc, &w);
             assert_eq!(s, scalar::screlu_dot(&acc, &w));
             assert_eq!(s as i64, scalar::screlu_dot_wide(&acc, &w));
         }
-        // Worst case for the i32 bound: all lanes saturated, |w| = 127.
+        // Worst case for the i32 bound at this width.
         let acc = [1000i16; H];
-        for w in [[127i16; H], [-127i16; H]] {
+        let safe_w = ((i32::MAX as i64) / (H as i64 * 255 * 255)).min(127) as i16;
+        for w in [[safe_w; H], [-safe_w; H]] {
             let s = simd::screlu_dot(&acc, &w);
             assert_eq!(s as i64, scalar::screlu_dot_wide(&acc, &w));
-            assert_eq!(s as i64, 256 * 255 * 255 * w[0] as i64);
+            assert_eq!(s as i64, H as i64 * 255 * 255 * w[0] as i64);
         }
     }
 
