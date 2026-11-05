@@ -1,14 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "nnue-net9-cumulative",
-    "mode": "net-gate",
-    "test_id": "q-nnue-net9-cumulative-1105-1804",
-    "sha": "204d64652a00ff3896d9b3226c461d3bee80f7de",
-    "base_sha": "94ab3bea08ebef8156a2bde33456538cab4999da",
-    "started": "2026-11-05T18:04:42Z",
-    "bench": 525806
-  },
+  "current": null,
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
