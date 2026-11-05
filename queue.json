@@ -1,14 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "nnue-net10b-unclipped",
-    "mode": "net-gate",
-    "test_id": "q-nnue-net10b-unclipped-1105-2102",
-    "sha": "fe6a243149757b0263e4172dbef0daa2af09b079",
-    "base_sha": "a9fe766590aff94bccfe1cf3517f9e62cc5fd533",
-    "started": "2026-11-05T21:02:11Z",
-    "bench": 399559
-  },
+  "current": null,
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
