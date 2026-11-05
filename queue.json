@@ -1,6 +1,14 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "nnue-net10b-finetune",
+    "mode": "net-gate",
+    "test_id": "q-nnue-net10b-finetune-1105-2007",
+    "sha": "a60037005455d7b7b85107d4fb6a17d5bd0df037",
+    "base_sha": "a9fe766590aff94bccfe1cf3517f9e62cc5fd533",
+    "started": "2026-11-05T20:07:53Z",
+    "bench": 406804
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
