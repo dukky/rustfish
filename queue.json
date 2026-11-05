@@ -1,14 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "nnue-net8c-nomirror",
-    "mode": "net-gate",
-    "test_id": "q-nnue-net8c-nomirror-1105-1718",
-    "sha": "7d35a0742c383ed48fd891f2d9636e206c64b562",
-    "base_sha": "94ab3bea08ebef8156a2bde33456538cab4999da",
-    "started": "2026-11-05T17:18:34Z",
-    "bench": 580118
-  },
+  "current": null,
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
