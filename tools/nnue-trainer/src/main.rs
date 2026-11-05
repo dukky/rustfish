@@ -175,6 +175,9 @@ fn parse_line(line: &str) -> Option<Sample> {
 struct LineReader {
     files: Vec<PathBuf>,
     readers: Vec<Option<BufReader<File>>>,
+    /// A file that hit EOF must stay exhausted. Reopening it would make the
+    /// round-robin reader loop forever.
+    done: Vec<bool>,
     next: usize,
     line: String,
 }
@@ -182,7 +185,8 @@ struct LineReader {
 impl LineReader {
     fn new(files: Vec<PathBuf>) -> Self {
         let readers = (0..files.len()).map(|_| None).collect();
-        Self { files, readers, next: 0, line: String::new() }
+        let done = (0..files.len()).map(|_| false).collect();
+        Self { files, readers, done, next: 0, line: String::new() }
     }
 
     /// Round-robin across the input files. With `--data a --data b` this
@@ -195,14 +199,23 @@ impl LineReader {
         for _ in 0..self.files.len() {
             let i = self.next;
             self.next = (self.next + 1) % self.files.len();
+            if self.done[i] {
+                continue;
+            }
             if self.readers[i].is_none() {
-                let f = File::open(&self.files[i]).ok()?;
-                self.readers[i] = Some(BufReader::with_capacity(1 << 20, f));
+                match File::open(&self.files[i]) {
+                    Ok(f) => self.readers[i] = Some(BufReader::with_capacity(1 << 20, f)),
+                    Err(_) => {
+                        self.done[i] = true;
+                        continue;
+                    }
+                }
             }
             self.line.clear();
             let read = self.readers[i].as_mut().unwrap().read_line(&mut self.line).ok()?;
             if read == 0 {
                 self.readers[i] = None;
+                self.done[i] = true;
                 continue;
             }
             return Some(self.line.clone());
