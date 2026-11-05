@@ -993,9 +993,8 @@ struct EngineState {
     use_nnue: bool,
 }
 
-/// Fourth net trained on 77M positions of net3 self-play (seed 5 at 8000
-/// nodes, 2 epochs) with `tools/nnue-trainer`; embedded so the engine is
-/// NNUE by default.
+/// Net10b: net4 fine-tuned on seed-10 current-main self-play at 1e-3 then
+/// 3e-4, without mirror; a delta from the accepted net rather than a reset.
 const EMBEDDED_NET: &[u8] = include_bytes!("../net/nnue.bin");
 
 impl EngineState {
