@@ -135,3 +135,4 @@
 {"branch": "nnue-512", "elo": -29.98, "elo_ci95": [-41.91, -18.12], "games": 1824, "llr": -4.465, "logged_at": "2026-11-05T07:59:49Z", "mode": "stc", "outcome": "rejected", "sha": "bfcd956e98fbd599a4c5a6a1668473a6e2da848e", "test_id": "q-nnue-512-1105-0743", "verdict": "H0"}
 {"branch": "cont-hist-r2", "logged_at": "2026-11-05T08:10:44Z", "mode": "stc", "outcome": "needs-human", "reason": "build failed after rebase"}
 {"base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827", "branch": "cont-hist-r2", "logged_at": "2026-11-05T08:13:54Z", "mode": "stc", "outcome": "dispatched", "sha": "56f020b7682348be3ca2743376ff42d55f15bf16", "test_id": "q-cont-hist-r2-1105-0813"}
+{"branch": "cont-hist-r2", "elo": -16.39, "elo_ci95": [-26.98, -5.84], "games": 1824, "llr": -3.261, "logged_at": "2026-11-05T08:30:05Z", "mode": "stc", "outcome": "rejected", "sha": "56f020b7682348be3ca2743376ff42d55f15bf16", "test_id": "q-cont-hist-r2-1105-0813", "verdict": "H0"}
