@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-net7",
-      "mode": "stc"
-    },
-    {
       "branch": "lmr-history-scale-r2",
       "mode": "stc"
     },
@@ -22,13 +18,13 @@
     }
   ],
   "current": {
-    "branch": "capture-history",
+    "branch": "nnue-net7",
     "mode": "stc",
-    "test_id": "q-capture-history-1105-1212",
-    "sha": "4eaeb79415e6ed61c1dc702153e00366caf4b27b",
+    "test_id": "q-nnue-net7-1105-1326",
+    "sha": "cab3af3f9a3ae77f3b6b9c08616d7d92bae476d3",
     "base_sha": "5627f5ce2fcf59a39af2af6f82d411e6edd4f827",
-    "started": "2026-11-05T12:12:04Z",
-    "bench": 509650
+    "started": "2026-11-05T13:26:03Z",
+    "bench": 550181
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
