@@ -1,0 +1,166 @@
+name: Train sweep
+
+# Independent NNUE training runs in parallel, one variant per runner, all
+# scored on the same held-out validation set (the last 1M positions of the
+# seed-9 datagen run, as on the laptop). For ablations (LR, lambda, epochs,
+# width, buckets, warm start): runners cannot share one training run, but 16
+# variants side by side take as long as one. Uses the same runners as the
+# SPRT queue, so run it overnight or when the queue is idle. See
+# docs/nnue-experiments.md.
+
+run-name: "Train sweep ${{ inputs.name }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Sweep name (used in the run title and artifacts)"
+        required: true
+      ref:
+        description: "Repo ref for the trainer source"
+        default: "main"
+      runs:
+        description: 'JSON {seed: datagen run id} for the training data, e.g. {"8":"41864886814","9":"41894096137"}'
+        required: true
+      val_run:
+        description: "Datagen run id of seed 9 (its last 1M positions are the validation set and are removed from training)"
+        default: "41894096137"
+      positions:
+        description: "Training positions per variant (a shuffled subset of the pool)"
+        default: "100000000"
+      variants:
+        description: 'JSON list of {"name": ..., "args": "<nnue-trainer train args>"}; --data/--val/--out are added'
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      variants: ${{ steps.plan.outputs.variants }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: plan
+        env:
+          VARIANTS: ${{ inputs.variants }}
+        run: |
+          python3 -c "import json,os,sys; v=json.loads(os.environ['VARIANTS']); assert all('name' in x and 'args' in x for x in v); print('variants='+json.dumps(v))" >> "$GITHUB_OUTPUT"
+      - name: Build trainer
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          cargo build --release --manifest-path tools/nnue-trainer/Cargo.toml
+          cargo test --release --manifest-path tools/nnue-trainer/Cargo.toml
+      - name: Fetch, convert and shuffle the pool
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ inputs.runs }}
+          VAL_RUN: ${{ inputs.val_run }}
+          POSITIONS: ${{ inputs.positions }}
+        run: |
+          # /mnt has ~70 GB on hosted runners; the root disk does not.
+          sudo mkdir -p /mnt/w && sudo chown "$USER" /mnt/w
+          T="$PWD/tools/nnue-trainer/target/release/nnue-trainer"
+          fetch() {  # seed run_id -> /mnt/w/s<seed>.bin
+            name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$2/artifacts?per_page=100" \
+              --jq '.artifacts[].name' | grep -E "^datagen-s$1-n[0-9]+$" | head -1)
+            [ -n "$name" ] || { echo "no merged datagen artifact for seed $1 in run $2"; exit 1; }
+            gh run download "$2" -R "$GITHUB_REPOSITORY" -n "$name" -D "/mnt/w/dl-$1"
+            gunzip -c /mnt/w/dl-$1/*.gz | "$T" convert - "/mnt/w/s$1.bin"
+            rm -rf "/mnt/w/dl-$1"
+          }
+          seeds=$(python3 -c "import json,os; print(' '.join(f'{k}:{v}' for k,v in json.loads(os.environ['RUNS']).items()))")
+          for sr in $seeds; do
+            [ "${sr%%:*}" = 7 ] && { echo "seed 7 is quarantined"; exit 1; }
+            fetch "${sr%%:*}" "${sr#*:}"
+          done
+          [ -f /mnt/w/s9.bin ] || fetch 9 "$VAL_RUN"
+          size=$(stat -c %s /mnt/w/s9.bin)
+          tail -c 32000000 /mnt/w/s9.bin > /mnt/w/val.bin
+          truncate -s $((size - 32000000)) /mnt/w/s9.bin
+          inputs=""
+          for sr in $seeds; do inputs="$inputs /mnt/w/s${sr%%:*}.bin"; done
+          "$T" shuffle --out /mnt/w/pool.bin $inputs
+          rm -f /mnt/w/s*.bin
+          total=$(( $(stat -c %s /mnt/w/pool.bin) / 32 ))
+          keep=$(( POSITIONS < total ? POSITIONS : total ))
+          truncate -s $((keep * 32)) /mnt/w/pool.bin
+          echo "pool: $keep of $total positions; val: 1000000" | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p sweep && mv /mnt/w/pool.bin /mnt/w/val.bin sweep/ && cp "$T" sweep/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep-data-${{ inputs.name }}
+          path: sweep
+          retention-days: 2
+          compression-level: 0
+
+  train:
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      # At most 16 of the 20 runners: long jobs must never block the merge queue.
+      max-parallel: 16
+      matrix:
+        variant: ${{ fromJSON(needs.prep.outputs.variants) }}
+    name: train ${{ matrix.variant.name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sweep-data-${{ inputs.name }}
+          path: sweep
+      - name: Train
+        env:
+          NAME: ${{ matrix.variant.name }}
+          ARGS: ${{ matrix.variant.args }}
+        run: |
+          chmod +x sweep/nnue-trainer
+          mkdir -p out
+          # Stop inside the 6 h job limit; the last finished epoch's net is kept.
+          timeout 19800 sweep/nnue-trainer train --data sweep/pool.bin --val sweep/val.bin \
+            --out "out/$NAME.bin" --threads "$(nproc)" $ARGS 2>&1 | tee "out/$NAME.log" || true
+          rm -f out/*.ckpt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ inputs.name }}-${{ matrix.variant.name }}
+          path: out
+          retention-days: 14
+
+  report:
+    needs: train
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sweep-${{ inputs.name }}-*
+          path: results
+          merge-multiple: true
+      - name: Summarise validation losses
+        run: |
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, os, re
+          rows = []
+          for log in sorted(glob.glob("results/*.log")):
+              text = open(log).read()
+              epochs = re.findall(r"^epoch (\d+) .*? val ([0-9.]+) \(quantized ([0-9.]+)\).*?([0-9]+) pos/s", text, re.M)
+              head = re.search(r"^train (.*)$", text, re.M)
+              name = os.path.basename(log)[:-4]
+              if epochs:
+                  e, v, q, pps = epochs[-1]
+                  best = min(epochs, key=lambda x: float(x[1]))
+                  rows.append((float(v), name, e, v, q, best[0], best[1], pps, head.group(1) if head else ""))
+              else:
+                  rows.append((9.0, name, "-", "-", "-", "-", "-", "-", "no epochs finished"))
+          print("| variant | epochs | final val | quantised | best epoch | best val | pos/s | config |")
+          print("|---|---|---|---|---|---|---|---|")
+          for r in sorted(rows):
+              print("| " + " | ".join(str(x) for x in r[1:]) + " |")
+          EOF
