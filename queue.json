@@ -28,5 +28,6 @@
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 0,
-  "merges_since_ladder": 0
+  "merges_since_ladder": 0,
+  "next_seed": 15
 }
