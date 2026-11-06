@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "nnue-arch-r2",
+      "mode": "speedup"
+    },
+    {
       "branch": "bigbang-r2",
       "mode": "stc"
     },
