@@ -7,6 +7,18 @@
     {
       "branch": "main",
       "mode": "ladder"
+    },
+    {
+      "branch": "spike-book-off-default",
+      "mode": "speedup"
+    },
+    {
+      "branch": "correction-history-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "king-buckets",
+      "mode": "speedup"
     }
   ],
   "current": {
