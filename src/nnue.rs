@@ -27,7 +27,7 @@ pub(crate) const QA: i32 = 255;
 pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
 /// Output buckets, selected by piece count: `(pieces - 2) * BUCKETS / 32`.
-pub(crate) const BUCKETS: usize = 1;
+pub(crate) const BUCKETS: usize = 8;
 
 /// Bytes in a net file: (768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
 pub(crate) const NET_BYTES: usize = (INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2;
