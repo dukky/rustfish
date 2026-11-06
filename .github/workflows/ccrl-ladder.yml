@@ -105,10 +105,25 @@ jobs:
           PKG: ${{ matrix.pkg }}
           BIN: ${{ matrix.bin }}
           NAME: ${{ matrix.name }}
+          DIR: ${{ matrix.dir }}
+          MAKE_ARGS: ${{ matrix.make_args }}
+          OUT: ${{ matrix.out }}
+          NET_URL: ${{ matrix.net_url }}
+          NET_SHA256: ${{ matrix.net_sha256 }}
+          NET_PATH: ${{ matrix.net_path }}
         run: |
           git clone --quiet --depth 1 --branch "$REF" "https://github.com/$REPO.git" anchor-src
+          # Nets kept outside the anchor's repo: commit-pinned URL plus sha256, so a
+          # missing or swapped net fails here rather than playing silently weak.
+          if [ -n "$NET_URL" ]; then
+            mkdir -p "$(dirname "anchor-src/$NET_PATH")"
+            curl -sSfL -o "anchor-src/$NET_PATH" "$NET_URL"
+            echo "$NET_SHA256  anchor-src/$NET_PATH" | sha256sum -c -
+          fi
           case "$KIND" in
             stash) make -C anchor-src/src -j"$(nproc)" EXE=anchor && cp anchor-src/src/anchor "engines/$NAME" ;;
+            # MAKE_ARGS is intentionally unquoted: it holds a target and VAR=value words.
+            make)  make -C "anchor-src/$DIR" -j"$(nproc)" $MAKE_ARGS && cp "anchor-src/$OUT" "engines/$NAME" ;;
             go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
             cargo) RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path anchor-src/Cargo.toml -p "$PKG" \
                      && cp "anchor-src/target/release/$BIN" "engines/$NAME" ;;
