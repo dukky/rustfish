@@ -964,8 +964,8 @@ impl Default for SearchParams {
             lmr_min_move_index: 3,
             lmr_extra_depth: 5,
             lmr_extra_move_index: 8,
-            node_tm_base: 150,
-            node_tm_scale: 135,
+            node_tm_base: 175,
+            node_tm_scale: 75,
         }
     }
 }
@@ -1169,8 +1169,8 @@ fn main() {
             println!("option name LmrMinMoveIndex type spin default 3 min 1 max 24");
             println!("option name LmrExtraDepth type spin default 5 min 1 max 16");
             println!("option name LmrExtraMoveIndex type spin default 8 min 1 max 32");
-            println!("option name NodeTmBase type spin default 150 min 110 max 300");
-            println!("option name NodeTmScale type spin default 135 min 50 max 300");
+            println!("option name NodeTmBase type spin default 175 min 110 max 300");
+            println!("option name NodeTmScale type spin default 75 min 50 max 300");
             println!("uciok");
             flush_stdout();
             continue;

@@ -18,8 +18,10 @@ const SCORE_DROP_MARGIN: i32 = 40;
 // Node-fraction time management (single-threaded searches only): from this
 // depth on, the soft target is also scaled by (NodeTmBase - f) * NodeTmScale
 // percent, f = percent of all search nodes spent under the current best move.
-// A best move that took nearly all the effort (f ~ 100) is easy and ends early
-// (~0.68x at the defaults); a contested root (f ~ 30) gets up to ~1.6x.
+// Defaults are neutral at f ~ 41, the median measured in 120+1 self-play (the
+// root has no LMR, so alternatives are expensive and f runs low): f = 90 (an
+// obvious move) ends at ~0.64x, f = 10 (contested root) gets ~1.24x. The
+// average comes out near 0.95x, so this redistributes time, not adds it.
 const NODE_TM_MIN_DEPTH: i32 = 8;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
