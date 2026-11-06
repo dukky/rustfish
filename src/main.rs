@@ -1228,7 +1228,7 @@ fn main() {
             continue;
         }
         if cmd.starts_with("evalhash") {
-            handle_evalhash(cmd, &mut board);
+            handle_evalhash(cmd, &mut board, engine.active_net());
             continue;
         }
         if cmd.starts_with("bench") {

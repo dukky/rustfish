@@ -1110,6 +1110,16 @@ pub(crate) fn evaluate(board: &Board) -> i32 {
     evaluate_impl(board, &mut NoTrace, None)
 }
 
+/// The hand-crafted eval for the side to move, even when NNUE is attached.
+pub(crate) fn hce_for_side(board: &Board) -> i32 {
+    let s = evaluate_impl(board, &mut NoTrace, None);
+    if board.side_to_move == Color::White {
+        s
+    } else {
+        -s
+    }
+}
+
 /// `eval_for_side` with pawn-structure terms served from `pawns`; bit-identical result.
 pub(crate) fn eval_for_side_cached(board: &Board, pawns: &mut PawnTable) -> i32 {
     let s = evaluate_impl(board, &mut NoTrace, Some(pawns));

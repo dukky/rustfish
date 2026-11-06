@@ -127,7 +127,9 @@ against the current `main`, so a stale base can't happen.
   (`[0, 10]` at 60+0.6), `speedup` (no SPRT; merges only if bench nodes equal
   `main`'s and the `evalhash` command gives the same hash as a `main` build:
   bench alone can't see an eval change that happens not to alter the bench
-  tree).
+  tree). `evalhash` prints the HCE `Eval hash` and, when a net is active (the
+  default), an `NNUE eval hash` computed through the incremental accumulator
+  (make/undo along each walk), so it also catches NNUE update/SIMD changes.
 - To add work: push the branch, then
   `python3 scripts/queue.py add <branch>:<mode>[,<branch>:<mode>]` (`--front`
   to jump the queue, e.g. for speedups). This drops a request file in
@@ -230,7 +232,7 @@ this pipeline before ruling it out again.
 | Tool | Purpose |
 |---|---|
 | `bench [depth]` (UCI command) | deterministic node count + NPS |
-| `evalhash` (UCI command) | hash of the static eval over ~190k fixed positions; must match `main` for a speedup |
+| `evalhash` (UCI command) | hash of the static eval (HCE line, plus an NNUE line when a net is active) over ~190k fixed positions; must match `main` for a speedup |
 | `scripts/check_bench.py` | bench vs last `Bench:` trailer (CI + local) |
 | `scripts/ci.py sprt/ladder/status` | dispatch and follow GitHub tests, log results |
 | `scripts/sprt.py` | LLR / Elo from pentanomial counts (used by the workflow) |
