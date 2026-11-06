@@ -92,6 +92,115 @@ Notes:
 - 5+0.05 with the UHO book exaggerates Elo differences relative to CCRL
   conditions; confirm big steps with a ladder.
 
+## Uncertainty head (offline study, 2026-11-06, branch `uncertainty-head`)
+
+**Question.** Can the net predict how wrong its own static eval is, cheaply
+enough to drive search (wider pruning margins where unsure, narrower where
+sure)? Offline only: no engine or search change.
+
+**Method.** `nnue-trainer uncert-train` adds a second output per bucket on the
+same accumulator, `u = 0.1 * softplus(w_u . screlu(acc) + b_u)` (1025 extra
+weights at H=512, B=1; one more dot product per eval). Target
+`t = |sigmoid(score/400) - sigmoid(eval/400)|`, squared loss, so `u` estimates
+the conditional mean of `t`. WDL space was chosen over raw cp because a
+200 cp miss at +900 is irrelevant and at 0 is decisive, it is the space the
+main loss already lives in, and it is bounded (no mate-score outliers); the cp
+error is reported as well. `eval` is the engine's static eval, i.e. **half**
+the net output (`src/eval.rs`, since ad53daa; `--eval-mul 0.5`): datagen
+scores are in those units. Frozen mode: E2 (`net/nnue.bin`) fixed, head only,
+2 epochs on seeds 14+15 (38.3M positions E2 never saw), Adam 2e-3 -> 1e-5,
+3 threads, ~4 min. Shared mode: fine-tune net + head 20M positions at
+1e-4 -> 1e-6, head loss weight 1, with and without the head's gradient
+reaching the FT (`--no-ft-grad` = control). Scored by
+`scripts/uncert_analysis.py` on 1M held-out positions; baselines (cell means
+over |eval| x pieces x en-prise counts x |material - eval|) fitted on the even
+rows, every predictor scored on the odd rows.
+
+**Data-scale finding (affects net training, not just this study).** The search
+scores in the pool are on three different scales relative to the net's
+output: seeds 12-13 were generated before the eval was halved (score ~ 1.0x
+E2 output), seeds 14-16 after (~0.53x), seed 9 / `val.bin` by net4 (~0.75x).
+pool3 mixes them under one `SCALE = 400`, so the score half of the target
+disagrees with itself by up to 2x between seeds. The first run of this study
+(trained on 13+14) learned mostly that scale mismatch. Worth fixing in
+datagen/trainer (record raw net-scale scores, or rescale per seed) before
+the next generation.
+
+**Result (frozen E2 head, val16 = seed 16, same scale as training).**
+Mean `t` 0.0276 (mean |score - eval| 60 cp); 9.8% of positions err by more
+than the 100 cp-at-equality equivalent (`t > 0.0622`), 14.9% by > 100 cp.
+
+| u decile | mean u | mean t | mean \|s-e\| cp | P(t large) | P(>100 cp) |
+|---|---|---|---|---|---|
+| 1 | 0.0132 | 0.0108 | 17.6 | 0.4% | 0.5% |
+| 3 | 0.0208 | 0.0178 | 32.7 | 2.7% | 4.4% |
+| 5 | 0.0261 | 0.0230 | 46.0 | 5.7% | 9.6% |
+| 7 | 0.0319 | 0.0300 | 64.0 | 10.5% | 17.1% |
+| 9 | 0.0417 | 0.0398 | 93.5 | 18.5% | 28.7% |
+| 10 | 0.0600 | 0.0591 | 151.9 | 33.0% | 45.3% |
+
+| predictor (odd rows) | Spearman t | Spearman cp | AUC large | top-10% captures large t | top-10% captures >100 cp |
+|---|---|---|---|---|---|
+| **u (head)** | **+0.384** | **+0.431** | **0.781** | **33.7%** | **30.3%** |
+| -\|eval\| | -0.190 | -0.333 | 0.386 | 5.1% | 3.3% |
+| pieces / phase | -0.145 / -0.138 | -0.21 / -0.20 | 0.39 / 0.40 | 1-2% | 1% |
+| en-prise count | +0.206 | +0.197 | 0.631 | 23.4% | 19.6% |
+| \|material - eval\| | +0.208 | +0.288 | 0.647 | 22.3% | 29.7% |
+| baseline cells (all of the above) | +0.390 | +0.432 | 0.760 | 28.5% | 25.3% |
+| cells x u-quintile | +0.435 | +0.473 | 0.797 | 32.6% | 28.9% |
+
+R^2 of `t`: cells 0.117, u 0.146, cells x u 0.148. Spearman of u with the
+cells' residual is only +0.05: u mostly *contains* the cheap features (it
+sees the board) and adds a little beyond them, it does not find a new
+dimension. `val.bin` (seed 9, other scale, analysed at 0.75x): u Spearman
+0.277 / AUC 0.676 / top decile 18.8%, cells 0.433 / 0.768 / 27.0%, cells x u
+0.460 / 0.786: under scale mismatch the |eval|-dependent part dominates and
+the head trained on a different scale transfers poorly.
+
+**Shared FT vs head-only.** After 20M positions of fine-tuning, val16 main
+loss 0.024667 (shared) vs 0.024664 (stop-gradient control); head loss
+0.0012396 vs 0.0012455; u Spearman 0.499 vs 0.498, AUC 0.796 vs 0.795.
+Letting the head shape the FT buys nothing measurable and costs nothing on
+the main loss. (Both fine-tunes moved the net toward the halved score scale,
+re-introducing a scale error the cells' |eval| term captures; the comparison
+between the two is still like for like.)
+
+**Verdict.** A real, well-calibrated signal: the top u-decile errs 8.6x more
+than the bottom (152 vs 18 cp) and holds a third of all large errors, and u
+beats every single cheap feature and a fitted combination of them. But most
+of it is reachable with features the search already has or can compute
+cheaply (|eval|, en-prise pieces, material gap), and the margin over them is
+modest (AUC 0.78 vs 0.76; R^2 0.15 vs 0.12). Labels are 5000-node searches on
+quiet positions only, so part of `t` is label noise u cannot predict.
+
+**If pursued (not implemented).**
+- Search use: replace fixed RFP / futility / LMP margins `m(d)` with
+  `m(d) * clamp(u / u_median, 0.5, 2.0)` (u in engine units via
+  `u_cp ~ 4 * 400 * u`, valid near equality), or simply add `k * u_cp` to
+  the margin; a cheaper first test is gating only reverse futility on
+  `u < u_p30`. Extensions/time: u at the root is a candidate input to time
+  management (spend more when the root eval is uncertain). Must be compared
+  against the same tweak driven by the cheap features (en-prise count, or a
+  correction-history term), since those capture most of the signal.
+- Export: append the head after the existing words as a trailer
+  `"RFU1" magic, buckets x 2H i8/i16 weights (QB-scaled), buckets i16 biases`.
+  `Network::from_bytes` currently requires `len == NET_BYTES`; change it to
+  accept `NET_BYTES` (no head, u = constant) or `NET_BYTES + trailer`, so old
+  nets load unchanged and the trainer's `eval`/`train --init` ignore the
+  trailer. u needs only the already-computed screlu(acc), so its cost is one
+  2H dot product, paid only at nodes that use it.
+- Next step: fix the score-scale mix first (it also hurts net training), then
+  one SPRT of "RFP margin x clamp(u/median)" against "RFP margin x
+  (1 + en-prise count)" to see whether the head's extra signal survives in
+  search.
+
+Commands: `nnue-trainer uncert-train --net net/nnue.bin --data tr.bin --val
+val16.bin --out frozen.head --epochs 2 --lr 2e-3 --lr-end 1e-5 --threads 3`,
+`nnue-trainer uncert-dump --net net/nnue.bin --head frozen.head --val
+val16.bin --out f_val16.csv`, `python3 -I scripts/uncert_analysis.py --mul 0.5
+f_val16.csv`; shared runs add `--head frozen.head --shared --alpha 1
+--epoch-size 20000000 --lr 1e-4 --lr-end 1e-6 [--no-ft-grad]`.
+
 ## Running a generation with scripts/netloop.py
 
 `scripts/netloop.py` (stdlib only) sequences one generation on the laptop.
