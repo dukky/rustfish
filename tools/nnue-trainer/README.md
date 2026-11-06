@@ -26,3 +26,19 @@ Rules that the v1 history taught us (see `docs/nnue-experiments.md`):
   to |w| <= 127 (the engine's fast path) with no post-hoc clipping.
 
 Throughput: ~1.1M positions/s at H = 256 on the 8-core M3 (8 threads).
+
+## Score-scale check
+
+```bash
+$T scalecheck --net ../../net/nnue.bin --data s18.bin [--buckets 1] [--n 200000] [--threads 2]
+```
+
+Over the first `--n` records: least-squares slope (through 0) of the
+record's score on the net's eval (both cp, White POV), Pearson r, mean
+|score| and mean |eval|; mates (`|score| >= --max-score`, 10000) are
+skipped. Data written at the net's scale gives ~1.0-1.15 against the main
+net (search scores run a bit wider than static evals); data written at the
+engine's halved scale (`eval = net/2` since ad53daa) gives ~0.57. Data from
+much older, weaker nets reads lower (s4: 0.65, s9/s11: 0.81). Only
+`--king-buckets none` here: a one-bucket reference net measures scale just as
+well. `scripts/netloop.py auto` uses it to triage new data.

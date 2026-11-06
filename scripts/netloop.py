@@ -8,12 +8,15 @@ Subcommands (see docs/nnue-experiments.md, "Running a generation"):
   train   run `nnue-trainer train` with the fixed val set, log, summarise
   embed   put a net on a fresh `nnue-<name>` branch, test, bench, commit, push
   record  append / update a row in net/experiments.jsonl
+  auto    the overnight loop: ingest + scale-check new data, warm-start train
+          on the GPU, screen on val sets, embed + queue winners (see cmd_auto)
 
 Python stdlib only. Heavy work is done by tools/nnue-trainer (std-only Rust)
 and cargo; this script only sequences it.
 """
 import argparse
 import datetime
+import fcntl
 import importlib.util
 import json
 import os
@@ -22,6 +25,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import traceback
+from array import array
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -128,23 +134,39 @@ def cmd_fetch(args):
     if len(names) != 1:
         die(f"expected one merged datagen-s{args.seed}-n* artifact in run {args.run}, "
             f"found {names or 'none'} (all: {res.stdout.split()})")
-    name = names[0]
-    tmp = Path(tempfile.mkdtemp(prefix=f"fetch-s{args.seed}-", dir=d))
+    n = download_convert(args.run, args.seed, out, trainer(args), d, names[0])
+    print(f"wrote {out} ({n} positions)")
+
+
+def download_convert(run_id, seed, out, trainer_bin, tmp_parent, name=None):
+    """Download run `run_id`'s merged datagen-s<seed>-n* artifact and convert it
+    to `out` (written as <out>.part, renamed when complete). Returns positions."""
+    if name is None:
+        res = subprocess.run(["gh", "api", f"repos/{GH_REPO}/actions/runs/{run_id}/artifacts",
+                              "--paginate", "--jq", ".artifacts[].name"],
+                             capture_output=True, text=True, check=True)
+        names = [n for n in res.stdout.split()
+                 if n.startswith(f"datagen-s{seed}-n") and "shard" not in n and "engine" not in n]
+        if len(names) != 1:
+            raise RuntimeError(f"expected one merged datagen-s{seed}-n* artifact in run {run_id}, "
+                               f"found {names or 'none'}")
+        name = names[0]
+    tmp = Path(tempfile.mkdtemp(prefix=f"fetch-s{seed}-", dir=tmp_parent))
     try:
-        run(["gh", "run", "download", str(args.run), "-R", GH_REPO, "-n", name, "-D", tmp])
+        run(["gh", "run", "download", str(run_id), "-R", GH_REPO, "-n", name, "-D", tmp])
         gz = sorted(tmp.rglob("*.gz"))
         if len(gz) != 1:
-            die(f"expected one .gz in artifact {name}, found {[str(g) for g in gz]}")
-        part = out.with_suffix(".bin.part")
+            raise RuntimeError(f"expected one .gz in artifact {name}, found {[str(g) for g in gz]}")
+        part = Path(str(out) + ".part")
         print(f"+ gunzip -c {gz[0]} | nnue-trainer convert - {part}", flush=True)
         gun = subprocess.Popen(["gunzip", "-c", str(gz[0])], stdout=subprocess.PIPE)
-        conv = subprocess.run([str(trainer(args)), "convert", "-", str(part)], stdin=gun.stdout)
+        conv = subprocess.run([str(trainer_bin), "convert", "-", str(part)], stdin=gun.stdout)
         gun.stdout.close()
         if gun.wait() != 0 or conv.returncode != 0:
             part.unlink(missing_ok=True)
-            die("convert failed")
+            raise RuntimeError("convert failed")
         part.rename(out)
-        print(f"wrote {out} ({out.stat().st_size // 32} positions)")
+        return out.stat().st_size // 32
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -380,6 +402,560 @@ def cmd_record(args):
     print(json.dumps(row))
 
 
+# ------------------------------------------------------------------ auto (overnight loop)
+#
+# One iteration (`auto --once`; without it the loop repeats every --interval s):
+#   a. ingest: new completed CI datagen runs + growth of local/L*.txt ->
+#      auto/*.bin, scale-checked against the main net (x2-corrected copy for
+#      half-scale data, quarantine for anything else odd), recorded in the ledger
+#   b. once >= --threshold new positions arrived since the last attempt:
+#      warm-start GPU training from main's net on (new data + an equal replay
+#      slice of --replay-pool), unless another trainer is running
+#   c. screen on val.bin and fix/val16x2.bin; better on both -> embed (branch
+#      nnue-auto-<n>, pushed) and queue it net-gate
+# Everything the loop writes lives in <data-dir>/auto/ plus netloop-auto.log,
+# netloop-auto.jsonl and ledger.json in <data-dir>; it never touches other files.
+
+AUTO_GPU = DEFAULT_DATA / "bin/nnue-trainer-metal-kb"
+AUTO_KB_TRAINER = DEFAULT_DATA / "bin/nnue-trainer-kb"
+SEED_RE = re.compile(r"^Datagen (\S+) seed (\d+) ")
+SCALE_RE = re.compile(r"slope (\S+) r (\S+) mean\|score\| (\S+)cp mean\|eval\| (\S+)cp")
+LOSS_RE = re.compile(r" loss (\S+) ")
+TRAINER_BUSY_RE = r"nnue-trainer[-a-z]* train "
+SCALE_HALF = (0.40, 0.65)  # data written at the engine's net/2 scale
+SCALE_OK = (0.80, 1.25)
+REC = 32
+
+
+class Auto:
+    def __init__(self, args):
+        self.a = args
+        self.d = Path(args.data_dir).expanduser()
+        self.dir = self.d / "auto"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.ledger_path = self.d / "ledger.json"
+        self.log_path = self.d / "netloop-auto.log"
+        self.jsonl_path = self.d / "netloop-auto.jsonl"
+        self.trainer = Path(args.trainer).expanduser()
+        self.dry = args.dry_run
+
+    # ---------------------------------------------------------- plumbing
+    def log(self, msg):
+        line = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+        print(line, flush=True)
+        with open(self.log_path, "a") as fh:
+            fh.write(line + "\n")
+
+    def row(self, **kw):
+        kw = {"date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "dry_run": self.dry, **kw}
+        with open(self.jsonl_path, "a") as fh:
+            fh.write(json.dumps(kw) + "\n")
+
+    def sh(self, cmd, **kw):
+        cmd = [str(c) for c in cmd]
+        self.log("+ " + " ".join(cmd))
+        kw.setdefault("capture_output", True)
+        kw.setdefault("text", True)
+        r = subprocess.run(cmd, **kw)
+        if r.returncode != 0:
+            raise RuntimeError(f"{cmd[0]} exited {r.returncode}: {(r.stderr or '')[-2000:]}")
+        return r.stdout
+
+    def load_ledger(self):
+        if self.ledger_path.exists():
+            return json.loads(self.ledger_path.read_text())
+        return None
+
+    def save_ledger(self, led):
+        tmp = self.ledger_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(led, indent=1, sort_keys=True) + "\n")
+        os.replace(tmp, self.ledger_path)
+
+    def new_path(self, name):
+        """A path under auto/ that does not exist yet (never overwrite)."""
+        p = self.dir / name
+        if not p.exists():
+            return p
+        stem, suf = p.name.split(".", 1) if "." in p.name else (p.name, "")
+        for k in range(2, 1000):
+            q = self.dir / (f"{stem}-{k}.{suf}" if suf else f"{stem}-{k}")
+            if not q.exists():
+                return q
+        raise RuntimeError(f"no free name for {name}")
+
+    def check_trainer(self):
+        if not self.trainer.exists():
+            die(f"trainer not found at {self.trainer}; build it with "
+                f"`cargo build --release --manifest-path {REPO}/tools/nnue-trainer/Cargo.toml`")
+        r = subprocess.run([str(self.trainer), "scalecheck", "--bogus"], capture_output=True, text=True)
+        if "unknown option" not in r.stderr:
+            die(f"{self.trainer} has no `scalecheck`; rebuild it from this branch")
+
+    # ---------------------------------------------------------- main net
+    def main_net(self):
+        """(net path, H, BUCKETS, king layout name) of origin/main, cached in auto/."""
+        subprocess.run(["git", "-C", str(REPO), "fetch", "--quiet", "origin"], check=False)
+        src = subprocess.run(["git", "-C", str(REPO), "show", "origin/main:src/nnue.rs"],
+                             capture_output=True, text=True, check=True).stdout
+        h, b = read_const(src, "H"), read_const(src, "BUCKETS") or 1
+        m = re.search(r"^pub\(crate\) const KING_LAYOUT: KingLayout = LAYOUT_(\w+);", src, re.MULTILINE)
+        layout = m.group(1).lower() if m else "none"
+        blob = subprocess.run(["git", "-C", str(REPO), "rev-parse", "origin/main:net/nnue.bin"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        path = self.dir / f"main-{blob[:12]}.bin"
+        if not path.exists():
+            data = subprocess.run(["git", "-C", str(REPO), "show", "origin/main:net/nnue.bin"],
+                                  capture_output=True, check=True).stdout
+            part = path.with_suffix(".part")
+            part.write_bytes(data)
+            part.rename(path)
+        kb = {"none": 1, "m1": 1, "kb4": 4, "kb4m": 4, "kb8m": 8}.get(layout)
+        if kb is None or path.stat().st_size != net_bytes(h, b) + (kb - 1) * INPUTS * h * 2:
+            raise RuntimeError(f"origin/main net {path} does not match H={h} B={b} layout={layout}")
+        return {"path": str(path), "blob": blob, "hidden": h, "buckets": b, "layout": layout}
+
+    def scale_ref(self, led, main):
+        """Net for scalecheck: main's if it has no king buckets (the CPU trainer's
+        scalecheck has none), else the last such main net."""
+        if main["layout"] == "none":
+            led["scale_ref"] = {"path": main["path"], "buckets": main["buckets"]}
+        ref = led.get("scale_ref")
+        if not ref:
+            raise RuntimeError("main has king buckets and no earlier one-bucket main net is cached for scalecheck")
+        return ref
+
+    # ---------------------------------------------------------- scale check
+    def scalecheck(self, ref, f):
+        out = self.sh(["nice", self.trainer, "scalecheck", "--net", ref["path"], "--buckets", ref["buckets"],
+                       "--data", f, "--n", self.a.scale_n, "--threads", 2])
+        m = SCALE_RE.search(out)
+        if not m:
+            raise RuntimeError(f"cannot parse scalecheck output: {out!r}")
+        slope, r, ms, me = map(float, m.groups())
+        self.log(f"scalecheck {f}: slope {slope:.4f} r {r:.4f} mean|score| {ms:.1f} mean|eval| {me:.1f}")
+        return {"slope": slope, "r": r, "mean_abs_score": ms, "mean_abs_eval": me}
+
+    def classify(self, ref, raw, name):
+        """Scale-check `raw`; returns a ledger entry with the file to train on (or quarantine)."""
+        sc = self.scalecheck(ref, raw)
+        ent = {"raw": str(raw), "positions": raw.stat().st_size // REC, **sc}
+        if SCALE_HALF[0] <= sc["slope"] <= SCALE_HALF[1]:
+            fixed = self.new_path(f"{name}x2.bin")
+            x2_copy(raw, fixed)
+            ent.update(status="ready", file=str(fixed), fix="x2", raw=None)
+            raw.unlink()  # our own intermediate; the ledger names the source
+            self.log(f"{name}: half scale -> wrote x2 copy {fixed} (raw deleted)")
+        elif SCALE_OK[0] <= sc["slope"] <= SCALE_OK[1]:
+            ent.update(status="ready", file=str(raw), fix=None)
+        else:
+            ent.update(status="quarantined", file=None,
+                       reason=f"slope {sc['slope']:.3f} outside {SCALE_HALF} and {SCALE_OK}")
+            self.log(f"{name}: QUARANTINED ({ent['reason']}); file kept at {raw}")
+        return ent
+
+    def add_item(self, led, key, ent):
+        led["seq"] += 1
+        ent.update(seq=led["seq"], added=datetime.datetime.now().isoformat(timespec="seconds"))
+        led["items"][key] = ent
+        self.save_ledger(led)
+        self.row(step="ingest", item=key, **{k: ent.get(k) for k in
+                 ("status", "file", "positions", "slope", "r", "fix", "run", "reason")})
+
+    # ---------------------------------------------------------- a. ingest
+    def bootstrap(self, runs):
+        """First run: everything that exists today is pre-existing (not new data)."""
+        led = {"version": 1, "seq": 0, "items": {}, "local": {}, "attempts": [], "next_n": 1,
+               "last_attempt_seq": 0, "last_embed_seq": 0, "replay_offset": 0}
+        for r in runs:
+            m = SEED_RE.match(r["displayTitle"])
+            if r["status"] == "completed" and m:
+                led["items"][f"ci-s{m.group(2)}"] = {"status": "preexisting", "run": r["databaseId"],
+                                                     "seq": 0, "ref": m.group(1)}
+        for txt in sorted((self.d / "local").glob("L*.txt")):
+            # Lines already converted by hand = records in <stem>[a-z].bin (data dir or local/).
+            done = sum(f.stat().st_size // REC for base in (self.d, self.d / "local")
+                       for f in base.glob(f"{txt.stem}[a-z].bin"))
+            off = line_offset(txt, done)
+            led["local"][txt.name] = {"offset": off, "chunks": 0, "bootstrap_lines": done}
+            self.log(f"bootstrap: {txt.name}: {done} lines already converted by hand -> offset {off}")
+        self.log(f"bootstrap: {len(led['items'])} existing CI runs recorded as pre-existing")
+        return led
+
+    def ci_runs(self):
+        out = subprocess.run(["gh", "run", "list", "-R", GH_REPO, "-w", "datagen.yml", "-L", "100", "--json",
+                              "databaseId,status,conclusion,displayTitle,createdAt"],
+                             capture_output=True, text=True, check=True).stdout
+        return json.loads(out)
+
+    def ingest(self, led, ref):
+        for r in sorted(self.ci_runs(), key=lambda r: r["createdAt"]):
+            m = SEED_RE.match(r["displayTitle"])
+            if not m or r["status"] != "completed":
+                continue
+            gen, seed = m.group(1), int(m.group(2))
+            key = f"ci-s{seed}"
+            if key in led["items"]:
+                continue
+            base = {"run": r["databaseId"], "ref": gen, "kind": "ci"}
+            if r["conclusion"] != "success":
+                self.add_item(led, key, {**base, "status": "skipped", "reason": f"run {r['conclusion']}"})
+                continue
+            if seed in QUARANTINED or gen not in self.a.allow_ref:
+                self.add_item(led, key, {**base, "status": "skipped",
+                                         "reason": f"quarantined seed or generator ref {gen!r} not in {self.a.allow_ref}"})
+                self.log(f"{key}: skipped (generator {gen})")
+                continue
+            self.need_disk(4 << 30)
+            raw = self.new_path(f"s{seed}.bin")
+            self.log(f"{key}: new datagen run {r['databaseId']}; downloading to {raw}")
+            n = download_convert(r["databaseId"], seed, raw, self.trainer, self.dir)
+            self.log(f"{key}: {n} positions")
+            self.add_item(led, key, {**base, **self.classify(ref, raw, f"s{seed}")})
+
+        for txt in sorted((self.d / "local").glob("L*.txt")):
+            st = led["local"].setdefault(txt.name, {"offset": 0, "chunks": 0})
+            size = txt.stat().st_size
+            if size - st["offset"] < self.a.local_min_bytes:
+                continue
+            end = last_newline(txt, st["offset"], size)
+            if end - st["offset"] < self.a.local_min_bytes:
+                continue
+            k = st["chunks"] + 1
+            raw = self.new_path(f"{txt.stem}-c{k}.bin")
+            self.log(f"{txt.name}: converting bytes {st['offset']}..{end} -> {raw}")
+            conv = subprocess.Popen([str(self.trainer), "convert", "-", str(raw)], stdin=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            with open(txt, "rb") as fh:
+                fh.seek(st["offset"])
+                left = end - st["offset"]
+                while left:
+                    buf = fh.read(min(left, 1 << 22))
+                    if not buf:
+                        break
+                    conv.stdin.write(buf)
+                    left -= len(buf)
+            conv.stdin.close()
+            err = conv.stderr.read().decode()
+            if conv.wait() != 0:
+                raw.unlink(missing_ok=True)
+                raise RuntimeError(f"convert failed: {err}")
+            self.log(err.strip())
+            ent = {"kind": "local", "source": txt.name, "bytes": [st["offset"], end], **self.classify(ref, raw, raw.stem)}
+            st.update(offset=end, chunks=k)
+            self.add_item(led, f"local-{txt.stem}-c{k}", ent)
+
+    def adopt(self, led, ref, files):
+        """--adopt: count existing record files as new data (read only; scale checked)."""
+        for f in files:
+            f = Path(f).expanduser()
+            if not f.is_absolute():
+                f = self.d / f
+            key = f"adopt-{f.name}"
+            if key in led["items"]:
+                continue
+            sc = self.scalecheck(ref, f)
+            ok = SCALE_OK[0] <= sc["slope"] <= SCALE_OK[1]
+            self.add_item(led, key, {"kind": "adopted", "file": str(f) if ok else None, "raw": str(f),
+                                     "positions": f.stat().st_size // REC, "fix": None,
+                                     "status": "ready" if ok else "quarantined", **sc,
+                                     **({} if ok else {"reason": "adopted file is not net scale"})})
+
+    # ---------------------------------------------------------- b. train
+    def need_disk(self, nbytes):
+        free = shutil.disk_usage(self.d).free
+        if free < nbytes + (20 << 30):
+            raise RuntimeError(f"only {free >> 30} GB free; need {nbytes >> 30} GB + 20 GB margin")
+
+    def trainer_busy(self):
+        r = subprocess.run(["pgrep", "-fl", TRAINER_BUSY_RE], capture_output=True, text=True)
+        return [l for l in r.stdout.splitlines() if l.strip() and str(os.getpid()) != l.split()[0]]
+
+    def plan(self, led):
+        ready = [(k, v) for k, v in led["items"].items() if v.get("status") == "ready"]
+        fresh = sum(v["positions"] for k, v in ready if v["seq"] > led["last_attempt_seq"])
+        pool = sorted([kv for kv in ready if kv[1]["seq"] > led["last_embed_seq"]],
+                      key=lambda kv: -kv[1]["seq"])
+        use, total = [], 0
+        for k, v in pool:
+            if total >= self.a.max_new:
+                break
+            use.append(k)
+            total += v["positions"]
+        return fresh, use, total
+
+    def replay_slice(self, led, positions, out):
+        pool = Path(self.a.replay_pool).expanduser()
+        if not pool.is_absolute():
+            pool = self.d / pool
+        size = pool.stat().st_size // REC * REC
+        want = min(positions * REC, size)
+        off = led["replay_offset"] % size
+        with open(pool, "rb") as src, open(out, "wb") as dst:
+            left = want
+            while left:
+                src.seek(off)
+                buf = src.read(min(left, 1 << 24, size - off))
+                dst.write(buf)
+                left -= len(buf)
+                off = (off + len(buf)) % size
+        return off
+
+    def attempt(self, led, main, use, total):
+        n = led["next_n"]
+        while (self.dir / f"auto-{n}.bin").exists() or branch_exists(f"nnue-auto-{n}"):
+            n += 1
+        name = f"auto-{n}"
+        files = [led["items"][k]["file"] for k in use]
+        train_set = self.dir / f"train-{n}.bin"
+        replay = self.dir / f"replay-{n}.bin"
+        net = self.dir / f"{name}.bin"
+        tlog = self.dir / f"{name}.log"
+        gpu = [Path(self.a.gpu_trainer).expanduser(), "train", "--data", train_set, "--val", self.d / "val.bin",
+               "--out", net, "--hidden", main["hidden"], "--buckets", main["buckets"], "--epochs", self.a.epochs,
+               "--lr", self.a.lr, "--lr-end", self.a.lr_end, "--init", main["path"]]
+        if main["layout"] != "none":
+            gpu += ["--king-buckets", main["layout"]]
+        plan = {"name": name, "files": files, "new_positions": total, "replay_positions": total,
+                "replay_pool": self.a.replay_pool, "replay_offset": led["replay_offset"],
+                "train_cmd": " ".join(map(str, gpu))}
+        if self.dry:
+            self.log(f"[dry-run] b: would train {name}: {total} new positions from {len(files)} files "
+                     f"+ {total} replay positions from {self.a.replay_pool} at record "
+                     f"{led['replay_offset'] // REC}, shuffled into {train_set}")
+            self.log(f"[dry-run] b: {plan['train_cmd']} > {tlog}")
+            self.screen_and_ship(led, main, name, net, plan)
+            return
+        self.need_disk(4 * total * REC)
+        self.log(f"b: {name}: building {train_set} from {total} new + {total} replay positions")
+        new_off = self.replay_slice(led, total, replay)
+        try:
+            self.sh(["nice", self.trainer, "shuffle", "--out", train_set, "--seed", n, *files, replay])
+        finally:
+            replay.unlink(missing_ok=True)
+        busy = self.trainer_busy()
+        if busy:  # someone started a trainer while we shuffled; the ledger is untouched
+            train_set.unlink(missing_ok=True)
+            self.log(f"b: trainer started meanwhile ({busy[0]}); retry next iteration")
+            return
+        # Committed to this attempt: a failed training is not retried on the same data.
+        led["replay_offset"] = new_off
+        led["next_n"] = n + 1
+        led["last_attempt_seq"] = max(led["items"][k]["seq"] for k in use)
+        led["attempts"].append({"n": n, "name": name, "upto_seq": led["last_attempt_seq"], "items": use,
+                                "positions": total, "status": "training"})
+        self.save_ledger(led)
+        self.log(f"b: training {name} on the GPU")
+        t0 = time.time()
+        try:
+            with open(tlog, "w") as lf:
+                lf.write("# " + " ".join(map(str, gpu)) + "\n")
+                lf.flush()
+                rc = subprocess.run([str(c) for c in gpu], stdout=lf, stderr=subprocess.STDOUT).returncode
+        finally:
+            train_set.unlink(missing_ok=True)
+            for f in self.dir.glob(f"{name}.e*.bin"):
+                f.unlink()
+        plan["train_seconds"] = round(time.time() - t0)
+        ok = rc == 0 and net.exists()
+        led["attempts"][-1]["status"] = "trained" if ok else f"train failed ({rc})"
+        self.save_ledger(led)
+        if not ok:
+            raise RuntimeError(f"GPU trainer exited {rc}; see {tlog}")
+        p = parse_log(tlog.read_text())
+        plan["train_log"] = p["rows"]
+        self.log(summary_text(name, p))
+        self.screen_and_ship(led, main, name, net, plan)
+
+    # ---------------------------------------------------------- c. screen + ship
+    def eval_loss(self, net, val, main):
+        if main["layout"] == "none":
+            cmd = ["nice", self.trainer, "eval", "--net", net, "--val", val, "--buckets", main["buckets"],
+                   "--threads", self.a.eval_threads]
+        else:
+            cmd = ["nice", Path(self.a.kb_trainer).expanduser(), "eval", "--net", net, "--val", val,
+                   "--buckets", main["buckets"], "--king-buckets", main["layout"]]
+        out = self.sh(cmd)
+        m = LOSS_RE.search(out)
+        if not m:
+            raise RuntimeError(f"cannot parse eval output {out!r}")
+        return float(m.group(1))
+
+    def screen_and_ship(self, led, main, name, net, plan):
+        vals = [self.d / "val.bin", self.d / "fix/val16x2.bin"]
+        if self.dry:
+            for v in vals:
+                self.log(f"[dry-run] c: would eval {net} and main {main['path']} on {v}")
+            base = {v.name: self.eval_loss(main["path"], v, main) for v in vals}
+            self.log(f"[dry-run] c: main net losses {base}; the candidate must beat both")
+            self.log(f"[dry-run] c: then: netloop.py embed --name {name} --net {net} --hidden {main['hidden']} "
+                     f"--buckets {main['buckets']} --data-dir {self.dir} (branch nnue-{name}, pushed) and "
+                     f"queue.py add nnue-{name}:net-gate{self.expect_flag(1.0)}")
+            self.row(step="plan", **plan, main_loss=base)
+            return
+        res = {}
+        for v in vals:
+            res[v.name] = {"candidate": self.eval_loss(net, v, main), "main": self.eval_loss(main["path"], v, main)}
+        better = all(x["candidate"] < x["main"] for x in res.values())
+        rel = min((x["main"] - x["candidate"]) / x["main"] * 100 for x in res.values())
+        self.log(f"c: {name} screen {res} -> {'PASS' if better else 'fail'} (min improvement {rel:.3f}%)")
+        row = {"step": "attempt", **plan, "screen": res, "passed": better, "min_improvement_pct": rel}
+        if not better:
+            self.log(f"c: {name} not better on both val sets; keep accumulating")
+            self.row(**row)
+            return
+        notes = (f"netloop auto: warm start from main ({main['blob'][:12]}), {plan['new_positions']} new + "
+                 f"{plan['replay_positions']} replay positions, {self.a.epochs} epochs lr {self.a.lr}->{self.a.lr_end}; "
+                 + "; ".join(f"{k} {v['candidate']:.6f} vs main {v['main']:.6f}" for k, v in res.items()))
+        if main["layout"] != "none":
+            self.log(f"c: {name} passed but main has king layout {main['layout']}, which this embed cannot set; "
+                     f"embed by hand")
+            self.row(**row, embedded=False)
+            return
+        self.sh([sys.executable, REPO / "scripts/netloop.py", "embed", "--name", name, "--net", net,
+                 "--hidden", main["hidden"], "--buckets", main["buckets"], "--data-dir", self.dir,
+                 "--notes", notes], cwd=REPO)
+        led["last_embed_seq"] = led["last_attempt_seq"]
+        self.save_ledger(led)
+        expect = self.expect(rel)
+        q = [sys.executable, REPO / "scripts/queue.py", "add", f"nnue-{name}:net-gate"]
+        if self.a.queue_front:
+            q.append("--front")
+        if self.queue_has_expect():
+            q += ["--expect", expect]
+        if self.a.no_queue:
+            self.log(f"c: --no-queue; would run {' '.join(map(str, q))}")
+        else:
+            self.sh(q, cwd=REPO)
+        self.log(f"c: {name} embedded as nnue-{name} and {'not ' if self.a.no_queue else ''}queued net-gate "
+                 f"(expect {expect})")
+        self.row(**row, embedded=True, branch=f"nnue-{name}", expect=expect, queued=not self.a.no_queue)
+
+    def expect(self, rel_pct):
+        # Conservative: ~1% lower val loss on both sets -> +10, capped there.
+        return int(max(2, min(self.a.expect_cap, round(rel_pct * 10))))
+
+    def queue_has_expect(self):
+        return "--expect" in (REPO / "scripts/queue.py").read_text()
+
+    def expect_flag(self, rel):
+        return f" --expect {self.expect(rel)}" if self.queue_has_expect() else \
+            " (this queue.py has no --expect; omitted)"
+
+    # ---------------------------------------------------------- loop
+    def iteration(self):
+        main = self.main_net()
+        led = self.load_ledger()
+        if led is None:
+            led = self.bootstrap(self.ci_runs())
+            self.save_ledger(led)
+        ref = self.scale_ref(led, main)
+        self.log(f"main net {main['path']} H={main['hidden']} B={main['buckets']} layout={main['layout']}")
+        if self.a.adopt:
+            self.adopt(led, ref, self.a.adopt)
+        self.ingest(led, ref)
+        self.save_ledger(led)
+        fresh, use, total = self.plan(led)
+        self.log(f"a: {fresh} new positions since the last attempt (threshold {self.a.threshold}); "
+                 f"{total} positions in {len(use)} files since the last embedded net")
+        if fresh < self.a.threshold:
+            self.row(step="wait", fresh=fresh, threshold=self.a.threshold, since_embed=total)
+            if self.dry and use:
+                self.log("[dry-run] below threshold; plan if it were met:")
+                self.attempt(led, main, use, total)
+            return
+        busy = self.trainer_busy()
+        if busy:
+            self.log(f"b: another trainer is running ({busy[0]}); waiting")
+            self.row(step="busy", fresh=fresh, trainer=busy[0])
+            if not self.dry:
+                return
+        self.attempt(led, main, use, total)
+
+    def run(self):
+        self.check_trainer()
+        lock = open(self.d / "netloop-auto.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            die("another netloop auto is running (netloop-auto.lock)")
+        self.log(f"netloop auto start (pid {os.getpid()}{', dry run' if self.dry else ''})")
+        while True:
+            try:
+                self.iteration()
+            except KeyboardInterrupt:
+                raise
+            except BaseException as e:  # die() raises SystemExit; keep looping past it too
+                self.log(f"ERROR: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                self.row(step="error", error=f"{type(e).__name__}: {e}")
+            if self.a.once or self.dry:
+                return
+            time.sleep(self.a.interval)
+
+
+def x2_copy(src, dst):
+    """Double every score, saturating (same as ~/rustfish-data/fix/x2.py)."""
+    part = Path(str(dst) + ".part")
+    with open(src, "rb") as fh, open(part, "wb") as out:
+        while True:
+            b = fh.read(32 * 1_000_000)
+            if not b:
+                break
+            a = array("h")
+            a.frombytes(b)
+            a[12::16] = array("h", (32767 if x > 16383 else -32767 if x < -16383 else 2 * x for x in a[12::16]))
+            out.write(a.tobytes())
+    part.rename(dst)
+
+
+def last_newline(path, start, end):
+    """Offset just past the last b'\\n' in path[start:end] (start if none)."""
+    with open(path, "rb") as fh:
+        pos = end
+        while pos > start:
+            lo = max(start, pos - (1 << 20))
+            fh.seek(lo)
+            buf = fh.read(pos - lo)
+            i = buf.rfind(b"\n")
+            if i >= 0:
+                return lo + i + 1
+            pos = lo
+    return start
+
+
+def line_offset(path, lines):
+    """Byte offset just past line number `lines` (0 -> 0); past the last complete
+    line if the file is shorter."""
+    if lines <= 0:
+        return 0
+    seen, off = 0, 0
+    with open(path, "rb") as fh:
+        while True:
+            buf = fh.read(1 << 24)
+            if not buf:
+                return last_newline(path, 0, off)
+            c = buf.count(b"\n")
+            if seen + c >= lines:
+                i = -1
+                for _ in range(lines - seen):
+                    i = buf.index(b"\n", i + 1)
+                return off + i + 1
+            seen += c
+            off += len(buf)
+
+
+def branch_exists(name):
+    local = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--verify", "--quiet", name],
+                           capture_output=True).returncode == 0
+    remote = subprocess.run(["git", "-C", str(REPO), "ls-remote", "--exit-code", "--heads", "origin", name],
+                            capture_output=True).returncode == 0
+    return local or remote
+
+
+def cmd_auto(args):
+    Auto(args).run()
+
+
 # ------------------------------------------------------------------ main
 
 def main():
@@ -443,13 +1019,44 @@ def main():
     p.add_argument("--sprt-games", type=int)
     p.add_argument("--verdict", choices=["merged", "rejected"])
 
+    p = common(sub.add_parser("auto", help="overnight loop: ingest, scale-check, train, screen, embed, queue"))
+    p.add_argument("--dry-run", action="store_true",
+                   help="ingest for real (step a), then print what training/screening/embedding would do; one pass")
+    p.add_argument("--once", action="store_true", help="one iteration, then exit")
+    p.add_argument("--interval", type=int, default=1200, help="seconds between iterations (default 1200)")
+    p.add_argument("--threshold", type=int, default=30_000_000,
+                   help="new positions since the last attempt that trigger training (default 30M)")
+    p.add_argument("--max-new", type=int, default=120_000_000,
+                   help="cap on new positions per training set, newest first (default 120M)")
+    p.add_argument("--replay-pool", default="pool3f.bin", help="shuffled pool to draw the replay half from")
+    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--lr", default="2e-4")
+    p.add_argument("--lr-end", default="1e-5")
+    p.add_argument("--gpu-trainer", default=str(AUTO_GPU))
+    p.add_argument("--kb-trainer", default=str(AUTO_KB_TRAINER),
+                   help="CPU trainer with --king-buckets, for eval if main has a king layout")
+    p.add_argument("--eval-threads", type=int, default=4)
+    p.add_argument("--scale-n", type=int, default=200_000, help="records per scalecheck")
+    p.add_argument("--local-min-bytes", type=int, default=64 << 20,
+                   help="convert a local/L*.txt once this much new text has accumulated (default 64 MB, ~1M positions)")
+    p.add_argument("--allow-ref", action="append", default=None,
+                   help="datagen generator refs to accept (default: main); repeatable")
+    p.add_argument("--adopt", action="append", default=[],
+                   help="count an existing net-scale record file as new data (once); repeatable")
+    p.add_argument("--expect-cap", type=int, default=10)
+    p.add_argument("--queue-front", action="store_true", help="queue winners with --front")
+    p.add_argument("--no-queue", action="store_true", help="embed + push winners but do not queue them")
+
     args, extra = ap.parse_known_args()
+    if args.cmd == "auto" and args.allow_ref is None:
+        args.allow_ref = ["main"]
     if extra and args.cmd != "train":
         ap.error(f"unrecognized arguments: {' '.join(extra)}")
     if args.cmd == "train":
         cmd_train(args, extra)
     else:
-        {"fetch": cmd_fetch, "pool": cmd_pool, "embed": cmd_embed, "record": cmd_record}[args.cmd](args)
+        {"fetch": cmd_fetch, "pool": cmd_pool, "embed": cmd_embed, "record": cmd_record,
+         "auto": cmd_auto}[args.cmd](args)
 
 
 if __name__ == "__main__":
