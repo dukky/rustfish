@@ -333,11 +333,11 @@ final class Trainer {
         self.g = g
         self.sh = sh
         batchN = batch
-        precondition(sh.h % TW == 0, "--hidden must be a multiple of \(TW)")
+        precondition(sh.h % 4 == 0, "--hidden must be a multiple of 4")
         precondition(sh.buckets <= MAXB, "at most \(MAXB) buckets")
         cfg = Cfg()
         cfg.h = UInt32(sh.h); cfg.nb = UInt32(sh.buckets); cfg.lambda = lambda
-        cfg.rf = UInt32(max(1, min(8, (batch + RS - 1) / RS)))
+        cfg.rf = UInt32(max(1, min(16, (batch + RS - 1) / RS)))
         p = g.buf(params)
         m = m0.map { g.buf($0) } ?? g.buf(sh.len * 4)
         v = v0.map { g.buf($0) } ?? g.buf(sh.len * 4)
@@ -348,7 +348,7 @@ final class Trainer {
         pow_ = g.buf(Int(cfg.rf) * sh.buckets * 2 * sh.h * 4)
         pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
         let nr = (batch + RS - 1) / RS
-        sorted = g.buf(nr * RS * 64 * 4)
+        sorted = g.buf(nr * RS * 64 * 2)
         ecount = g.buf(nr * 769 * 4)
     }
 
@@ -381,7 +381,7 @@ final class Trainer {
         enc.setComputePipelineState(g.gradFused)
         enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_], offsets: [0, 0, 0, 0, 0, 0, 0, 0], range: 0..<8)
         enc.setBytes(&c, length: cl, index: 8)
-        enc.dispatchThreadgroups(MTLSize(width: sh.h / TW, height: Int(c.rf), depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         enc.setComputePipelineState(g.gradOb)
         enc.setBuffers([gs, b.meta, pob], offsets: [0, 0, 0], range: 0..<3)
         enc.setBytes(&c, length: cl, index: 3)
