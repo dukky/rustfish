@@ -124,3 +124,12 @@ positions_per_epoch, val_loss, val_loss_quantized, baseline, branch, notes,
 sprt, verdict`). Bucketed nets (`--buckets > 1`) need a base with the
 `BUCKETS` constant (`--base origin/nnue-arch` until that lands); `embed`
 refuses otherwise.
+
+### King-bucketed inputs
+
+Both trainers take `--king-buckets <none|m1|kb4|kb4m|kb8m>` (see
+`tools/nnue-trainer/README.md`); `--init` from a one-bucket net copies its
+rows into every bucket. To embed a bucketed net, set `KING_LAYOUT` in
+`src/nnue.rs` to the matching `LAYOUT_*` constant by hand (`netloop.py
+embed` does not do it yet) and gate it at `stc` like any other shape change
+(about -14% bench NPS for kb8m at H = 256 in a first measurement).

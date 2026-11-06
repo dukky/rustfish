@@ -27,7 +27,7 @@ $M gradcheck --data recs.bin --hidden 256 --buckets 8 --batch 2048
 $M bench --data recs.bin --hidden 1024 --buckets 8   # per-kernel GPU time for one batch
 ```
 
-Flags: `--data` (repeatable) `--val --out --hidden --buckets --epochs
+Flags: `--data` (repeatable) `--val --out --hidden --buckets --king-buckets --epochs
 --epoch-size --batch --lr --lr-end --wd --lambda --seed --mirror --init
 --resume --checkpoint`. `--threads` is accepted and ignored. Writes
 `<out>.eN.bin` per epoch, `<out>.ckpt`, and `<out>`. At exit it prints one
@@ -46,7 +46,7 @@ trainers see the same batches in the same order.
   per-batch `seed_b` and per-256-chunk mirror RNG.
 - The same init (`init_params` RNG sequence), `--init` clamping, and
   checkpoint layout.
-- `(768 -> H) x 2 -> B`, SCReLU, bucket `(n-2)*B/32`, target
+- `(KB*768 -> H) x 2 -> B` (KB = king buckets, see below), SCReLU, bucket `(n-2)*B/32`, target
   `lambda*wdl + (1-lambda)*sigmoid(cp/400)`, MSE on sigmoid(out).
 - AdamW (b1 .9, b2 .999, eps 1e-8, the same `powi` bias correction), cosine
   LR on positions seen, clip +-1.98, batch 16384.
@@ -150,6 +150,48 @@ Approaches that lost (kept here so nobody retries them blind):
   flushes: SIMT divergence made almost every iteration pay a flush.
 - Per-range device read-modify-write of the gradient instead of registers:
   about 30% slower at H = 1024.
+
+## King buckets
+
+`--king-buckets <none|m1|kb4|kb4m|kb8m>` (train, eval, gradcheck, bench)
+works as in the CPU trainer (same tables, same feature index, same
+`--init` expansion from a one-bucket net, same checkpoint header). On the
+GPU:
+
+- `decode` finds both kings first and writes `bucket*768 + ...` indices
+  (the layout table travels in `Cfg`). `meta` also carries each row's king
+  bucket.
+- `sort_entries` runs per (range, king bucket): every row's features are in
+  its king's block, so each group builds the same 768-feature CSR as before
+  from its own rows (24 KB of masks, unchanged).
+- `grad_fused` gets a third grid dimension, the king bucket. Group kb sums
+  only its block's features into the same register layout; bucket 0 also
+  produces the FT-bias and output gradients, other buckets load only their
+  own rows and skip empty ranges. The fixed order of every sum is kept, so
+  training is still deterministic.
+
+Validation: `gradcheck.sh` covers kb8m (H 32/B 8, H 256/B 8), kb4m with
+`--mirror`, kb4, m1, all PASS with errors the same size as one-bucket nets.
+Parity on 4M records of `pool2.bin`, 1 epoch, `--val` = first 100k of
+`val.bin`:
+
+| config | trainer | start val | train / val (quantised) |
+|---|---|---|---|
+| H 128, B 1, kb8m, --mirror, seed 5 | CPU (2 threads) | 0.081495 | 0.061364 / 0.057181 (0.057218) |
+| | GPU | 0.081495 | 0.061364 / 0.057181 (0.057219) |
+| H 64, B 8, kb4, 2M records, seed 3 | CPU | 0.081524 | 0.074645 / 0.073476 (0.073482) |
+| | GPU | 0.081524 | 0.074645 / 0.073476 (0.073482) |
+
+Each evaluator gives the other trainer's nets the same quantised loss as
+that trainer reported. Warm start from `net/nnue.bin` into kb4 at lr ~0
+gives quantised val 0.027584, the one-bucket net's exact loss.
+
+Cost: the bucket loop repeats `grad_fused`'s fixed per-range feature loop
+(768 features) for every bucket while the entries are spread thinner. H =
+256, B = 1, GPU shared with a production training job: KB 1 step 13.6 ms,
+kb4m 25.5 ms (grad 17.7), kb8m 42.4 ms (grad 30.6, adam 3.8 for 8x the
+params). One idea not tried yet: a per-(range, bucket, simdgroup) bitmask of
+non-empty features so empty ones skip their offset loads.
 
 ## Known gaps
 

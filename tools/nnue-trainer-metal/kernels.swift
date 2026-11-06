@@ -2,7 +2,8 @@ import Foundation
 // MSL source, compiled at runtime (no offline `metal` compiler needed).
 //
 // Parameter layout matches the CPU trainer / exported file:
-//   ft weights [768][H] | ft bias [H] | out weights [B][2H] (stm half first) | out bias [B]
+//   ft weights [KB*768][H] | ft bias [H] | out weights [B][2H] (stm half first) | out bias [B]
+// (NF = KB*768 FT rows; KB = king buckets, see `--king-buckets`).
 //
 // Per batch: decode -> forward_train -> sort_entries -> grad_fused + grad_ob -> adam.
 // Gradients are written as per-super-range partials and summed in a fixed
@@ -38,12 +39,17 @@ struct Cfg {
     float c2;
     float inv_batch;
     uint mode;       // adam: 0 = AdamW step, 1 = write summed gradient to m (gradcheck)
+    uint nf;         // FT rows = KB * 768
+    uint kmirror;    // king layout mirrors (king on files e-h -> flip files)
+    uint ktab[16];   // king bucket per perspective-relative square, 4 per word
 };
+
+inline uint king_bucket(constant Cfg& c, uint k) { return (c.ktab[k >> 2] >> (8 * (k & 3))) & 0xFF; }
 
 inline float sigm(float x) { return 1.0f / (1.0f + precise::exp(-x)); }
 
 // 32-byte record -> features of both perspectives (0 = side to move),
-// meta = n | bucket << 8, target. Byte 28 (padding) carries the mirror flag
+// meta = n | bucket << 8 | king bucket (persp 0) << 16 | king bucket (persp 1) << 24, target. Byte 28 (padding) carries the mirror flag
 // chosen on the CPU so the mirror RNG stream matches the CPU trainer.
 kernel void decode(device const uint* recs [[buffer(0)]],
                    device ushort* feats [[buffer(1)]],
@@ -59,6 +65,29 @@ kernel void decode(device const uint* recs [[buffer(0)]],
     uint result = (w6 >> 16) & 0xFF;
     bool stm_black = ((w6 >> 24) & 0xFF) == 1;
     uint flip = (r[7] & 0xFF) != 0 ? 7 : 0;
+    // King contexts (0 = side to move) from each perspective's own king.
+    uint kbase[2] = {0, 0}, kflip[2] = {0, 0};
+    if (c.nf > 768 || c.kmirror != 0) {
+        uint ksq[2] = {0, 0};
+        uint n = 0;
+        for (uint half_ = 0; half_ < 2; half_++) {
+            uint occ = half_ == 0 ? lo : hi;
+            while (occ != 0 && n < 32) {
+                uint sq = (ctz(occ) + half_ * 32) ^ flip;
+                occ &= occ - 1;
+                uint byte_ = (r[2 + (n >> 3)] >> (8 * ((n >> 1) & 3))) & 0xFF;
+                uint nib = (byte_ >> (4 * (n & 1))) & 0xF;
+                if ((nib & 7) == 5) ksq[nib >> 3] = sq;
+                n++;
+            }
+        }
+        for (uint i = 0; i < 2; i++) {
+            bool pb = i == 0 ? stm_black : !stm_black;
+            uint k = pb ? (ksq[1] ^ 56) : ksq[0];
+            kbase[i] = king_bucket(c, k) * 768;
+            kflip[i] = (c.kmirror != 0 && (k & 7) >= 4) ? 7 : 0;
+        }
+    }
     uint n = 0;
     for (uint half_ = 0; half_ < 2; half_++) {
         uint occ = half_ == 0 ? lo : hi;
@@ -73,13 +102,13 @@ kernel void decode(device const uint* recs [[buffer(0)]],
                 bool pb = i == 0 ? stm_black : !stm_black;
                 uint side = black == pb ? 0 : 384;
                 uint rel = pb ? (sq ^ 56) : sq;
-                feats[s * 64 + i * 32 + n] = ushort(side + kind * 64 + rel);
+                feats[s * 64 + i * 32 + n] = ushort(kbase[i] + side + kind * 64 + (rel ^ kflip[i]));
             }
             n++;
         }
     }
     uint bucket = c.nb == 1 ? 0 : min((n < 2 ? 0 : n - 2) * c.nb / 32, c.nb - 1);
-    meta[s] = n | (bucket << 8);
+    meta[s] = n | (bucket << 8) | ((kbase[0] / 768) << 16) | ((kbase[1] / 768) << 24);
     float wdl = float(result) / 2.0f;
     float sc = score;
     if (stm_black) { wdl = 1.0f - wdl; sc = -sc; }
@@ -94,12 +123,12 @@ inline float forward_one(device const float* p, device const ushort* feats, devi
                          threadgroup ushort* fl) {
     uint h = c.h, h4 = c.h / 4;
     uint m = meta[s];
-    uint n = m & 0xFF, b = m >> 8;
+    uint n = m & 0xFF, b = (m >> 8) & 0xFF;
     for (uint i = tid; i < 64; i += tpg) fl[i] = feats[s * 64 + i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     device const float4* w4 = (device const float4*)p;
-    device const float4* fb4 = (device const float4*)(p + 768 * h);
-    device const float4* ow4 = (device const float4*)(p + 769 * h + b * 2 * h);
+    device const float4* fb4 = (device const float4*)(p + c.nf * h);
+    device const float4* ow4 = (device const float4*)(p + (c.nf + 1) * h + b * 2 * h);
     device float4* acc4 = (device float4*)(acc + s * 2 * h);
     float part = 0.0f;
     for (uint ch = tid; ch < 2 * h4; ch += tpg) {
@@ -121,7 +150,7 @@ inline float forward_one(device const float* p, device const ushort* feats, devi
     if (tid == 0) {
         for (uint i = 0; i < nsg; i++) t += red[i];
     }
-    return p[769 * h + c.nb * 2 * h + b] + t;
+    return p[(c.nf + 1) * h + c.nb * 2 * h + b] + t;
 }
 
 kernel void forward_train(device const float* p [[buffer(0)]],
@@ -176,19 +205,22 @@ kernel void forward_val(device const float* p [[buffer(0)]],
 // sample * 2 + perspective), bucket the active (feature, row) entries by
 // feature, deterministically: a 256-bit row mask per feature (atomic OR is
 // order independent), then each feature's rows are emitted in increasing
-// order. Output: sorted[range][RS*64] = row, offs[range][769] (feature f
-// occupies sorted[offs[f] .. offs[f+1])).
+// order. Threadgroup (range, king bucket kb) only takes rows whose features
+// lie in kb's block (every row's features share its king's bucket).
+// Output: sorted[range][kb][RS*64] = row, offs[range][kb][769] (local
+// feature f = global - kb*768 occupies sorted[offs[f] .. offs[f+1])).
 kernel void sort_entries(device const ushort* feats [[buffer(0)]],
                          device const uint* meta [[buffer(1)]],
                          device ushort* sorted [[buffer(2)]],
                          device uint* offs [[buffer(3)]],
                          constant Cfg& c [[buffer(4)]],
-                         uint rg [[threadgroup_position_in_grid]],
+                         uint2 tgp [[threadgroup_position_in_grid]],
                          uint tid [[thread_index_in_threadgroup]],
                          uint sl [[thread_index_in_simdgroup]],
                          uint sg [[simdgroup_index_in_threadgroup]]) {
     threadgroup atomic_uint mask[768 * 8];
     threadgroup uint simd_tot[8];
+    uint rg = tgp.x, kb = tgp.y, nkb = c.nf / 768;
     for (uint i = tid; i < 768 * 8; i += 256) atomic_store_explicit(&mask[i], 0u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     {
@@ -197,8 +229,10 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
         if (s < c.count) {
             uint n = meta[s] & 0xFF;
             device const ushort* f = feats + s * 64 + (row & 1) * 32;
-            for (uint k = 0; k < n; k++)
-                atomic_fetch_or_explicit(&mask[uint(f[k]) * 8 + row / 32], 1u << (row % 32), memory_order_relaxed);
+            if (n > 0 && uint(f[0]) / 768 == kb) {
+                for (uint k = 0; k < n; k++)
+                    atomic_fetch_or_explicit(&mask[(uint(f[k]) - kb * 768) * 8 + row / 32], 1u << (row % 32), memory_order_relaxed);
+            }
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -214,9 +248,9 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     uint base = pre;
     for (uint i = 0; i < sg; i++) base += simd_tot[i];
-    device uint* off = offs + rg * 769;
+    device uint* off = offs + (rg * nkb + kb) * 769;
     if (tid == 255) off[768] = base + local;
-    device ushort* out = sorted + rg * RS * 64;
+    device ushort* out = sorted + (rg * nkb + kb) * RS * 64;
     uint pos = base;
     for (uint i = 0; i < 3; i++) {
         off[3 * tid + i] = pos;
@@ -239,7 +273,9 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
 // control flow, one broadcast index load and one conflict-free threadgroup
 // load per entry, no atomics. At the end the per-(feature, column) sums go
 // to this threadgroup's own region of the partial-gradient buffer, so the
-// result is deterministic.
+// result is deterministic. tg.z = king bucket: the threadgroup sums that
+// bucket's 768 features (only kb 0 writes the FT-bias / output gradients,
+// which every kb stages identically; kb > 0 skips ranges with no entries).
 kernel void grad_fused(device const float* p [[buffer(0)]],
                        device const uint* meta [[buffer(1)]],
                        device const float* acc [[buffer(2)]],
@@ -249,32 +285,40 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
                        device float* pft [[buffer(6)]],
                        device float* pow_ [[buffer(7)]],
                        constant Cfg& c [[buffer(8)]],
-                       uint2 tg [[threadgroup_position_in_grid]],
+                       uint3 tg [[threadgroup_position_in_grid]],
                        uint lane [[thread_index_in_simdgroup]],
                        uint sg [[simdgroup_index_in_threadgroup]]) {
     threadgroup float dt[2 * RS * 32];
     uint h = c.h;
+    uint kb = tg.z, nkb = c.nf / 768;
     uint j = tg.x * 32 + lane;
     bool live = j < h;
     uint side = sg & 1;                   // this thread stages rows sg + NSG * k
     uint nranges = (c.count + RS - 1) / RS;
     uint per = (nranges + c.rf - 1) / c.rf;
     uint r0 = min(nranges, tg.y * per), r1 = min(nranges, r0 + per);
-    device const float* ow = p + 769 * h;
-    device float* G = pft + tg.y * 769 * h;
+    device const float* ow = p + (c.nf + 1) * h;
+    device float* G = pft + tg.y * (c.nf + 1) * h;
     float bacc = 0.0f;
     float oacc[MAXB];
     for (uint b = 0; b < MAXB; b++) oacc[b] = 0.0f;
     float gr[768 / NSG];                  // this lane's sums for features sg + NSG * i
     for (uint i = 0; i < 768 / NSG; i++) gr[i] = 0.0f;
     for (uint rg = r0; rg < r1; rg++) {
+        device const uint* off = offs + (rg * nkb + kb) * 769;
+        device const ushort* srt = sorted + (rg * nkb + kb) * RS * 64;
+        if (kb > 0 && off[768] == 0) continue;   // uniform per threadgroup
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint row = sg; row < 2 * RS; row += NSG) {
             uint s = rg * RS + row / 2;
             float d = 0.0f;
-            if (s < c.count && live) {
+            // kb > 0 only needs the rows of its own king bucket (all of a
+            // row's features are in it); kb 0 stages every row for the
+            // FT-bias and output gradients. Uniform per simdgroup.
+            uint ms = s < c.count ? meta[s] : 0;
+            if (s < c.count && live && (kb == 0 || ((ms >> (16 + 8 * side)) & 0xFF) == kb)) {
                 float g = gs[s];
-                uint b = meta[s] >> 8;
+                uint b = (ms >> 8) & 0xFF;
                 float x = acc[s * 2 * h + side * h + j];
                 float q = clamp(x, 0.0f, 1.0f);
                 oacc[b] += g * q * q;
@@ -284,8 +328,6 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
             dt[row * 32 + lane] = d;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        device const uint* off = offs + rg * 769;
-        device const ushort* srt = sorted + rg * RS * 64;
 #pragma unroll
         for (uint i = 0; i < 768 / NSG; i++) {
             uint f = sg + NSG * i;
@@ -303,8 +345,9 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
         }
     }
     if (live) {
-        for (uint i = 0; i < 768 / NSG; i++) G[(sg + NSG * i) * h + j] = gr[i];
+        for (uint i = 0; i < 768 / NSG; i++) G[(kb * 768 + sg + NSG * i) * h + j] = gr[i];
     }
+    if (kb > 0) return;   // uniform per threadgroup
     // FT bias: reduce the NSG simdgroups per column, fixed order.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     dt[sg * 32 + lane] = bacc;
@@ -312,7 +355,7 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
     if (sg == 0 && live) {
         float t = 0.0f;
         for (uint k = 0; k < NSG; k++) t += dt[k * 32 + lane];
-        G[768 * h + j] = t;
+        G[c.nf * h + j] = t;
     }
     // Output weights: reduce the NSG / 2 simdgroups sharing (side, column), per bucket.
     for (uint b = 0; b < c.nb; b++) {
@@ -339,7 +382,7 @@ kernel void grad_ob(device const float* gs [[buffer(0)]],
     uint per = (nranges + c.rf - 1) / c.rf;
     uint s0 = min(c.count, r * per * RS), s1 = min(c.count, (r + 1) * per * RS);
     float t = 0.0f;
-    for (uint s = s0; s < s1; s++) if ((meta[s] >> 8) == b) t += gs[s];
+    for (uint s = s0; s < s1; s++) if (((meta[s] >> 8) & 0xFF) == b) t += gs[s];
     pob[r * c.nb + b] = t;
 }
 
@@ -353,7 +396,7 @@ kernel void adam(device float* p [[buffer(0)]],
                  constant Cfg& c [[buffer(6)]],
                  uint i [[thread_position_in_grid]]) {
     uint h = c.h;
-    uint out_w = 769 * h, out_b = out_w + c.nb * 2 * h;
+    uint out_w = (c.nf + 1) * h, out_b = out_w + c.nb * 2 * h;
     if (i >= out_b + c.nb) return;
     float g = 0.0f;
     if (i < out_w) {

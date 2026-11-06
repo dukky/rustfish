@@ -87,21 +87,62 @@ func rustDisplay(_ x: Float) -> String {
     return (neg ? "-" : "") + res
 }
 
+// ---------------------------------------------------------------- king buckets (same tables as src/nnue.rs)
+
+struct KingLayout: Equatable {
+    let name: String
+    let buckets: [UInt8]   // 64, perspective-relative king square (a1 = 0)
+    let mirror: Bool
+    var kb: Int { Int(buckets.max()!) + 1 }
+    /// Packed 4 per word for the GPU Cfg.
+    var packed: [UInt32] { (0..<16).map { w in (0..<4).reduce(UInt32(0)) { $0 | UInt32(buckets[w * 4 + $1]) << (8 * UInt32($1)) } } }
+    /// Feature offset and square xor for a perspective whose own king is on `k` (perspective-relative).
+    func ctx(_ k: Int) -> (Int, Int) { (Int(buckets[k]) * INPUTS, mirror && k & 7 >= 4 ? 7 : 0) }
+}
+
+func mirrored(_ half: [UInt8]) -> [UInt8] {
+    var t = [UInt8](repeating: 0, count: 64)
+    for i in 0..<32 { let r = i / 4, f = i % 4; t[r * 8 + f] = half[i]; t[r * 8 + 7 - f] = half[i] }
+    return t
+}
+
+/// Index = layout id stored in checkpoints (0 = `none`, the original net); same order as the CPU trainer.
+let LAYOUTS: [KingLayout] = [
+    KingLayout(name: "none", buckets: [UInt8](repeating: 0, count: 64), mirror: false),
+    KingLayout(name: "m1", buckets: [UInt8](repeating: 0, count: 64), mirror: true),
+    KingLayout(name: "kb4", buckets: [0, 0, 0, 0, 1, 1, 1, 1] + [UInt8](repeating: 2, count: 8) + [UInt8](repeating: 3, count: 48), mirror: false),
+    KingLayout(name: "kb4m", buckets: mirrored([0, 0, 1, 1, 2, 2, 2, 2] + [UInt8](repeating: 3, count: 24)), mirror: true),
+    KingLayout(name: "kb8m", buckets: mirrored([0, 1, 2, 3, 4, 4, 5, 5] + [UInt8](repeating: 6, count: 8) + [UInt8](repeating: 7, count: 16)), mirror: true),
+]
+
+func layoutId(_ name: String) -> Int {
+    guard let i = LAYOUTS.firstIndex(where: { $0.name == name }) else {
+        die("unknown --king-buckets \(name) (one of \(LAYOUTS.map { $0.name }.joined(separator: ", ")))")
+    }
+    return i
+}
+
 // ---------------------------------------------------------------- shape / net I/O
 
 struct Shape: Equatable {
     var h: Int
     var buckets: Int
-    var ftB: Int { INPUTS * h }
+    /// King layout id (index into LAYOUTS); the FT has kb * 768 rows.
+    var layout: Int = 0
+    var kl: KingLayout { LAYOUTS[layout] }
+    var kb: Int { kl.kb }
+    var ftRows: Int { kb * INPUTS }
+    var ftB: Int { ftRows * h }
     var outW: Int { ftB + h }
     var outB: Int { outW + buckets * 2 * h }
     var len: Int { outB + buckets }
     var fileBytes: Int { len * 2 }
-    static func fromFileBytes(_ bytes: Int, _ buckets: Int) -> Shape? {
+    static func fromFileBytes(_ bytes: Int, _ buckets: Int, layout: Int = 0) -> Shape? {
         let words = bytes / 2
         guard words >= buckets else { return nil }
-        let h = (words - buckets) / (INPUTS + 1 + 2 * buckets)
-        let s = Shape(h: h, buckets: buckets)
+        let rows = LAYOUTS[layout].kb * INPUTS
+        let h = (words - buckets) / (rows + 1 + 2 * buckets)
+        let s = Shape(h: h, buckets: buckets, layout: layout)
         return s.fileBytes == bytes ? s : nil
     }
     func scale(_ i: Int) -> Float { i < outW ? QA : (i < outB ? QB : QA * QB) }
@@ -133,18 +174,36 @@ func writeFile(_ path: String, _ bytes: [UInt8]) {
     guard FileManager.default.createFile(atPath: path, contents: Data(bytes)) else { die("\(path): cannot write") }
 }
 
-func loadNet(_ path: String, _ buckets: Int) -> ([Float], Shape) {
+func loadNet(_ path: String, _ buckets: Int, layout: Int = 0) -> ([Float], Shape) {
     let b = readFile(path)
-    guard let sh = Shape.fromFileBytes(b.count, buckets) else {
-        die("\(path): \(b.count) bytes is no (768->H)x2->\(buckets) net")
+    guard let sh = Shape.fromFileBytes(b.count, buckets, layout: layout) else {
+        die("\(path): \(b.count) bytes is no (\(LAYOUTS[layout].kb)*768->H)x2->\(buckets) net")
     }
     return (dequantize(b, sh), sh)
+}
+
+/// Warm start: a net for `layout`, or a one-bucket net whose 768 FT rows are
+/// copied into every king bucket (as the CPU trainer's `load_init`).
+func loadInit(_ path: String, _ buckets: Int, layout: Int) -> ([Float], Shape) {
+    let b = readFile(path)
+    if LAYOUTS[layout].kb == 1 || Shape.fromFileBytes(b.count, buckets, layout: layout) != nil {
+        return loadNet(path, buckets, layout: layout)
+    }
+    let (p1, s1) = loadNet(path, buckets)
+    out("init: \(path) is a one-bucket net; copying its FT rows into all \(LAYOUTS[layout].kb) king buckets")
+    var sh = s1
+    sh.layout = layout
+    var p = [Float]()
+    p.reserveCapacity(sh.len)
+    for _ in 0..<sh.kb { p += p1[0..<s1.ftB] }
+    p += p1[s1.ftB...]
+    return (p, sh)
 }
 
 func initParams(_ sh: Shape, _ rng: inout Rng) -> [Float] {
     var p = [Float](repeating: 0, count: sh.len)
     var a: Float = 1.0 / Float(32).squareRoot()
-    for i in 0..<(INPUTS * sh.h) { p[i] = rng.uniform(a) }
+    for i in 0..<sh.ftB { p[i] = rng.uniform(a) }
     a = 1.0 / Float(2 * sh.h).squareRoot()
     for i in sh.outW..<sh.outB { p[i] = rng.uniform(a) }
     return p
@@ -165,7 +224,8 @@ func withExtension(_ path: String, _ ext: String) -> String {
 
 func saveCkpt(_ path: String, _ sh: Shape, _ p: UnsafePointer<Float>, _ m: UnsafePointer<Float>, _ v: UnsafePointer<Float>, step: UInt64, seen: UInt64) {
     var d = Data(CKPT_MAGIC)
-    for x in [UInt64(sh.h), UInt64(sh.buckets), step, seen] { withUnsafeBytes(of: x.littleEndian) { d.append(contentsOf: $0) } }
+    // Word 1 = output buckets | king layout id << 32 (as the CPU trainer).
+    for x in [UInt64(sh.h), UInt64(sh.buckets) | UInt64(sh.layout) << 32, step, seen] { withUnsafeBytes(of: x.littleEndian) { d.append(contentsOf: $0) } }
     for arr in [p, m, v] { d.append(UnsafeBufferPointer(start: arr, count: sh.len)) }
     FileManager.default.createFile(atPath: path, contents: d)
 }
@@ -174,7 +234,9 @@ func loadCkpt(_ path: String, _ sh: Shape) -> ([Float], [Float], [Float], UInt64
     let b = readFile(path)
     guard b.count >= 40, Array(b[0..<8]) == CKPT_MAGIC else { die("not a v2 checkpoint") }
     func word(_ i: Int) -> UInt64 { b[8 + 8 * i..<16 + 8 * i].reversed().reduce(0) { $0 << 8 | UInt64($1) } }
-    guard Int(word(0)) == sh.h, Int(word(1)) == sh.buckets else { die("checkpoint shape differs") }
+    guard Int(word(0)) == sh.h, Int(word(1) & 0xFFFF_FFFF) == sh.buckets, Int(word(1) >> 32) == sh.layout else {
+        die("checkpoint shape (H, buckets, king layout) differs")
+    }
     let n = sh.len
     guard b.count == 40 + 12 * n else { die("checkpoint size mismatch") }
     var f = [Float](repeating: 0, count: 3 * n)
@@ -264,6 +326,19 @@ struct Cfg {
     var c2: Float = 1
     var invBatch: Float = 1
     var mode: UInt32 = 0
+    var nf: UInt32 = 768        // FT rows = king buckets * 768
+    var kmirror: UInt32 = 0
+    var ktab: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+               UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    init() {}
+    /// Shape fields (H, buckets, king layout).
+    init(_ sh: Shape) {
+        h = UInt32(sh.h); nb = UInt32(sh.buckets)
+        nf = UInt32(sh.ftRows); kmirror = sh.kl.mirror ? 1 : 0
+        let t = sh.kl.packed
+        ktab = (t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15])
+    }
 }
 
 final class Gpu {
@@ -335,8 +410,8 @@ final class Trainer {
         batchN = batch
         precondition(sh.h % 4 == 0, "--hidden must be a multiple of 4")
         precondition(sh.buckets <= MAXB, "at most \(MAXB) buckets")
-        cfg = Cfg()
-        cfg.h = UInt32(sh.h); cfg.nb = UInt32(sh.buckets); cfg.lambda = lambda
+        cfg = Cfg(sh)
+        cfg.lambda = lambda
         cfg.rf = UInt32(max(1, min(16, (batch + RS - 1) / RS)))
         p = g.buf(params)
         m = m0.map { g.buf($0) } ?? g.buf(sh.len * 4)
@@ -348,8 +423,9 @@ final class Trainer {
         pow_ = g.buf(Int(cfg.rf) * sh.buckets * 2 * sh.h * 4)
         pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
         let nr = (batch + RS - 1) / RS
-        sorted = g.buf(nr * RS * 64 * 2)
-        ecount = g.buf(nr * 769 * 4)
+        // Per (range, king bucket): a CSR over that bucket's 768 features.
+        sorted = g.buf(nr * sh.kb * RS * 64 * 2)
+        ecount = g.buf(nr * sh.kb * 769 * 4)
     }
 
     /// Encode forward + backward + (mode 0) AdamW step / (mode 1) gradient into `m`.
@@ -374,14 +450,14 @@ final class Trainer {
         enc.setComputePipelineState(g.sortE)
         enc.setBuffers([b.feats, b.meta, sorted, ecount], offsets: [0, 0, 0, 0], range: 0..<4)
         enc.setBytes(&c, length: cl, index: 4)
-        enc.dispatchThreadgroups(MTLSize(width: (b.n + RS - 1) / RS, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.dispatchThreadgroups(MTLSize(width: (b.n + RS - 1) / RS, height: sh.kb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 3 {
         enc.setComputePipelineState(g.gradFused)
         enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_], offsets: [0, 0, 0, 0, 0, 0, 0, 0], range: 0..<8)
         enc.setBytes(&c, length: cl, index: 8)
-        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: 1), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
+        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: sh.kb), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
         enc.setComputePipelineState(g.gradOb)
         enc.setBuffers([gs, b.meta, pob], offsets: [0, 0, 0], range: 0..<3)
         enc.setBytes(&c, length: cl, index: 3)
@@ -409,8 +485,8 @@ final class ValSet {
         // Byte 28 = mirror flag: never mirror validation positions.
         let r = bb.recs.contents().assumingMemoryBound(to: UInt8.self)
         for i in 0..<n { r[i * REC + 28] = 0 }
-        var c = Cfg()
-        c.h = UInt32(sh.h); c.nb = UInt32(sh.buckets); c.lambda = lambda
+        var c = Cfg(sh)
+        c.lambda = lambda
         let cb = g.q.makeCommandBuffer()!
         let enc = cb.makeComputeCommandEncoder()!
         bb.encodeDecode(g, enc, c)
@@ -422,8 +498,8 @@ final class ValSet {
 
     func validate(_ g: Gpu, _ p: MTLBuffer, _ sh: Shape) -> (Double, Double) {
         guard let b = b else { return (.nan, .nan) }
-        var c = Cfg()
-        c.h = UInt32(sh.h); c.nb = UInt32(sh.buckets); c.count = UInt32(b.n)
+        var c = Cfg(sh)
+        c.count = UInt32(b.n)
         let cb = g.q.makeCommandBuffer()!
         let enc = cb.makeComputeCommandEncoder()!
         enc.setComputePipelineState(g.fwdVal)
@@ -474,6 +550,7 @@ func cmdTrain(_ args: [String]) {
         case "--out": outPath = it.value(a)
         case "--hidden": sh.h = parse(it.value(a), a)
         case "--buckets": sh.buckets = parse(it.value(a), a)
+        case "--king-buckets": sh.layout = layoutId(it.value(a))
         case "--epochs": epochs = parse(it.value(a), a)
         case "--epoch-size": epochSize = parse(it.value(a), a)
         case "--batch": batch = parse(it.value(a), a)
@@ -508,8 +585,8 @@ func cmdTrain(_ args: [String]) {
         let (p, m, v, st, se) = loadCkpt(r, sh)
         p0 = p; m0 = m; v0 = v; step = st; seen = se
     } else if let i = initPath {
-        let (p, s) = loadNet(i, sh.buckets)
-        if s != sh { die("init net shape differs from --hidden/--buckets") }
+        let (p, s) = loadInit(i, sh.buckets, layout: sh.layout)
+        if s != sh { die("init net shape differs from --hidden/--buckets/--king-buckets") }
         p0 = p.map { min(max($0, -CLIP), CLIP) }
     } else {
         p0 = initParams(sh, &rng)
@@ -518,7 +595,8 @@ func cmdTrain(_ args: [String]) {
     let valRecs = valPath.map(readFile) ?? []
     let val = ValSet(g, valRecs, lambda: lambda, sh: sh)
     let tr = Trainer(g, sh, batch: batch, lambda: lambda, params: p0, m0: m0, v0: v0)
-    out("train H=\(sh.h) buckets=\(sh.buckets) params=\(sh.len) epochs=\(epochs) x \(epochSize) batch=\(batch) lr \(rustDisplay(lr))->\(rustDisplay(lrEnd)) wd=\(rustDisplay(wd)) lambda=\(rustDisplay(lambda)) mirror=\(mirror) threads=\(threads) val=\(valRecs.count / REC)")
+    let kbNote = sh.layout != 0 ? " king-buckets=\(sh.kl.name) (KB=\(sh.kb))" : ""
+    out("train H=\(sh.h) buckets=\(sh.buckets)\(kbNote) params=\(sh.len) epochs=\(epochs) x \(epochSize) batch=\(batch) lr \(rustDisplay(lr))->\(rustDisplay(lrEnd)) wd=\(rustDisplay(wd)) lambda=\(rustDisplay(lambda)) mirror=\(mirror) threads=\(threads) val=\(valRecs.count / REC)")
     let (vl0, ve0) = val.validate(g, tr.p, sh)
     out("start val loss \(f6(vl0)) mean|eval| \(f1(ve0))cp")
 
@@ -605,14 +683,14 @@ func cmdTrain(_ args: [String]) {
     while !pending.isEmpty { retire() }
     let q = quantize(pP, sh)
     writeFile(outPath, q)
-    out("wrote \(outPath) (\(q.count) bytes, H=\(sh.h) buckets=\(sh.buckets))")
+    out("wrote \(outPath) (\(q.count) bytes, H=\(sh.h) buckets=\(sh.buckets)\(kbNote))")
     FileHandle.standardError.write(String(format: "waits: loader %.1fs gpu %.1fs gpu-busy %.1fs total %.1fs\n", loaderWait, gpuWait, gpuBusy, Date().timeIntervalSince(started)).data(using: .utf8)!)
     exit(0)
 }
 
 func cmdEval(_ args: [String]) {
     var net: String? = nil, valPath: String? = nil
-    var buckets = 1
+    var buckets = 1, layout = 0
     var lambda: Float = 0.5
     let it = Args(args)
     while let a = it.next() {
@@ -620,31 +698,45 @@ func cmdEval(_ args: [String]) {
         case "--net": net = it.value(a)
         case "--val": valPath = it.value(a)
         case "--buckets": buckets = parse(it.value(a), a)
+        case "--king-buckets": layout = layoutId(it.value(a))
         case "--lambda": lambda = parse(it.value(a), a)
         default: die("unknown option \(a)")
         }
     }
     guard let n = net, let vp = valPath else { die("--net and --val required") }
-    let (p, sh) = loadNet(n, buckets)
+    let (p, sh) = loadNet(n, buckets, layout: layout)
     let g = Gpu()
     let recs = readFile(vp)
     let val = ValSet(g, recs, lambda: lambda, sh: sh)
     let (l, e) = val.validate(g, g.buf(p), sh)
-    out("H=\(sh.h) buckets=\(sh.buckets) val positions \(recs.count / REC) loss \(f6(l)) mean|eval| \(f1(e))cp")
+    out("H=\(sh.h) buckets=\(sh.buckets) \(sh.layout != 0 ? "king-buckets=\(sh.kl.name) " : "")val positions \(recs.count / REC) loss \(f6(l)) mean|eval| \(f1(e))cp")
 }
 
 // ---------------------------------------------------------------- CPU reference (gradcheck)
 
 struct Sample { var f: [[Int]]; var bucket: Int; var target: Float }
 
-func cpuDecode(_ r: UnsafePointer<UInt8>, _ lambda: Float, _ buckets: Int, _ mirror: Bool) -> Sample {
-    var occ: UInt64 = 0
-    for i in 0..<8 { occ |= UInt64(r[i]) << (8 * UInt64(i)) }
+func cpuDecode(_ r: UnsafePointer<UInt8>, _ lambda: Float, _ buckets: Int, _ mirror: Bool, _ kl: KingLayout = LAYOUTS[0]) -> Sample {
+    var occ0: UInt64 = 0
+    for i in 0..<8 { occ0 |= UInt64(r[i]) << (8 * UInt64(i)) }
     let score = Float(Int16(bitPattern: UInt16(r[24]) | UInt16(r[25]) << 8))
     let stmBlack = r[27] == 1
     var s = Sample(f: [[], []], bucket: 0, target: 0)
     let flip = mirror ? 7 : 0
+    // King context per perspective (0 = side to move) from its own king.
+    var ksq = [0, 0]
+    var occ = occ0
     var n = 0
+    while occ != 0 {
+        let sq = occ.trailingZeroBitCount ^ flip
+        occ &= occ - 1
+        let nib = Int(r[8 + n / 2] >> (4 * UInt8(n & 1)) & 0xF)
+        if nib & 7 == 5 { ksq[nib >> 3] = sq }
+        n += 1
+    }
+    let ctx = [stmBlack, !stmBlack].map { pb in kl.ctx(pb ? ksq[1] ^ 56 : ksq[0]) }
+    occ = occ0
+    n = 0
     while occ != 0 {
         let sq = occ.trailingZeroBitCount ^ flip
         occ &= occ - 1
@@ -652,7 +744,7 @@ func cpuDecode(_ r: UnsafePointer<UInt8>, _ lambda: Float, _ buckets: Int, _ mir
         let black = nib >> 3 == 1
         let kind = nib & 7
         for (i, pb) in [stmBlack, !stmBlack].enumerated() {
-            s.f[i].append((black == pb ? 0 : 384) + kind * 64 + (pb ? sq ^ 56 : sq))
+            s.f[i].append(ctx[i].0 + (black == pb ? 0 : 384) + kind * 64 + ((pb ? sq ^ 56 : sq) ^ ctx[i].1))
         }
         n += 1
     }
@@ -713,6 +805,7 @@ func cmdGradcheck(_ args: [String]) {
         case "--buckets": sh.buckets = parse(it.value(a), a)
         case "--batch": n = parse(it.value(a), a)
         case "--mirror": mirror = true
+        case "--king-buckets": sh.layout = layoutId(it.value(a))
         default: die("unknown option \(a)")
         }
     }
@@ -741,7 +834,7 @@ func cmdGradcheck(_ args: [String]) {
     var lossRef = 0.0
     raw.withUnsafeBufferPointer { rp in
         for i in 0..<n {
-            let s = cpuDecode(rp.baseAddress! + i * REC, lambda, sh.buckets, raw[i * REC + 28] != 0)
+            let s = cpuDecode(rp.baseAddress! + i * REC, lambda, sh.buckets, raw[i * REC + 28] != 0, sh.kl)
             samples.append(s)
             lossRef += cpuTrainSample(p, sh, s, &ref)
         }
@@ -753,7 +846,7 @@ func cmdGradcheck(_ args: [String]) {
         if d > maxAbs { maxAbs = d; worst = i }
         maxRef = max(maxRef, abs(ref[i]))
     }
-    out("gradcheck H=\(sh.h) buckets=\(sh.buckets) batch=\(n) mirror=\(mirror)")
+    out("gradcheck H=\(sh.h) buckets=\(sh.buckets) king-buckets=\(sh.kl.name) batch=\(n) mirror=\(mirror)")
     out("  loss sum: gpu \(lossGpu) cpu \(lossRef) rel \(abs(lossGpu - lossRef) / lossRef)")
     out("  grad: max|gpu-cpu| \(maxAbs) at \(worst) (max|grad| \(maxRef)), rel \(maxAbs / maxRef)")
 
@@ -829,6 +922,7 @@ func cmdBench(_ args: [String]) {
         case "--buckets": sh.buckets = parse(it.value(a), a)
         case "--batch": n = parse(it.value(a), a)
         case "--iters": iters = parse(it.value(a), a)
+        case "--king-buckets": sh.layout = layoutId(it.value(a))
         default: die("unknown option \(a)")
         }
     }
@@ -842,7 +936,7 @@ func cmdBench(_ args: [String]) {
     raw.withUnsafeBytes { b.recs.contents().copyMemory(from: $0.baseAddress!, byteCount: n * REC) }
     let names = ["decode", "forward", "sort", "grad", "adam"]
     var tot = 0.0
-    var line = "bench H=\(sh.h) B=\(sh.buckets) batch=\(n):"
+    var line = "bench H=\(sh.h) B=\(sh.buckets) KB=\(sh.kb) batch=\(n):"
     for st in -1..<5 {
         // Sustained: iters command buffers back to back (warm clocks), GPU span / iters.
         var best = 1e9
