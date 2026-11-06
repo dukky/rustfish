@@ -1,5 +1,10 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "nnue-e2",
+      "mode": "stc"
+    }
+  ],
   "current": {
     "branch": "nnue-e3",
     "mode": "net-gate",
