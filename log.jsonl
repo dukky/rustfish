@@ -213,3 +213,6 @@
 {"branch": "datagen-r2", "logged_at": "2026-11-06T21:49:44Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf"}
 {"base_sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf", "branch": "nnue-g3", "logged_at": "2026-11-06T21:50:13Z", "mode": "net-gate", "outcome": "dispatched", "sha": "51402f5322a308f935643407e580d9fbd7d565c1", "test_id": "q-nnue-g3-1106-2150"}
 {"branch": "main", "logged_at": "2026-11-06T21:50:16Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 19, "sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf"}
+{"branch": "nnue-g3", "elo": 81.54, "elo_ci95": [52.6, 111.64], "games": 256, "llr": 3.711, "logged_at": "2026-11-06T21:53:21Z", "mode": "net-gate", "outcome": "merged", "sha": "51402f5322a308f935643407e580d9fbd7d565c1", "test_id": "q-nnue-g3-1106-2150", "verdict": "H1"}
+{"branch": "nnue-g2b", "logged_at": "2026-11-06T21:53:21Z", "mode": "net-gate", "outcome": "skipped", "reason": "no commits beyond main"}
+{"branch": "main", "logged_at": "2026-11-06T21:53:23Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "fb4ece7ca7363693cccb14598dca31f703807689", "test_id": "q-ladder-1106-2153"}
