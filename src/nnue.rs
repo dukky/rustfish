@@ -8,13 +8,15 @@
 //! - `eval = ((Σ screlu(us)·w[i] + Σ screlu(them)·w[H+i]) / QA + b) · SCALE / (QA·QB)`
 //!   with `screlu(x) = clamp(x, 0, QA)²`, integer division truncating to zero.
 //!
-//! Accumulators are updated incrementally by `Board::make_move` through
-//! `NnueState::push_move` (one stack entry per ply, copy-and-update fused in
-//! one pass) and popped by `undo_move`. Every SIMD kernel has a scalar twin
-//! and both are exact (wrapping i16 adds; output sums proven not to overflow
-//! i32, otherwise the i64 scalar path is used), so results never depend on
-//! the target.
+//! Accumulators are updated incrementally and lazily: `Board::make_move`
+//! records the move's feature delta through `NnueState::push_move` (one stack
+//! entry per ply), `undo_move` pops it, and `evaluate` materialises pending
+//! entries (copy-and-update fused in one pass) only when an eval is needed.
+//! Every SIMD kernel has a scalar twin and both are exact (wrapping i16 adds;
+//! output sums proven not to overflow i32, otherwise the i64 scalar path is
+//! used), so results never depend on the target.
 
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use crate::{Board, Color, Move, Piece, PieceType};
@@ -202,11 +204,29 @@ fn move_delta(board: &Board, mv: Move) -> Delta {
     d
 }
 
+/// One ply of the accumulator stack: the move's feature delta from the
+/// entry below, and the accumulator it yields once materialised.
+#[derive(Clone, Copy)]
+struct Slot {
+    acc: Accumulator,
+    delta: Delta,
+}
+
 /// Per-board NNUE state: the net and one accumulator per ply.
+///
+/// Updates are lazy: `push_move` only records the move's feature delta, and
+/// `evaluate` materialises the missing accumulators bottom-up from the last
+/// computed one. Nodes that never evaluate (TT cutoffs, eval-cache hits,
+/// checks, repetitions) then cost no accumulator work at all. The values
+/// are identical to eager updating: the same wrapping adds in the same chain.
 #[derive(Clone)]
 pub(crate) struct NnueState {
     net: Arc<Network>,
-    stack: Vec<Accumulator>,
+    /// `stack[..=computed]` hold valid accumulators for the current line;
+    /// `computed <= top` always. Behind a RefCell so `evaluate(&self)` can
+    /// fill in the pending entries.
+    stack: RefCell<Vec<Slot>>,
+    computed: Cell<usize>,
     top: usize,
 }
 
@@ -220,8 +240,9 @@ impl Eq for NnueState {}
 
 impl NnueState {
     pub(crate) fn new(net: Arc<Network>, board: &Board) -> Self {
-        let mut s = Self { net, stack: Vec::with_capacity(256), top: 0 };
-        s.stack.push(Accumulator::ZERO);
+        let mut v = Vec::with_capacity(256);
+        v.push(Slot { acc: Accumulator::ZERO, delta: Delta::default() });
+        let mut s = Self { net, stack: RefCell::new(v), computed: Cell::new(0), top: 0 };
         s.refresh(board);
         s
     }
@@ -229,36 +250,27 @@ impl NnueState {
     /// Rebuild from scratch and reset the stack to one entry.
     pub(crate) fn refresh(&mut self, board: &Board) {
         self.top = 0;
-        self.stack[0] = Accumulator::refresh(&self.net, board);
+        self.computed.set(0);
+        self.stack.get_mut()[0].acc = Accumulator::refresh(&self.net, board);
     }
 
-    pub(crate) fn current(&self) -> &Accumulator {
-        &self.stack[self.top]
+    /// The (materialised) accumulator of the current position.
+    #[cfg(test)]
+    pub(crate) fn current(&self) -> Accumulator {
+        self.materialise();
+        self.stack.borrow()[self.top].acc
     }
 
     /// Called by `make_move` before the board changes.
     #[inline]
     pub(crate) fn push_move(&mut self, board: &Board, mv: Move) {
-        let d = move_delta(board, mv);
-        if self.top + 1 == self.stack.len() {
-            self.stack.push(Accumulator::ZERO);
-        }
-        let (lo, hi) = self.stack.split_at_mut(self.top + 1);
-        let src = &lo[self.top];
-        let dst = &mut hi[0];
+        let delta = move_delta(board, mv);
+        let stack = self.stack.get_mut();
         self.top += 1;
-        let net = &*self.net;
-        for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
-            let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0));
-            let a0 = f(d.add[0]);
-            let s0 = f(d.sub[0]);
-            let (s, o) = (&src.v[pi], &mut dst.v[pi]);
-            match (d.n_add, d.n_sub) {
-                (1, 1) => update(o, s, &[a0], &[s0]),
-                (1, 2) => update(o, s, &[a0], &[s0, f(d.sub[1])]),
-                (2, 2) => update(o, s, &[a0, f(d.add[1])], &[s0, f(d.sub[1])]),
-                _ => unreachable!(),
-            }
+        if self.top == stack.len() {
+            stack.push(Slot { acc: Accumulator::ZERO, delta });
+        } else {
+            stack[self.top].delta = delta;
         }
     }
 
@@ -266,13 +278,53 @@ impl NnueState {
     #[inline]
     pub(crate) fn pop(&mut self) {
         self.top -= 1;
+        if self.computed.get() > self.top {
+            self.computed.set(self.top);
+        }
+    }
+
+    /// Bring `stack[..=top]` up to date.
+    #[inline]
+    fn materialise(&self) {
+        let mut k = self.computed.get();
+        if k == self.top {
+            return;
+        }
+        let mut stack = self.stack.borrow_mut();
+        let net = &*self.net;
+        while k < self.top {
+            let (lo, hi) = stack.split_at_mut(k + 1);
+            apply_delta(net, &lo[k].acc, &mut hi[0]);
+            k += 1;
+        }
+        self.computed.set(k);
     }
 
     /// Score from the side to move's point of view, in centipawns, for a
     /// position with `pieces` pieces on the board (selects the output bucket).
     #[inline]
     pub(crate) fn evaluate(&self, stm: Color, pieces: u32) -> i32 {
-        evaluate_acc(&self.net, self.current(), stm, pieces)
+        self.materialise();
+        let stack = self.stack.borrow();
+        evaluate_acc(&self.net, &stack[self.top].acc, stm, pieces)
+    }
+}
+
+/// `dst.acc = src + dst.delta`, both perspectives in one copy-and-update pass.
+#[inline(always)]
+fn apply_delta(net: &Network, src: &Accumulator, dst: &mut Slot) {
+    let d = dst.delta;
+    for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+        let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0));
+        let a0 = f(d.add[0]);
+        let s0 = f(d.sub[0]);
+        let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
+        match (d.n_add, d.n_sub) {
+            (1, 1) => update(o, s, &[a0], &[s0]),
+            (1, 2) => update(o, s, &[a0], &[s0, f(d.sub[1])]),
+            (2, 2) => update(o, s, &[a0, f(d.add[1])], &[s0, f(d.sub[1])]),
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -383,22 +435,25 @@ pub(crate) mod simd {
     #[inline(always)]
     pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
         // SAFETY: as above. c in [0,255], |w| <= 127 so c*w fits i16; each
-        // i32 lane sums H/8 products of at most 255^2*127 (exact for H <= 2048)
-        // and the lanes are reduced in i64.
+        // i32 lane sums H/32 products of at most 255^2*127 (exact for H <= 8192)
+        // and the lanes are reduced in i64. Eight independent accumulators
+        // keep the multiply-accumulate chains from bounding throughput.
+        const { assert!(H % 32 == 0) };
         unsafe {
             let zero = vdupq_n_s16(0);
             let qa = vdupq_n_s16(QA as i16);
-            let mut s0 = vdupq_n_s32(0);
-            let mut s1 = vdupq_n_s32(0);
+            let mut s = [vdupq_n_s32(0); 8];
             let mut i = 0;
             while i < H {
-                let c = vminq_s16(vmaxq_s16(vld1q_s16(acc.as_ptr().add(i)), zero), qa);
-                let cw = vmulq_s16(c, vld1q_s16(w.as_ptr().add(i)));
-                s0 = vmlal_s16(s0, vget_low_s16(cw), vget_low_s16(c));
-                s1 = vmlal_high_s16(s1, cw, c);
-                i += 8;
+                for j in 0..4 {
+                    let c = vminq_s16(vmaxq_s16(vld1q_s16(acc.as_ptr().add(i + 8 * j)), zero), qa);
+                    let cw = vmulq_s16(c, vld1q_s16(w.as_ptr().add(i + 8 * j)));
+                    s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c));
+                    s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c);
+                }
+                i += 32;
             }
-            vaddlvq_s32(s0) + vaddlvq_s32(s1)
+            s.iter().map(|&x| vaddlvq_s32(x)).sum()
         }
     }
 }
@@ -805,6 +860,7 @@ mod tests {
         let t = Instant::now();
         for i in 0..n {
             st.push_move(&board, legal[i % legal.len()]);
+            st.materialise();
             st.pop();
         }
         let upd_only = n as f64 / t.elapsed().as_secs_f64();

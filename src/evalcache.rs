@@ -41,19 +41,19 @@ impl EvalCache {
     /// `key` must be the zobrist key of `board` (as maintained by search).
     #[inline]
     pub(crate) fn eval(&mut self, board: &Board, key: u64) -> i32 {
-        // With a net attached the eval is not a function of the HCE inputs the
-        // key covers alone, so bypass the memo (NNUE is off by default). The
-        // search consumes side-to-move evals, so convert here: `evaluate` is
-        // White POV but `eval_for_side` is the stm-POV wrapper every other
-        // path through this cache returns.
-        if board.nnue.is_some() {
-            return eval_for_side(board);
-        }
+        // NNUE evals are a pure function of piece placement and side to move
+        // too, so they are memoised the same way (the cache is cleared
+        // whenever the evaluator changes). The search consumes side-to-move
+        // evals: `eval_for_side` is that wrapper for both evaluators.
         let slot = &mut self.entries[key as usize & EVAL_CACHE_MASK];
         if slot.key == key && key != EMPTY_KEY {
             return slot.eval;
         }
-        let eval = eval_for_side_cached(board, &mut self.pawns);
+        let eval = if board.nnue.is_some() {
+            eval_for_side(board)
+        } else {
+            eval_for_side_cached(board, &mut self.pawns)
+        };
         *slot = Entry { key, eval };
         eval
     }
