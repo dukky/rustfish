@@ -125,18 +125,22 @@ Per batch, one command buffer:
 2. **forward_train**: one threadgroup per position, float4 columns;
    stores the pre-activation accumulators, the output gradient
    `2 err p (1-p)` and the loss.
-3. **sort_entries**: per 128-position range, buckets the 256 rows' active
+3. **plan_rows** (one threadgroup) orders the rows (position x
+   perspective) by king bucket, stably, and cuts them into ranges of 256
+   rows and work items of up to 1/16 of the batch (identity order with one
+   king bucket). **sort_entries**: per range, buckets the 256 rows' active
    features by feature, deterministically (a 256-bit row mask per feature,
    then rows emitted in order) and writes CSR offsets.
-4. **grad_fused**: threadgroup = (32-column tile, 1/16 of the batch),
+4. **grad_fused**: threadgroup = (32-column tile, work item),
    1024 threads = 32 simdgroups x 32 lanes (lane = column). For each range
    it stages `dacc[256 rows][32]` in threadgroup memory, collecting the
    output-weight and FT-bias gradients from the same accumulator reads.
    Simdgroup k then sums the staged rows of features k, k+32, ... into
    registers. No atomics, uniform control flow, conflict-free loads. Each
    threadgroup writes its own partial-gradient slice.
-5. **grad_ob** (output bias) and **adam**: sum the 16 partials in fixed
-   order, AdamW + clip, all parameters dense.
+5. **grad_ob** (output bias) and **adam**: sum the partials in fixed
+   order (an FT row: the items of its king bucket), AdamW + clip, all
+   parameters dense.
 
 Validation uses the same forward kernel on a GPU-resident decoded val set.
 For the quantised loss, the CPU quantises and dequantises the weights and
@@ -161,16 +165,23 @@ GPU:
 - `decode` finds both kings first and writes `bucket*768 + ...` indices
   (the layout table travels in `Cfg`). `meta` also carries each row's king
   bucket.
-- `sort_entries` runs per (range, king bucket): every row's features are in
-  its king's block, so each group builds the same 768-feature CSR as before
-  from its own rows (24 KB of masks, unchanged).
-- `grad_fused` gets a third grid dimension, the king bucket. Group kb sums
-  only its block's features into the same register layout; bucket 0 also
-  produces the FT-bias and output gradients, other buckets load only their
-  own rows and skip empty ranges. The fixed order of every sum is kept, so
-  training is still deterministic.
+- `plan_rows` sorts the batch's rows by king bucket (stable, so with one
+  bucket nothing moves). Every row's features are in its king's 768-row
+  block, so each bucket's rows are a dense 768-feature problem: ranges of
+  256 rows of one bucket get the same CSR as before (24 KB of masks), and a
+  work item (a run of up to `per` ranges of one bucket, `per` = the
+  one-bucket super-range length) sums into the same register layout. Every
+  row is staged exactly once, so the work is that of one bucket plus at
+  most one partial range per bucket. Items write 768 FT rows + FT bias +
+  output weights; `adam` sums an FT row over its bucket's items, the rest
+  over all items, in fixed order: training stays deterministic.
+- KB = 1 uses `grad_fused1`, the same code with the row lookup and the
+  per-side output-gradient registers compiled out; its summation order is
+  the original one, so one-bucket nets (`none`, `m1`) are bit-identical to
+  the trainer before king buckets.
 
-Validation: `gradcheck.sh` covers kb8m (H 32/B 8, H 256/B 8), kb4m with
+Validation: `gradcheck.sh` covers kb8m (H 32/B 8, H 256/B 8, H 64/B 8
+with `--mirror` and a batch that is not a multiple of 128), kb4m with
 `--mirror`, kb4, m1, all PASS with errors the same size as one-bucket nets.
 Parity on 4M records of `pool2.bin`, 1 epoch, `--val` = first 100k of
 `val.bin`:
@@ -186,12 +197,30 @@ Each evaluator gives the other trainer's nets the same quantised loss as
 that trainer reported. Warm start from `net/nnue.bin` into kb4 at lr ~0
 gives quantised val 0.027584, the one-bucket net's exact loss.
 
-Cost: the bucket loop repeats `grad_fused`'s fixed per-range feature loop
-(768 features) for every bucket while the entries are spread thinner. H =
-256, B = 1, GPU shared with a production training job: KB 1 step 13.6 ms,
-kb4m 25.5 ms (grad 17.7), kb8m 42.4 ms (grad 30.6, adam 3.8 for 8x the
-params). One idea not tried yet: a per-(range, bucket, simdgroup) bitmask of
-non-empty features so empty ones skip their offset loads.
+Bucket-sorted backward (plan_rows): 2M records of `pool3.bin`, H 128, B 8,
+`--mirror`, seed 5, 1 epoch, `--val` = first 100k of `val.bin`: kb8m CPU,
+GPU before and GPU after all give start val 0.081269, train 0.073039, val
+0.070774 (quantised 0.070792); the CPU evaluator gives the new GPU net
+0.070792. `none` and `m1` nets and checkpoints are byte-identical to the
+previous build. End-to-end kb8m went 0.45M -> 0.96M pos/s at H 128.
+
+Cost (`bench`, B 8, kernel step per 16384 batch). Uncontended moment of a
+shared GPU:
+
+| H | KB | before | after (grad / adam) |
+|---|---|---|---|
+| 256 | 1 | 5.25 ms | 4.81 ms (3.52 / 0.21) |
+| 256 | 4 (kb4m) | 13.32 ms | 6.44 ms (4.86 / 0.41) |
+| 256 | 8 (kb8m) | 26.70 ms | 6.71 ms (4.84 / 0.61) |
+| 512 | 1 | 10.92 ms | 10.19 ms (8.28 / 0.42) |
+| 512 | 4 (kb4m) | 29.17 ms | 12.86 ms (10.11 / 0.77) |
+| 512 | 8 (kb8m) | 52.43 ms | 14.37 ms (10.56 / 1.22) |
+
+kb8m costs ~1.3-1.4x one bucket (contended runs agree): the rest is the
+row-id indirection and two output-gradient register sets in `grad_fused`
+(~10%), dense AdamW over 8x the FT parameters, and a forward that gathers
+from an 8x larger table. Tried without gain: equal-sized items, and
+prefetching row id/meta/gradient per lane with simd shuffles.
 
 ## Known gaps
 

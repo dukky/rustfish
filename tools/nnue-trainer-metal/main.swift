@@ -344,7 +344,7 @@ struct Cfg {
 final class Gpu {
     let dev: MTLDevice
     let q: MTLCommandQueue
-    let decode, fwdTrain, fwdVal, sortE, gradFused, gradOb, adam: MTLComputePipelineState
+    let decode, fwdTrain, fwdVal, plan, sortE, gradFused, gradFused1, gradOb, adam: MTLComputePipelineState
 
     init() {
         guard let d = MTLCreateSystemDefaultDevice() else { die("no Metal device") }
@@ -358,7 +358,7 @@ final class Gpu {
             do { let ps = try d.makeComputePipelineState(function: lib.makeFunction(name: n)!); if ProcessInfo.processInfo.environment["NNUE_DEBUG"] != nil { FileHandle.standardError.write("\(n): tgmem \(ps.staticThreadgroupMemoryLength) maxthreads \(ps.maxTotalThreadsPerThreadgroup)\n".data(using: .utf8)!) }; return ps } catch { die("pipeline \(n): \(error)") }
         }
         decode = pipe("decode"); fwdTrain = pipe("forward_train"); fwdVal = pipe("forward_val")
-        sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradOb = pipe("grad_ob"); adam = pipe("adam")
+        plan = pipe("plan_rows"); sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradFused1 = pipe("grad_fused1"); gradOb = pipe("grad_ob"); adam = pipe("adam")
     }
 
     func buf(_ bytes: Int) -> MTLBuffer { dev.makeBuffer(length: max(bytes, 16), options: .storageModeShared)! }
@@ -402,7 +402,9 @@ final class Trainer {
     let sh: Shape
     let batchN: Int
     var cfg: Cfg
-    let p, m, v, acc, gs, pft, pow_, pob, sorted, ecount: MTLBuffer
+    let p, m, v, acc, gs, pft, pow_, pob, sorted, ecount, rows, hdr, rng, items: MTLBuffer
+    /// Upper bounds on sort ranges / grad work items per batch (grid sizes).
+    let maxRanges, maxItems: Int
 
     init(_ g: Gpu, _ sh: Shape, batch: Int, lambda: Float, params: [Float], m0: [Float]?, v0: [Float]?) {
         self.g = g
@@ -419,13 +421,23 @@ final class Trainer {
         if m0 == nil { memset(m.contents(), 0, sh.len * 4); memset(v.contents(), 0, sh.len * 4) }
         acc = g.buf(batch * 2 * sh.h * 4)
         gs = g.buf(batch * 4)
-        pft = g.buf(Int(cfg.rf) * sh.outW * 4)
-        pow_ = g.buf(Int(cfg.rf) * sh.buckets * 2 * sh.h * 4)
-        pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
+        precondition(sh.kb <= MAXKB, "at most \(MAXKB) king buckets")
+        // Rows sorted by king bucket, cut into ranges of 2 * RS rows (each
+        // bucket's last one partial) and items of `per` ranges (see plan_rows).
         let nr = (batch + RS - 1) / RS
-        // Per (range, king bucket): a CSR over that bucket's 768 features.
-        sorted = g.buf(nr * sh.kb * RS * 64 * 2)
-        ecount = g.buf(nr * sh.kb * 769 * 4)
+        let per = (nr + Int(cfg.rf) - 1) / Int(cfg.rf)
+        maxRanges = nr + sh.kb
+        maxItems = (maxRanges + sh.kb * (per - 1)) / per
+        pft = g.buf(maxItems * (INPUTS + 1) * sh.h * 4)
+        pow_ = g.buf(maxItems * sh.buckets * 2 * sh.h * 4)
+        pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
+        // Per range: a CSR over its bucket's 768 features.
+        sorted = g.buf(maxRanges * RS * 64 * 2)
+        ecount = g.buf(maxRanges * 769 * 4)
+        rows = g.buf(2 * batch * 4)
+        hdr = g.buf((3 + MAXKB) * 4)
+        rng = g.buf(maxRanges * 16)
+        items = g.buf(maxItems * 16)
     }
 
     /// Encode forward + backward + (mode 0) AdamW step / (mode 1) gradient into `m`.
@@ -447,17 +459,22 @@ final class Trainer {
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 2 {
+        enc.setComputePipelineState(g.plan)
+        enc.setBuffers([b.meta, rows, hdr, rng, items], offsets: [0, 0, 0, 0, 0], range: 0..<5)
+        enc.setBytes(&c, length: cl, index: 5)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(1024, g.plan.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        enc.memoryBarrier(scope: .buffers)
         enc.setComputePipelineState(g.sortE)
-        enc.setBuffers([b.feats, b.meta, sorted, ecount], offsets: [0, 0, 0, 0], range: 0..<4)
-        enc.setBytes(&c, length: cl, index: 4)
-        enc.dispatchThreadgroups(MTLSize(width: (b.n + RS - 1) / RS, height: sh.kb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.setBuffers([b.feats, b.meta, sorted, ecount, rows, hdr, rng], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
+        enc.setBytes(&c, length: cl, index: 7)
+        enc.dispatchThreadgroups(MTLSize(width: maxRanges, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 3 {
-        enc.setComputePipelineState(g.gradFused)
-        enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_], offsets: [0, 0, 0, 0, 0, 0, 0, 0], range: 0..<8)
-        enc.setBytes(&c, length: cl, index: 8)
-        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: sh.kb), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
+        enc.setComputePipelineState(sh.kb == 1 ? g.gradFused1 : g.gradFused)
+        enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_, rows, hdr, rng, items], offsets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], range: 0..<12)
+        enc.setBytes(&c, length: cl, index: 12)
+        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: maxItems, depth: 1), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
         enc.setComputePipelineState(g.gradOb)
         enc.setBuffers([gs, b.meta, pob], offsets: [0, 0, 0], range: 0..<3)
         enc.setBytes(&c, length: cl, index: 3)
@@ -466,8 +483,8 @@ final class Trainer {
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 4 {
         enc.setComputePipelineState(g.adam)
-        enc.setBuffers([p, m, v, pft, pow_, pob], offsets: [0, 0, 0, 0, 0, 0], range: 0..<6)
-        enc.setBytes(&c, length: cl, index: 6)
+        enc.setBuffers([p, m, v, pft, pow_, pob, hdr], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
+        enc.setBytes(&c, length: cl, index: 7)
         enc.dispatchThreads(MTLSize(width: sh.len, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
         enc.endEncoding()
