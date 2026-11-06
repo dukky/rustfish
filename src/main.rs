@@ -841,6 +841,14 @@ impl Board {
     }
 
     fn generate_legal_moves(&mut self, captures_only: bool, buf: &mut Vec<Move>) {
+        self.generate_legal_moves_from(captures_only, u64::MAX, buf);
+    }
+
+    /// `generate_legal_moves` restricted to the pieces standing on
+    /// `from_mask`: exactly the moves of the full list whose origin is in
+    /// the mask, in the same order.
+    #[inline(always)]
+    fn generate_legal_moves_from(&mut self, captures_only: bool, from_mask: u64, buf: &mut Vec<Move>) {
         let side = self.side_to_move;
         let st = self.legal_state(side);
         // En passant is the one case the pin/check masks cannot decide
@@ -851,7 +859,7 @@ impl Board {
             use crate::bitboard::PAWN_ATTACKERS;
             let c = color_index(side);
             let ep_bit = square_mask(ep);
-            let mut pawns = self.bb.pieces[c][0];
+            let mut pawns = self.bb.pieces[c][0] & from_mask;
             while pawns != 0 {
                 let sq = pawns.trailing_zeros() as u8;
                 pawns &= pawns - 1;
@@ -872,7 +880,7 @@ impl Board {
                 }
             }
         }
-        generate_legal_moves_fused(self, captures_only, &st, ep_legal_from, buf);
+        generate_legal_moves_fused(self, captures_only, &st, ep_legal_from, from_mask, buf);
     }
 
     #[cfg(test)]

@@ -238,6 +238,7 @@ pub(crate) fn generate_legal_moves_fused(
     captures_only: bool,
     st: &LegalState,
     ep_legal_from: u64,
+    from_mask: u64,
     moves: &mut Vec<Move>,
 ) {
     use crate::bitboard::{
@@ -289,7 +290,7 @@ pub(crate) fn generate_legal_moves_fused(
     let promo_from_rank: u8 = if us == Color::White { 6 } else { 1 };
     let start_rank: u8 = if us == Color::White { 1 } else { 6 };
 
-    let mut pawns = bb.pieces[c][0];
+    let mut pawns = bb.pieces[c][0] & from_mask;
     while pawns != 0 {
         let sq = pawns.trailing_zeros() as u8;
         pawns &= pawns - 1;
@@ -342,7 +343,7 @@ pub(crate) fn generate_legal_moves_fused(
 
     if non_king {
         // A pinned knight never has a legal move.
-        let mut knights = bb.pieces[c][1] & !st.pinned;
+        let mut knights = bb.pieces[c][1] & !st.pinned & from_mask;
         while knights != 0 {
             let sq = knights.trailing_zeros() as u8;
             knights &= knights - 1;
@@ -355,7 +356,7 @@ pub(crate) fn generate_legal_moves_fused(
         }
 
         for kind in [PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
-            let mut sliders = bb.pieces[c][crate::bitboard::kind_index(kind)];
+            let mut sliders = bb.pieces[c][crate::bitboard::kind_index(kind)] & from_mask;
             while sliders != 0 {
                 let sq = sliders.trailing_zeros() as u8;
                 sliders &= sliders - 1;
@@ -374,7 +375,7 @@ pub(crate) fn generate_legal_moves_fused(
         }
     }
 
-    let kings = bb.pieces[c][5];
+    let kings = bb.pieces[c][5] & from_mask;
     if kings != 0 {
         let sq = kings.trailing_zeros() as u8;
         let enemy = us.opposite();

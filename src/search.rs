@@ -17,6 +17,8 @@ const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
+// Nodes up to this depth with a TT move use the lazy move picker.
+const LAZY_PICKER_MAX_DEPTH: i32 = -100;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
 // margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
@@ -122,6 +124,12 @@ pub(crate) struct Search {
     /// Move skipped by a singular-extension verification search at this ply.
     excluded: [Option<Move>; MAX_PLY],
     move_buf: Vec<Move>,
+    /// Undo log of history writes, kept while a lazy move picker is pending
+    /// (see `MovePicker::new_lazy`): (encoded table index, value before).
+    hist_journal: Vec<(u32, i32)>,
+    /// Number of lazy pickers on the current line still waiting to score
+    /// their moves; history writes are journaled while it is non-zero.
+    lazy_pending: u32,
 }
 
 impl Search {
@@ -135,6 +143,8 @@ impl Search {
             static_evals: [NO_EVAL; MAX_PLY],
             excluded: [None; MAX_PLY],
             move_buf: Vec::with_capacity(256),
+            hist_journal: Vec::new(),
+            lazy_pending: 0,
         }
     }
 
@@ -203,13 +213,21 @@ fn apply_gravity(h: &mut i32, delta: i32) {
     *h += delta - *h * delta.abs() / HISTORY_MAX;
 }
 
-fn apply_history_delta(engine: &mut EngineState, side: Color, mv: Move, delta: i32) {
-    let h = &mut engine.history[color_index(side)][mv.from as usize][mv.to as usize];
+/// Journal tag for continuation-history entries; history entries are untagged.
+const JOURNAL_CONT: u32 = 1 << 31;
+
+fn apply_history_delta(engine: &mut EngineState, search: &mut Search, side: Color, mv: Move, delta: i32) {
+    let (c, f, t) = (color_index(side), mv.from as usize, mv.to as usize);
+    let h = &mut engine.history[c][f][t];
+    if search.lazy_pending > 0 {
+        search.hist_journal.push((((c << 12) | (f << 6) | t) as u32, *h));
+    }
     apply_gravity(h, delta);
 }
 
 fn apply_continuation_history_delta(
     engine: &mut EngineState,
+    search: &mut Search,
     side: Color,
     prev_move: Option<Move>,
     mv: Move,
@@ -218,9 +236,37 @@ fn apply_continuation_history_delta(
     let Some(prev) = prev_move else {
         return;
     };
-    let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-        [mv.to as usize];
+    let (c, p, f, t) = (color_index(side), prev.to as usize, mv.from as usize, mv.to as usize);
+    let h = &mut engine.continuation_history[c][p][f][t];
+    if search.lazy_pending > 0 {
+        search
+            .hist_journal
+            .push((JOURNAL_CONT | ((c << 18) | (p << 12) | (f << 6) | t) as u32, *h));
+    }
     apply_gravity(h, delta);
+}
+
+/// Swap every journaled history entry from `mark` on with its logged value.
+/// Walking backwards restores the tables to their state when the journal was
+/// at `mark` (each entry then holds the value its write produced); walking
+/// forwards afterwards re-applies the writes and restores the journal.
+fn swap_journal(engine: &mut EngineState, journal: &mut [(u32, i32)], backwards: bool) {
+    let mut swap_one = |entry: &mut (u32, i32)| {
+        let i = entry.0;
+        let slot = if i & JOURNAL_CONT != 0 {
+            let i = (i & !JOURNAL_CONT) as usize;
+            &mut engine.continuation_history[i >> 18][(i >> 12) & 63][(i >> 6) & 63][i & 63]
+        } else {
+            let i = i as usize;
+            &mut engine.history[i >> 12][(i >> 6) & 63][i & 63]
+        };
+        std::mem::swap(slot, &mut entry.1);
+    };
+    if backwards {
+        journal.iter_mut().rev().for_each(&mut swap_one);
+    } else {
+        journal.iter_mut().for_each(&mut swap_one);
+    }
 }
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
@@ -320,6 +366,19 @@ struct MovePicker {
     tt_yielded: bool,
     bufs: PickerBufs,
     total: usize,
+    /// Set by `new_lazy`: the moves are not generated yet.
+    lazy: Option<LazyFill>,
+}
+
+/// What a lazy picker needs to generate and score its moves later exactly
+/// as `MovePicker::new` would have at construction time.
+#[derive(Clone, Copy)]
+struct LazyFill {
+    counter_move: Option<Move>,
+    prev_move: Option<Move>,
+    killers: [Option<Move>; 2],
+    /// `Search::hist_journal` length at construction.
+    mark: usize,
 }
 
 impl Drop for MovePicker {
@@ -342,10 +401,7 @@ impl MovePicker {
         move_buf: &mut Vec<Move>,
     ) -> Self {
         board.generate_legal_moves(captures_only, move_buf);
-        let mut bufs = PICKER_BUF_POOL
-            .with(|pool| pool.borrow_mut().pop())
-            .unwrap_or_default();
-        bufs.clear();
+        let bufs = Self::pooled_bufs();
 
         if move_buf.is_empty() {
             return Self {
@@ -353,17 +409,124 @@ impl MovePicker {
                 tt_yielded: true,
                 bufs,
                 total: 0,
+                lazy: None,
             };
         }
 
-        let side = board.side_to_move;
         let mut picker = Self {
             tt_move: None,
             tt_yielded: false,
             bufs,
             total: 0,
+            lazy: None,
         };
+        picker.bucket(board, engine, tt_move, counter_move, prev_move, killers, history, move_buf);
+        picker
+    }
 
+    fn pooled_bufs() -> PickerBufs {
+        let mut bufs = PICKER_BUF_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        bufs.clear();
+        bufs
+    }
+
+    /// Main-search picker that yields a legal `tt_move` before generating
+    /// anything, so a TT-move cutoff costs no move generation or scoring.
+    /// The quiet scores read history, which the TT move's subtree may
+    /// change, so history writes are journaled until `fill` runs; `fill`
+    /// rolls them back, scores, and re-applies them. The resulting order is
+    /// exactly that of `MovePicker::new` called here. `None` when the TT
+    /// move is not legal (the caller then uses `new`).
+    fn new_lazy(
+        board: &mut Board,
+        search: &mut Search,
+        tt_move: Move,
+        counter_move: Option<Move>,
+        prev_move: Option<Move>,
+        killers: &[Option<Move>; 2],
+    ) -> Option<Self> {
+        board.generate_legal_moves_from(false, 1u64 << tt_move.from, &mut search.move_buf);
+        if !search.move_buf.contains(&tt_move) {
+            return None;
+        }
+        let mark = search.hist_journal.len();
+        search.lazy_pending += 1;
+        Some(Self {
+            tt_move: Some(tt_move),
+            tt_yielded: false,
+            bufs: Self::pooled_bufs(),
+            total: 1,
+            lazy: Some(LazyFill { counter_move, prev_move, killers: *killers, mark }),
+        })
+    }
+
+    /// True once the TT move is out and a lazy picker must `fill` before `next`.
+    #[inline]
+    fn needs_fill(&self) -> bool {
+        self.tt_yielded && self.lazy.is_some()
+    }
+
+    /// Generate and score the remaining moves of a lazy picker against the
+    /// history as it was at construction.
+    fn fill(&mut self, board: &mut Board, engine: &mut EngineState, search: &mut Search) {
+        let Some(l) = self.lazy.take() else {
+            return;
+        };
+        search.lazy_pending -= 1;
+        let mut journal = std::mem::take(&mut search.hist_journal);
+        let changed = journal.len() > l.mark;
+        if changed {
+            swap_journal(engine, &mut journal[l.mark..], true);
+        }
+        board.generate_legal_moves(false, &mut search.move_buf);
+        self.total = 0;
+        self.bucket(
+            board,
+            engine,
+            self.tt_move,
+            l.counter_move,
+            l.prev_move,
+            &l.killers,
+            &engine.history,
+            &search.move_buf,
+        );
+        if changed {
+            swap_journal(engine, &mut journal[l.mark..], false);
+        }
+        if search.lazy_pending == 0 {
+            journal.clear();
+        }
+        search.hist_journal = journal;
+    }
+
+    /// Leave a node whose lazy picker never filled (cutoff or stop on the TT move).
+    #[inline]
+    fn abandon(&mut self, search: &mut Search) {
+        if self.lazy.take().is_some() {
+            search.lazy_pending -= 1;
+            if search.lazy_pending == 0 {
+                search.hist_journal.clear();
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn bucket(
+        &mut self,
+        board: &Board,
+        engine: &EngineState,
+        tt_move: Option<Move>,
+        counter_move: Option<Move>,
+        prev_move: Option<Move>,
+        killers: &[Option<Move>; 2],
+        history: &HistoryTable,
+        move_buf: &[Move],
+    ) {
+        let side = board.side_to_move;
+        let picker = self;
         for mv in move_buf.iter().copied() {
             picker.total += 1;
             if Some(mv) == tt_move {
@@ -389,8 +552,6 @@ impl MovePicker {
                 picker.bufs.quiets.push((mv, score.max(history_score(history, side, mv))));
             }
         }
-
-        picker
     }
 
     fn is_empty(&self) -> bool {
@@ -1293,17 +1454,26 @@ fn negamax(
 
     let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
     let killers = search.killers[ply];
-    let mut picker = MovePicker::new(
-        board,
-        engine,
-        tt_move,
-        counter_move,
-        prev_move,
-        &killers,
-        &engine.history,
-        false,
-        &mut search.move_buf,
-    );
+    let lazy = match tt_move {
+        Some(tm) if excluded.is_none() && depth <= LAZY_PICKER_MAX_DEPTH => {
+            MovePicker::new_lazy(board, search, tm, counter_move, prev_move, &killers)
+        }
+        _ => None,
+    };
+    let mut picker = match lazy {
+        Some(p) => p,
+        None => MovePicker::new(
+            board,
+            engine,
+            tt_move,
+            counter_move,
+            prev_move,
+            &killers,
+            &engine.history,
+            false,
+            &mut search.move_buf,
+        ),
+    };
     if picker.is_empty() {
         if in_check {
             return -MATE_SCORE + ply as i32;
@@ -1317,7 +1487,13 @@ fn negamax(
     let mut quiets_tried = PooledMoveVec::take();
     let mut idx = 0usize;
 
-    while let Some((mv, stage)) = picker.next() {
+    loop {
+        if picker.needs_fill() {
+            picker.fill(board, engine, search);
+        }
+        let Some((mv, stage)) = picker.next() else {
+            break;
+        };
         if Some(mv) == excluded {
             continue;
         }
@@ -1349,6 +1525,7 @@ fn negamax(
                     );
                     search.excluded[ply] = None;
                     if search.stop {
+                        picker.abandon(search);
                         return 0;
                     }
                     if s < singular_beta {
@@ -1356,6 +1533,7 @@ fn negamax(
                     } else if singular_beta >= beta && beta - alpha <= 1 {
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
+                        picker.abandon(search);
                         return singular_beta;
                     }
                 }
@@ -1527,6 +1705,7 @@ fn negamax(
         board.undo_move(mv, undo);
 
         if search.stop {
+            picker.abandon(search);
             return 0;
         }
 
@@ -1548,15 +1727,17 @@ fn negamax(
                     search.killers[ply][1] = search.killers[ply][0];
                     search.killers[ply][0] = Some(mv);
                 }
-                apply_history_delta(engine, side, mv, bonus);
-                apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                picker.abandon(search);
+                apply_history_delta(engine, search, side, mv, bonus);
+                apply_continuation_history_delta(engine, search, side, prev_move, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
-                        apply_history_delta(engine, side, tried, -bonus);
-                        apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_history_delta(engine, search, side, tried, -bonus);
+                        apply_continuation_history_delta(engine, search, side, prev_move, tried, -bonus);
                     }
                 }
             }
+            picker.abandon(search);
             if excluded.is_none() {
                 engine.tt.store(
                     key,
