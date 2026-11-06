@@ -1017,7 +1017,9 @@ impl EngineState {
             threads: 1,
             hash_mb,
             opening_book,
-            own_book: true,
+            // CCRL and most testers use their own opening books; an engine
+            // book left on by default can be measured instead of the engine.
+            own_book: false,
             book_style,
             book_file: None,
             position_history: Vec::new(),
