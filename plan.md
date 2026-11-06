@@ -13,7 +13,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 | | |
 |---|---|
 | Strength | **~3330 CCRL Blitz** (partial ladder, 95% CI 3223-3460) on `ad53daa` (E1 net + halved eval scale); rerun with 3273-3491 anchors in progress. Was 3168 (net4) this morning. |
-| Goals | **Short term 3400** (~#131 on the single-CPU blitz list). **Mid term top 100 (~3500) then top 50 (~3650).** **Long term top 10** (~3700+). Competing with Stockfish itself is out of scope for our resources. Stockfish 17 skill 17 (~3140) is already passed within error. |
+| Goals | **Short term: 3400 CCRL Blitz** (~#130 on the single-CPU blitz list; we are ~3330). **Mid term: a top-100 engine on CCRL Blitz** (~3500). **Long term: top 10** (~3700+). Competing with Stockfish itself is out of scope for our resources. |
 | Eval | NNUE E1, (768 -> 256) x 2 -> 1 SCReLU, i16, output halved to the HCE scale the search margins were tuned on (+123); HCE is the fallback. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
