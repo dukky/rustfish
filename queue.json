@@ -3,6 +3,10 @@
     {
       "branch": "nnue-e2",
       "mode": "stc"
+    },
+    {
+      "branch": "netloop",
+      "mode": "speedup"
     }
   ],
   "current": {
