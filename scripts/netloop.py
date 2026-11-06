@@ -68,8 +68,14 @@ def parse_seeds(s):
         die(f"bad seed list {s!r} (want e.g. 4,5,6)")
 
 
-def net_bytes(h, buckets):
-    return (INPUTS * h + h + buckets * (2 * h + 1)) * 2
+# King (input) bucket layouts: --king-buckets name -> (src/nnue.rs constant, KB).
+KING_LAYOUTS = {"none": ("LAYOUT_NONE", 1), "m1": ("LAYOUT_M1", 1), "kb4": ("LAYOUT_KB4", 4),
+                "kb4m": ("LAYOUT_KB4M", 4), "kb8m": ("LAYOUT_KB8M", 8)}
+KING_LAYOUT_RE = r"^(pub\(crate\) const KING_LAYOUT: KingLayout = )(LAYOUT_\w+);"
+
+
+def net_bytes(h, buckets, kb=1):
+    return (kb * INPUTS * h + h + buckets * (2 * h + 1)) * 2
 
 
 # ------------------------------------------------------------------ log parsing
@@ -233,10 +239,11 @@ def cmd_embed(args):
     net = Path(args.net).expanduser()
     if not net.exists():
         die(f"missing net {net}")
-    want = net_bytes(args.hidden, args.buckets)
+    layout_const, kb = KING_LAYOUTS[args.king_buckets]
+    want = net_bytes(args.hidden, args.buckets, kb)
     if net.stat().st_size != want:
         die(f"{net} is {net.stat().st_size} bytes; H={args.hidden} buckets={args.buckets} "
-            f"needs {want}. Wrong shape?")
+            f"king-buckets={args.king_buckets} needs {want}. Wrong shape?")
     branch = f"nnue-{args.name}"
     if subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", "--quiet", branch],
                       capture_output=True).returncode == 0:
@@ -255,7 +262,13 @@ def cmd_embed(args):
         if base_b is None and args.buckets > 1:
             die(f"{args.base} has no BUCKETS constant (output buckets live on origin/nnue-arch); "
                 f"use --base with bucket support for a {args.buckets}-bucket net")
-        shape_change = base_h != args.hidden or (base_b or 1) != args.buckets
+        m = re.search(KING_LAYOUT_RE, src, re.MULTILINE)
+        base_layout = m.group(2) if m else "LAYOUT_NONE"
+        if m is None and args.king_buckets != "none":
+            die(f"{args.base} has no KING_LAYOUT constant (king buckets live on origin/king-buckets)")
+        if base_layout != layout_const:
+            src = re.sub(KING_LAYOUT_RE, rf"\g<1>{layout_const};", src, count=1, flags=re.MULTILINE)
+        shape_change = base_h != args.hidden or (base_b or 1) != args.buckets or base_layout != layout_const
         if base_h != args.hidden:
             src = set_const(src, "H", args.hidden)
         if base_b is not None and base_b != args.buckets:
@@ -276,8 +289,9 @@ def cmd_embed(args):
         log = d / f"{args.name}.log"
         exp = summary_text(args.name, parse_log(log.read_text())) if log.exists() else \
             f"(no training log at {log})"
-        shape = f"H {base_h}->{args.hidden}, buckets {base_b or 1}->{args.buckets}" if shape_change \
-            else f"same shape (H={args.hidden}, buckets={args.buckets})"
+        shape = (f"H {base_h}->{args.hidden}, buckets {base_b or 1}->{args.buckets}, "
+                 f"king layout {base_layout}->{layout_const}") if shape_change \
+            else f"same shape (H={args.hidden}, buckets={args.buckets}, {layout_const})"
         msg = (f"NNUE: {args.name} net\n\n"
                f"Net {args.name} on {args.base}; {shape}.\n"
                + (f"{args.notes}\n" if args.notes else "")
@@ -420,6 +434,8 @@ def main():
     p.add_argument("--base", default="origin/main")
     p.add_argument("--hidden", type=int, required=True)
     p.add_argument("--buckets", type=int, required=True)
+    p.add_argument("--king-buckets", default="none", choices=sorted(KING_LAYOUTS),
+                   help="king (input) bucket layout the net was trained with; sets KING_LAYOUT")
     p.add_argument("--notes", default="", help="extra line for the commit message")
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--keep-worktree", action="store_true", help="keep the temp worktree on failure")

@@ -129,7 +129,7 @@ refuses otherwise.
 
 Both trainers take `--king-buckets <none|m1|kb4|kb4m|kb8m>` (see
 `tools/nnue-trainer/README.md`); `--init` from a one-bucket net copies its
-rows into every bucket. To embed a bucketed net, set `KING_LAYOUT` in
-`src/nnue.rs` to the matching `LAYOUT_*` constant by hand (`netloop.py
-embed` does not do it yet) and gate it at `stc` like any other shape change
-(about -14% bench NPS for kb8m at H = 256 in a first measurement).
+rows into every bucket. To embed a bucketed net, pass the same layout to
+`netloop.py embed --king-buckets <layout>` (it sets `KING_LAYOUT` in
+`src/nnue.rs` and treats it as a shape change, so it gates at `stc`). First
+measurement: about -14% bench NPS for kb8m at H = 256.
