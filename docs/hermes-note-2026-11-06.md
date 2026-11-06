@@ -58,6 +58,53 @@ enforced, not left to each mode's config:
   path that compares against main's measured bench. The queue already fixes
   stale trailers when it merges; CI on standalone docs branches does not.
 
+## Free wins vs. the things that actually close a top-10 gap
+
+Plan.md already has SPSA (`spsa-nnue`) and Syzygy listed, but it does not rank
+the architecture pieces. My ranking, for what it is worth:
+
+**No net training required (do these in parallel with training):**
+
+1. **SPSA of the NNUE-era search margins** (`tune/spsa-nnue.json`,
+   `spsa-nnue`). Highest-confidence non-net gain: the eval scale was 2x off
+   for a day, so the pruning margins are still calibrated on HCE. Expect
+   roughly +10..30.
+2. **Correction history** — see `docs/correction-history-plan`
+   (branch `docs/correction-history-plan`). Pawn correction only first.
+   Cheap, standard in modern NNUE engines, expected +5..15.
+3. **Time management at 120+1 / 40/15**: `tm-ccrl` is testing exactly this.
+4. **AVX2 (not AVX-512) speed work.** The CCRL reference box is an i7-4770K
+   (Haswell, AVX2 only), so AVX-512 kernels are dead code there.
+
+**One-retrain architecture wins, ordered by expected value:**
+
+5. **King-relative inputs / king buckets.** The single biggest standard
+   upgrade over absolute piece-square features; one clean retrain on the full
+   pool, validation loss first.
+6. **Threat features** (attacked pieces, pawn attacks, hanging pieces). Also
+   one retrain; proven in modern engines.
+7. **Output buckets on the 512 net.** E3's +4.9 was on 256 and inconclusive;
+   cheap to retest at the width that actually merged.
+8. **Material/phase input buckets** — capacity without changing feature
+   semantics.
+
+**Do not spend weeks on:** more width-only runs (E2 gave +26, not a top-10
+jump), more output buckets on 256 (E3 +4.9, inconclusive), or a ladder of
+7M-position nets — that is how the nine v1 nets got rejected.
+
+For top 10 specifically: king-relative/threat inputs are the architecture
+pieces that matter. Width alone will not get there.
+
+## Branches from this session, for review
+
+- `docs/neural-guided-alpha-beta` — policy-head proposal (novel path; a
+  research bet, not a free win).
+- `docs/correction-history-plan` — pawn correction plan above.
+- `spike-book-off-default` — `OwnBook=false` by default (submission hygiene,
+  bench-identical).
+- `dashboard-scenarios` — saturating projection chart + table (illustrative).
+- `notes/hermes-2026-11-06` — this note.
+
 ## Other things that may matter
 
 - E1's gain came from the whole valid pool (350M) and 6 epochs with cosine LR,
