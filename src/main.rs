@@ -1080,16 +1080,16 @@ impl EngineState {
 
     // Ages history between moves. Gravity already bounds magnitude; this
     // only fades stale entries that are no longer being updated.
+    // Halves every entry once; walked in memory order (the 2 MB
+    // continuation table used to be strided, ~4% of a 5000-node search).
     fn decay_history(&mut self) {
-        for side in 0..2 {
-            for from in 0..64 {
-                for to in 0..64 {
-                    self.history[side][from][to] /= 2;
-                    for next_to in 0..64 {
-                        self.continuation_history[side][to][from][next_to] /= 2;
-                    }
-                }
-            }
+        let history = self.history.as_flattened_mut().as_flattened_mut();
+        let cont = self.continuation_history.as_flattened_mut().as_flattened_mut().as_flattened_mut();
+        for e in history.iter_mut() {
+            *e /= 2;
+        }
+        for e in cont.iter_mut() {
+            *e /= 2;
         }
     }
 

@@ -665,11 +665,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         let (score, mv, completed, depth_nodes) = loop {
             if use_threads {
                 if worker_engines.is_none() {
-                    worker_engines = Some(
-                        (0..worker_count)
-                            .map(|_| engine.worker_clone())
-                            .collect::<Vec<_>>(),
-                    );
+                    worker_engines = Some(make_worker_engines(engine, worker_count));
                 }
                 let result = search_root_parallel(
                     board,
@@ -765,6 +761,16 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     engine.last_search_nodes = search.nodes + total_threaded_nodes;
     LAST_SEARCH_SCORE.with(|s| s.set(best_score));
     best_move.map(move_to_uci)
+}
+
+/// Helper threads' engines for a parallel search. Kept out of line: each
+/// clone passes a multi-MB `EngineState` through the stack, and inlined into
+/// `handle_go` that made every search (single-threaded ones included) probe a
+/// 4 MB stack frame on entry.
+#[inline(never)]
+#[cold]
+fn make_worker_engines(engine: &EngineState, count: usize) -> Vec<EngineState> {
+    (0..count).map(|_| engine.worker_clone()).collect()
 }
 
 /// Soft target and hard limit in ms for a clock search. The soft target is
