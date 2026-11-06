@@ -139,6 +139,19 @@ features; getting to 3750 (top 10) is very unlikely from more generations of
 this representation, and the plan should say so rather than imply that
 scaling training time is the path.
 
+## Local E2 512 A/B (smoke only)
+
+A local 200-game match at 10+0.1, pre-E2 main vs E2 512, on this 2-core box:
+
+- pre-E2: 48.50%
+- E2 512: 51.50%
+- naive Elo: about +10, but the 95% CI is roughly +/-25 at 200 games.
+
+So this is **not** evidence against E2's +26 stc result; it is statistically
+consistent with it. The value is as a warning that the 512 NPS cost may make
+the 120+1 ladder land nearer +10..+20 than the stc +26. The ladder is still
+the authority; do not gate or reject on this local match.
+
 ## Branches from this session, for review
 
 - `docs/neural-guided-alpha-beta` — policy-head proposal (novel path; a
