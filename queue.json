@@ -15,6 +15,10 @@
     {
       "branch": "dashboard-netlog",
       "mode": "speedup"
+    },
+    {
+      "branch": "tm-ccrl",
+      "mode": "ltc-gainer"
     }
   ],
   "current": {
