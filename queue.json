@@ -1,5 +1,14 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "nnue-e1",
+      "mode": "net-gate"
+    },
+    {
+      "branch": "netloop",
+      "mode": "speedup"
+    }
+  ],
   "current": {
     "branch": "bigbang-r2",
     "mode": "stc",
