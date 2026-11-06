@@ -39,7 +39,7 @@ pub(crate) const QA: i32 = 255;
 pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
 /// Output buckets, selected by piece count: `(pieces - 2) * BUCKETS / 32`.
-pub(crate) const BUCKETS: usize = 1;
+pub(crate) const BUCKETS: usize = 8;
 
 // ------------------------------------------------------------ king buckets
 
