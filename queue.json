@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-scale-38",
-      "mode": "stc"
-    },
-    {
       "branch": "nnue-scale-58",
       "mode": "stc"
     },
@@ -22,12 +18,13 @@
     }
   ],
   "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "test_id": "q-ladder-1106-1336",
-    "sha": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-    "base_sha": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-    "started": "2026-11-06T13:36:15Z"
+    "branch": "nnue-scale-38",
+    "mode": "stc",
+    "test_id": "q-nnue-scale-38-1106-1355",
+    "sha": "7067e5f92bfd659ccfb336bb5733b02b91161358",
+    "base_sha": "23cbf3bcee3a3e19fe4a6880d3b8ea66a2b48fd7",
+    "started": "2026-11-06T13:55:10Z",
+    "bench": 726443
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 0,
