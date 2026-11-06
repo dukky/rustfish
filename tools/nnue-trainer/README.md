@@ -46,7 +46,7 @@ the perspective's orientation. Mirrored layouts also flip every file
 The net file grows to `(KB*768*H + H + B*(2H+1))` i16; nothing in the file
 names the layout, so pass the same `--king-buckets` to `eval` and set the
 engine's `KING_LAYOUT` (`src/nnue.rs`) to the matching `LAYOUT_*` constant
-when embedding. `--init` from a one-bucket net copies its 768 rows into
+when embedding (`scripts/netloop.py embed --king-buckets <layout>` does that). `--init` from a one-bucket net copies its 768 rows into
 every bucket (start loss equals the one-bucket net's for unmirrored
 layouts). Checkpoints store the layout id in the high half of the buckets
 header word, so one-bucket checkpoints are unchanged. The `--mirror` data
