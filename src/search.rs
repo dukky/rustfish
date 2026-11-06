@@ -15,6 +15,12 @@ const HARD_LIMIT_FACTOR: u64 = 3;
 const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 // A score drop of at least this many cp since the last iteration buys more time.
 const SCORE_DROP_MARGIN: i32 = 40;
+// Node-fraction time management (single-threaded searches only): from this
+// depth on, the soft target is also scaled by (NodeTmBase - f) * NodeTmScale
+// percent, f = percent of all search nodes spent under the current best move.
+// A best move that took nearly all the effort (f ~ 100) is easy and ends early
+// (~0.68x at the defaults); a contested root (f ~ 30) gets up to ~1.6x.
+const NODE_TM_MIN_DEPTH: i32 = 8;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
@@ -127,6 +133,9 @@ pub(crate) struct Search {
     /// Move skipped by a singular-extension verification search at this ply.
     excluded: [Option<Move>; MAX_PLY],
     move_buf: Vec<Move>,
+    /// Nodes spent under each root move (from * 64 + to) over the whole search,
+    /// for node-fraction time management. Allocated by the first search_root.
+    root_nodes: Vec<u64>,
 }
 
 impl Search {
@@ -140,6 +149,7 @@ impl Search {
             static_evals: [NO_EVAL; MAX_PLY],
             excluded: [None; MAX_PLY],
             move_buf: Vec::with_capacity(256),
+            root_nodes: Vec::new(),
         }
     }
 
@@ -762,6 +772,14 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             if d >= 4 && best_score < prev_score - SCORE_DROP_MARGIN {
                 target = target * 5 / 4;
             }
+            if !threaded && d >= NODE_TM_MIN_DEPTH && search.nodes > 0 {
+                if let Some(m) = best_move {
+                    let params = &engine.search_params;
+                    let frac = search.root_nodes[root_node_index(m)] * 100 / search.nodes;
+                    let pct = params.node_tm_base.saturating_sub(frac) * params.node_tm_scale / 100;
+                    target = target * pct / 100;
+                }
+            }
             if elapsed >= target {
                 break;
             }
@@ -782,6 +800,10 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 #[cold]
 fn make_worker_engines(engine: &EngineState, count: usize) -> Vec<EngineState> {
     (0..count).map(|_| engine.worker_clone()).collect()
+}
+
+fn root_node_index(mv: Move) -> usize {
+    mv.from as usize * 64 + mv.to as usize
 }
 
 /// Soft target and hard limit in ms for a clock search. The soft target is
@@ -952,12 +974,16 @@ fn search_root(
 
     let mut best_move = None;
     let mut best_score = -INF;
+    if search.root_nodes.is_empty() {
+        search.root_nodes = vec![0; 64 * 64];
+    }
 
     for (idx, mv) in root_moves.iter().copied().enumerate() {
         if search.should_stop() {
             return (best_score, best_move, false);
         }
 
+        let nodes_before = search.nodes;
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
@@ -1013,6 +1039,7 @@ fn search_root(
 
         rep_stack.pop();
         board.undo_move(mv, undo);
+        search.root_nodes[root_node_index(mv)] += search.nodes - nodes_before;
 
         if search.stop {
             return (best_score, best_move, false);
