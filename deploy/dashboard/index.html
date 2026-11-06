@@ -509,20 +509,22 @@ function renderProjection(s) {
     $("projection-note").textContent = "";
     return;
   }
-  const rates = [8, 15, 25];
-  const gensPerDay = 4; // one generation per 6h, the current observed cadence
+  const rates = [20, 25, 30], decay = 0.85, gensPerDay = 3, horizon = 7;
+  const at = (rating, days, g0) => {
+    const n = days * gensPerDay;
+    return rating + g0 * (1 - Math.pow(decay, n)) / (1 - decay);
+  };
   const rows = targets.map((t) => {
     const gap = t.rating - c.rating;
-    const cells = rates.map((r) => {
-      if (gap <= 0) return `<td class="num">reached</td>`;
-      const gens = Math.ceil(gap / r);
-      const days = gens / gensPerDay;
-      return `<td class="num">${gens} gen · ${days < 1 ? "<1" : days.toFixed(1)}d</td>`;
-    }).join("");
-    return `<tr><td>${esc(t.name)} <span class="meta">${fmt(t.rating)}</span></td><td class="num">${gap > 0 ? fmt(gap) : "—"}</td>${cells}</tr>`;
+    if (gap <= 0) return `<tr><td>${esc(t.name)} <span class="meta">${fmt(t.rating)}</span></td><td class="num">reached</td><td class="num">reached</td><td class="num">reached</td><td class="num">reached</td><td class="num">reached</td></tr>`;
+    const vals = rates.map((r) => at(c.rating, horizon, r));
+    const asym = c.rating + 25 / (1 - decay);
+    return `<tr><td>${esc(t.name)} <span class="meta">${fmt(t.rating)}</span></td><td class="num">${fmt(gap)}</td>` +
+      vals.map((v) => `<td class="num">${fmt(v)}</td>`).join("") +
+      `<td class="num">${fmt(asym)}${asym < t.rating ? ' <span class="meta">not reached</span>' : ""}</td></tr>`;
   }).join("");
-  $("projection").innerHTML = `<div class="scroll"><table><thead><tr><th>Target</th><th class="num">Gap</th><th class="num">+8 Elo/gen</th><th class="num">+15 Elo/gen</th><th class="num">+25 Elo/gen</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-  $("projection-note").textContent = `From measured ${fmt(c.rating)}. Assumes a constant gain per generation and ${gensPerDay} generations/day (one per 6h); no diminishing returns. If the next gates are +8 rather than +25, use the left column. Recalculate only when a new ladder lands.`;
+  $("projection").innerHTML = `<div class="scroll"><table><thead><tr><th>Target</th><th class="num">Gap</th><th class="num">7d @ +20/gen</th><th class="num">7d @ +25/gen</th><th class="num">7d @ +30/gen</th><th class="num">Asymptote @ +25/gen</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  $("projection-note").textContent = `From measured ${fmt(c.rating)}. Each generation is assumed to lose 15% of its gain (decay 0.85), ${gensPerDay} generations/day, with no architectural jump. The asymptote is the ceiling of this model: if it is below a target, that target needs a real architecture/feature change, not more generations. Illustrative, not a forecast.`;
 }
 
 function renderChart(s) {
@@ -534,7 +536,9 @@ function renderChart(s) {
   const tgt = s.target.rating;
   const goals = ((s.ccrl_targets && s.ccrl_targets.targets) || [{name: "short term", rating: tgt}]);
   const t0 = Date.parse(pts[0].when) - 6 * 3600e3;
-  const t1 = Math.max(Date.now(), Date.parse(pts[pts.length - 1].when)) + 3 * 3600e3;
+  const day = 86400e3;
+  const projDays = 7;
+  const t1 = Math.max(Date.now(), Date.parse(pts[pts.length - 1].when)) + projDays * day;
   let lo = Math.min(...pts.map((p) => p.ci ? p.ci[0] : p.rating)), hi = Math.max(tgt, ...goals.map((t) => t.rating), ...pts.map((p) => p.ci ? p.ci[1] : p.rating));
   lo = Math.floor((lo - 50) / 100) * 100; hi = Math.ceil((hi + 30) / 100) * 100;
   const x = (t) => m.l + (t - t0) / (t1 - t0) * (W - m.l - m.r);
@@ -544,7 +548,6 @@ function renderChart(s) {
     if (hi - lo > 800 && v % 200) continue;
     g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${v}</text>`;
   }
-  const day = 86400e3;
   const steps = Math.ceil((t1 - t0) / day / Math.max(1, Math.floor((W - 80) / 70)));
   for (let t = Math.ceil(t0 / day) * day; t <= t1; t += day * steps) {
     g += `<line x1="${x(t)}" x2="${x(t)}" y1="${H - m.b}" y2="${H - m.b + 4}" stroke="var(--muted)"/><text x="${x(t)}" y="${H - m.b + 17}" text-anchor="middle" font-size="11" fill="var(--muted)">${new Date(t).toLocaleDateString(undefined, {month: "short", day: "numeric"})}</text>`;
@@ -564,6 +567,27 @@ function renderChart(s) {
   const band = full.filter((p) => p.ci);
   if (band.length > 1) g += `<path d="M${band.map((p) => `${x(Date.parse(p.when))},${y(p.ci[1])}`).join("L")}L${band.slice().reverse().map((p) => `${x(Date.parse(p.when))},${y(p.ci[0])}`).join("L")}Z" fill="var(--accent-soft)"/>`;
   g += `<path d="M${full.map((p) => `${x(Date.parse(p.when))},${y(p.rating)}`).join("L")}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  // Conditional projection: constant per-generation gain with geometric decay,
+  // 3 generations/day, no architecture change. This is a scenario, not a
+  // prediction; the band shows +20/+25/+30 Elo at the next generation.
+  if (full.length) {
+    const last = full[full.length - 1];
+    const start = Date.parse(last.when);
+    const rates = [20, 25, 30], decay = 0.85, gensPerDay = 3;
+    const at = (days, g0) => {
+      const n = days * gensPerDay;
+      return last.rating + g0 * (1 - Math.pow(decay, n)) / (1 - decay);
+    };
+    const path = (g0) => {
+      let d = "";
+      for (let dd = 0; dd <= projDays; dd += 0.5) d += `${d ? "L" : "M"}${x(start + dd * day)},${y(at(dd, g0))}`;
+      return d;
+    };
+    g += `<path d="${path(20)}" fill="none" stroke="var(--text-2)" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>`;
+    g += `<path d="${path(30)}" fill="none" stroke="var(--text-2)" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>`;
+    g += `<path d="${path(25)}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="5 4" opacity=".8"/>`;
+    g += `<text x="${W - m.r}" y="${m.t + 12}" text-anchor="end" font-size="11" fill="var(--muted)">conditional projection (no architecture change)</text>`;
+  }
   pts.forEach((p, i) => {
     if (!p.partial) return;
     const prev = pts.slice(0, i).reverse().find((q) => !q.partial);
