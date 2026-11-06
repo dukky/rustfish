@@ -1,6 +1,14 @@
 {
   "pending": [
     {
+      "branch": "nnue-speed",
+      "mode": "speedup"
+    },
+    {
+      "branch": "main",
+      "mode": "ladder"
+    },
+    {
       "branch": "nnue-scale-58",
       "mode": "stc"
     },
