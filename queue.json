@@ -1,6 +1,18 @@
 {
   "pending": [
     {
+      "branch": "spike-book-off-default",
+      "mode": "speedup"
+    },
+    {
+      "branch": "king-buckets",
+      "mode": "speedup"
+    },
+    {
+      "branch": "speed-r3",
+      "mode": "speedup"
+    },
+    {
       "branch": "nnue-g2b",
       "mode": "net-gate"
     },
@@ -9,19 +21,11 @@
       "mode": "ladder"
     },
     {
-      "branch": "spike-book-off-default",
-      "mode": "speedup"
-    },
-    {
       "branch": "correction-history-r2",
       "mode": "stc"
     },
     {
-      "branch": "king-buckets",
-      "mode": "speedup"
-    },
-    {
-      "branch": "speed-r3",
+      "branch": "datagen-r2",
       "mode": "speedup"
     }
   ],
