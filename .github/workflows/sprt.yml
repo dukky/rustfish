@@ -67,10 +67,19 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     steps:
+      # Waves 2+ of the same test reuse wave 1's binaries (same SHAs, same
+      # flags): saves ~60 s per wave, most of a short net-gate wave's overhead.
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: engines
+          key: sprt-engines-v1-${{ needs.plan.outputs.candidate_sha }}-${{ needs.plan.outputs.base_sha }}-${{ env.FASTCHESS_VERSION }}-${{ env.BOOK }}
       - uses: actions/checkout@v4
+        if: steps.cache.outputs.cache-hit != 'true'
         with:
           fetch-depth: 0
       - name: Build candidate and base
+        if: steps.cache.outputs.cache-hit != 'true'
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CAND: ${{ needs.plan.outputs.candidate_sha }}
@@ -85,6 +94,7 @@ jobs:
             printf 'bench\nquit\n' | "engines/$name" | grep 'Nodes searched'
           done
       - name: Fetch fastchess and openings
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
           mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
