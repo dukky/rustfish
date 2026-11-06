@@ -21,6 +21,9 @@ evidence** for or against an idea.
 4. **Bootstrap rule** (kept from v1): only a merged net generates the next
    dataset.
 5. **Record everything here**, including failures, with the exact command.
+6. Every trained net gets an experiments.jsonl row committed to main when
+   training finishes (netloop record), whatever the gate result; the
+   dashboard shows gate status from the queue log automatically.
 
 ### Fixed validation set
 
