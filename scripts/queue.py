@@ -255,7 +255,8 @@ def start(item):
     mnodes = main_bench()
 
     msg = out("git", "log", "-1", "--format=%B")
-    if nodes != mnodes:
+    stale = [int(b) for b in re.findall(r"^Bench: (\d+)$", msg, re.M) if int(b) != nodes]
+    if nodes != mnodes or stale:
         if re.search(r"^Bench: \d+$", msg, re.M):
             msg = re.sub(r"^Bench: \d+$", f"Bench: {nodes}", msg, flags=re.M)
         else:
