@@ -934,6 +934,7 @@ fn search_root(
                 child_key,
                 Some(mv),
                 true,
+                None,
             );
         } else {
             score = -negamax(
@@ -948,6 +949,7 @@ fn search_root(
                 child_key,
                 Some(mv),
                 true,
+                None,
             );
             if score > alpha && score < beta {
                 score = -negamax(
@@ -962,6 +964,7 @@ fn search_root(
                     child_key,
                     Some(mv),
                     true,
+                    None,
                 );
             }
         }
@@ -1039,6 +1042,8 @@ fn negamax(
     key: u64,
     prev_move: Option<Move>,
     allow_null: bool,
+    // Whether the side to move is in check, when the caller already knows.
+    known_in_check: Option<bool>,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1059,7 +1064,7 @@ fn negamax(
         return 0;
     }
 
-    let in_check = board.is_in_check(board.side_to_move);
+    let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
     if in_check {
         depth += 1;
     }
@@ -1077,7 +1082,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply);
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check));
     }
 
     let alpha_orig = alpha;
@@ -1129,7 +1134,7 @@ fn negamax(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply);
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check));
             }
         }
 
@@ -1194,6 +1199,7 @@ fn negamax(
                 child_key,
                 None,
                 false,
+                None,
             );
             rep_stack.pop();
 
@@ -1255,6 +1261,7 @@ fn negamax(
                     rep_stack,
                     child_key,
                     ply + 1,
+                    None,
                 );
                 if score >= probcut_beta && !search.stop {
                     score = -negamax(
@@ -1269,6 +1276,7 @@ fn negamax(
                         child_key,
                         Some(mv),
                         true,
+                        None,
                     );
                 }
                 rep_stack.pop();
@@ -1346,6 +1354,7 @@ fn negamax(
                         key,
                         prev_move,
                         false,
+                        Some(in_check),
                     );
                     search.excluded[ply] = None;
                     if search.stop {
@@ -1443,6 +1452,7 @@ fn negamax(
                 child_key,
                 Some(mv),
                 true,
+                Some(gives_check),
             );
         } else {
             let reduction = if quiet
@@ -1488,6 +1498,7 @@ fn negamax(
                 child_key,
                 Some(mv),
                 true,
+                Some(gives_check),
             );
 
             if reduced && score > alpha {
@@ -1503,6 +1514,7 @@ fn negamax(
                     child_key,
                     Some(mv),
                     true,
+                    Some(gives_check),
                 );
             }
 
@@ -1519,6 +1531,7 @@ fn negamax(
                     child_key,
                     Some(mv),
                     true,
+                    Some(gives_check),
                 );
             }
         }
@@ -1595,7 +1608,7 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     let key = board_hash(board, &engine.zobrist);
     let mut search = Search::new(None);
     let mut rep_stack = vec![key];
-    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0);
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None);
     (q - eval_for_side(board)).abs()
 }
 
@@ -1608,6 +1621,8 @@ fn quiescence(
     rep_stack: &mut Vec<u64>,
     key: u64,
     ply: usize,
+    // Whether the side to move is in check, when the caller already knows.
+    known_in_check: Option<bool>,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1642,7 +1657,7 @@ fn quiescence(
         }
     }
 
-    let in_check = board.is_in_check(board.side_to_move);
+    let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
     let mut best_move = None;
     let raw_static_eval = if in_check {
         None
@@ -1710,7 +1725,7 @@ fn quiescence(
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
         rep_stack.push(child_key);
-        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1);
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None);
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -2484,6 +2499,7 @@ mod tests {
                     &mut rep_stack,
                     key,
                     3,
+                    None,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 3);
@@ -2523,6 +2539,7 @@ mod tests {
                     &mut rep_stack,
                     key,
                     5,
+                    None,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 5);
