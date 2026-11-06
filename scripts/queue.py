@@ -373,6 +373,24 @@ def parse_adds(spec):
     return items
 
 
+def background_lane(state):
+    """Keep the 4 background runners busy: when no datagen, ladder or SPSA run
+    is queued or running, generate the next datagen seed from main (only
+    merged nets generate data)."""
+    for wf in ("datagen.yml", "ccrl-ladder.yml", "spsa.yml"):
+        runs = json.loads(out("gh", "run", "list", "--workflow", wf, "--limit", "10",
+                              "--json", "status"))
+        if any(r["status"] != "completed" for r in runs):
+            return
+    seed = state.get("next_seed", 14)
+    sh("gh", "workflow", "run", "datagen.yml", "--ref", "main", "-f", "ref=main",
+       "-f", "shards=16", "-f", "games_per_shard=15000", "-f", "nodes=5000",
+       "-f", f"seed={seed}", "-f", "max_parallel=4")
+    state["next_seed"] = seed + 1
+    log({"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
+         "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"})
+
+
 def advance():
     state = load_state()
     raw = os.environ.get("RESULT", "").strip()
@@ -419,6 +437,10 @@ def advance():
         state["current"] = None
     elif cur:
         print(f"{cur['test_id']} still in flight; nothing to do")
+        try:
+            background_lane(state)
+        except Exception as exc:  # never let the background lane stall the queue
+            print(f"background lane: {exc}")
         save_state(state, "queue: add items")
         return
 
@@ -438,6 +460,10 @@ def advance():
             else:
                 log({"branch": item["branch"], "mode": item["mode"], "outcome": "needs-human", "reason": reason})
             state["current"] = None
+    try:
+        background_lane(state)
+    except Exception as exc:  # never let the background lane stall the queue
+        print(f"background lane: {exc}")
     save_state(state, f"queue: {state['current']['test_id'] if state.get('current') else 'idle'}")
 
 
