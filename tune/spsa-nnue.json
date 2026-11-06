@@ -1,0 +1,32 @@
+{
+  "comment": "SPSA of the eval-scale-sensitive search constants under NNUE (net/nnue.bin). Start values = SearchParams::default() (bench 422085); min/max are tuning bounds inside the UCI option limits; c_end ~5-10% of range; r_end fishtest-standard 0.002. Sized for combine=sum with 8 shards x 40 iterations x 12 rounds = 3840 merged iterations (61,440 games at 8 pairs/iteration). Measured on 1680 self-play positions: NNUE depth-1 |score| is ~2x HCE (slope 2.0; median 123 vs 73 cp), so the cp margins below were sized for an eval about half as wide.",
+  "iteration": 0,
+  "total_iterations": 3840,
+  "alpha": 0.602,
+  "gamma": 0.101,
+  "A_ratio": 0.1,
+  "params": {
+    "FutilityMarginD1":        {"value": 120,   "min": 40,   "max": 400,   "c_end": 15,   "r_end": 0.002},
+    "FutilityMarginD2":        {"value": 220,   "min": 80,   "max": 600,   "c_end": 25,   "r_end": 0.002},
+    "ReverseFutilityMarginD1": {"value": 90,    "min": 30,   "max": 300,   "c_end": 12,   "r_end": 0.002},
+    "ReverseFutilityMarginD2": {"value": 180,   "min": 60,   "max": 450,   "c_end": 20,   "r_end": 0.002},
+    "ReverseFutilityMarginD3": {"value": 300,   "min": 100,  "max": 700,   "c_end": 30,   "r_end": 0.002},
+    "RfpDeepStep":             {"value": 100,   "min": 30,   "max": 300,   "c_end": 12,   "r_end": 0.002},
+    "NullMarginBase":          {"value": 90,    "min": 0,    "max": 300,   "c_end": 15,   "r_end": 0.002},
+    "NullMarginDepthScale":    {"value": 20,    "min": 0,    "max": 60,    "c_end": 4,    "r_end": 0.002},
+    "ProbcutMargin":           {"value": 190,   "min": 80,   "max": 450,   "c_end": 20,   "r_end": 0.002},
+    "SeMarginPerDepth":        {"value": 2,     "min": 0,    "max": 8,     "c_end": 0.5,  "r_end": 0.002},
+    "AspirationWindow":        {"value": 35,    "min": 10,   "max": 120,   "c_end": 5,    "r_end": 0.002},
+    "QsDeltaMargin":           {"value": 150,   "min": 50,   "max": 400,   "c_end": 20,   "r_end": 0.002},
+    "SeeQuietMargin":          {"value": 20,    "min": 5,    "max": 80,    "c_end": 3,    "r_end": 0.002},
+    "SeeCaptureMargin":        {"value": 100,   "min": 30,   "max": 250,   "c_end": 12,   "r_end": 0.002},
+    "LmpLimitD1":              {"value": 6,     "min": 2,    "max": 16,    "c_end": 1,    "r_end": 0.002},
+    "LmpLimitD2":              {"value": 10,    "min": 4,    "max": 24,    "c_end": 1.5,  "r_end": 0.002},
+    "LmpLimitD3":              {"value": 14,    "min": 6,    "max": 32,    "c_end": 2,    "r_end": 0.002},
+    "LmrBase":                 {"value": 50,    "min": -50,  "max": 150,   "c_end": 10,   "r_end": 0.002},
+    "LmrDivisor":              {"value": 200,   "min": 120,  "max": 400,   "c_end": 15,   "r_end": 0.002},
+    "LmrHistoryThreshold":     {"value": 14000, "min": 4000, "max": 16000, "c_end": 1000, "r_end": 0.002},
+    "HistoryBonusScale":       {"value": 16,    "min": 4,    "max": 40,    "c_end": 2,    "r_end": 0.002},
+    "HistoryBonusMax":         {"value": 1536,  "min": 256,  "max": 4096,  "c_end": 150,  "r_end": 0.002}
+  }
+}
