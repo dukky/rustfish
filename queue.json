@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "nnue-scale-half",
+      "mode": "stc"
+    },
+    {
       "branch": "nnue-e2",
       "mode": "stc"
     },
