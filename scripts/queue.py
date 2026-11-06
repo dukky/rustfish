@@ -228,8 +228,11 @@ def start(item):
         test_id = f"q-ladder-{datetime.datetime.utcnow().strftime('%m%d-%H%M')}"
         sh("gh", "workflow", "run", "ccrl-ladder.yml", "--ref", "main", "-f", f"test_id={test_id}",
            *[a for k, v in LADDER.items() for a in ("-f", f"{k}={v}")])
-        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha))
-        return dict(base, test_id=test_id, sha=main_sha, base_sha=main_sha, started=now())
+        # Background lane: a ladder gates nothing, so the queue moves straight on
+        # (the workflow logs its own rating to tests/ladder-log.jsonl; its
+        # callback is ignored as "not the current item").
+        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha, reason="background"))
+        return None
     sh("git", "fetch", "-q", "origin", "main", branch)
     sh("git", "checkout", "-q", "-B", "candidate", f"origin/{branch}")
     if sh("git", "rebase", "-q", "origin/main", check=False).returncode != 0:
