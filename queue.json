@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "datagen-netscale",
+      "mode": "speedup"
+    },
+    {
       "branch": "spike-book-off-default",
       "mode": "speedup"
     },
