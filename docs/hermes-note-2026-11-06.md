@@ -95,6 +95,50 @@ jump), more output buckets on 256 (E3 +4.9, inconclusive), or a ladder of
 For top 10 specifically: king-relative/threat inputs are the architecture
 pieces that matter. Width alone will not get there.
 
+## Critique: is the plan's weight on net training right?
+
+The plan's centre of gravity is "train the net properly, generation after
+generation". That was right for the v1 collapse (nine rejected nets) and E1
+proved the point: same shape, proper pool, +152. But the plan should not
+assume that marginal training keeps returning +100.
+
+The evidence so far, on this net shape:
+
+| change | gate result |
+|---|---|
+| E1: full pool, 6 epochs, same 256 shape | **+151.8** |
+| E2: 512 wide, same data/recipe | **+26.1** |
+| E3: 8 output buckets on 256 | +4.9, inconclusive |
+| Eval-scale 1/2 vs 3/8 / 5/8 | **+123** (1/2 best; 3/8 -9.3, 5/8 -22.2) |
+
+E1 and the scale fix are **one-time corrections**, not a rate. E2 and E3 are
+what a marginal generation looks like: **+26 and +5**, not +150. If g2a/g2b
+land at +25..40, the data is telling us the 768->H->1 shape is approaching its
+ceiling for this feature representation, and more generations of the *same
+features* will decay towards zero.
+
+That does not mean stop training. It means:
+
+1. **Do not budget the plan around "N generations x +30".** Budget around a
+   measured marginal rate that is falling. The dashboard projection models
+   decay 0.85 deliberately.
+2. **Spend the next training runs on a feature change, not on more width or
+   more buckets of the same 768 absolute inputs.** King-relative inputs /
+   king buckets and threat features are the two that change what the net can
+   represent. That is a real architectural gain, not a scaling one.
+3. **Run the free wins in parallel**, not after the net chain plateaus: SPSA
+   of the NNUE-era margins, correction history, time management. Those cost
+   no training and are independent of which net is embedded.
+4. **Keep a control.** Every generation should be usable as a control against
+   the previous one on the same validation set, or the +25s are not
+   distinguishable from data noise.
+
+The honest framing for the plan: the net work has taken us from ~3200 to
+~3400. Getting to ~3500 is plausibly more of the same plus king/threat
+features; getting to 3750 (top 10) is very unlikely from more generations of
+this representation, and the plan should say so rather than imply that
+scaling training time is the path.
+
 ## Branches from this session, for review
 
 - `docs/neural-guided-alpha-beta` — policy-head proposal (novel path; a
