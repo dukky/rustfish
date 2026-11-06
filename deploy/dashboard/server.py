@@ -171,7 +171,8 @@ def parse_when(s):
 def is_net_row(branch, mode):
     """A net candidate: an nnue-* branch or a net-gate test, but not engine code
     shipped as a speedup (nnue-inference, nnue-arch-r2, ...)."""
-    return mode == "net-gate" or (bool(branch) and branch.startswith("nnue-") and mode != "speedup")
+    return mode == "net-gate" or (bool(branch) and branch.startswith("nnue-") and mode != "speedup"
+                                  and not branch.startswith("nnue-scale"))  # eval-scale tests, not nets
 
 
 def build_net_gates(qlog, queue, experiments, v1_branches):
