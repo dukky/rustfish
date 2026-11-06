@@ -1,48 +1,48 @@
-//! NNUE trainer for rustfish.
+//! NNUE trainer for rustfish (v2).
 //!
-//! Trains the (768 -> 256) x 2 -> 1 SCReLU network that `src/nnue.rs` runs,
-//! from the self-play text format written by `datagen`:
+//! Trains `(768 -> H) x 2 -> B` SCReLU networks (B = output buckets by piece
+//! count; B = 1 is the layout `src/nnue.rs` runs today) from datagen output.
+//! Std only, like the engine.
 //!
-//! ```text
-//! <FEN> | <score_cp from White's POV> | <result 1.0 | 0.5 | 0.0>
-//! ```
-//!
-//! The network is trained in the same integer-ish scale the inference code
-//! uses (accumulator clamped at QA = 255), so export is a plain round to i16;
-//! there is no separate float->quantized rescaling step. Weights are
-//! feature-major, exactly like the runtime file:
+//! Pipeline:
 //!
 //! ```text
-//! feature weights [768][H], feature bias [H], output weights [2H], output bias
+//! gunzip -c datagen-s9-n8000.gz | nnue-trainer convert - s9.bin   # text -> 32-byte records
+//! nnue-trainer shuffle --out pool.bin s4.bin s5.bin s9.bin         # one global shuffle
+//! nnue-trainer train --data pool.bin --val val.bin --out net.bin --hidden 256 --epochs 20
+//! nnue-trainer eval --net net/nnue.bin --val val.bin              # same metric for any i16 net
 //! ```
 //!
-//! Std only, like the engine. Run `cargo build --release` in this directory.
+//! Training runs in float with the standard quantisation scheme: feature
+//! weights/biases are exported as `round(x * QA)`, output weights as
+//! `round(x * QB)`, output bias as `round(x * QA * QB)`. Every parameter is
+//! clipped to +-1.98 while training, so output weights export to |w| <= 127
+//! (the engine's fast i32 SIMD path) and accumulators cannot overflow i16.
+//!
+//! Net output `o` is in units of `eval / SCALE`: the engine computes
+//! `eval_cp = SCALE * (sum screlu(acc) * w + b)`, the loss is
+//! `(sigmoid(o) - target)^2` with
+//! `target = lambda * wdl + (1 - lambda) * sigmoid(score_cp / SCALE)`.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const INPUTS: usize = 768;
-const H: usize = 256;
 const QA: f32 = 255.0;
 const QB: f32 = 64.0;
 const SCALE: f32 = 400.0;
-/// `(sum / QA + out_b) * SCALE / (QA * QB)`: output units -> centipawns.
-const OUT_SCALE: f32 = SCALE / (QA * QB);
+const CLIP: f32 = 1.98;
+const REC: usize = 32;
+const CKPT_MAGIC: &[u8; 8] = b"RFNNT2\0\0";
 
-const NET_BYTES: usize = (INPUTS * H + H + 2 * H + 1) * 2;
-const CHECKPOINT_MAGIC: &[u8; 8] = b"RFNNT1\0\0";
+/// Packed position: occupancy (8), piece nibbles in square order (16),
+/// score cp White POV i16 (2), result 0/1/2 = Black win/draw/White win (1),
+/// side to move 0 = White (1), padding (4).
+type Rec = [u8; REC];
 
-/// A position as two perspective feature lists (max 32 pieces per side).
-#[derive(Clone, Copy)]
-struct Sample {
-    feats: [[u16; 32]; 2],
-    counts: [u8; 2],
-    stm_white: bool,
-    score: f32,
-    result: f32,
-}
+// ---------------------------------------------------------------- utilities
 
 struct Rng(u64);
 
@@ -50,8 +50,6 @@ impl Rng {
     fn new(seed: u64) -> Self {
         Self(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
-
-    #[inline]
     fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
@@ -59,335 +57,18 @@ impl Rng {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
-
-    #[inline]
     fn below(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
+        ((self.next_u64() >> 32) * n as u64 >> 32) as usize
     }
-
-    #[inline]
-    fn f32(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    fn uniform(&mut self, a: f32) -> f32 {
+        ((self.next_u64() >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * a
     }
 }
 
-/// Parse the board and side-to-move fields of a FEN into both perspectives'
-/// feature lists. Feature layout must stay in lockstep with `nnue::feature`:
-/// `(piece colour != perspective ? 384 : 0) + kind*64 + (persp == White ? sq : sq ^ 56)`,
-/// with `kind`: pawn 0 .. king 5 and a1 = 0.
-fn parse_fen(fen: &str) -> Option<(Sample, bool)> {
-    let mut fields = fen.split_whitespace();
-    let board = fields.next()?;
-    let stm = fields.next()?;
-    let stm_white = match stm {
-        "w" => true,
-        "b" => false,
-        _ => return None,
-    };
-
-    let mut sample = Sample {
-        feats: [[0; 32]; 2],
-        counts: [0; 2],
-        stm_white,
-        score: 0.0,
-        result: 0.0,
-    };
-    let mut file = 0i32;
-    let mut rank = 7i32;
-    for c in board.chars() {
-        match c {
-            '/' => {
-                rank -= 1;
-                file = 0;
-            }
-            '1'..='8' => file += c as i32 - '0' as i32,
-            _ => {
-                let (color_white, kind) = match c {
-                    'P' => (true, 0),
-                    'N' => (true, 1),
-                    'B' => (true, 2),
-                    'R' => (true, 3),
-                    'Q' => (true, 4),
-                    'K' => (true, 5),
-                    'p' => (false, 0),
-                    'n' => (false, 1),
-                    'b' => (false, 2),
-                    'r' => (false, 3),
-                    'q' => (false, 4),
-                    'k' => (false, 5),
-                    _ => return None,
-                };
-                if !(0..8).contains(&rank) || !(0..8).contains(&file) {
-                    return None;
-                }
-                let sq = (rank * 8 + file) as u8;
-                for (p, persp_white) in [true, false].into_iter().enumerate() {
-                    let side = if color_white == persp_white { 0 } else { 384 };
-                    let s = if persp_white { sq } else { sq ^ 56 };
-                    let f = side + kind * 64 + s as usize;
-                    let n = sample.counts[p] as usize;
-                    if n >= 32 {
-                        return None;
-                    }
-                    sample.feats[p][n] = f as u16;
-                    sample.counts[p] = (n + 1) as u8;
-                }
-                file += 1;
-            }
-        }
-    }
-    Some((sample, stm_white))
-}
-
-/// A line of datagen output: `FEN | score_cp (White POV) | result (White POV)`.
-/// Horizontal mirror augmentation: flipping the board left-right is a
-/// symmetry of chess, and in this feature layout it is exactly `sq ^ 7` for
-/// both perspectives (the low three bits are the file).
-fn mirror_sample(s: &mut Sample) {
-    for p in 0..2 {
-        for i in 0..s.counts[p] as usize {
-            s.feats[p][i] ^= 7;
-        }
-    }
-}
-
-fn parse_line(line: &str) -> Option<Sample> {
-    let mut parts = line.split('|');
-    let fen = parts.next()?.trim();
-    let score: f32 = parts.next()?.trim().parse().ok()?;
-    let result: f32 = parts.next()?.trim().parse().ok()?;
-    let (mut sample, stm_white) = parse_fen(fen)?;
-    if !(0.0..=1.0).contains(&result) {
-        return None;
-    }
-    // Data is White POV; the net learns the side-to-move POV.
-    if stm_white {
-        sample.score = score;
-        sample.result = result;
-    } else {
-        sample.score = -score;
-        sample.result = 1.0 - result;
-    }
-    Some(sample)
-}
-
-/// Sequential reader over one or more plain (uncompressed) data files.
-struct LineReader {
-    files: Vec<PathBuf>,
-    readers: Vec<Option<BufReader<File>>>,
-    /// A file that hit EOF must stay exhausted. Reopening it would make the
-    /// round-robin reader loop forever.
-    done: Vec<bool>,
-    next: usize,
-    line: String,
-}
-
-impl LineReader {
-    fn new(files: Vec<PathBuf>) -> Self {
-        let readers = (0..files.len()).map(|_| None).collect();
-        let done = (0..files.len()).map(|_| false).collect();
-        Self { files, readers, done, next: 0, line: String::new() }
-    }
-
-    /// Round-robin across the input files. With `--data a --data b` this
-    /// interleaves generations instead of finishing one dataset before the
-    /// next, which matters when the files come from different nets.
-    fn next_line(&mut self) -> Option<String> {
-        if self.files.is_empty() {
-            return None;
-        }
-        for _ in 0..self.files.len() {
-            let i = self.next;
-            self.next = (self.next + 1) % self.files.len();
-            if self.done[i] {
-                continue;
-            }
-            if self.readers[i].is_none() {
-                match File::open(&self.files[i]) {
-                    Ok(f) => self.readers[i] = Some(BufReader::with_capacity(1 << 20, f)),
-                    Err(_) => {
-                        self.done[i] = true;
-                        continue;
-                    }
-                }
-            }
-            self.line.clear();
-            let read = self.readers[i].as_mut().unwrap().read_line(&mut self.line).ok()?;
-            if read == 0 {
-                self.readers[i] = None;
-                self.done[i] = true;
-                continue;
-            }
-            return Some(self.line.clone());
-        }
-        None
-    }
-}
-
-struct Shuffler {
-    buf: Vec<Sample>,
-    reader: LineReader,
-    rng: Rng,
-    capacity: usize,
-    skipped: u64,
-}
-
-impl Shuffler {
-    fn new(files: Vec<PathBuf>, capacity: usize, seed: u64) -> Self {
-        Self {
-            buf: Vec::with_capacity(capacity),
-            reader: LineReader::new(files),
-            rng: Rng::new(seed),
-            capacity,
-            skipped: 0,
-        }
-    }
-
-    fn fill(&mut self) {
-        while self.buf.len() < self.capacity {
-            match self.reader.next_line() {
-                Some(line) => match parse_line(&line) {
-                    Some(s) => self.buf.push(s),
-                    None => self.skipped += 1,
-                },
-                None => break,
-            }
-        }
-    }
-
-    /// Start a new pass over the data files (shuffle order continues).
-    fn rewind(&mut self) {
-        self.buf.clear();
-        self.reader = LineReader::new(self.reader.files.clone());
-    }
-
-    /// Reservoir-style bounded shuffle: every returned sample is drawn from a
-    /// roughly `capacity`-sized rolling window, so memory stays flat on 65M+
-    /// position files while consecutive samples are still decorrelated.
-    fn next(&mut self) -> Option<Sample> {
-        if self.buf.len() < 4096 {
-            self.fill();
-        }
-        if self.buf.is_empty() {
-            return None;
-        }
-        let i = self.rng.below(self.buf.len());
-        let sample = self.buf[i];
-        let mut line = self.reader.next_line();
-        loop {
-            match line {
-                Some(l) => match parse_line(&l) {
-                    Some(s) => {
-                        self.buf[i] = s;
-                        break;
-                    }
-                    None => {
-                        self.skipped += 1;
-                        line = self.reader.next_line();
-                    }
-                },
-                None => {
-                    self.buf.swap_remove(i);
-                    break;
-                }
-            }
-        }
-        Some(sample)
-    }
-}
-
-struct Net {
-    w: Vec<f32>,
-    b: Vec<f32>,
-    ow: Vec<f32>,
-    ob: f32,
-}
-
-impl Net {
-    fn new(rng: &mut Rng) -> Self {
-        let mut w = vec![0.0f32; INPUTS * H];
-        for x in w.iter_mut() {
-            *x = (rng.f32() - 0.5) * 32.0;
-        }
-        let mut ow = vec![0.0f32; 2 * H];
-        for x in ow.iter_mut() {
-            *x = (rng.f32() - 0.5) * 0.1;
-        }
-        Self { w, b: vec![0.0; H], ow, ob: 0.0 }
-    }
-
-    /// Load an existing i16 net so we can fine-tune it instead of starting
-    /// from random weights. Layout must match `src/nnue.rs`.
-    fn load(path: &std::path::Path) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        let expected = (INPUTS * H + H + 2 * H + 1) * 2;
-        if bytes.len() != expected {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("net is {} bytes, expected {}", bytes.len(), expected),
-            ));
-        }
-        let mut words = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]));
-        let mut w = Vec::with_capacity(INPUTS * H);
-        for _ in 0..INPUTS * H {
-            w.push(words.next().unwrap() as f32);
-        }
-        let mut b = Vec::with_capacity(H);
-        for _ in 0..H {
-            b.push(words.next().unwrap() as f32);
-        }
-        let mut ow = Vec::with_capacity(2 * H);
-        for _ in 0..2 * H {
-            ow.push(words.next().unwrap() as f32);
-        }
-        let ob = words.next().unwrap() as f32;
-        Ok(Self { w, b, ow, ob })
-    }
-
-    /// Inference in trainer units; used by tests and handy for sanity checks.
-    #[allow(dead_code)]
-    fn eval(&self, s: &Sample) -> f32 {
-        let (us, them) = if s.stm_white { (0, 1) } else { (1, 0) };
-        let mut sum = 0.0f32;
-        for p in [us, them] {
-            let mut acc = [0.0f32; H];
-            acc.copy_from_slice(&self.b);
-            for i in 0..s.counts[p] as usize {
-                let row = s.feats[p][i] as usize * H;
-                for (a, w) in acc.iter_mut().zip(&self.w[row..row + H]) {
-                    *a += *w;
-                }
-            }
-            let off = if p == us { 0 } else { H };
-            for h in 0..H {
-                let a = acc[h].clamp(0.0, QA);
-                sum += a * a * self.ow[off + h];
-            }
-        }
-        (sum / QA + self.ob) * OUT_SCALE
-    }
-}
-
-/// Per-thread gradient buffer; one per worker, summed once per batch.
-struct Grad {
-    w: Vec<f32>,
-    b: Vec<f32>,
-    ow: Vec<f32>,
-    ob: f32,
-    loss: f64,
-}
-
-impl Grad {
-    fn new() -> Self {
-        Self { w: vec![0.0; INPUTS * H], b: vec![0.0; H], ow: vec![0.0; 2 * H], ob: 0.0, loss: 0.0 }
-    }
-
-    fn clear(&mut self) {
-        self.w.fill(0.0);
-        self.b.fill(0.0);
-        self.ow.fill(0.0);
-        self.ob = 0.0;
-        self.loss = 0.0;
+fn shuffle<T>(v: &mut [T], rng: &mut Rng) {
+    for i in (1..v.len()).rev() {
+        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+        v.swap(i, j);
     }
 }
 
@@ -396,457 +77,653 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Forward, loss and backward for one sample, accumulating into `g`.
-fn accumulate(g: &mut Grad, net: &Net, s: &Sample, lambda: f32) {
-    let (us, them) = if s.stm_white { (0usize, 1usize) } else { (1, 0) };
-    let mut acc = [[0.0f32; H]; 2];
-    let mut a = [[0.0f32; H]; 2];
-    let mut sq = [[0.0f32; H]; 2];
-    let mut sum = 0.0f32;
+fn read_recs(path: &Path) -> Vec<Rec> {
+    let mut bytes = Vec::new();
+    File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).read_to_end(&mut bytes).unwrap();
+    assert!(bytes.len() % REC == 0, "{} is not a record file", path.display());
+    bytes.chunks_exact(REC).map(|c| c.try_into().unwrap()).collect()
+}
 
-    for p in [us, them] {
-        acc[p].copy_from_slice(&net.b);
-        for i in 0..s.counts[p] as usize {
-            let row = s.feats[p][i] as usize * H;
-            for (x, w) in acc[p].iter_mut().zip(&net.w[row..row + H]) {
-                *x += *w;
+fn threads_default() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
+// ---------------------------------------------------------------- encoding
+
+/// `<FEN> | <score_cp White POV> | <result White POV>` -> record.
+fn encode(line: &str) -> Option<Rec> {
+    let mut parts = line.split('|');
+    let fen = parts.next()?.trim();
+    let score: f32 = parts.next()?.trim().parse().ok()?;
+    let result: f32 = parts.next()?.trim().parse().ok()?;
+    let mut fields = fen.split_whitespace();
+    let board = fields.next()?;
+    let stm = match fields.next()? {
+        "w" => 0u8,
+        "b" => 1,
+        _ => return None,
+    };
+    let mut squares = [0xFFu8; 64];
+    let (mut rank, mut file) = (7i32, 0i32);
+    for c in board.chars() {
+        match c {
+            '/' => {
+                rank -= 1;
+                file = 0;
             }
-        }
-        for h in 0..H {
-            let v = acc[p][h].clamp(0.0, QA);
-            a[p][h] = v;
-            sq[p][h] = v * v;
-            sum += sq[p][h] * net.ow[if p == us { h } else { H + h }];
+            '1'..='8' => file += c as i32 - '0' as i32,
+            _ => {
+                let kind = "pnbrqk".find(c.to_ascii_lowercase())? as u8;
+                let black = c.is_ascii_lowercase() as u8;
+                if !(0..8).contains(&rank) || !(0..8).contains(&file) {
+                    return None;
+                }
+                squares[(rank * 8 + file) as usize] = black << 3 | kind;
+                file += 1;
+            }
         }
     }
-
-    let eval = (sum / QA + net.ob) * OUT_SCALE;
-    let pred = sigmoid(eval / SCALE);
-    // Blend the game result with the engine score *in sigmoid space*. The old
-    // loss used an unbounded squared error in centipawns, so a few 2000 cp
-    // outliers could dominate a WDL term capped at 1.
-    let score_target = sigmoid(s.score / SCALE);
-    let target = lambda * s.result + (1.0 - lambda) * score_target;
-    let delta = pred - target;
-    g.loss += (delta * delta) as f64;
-
-    // d loss / d eval
-    let dl_de = 2.0 * delta * pred * (1.0 - pred) / SCALE;
-    let dsum = dl_de * OUT_SCALE / QA;
-    g.ob += dl_de * OUT_SCALE;
-
-    for h in 0..H {
-        g.ow[h] += dsum * sq[us][h];
-        g.ow[H + h] += dsum * sq[them][h];
+    let mut rec = [0u8; REC];
+    let mut occ = 0u64;
+    let mut n = 0usize;
+    for (sq, &p) in squares.iter().enumerate() {
+        if p != 0xFF {
+            if n >= 32 {
+                return None;
+            }
+            occ |= 1 << sq;
+            rec[8 + n / 2] |= p << (4 * (n & 1));
+            n += 1;
+        }
     }
+    rec[..8].copy_from_slice(&occ.to_le_bytes());
+    let s = score.round().clamp(-32000.0, 32000.0) as i16;
+    rec[24..26].copy_from_slice(&s.to_le_bytes());
+    rec[26] = if result == 1.0 {
+        2
+    } else if result == 0.5 {
+        1
+    } else if result == 0.0 {
+        0
+    } else {
+        return None;
+    };
+    rec[27] = stm;
+    Some(rec)
+}
 
-    // d loss / d accumulator for each perspective, then scatter to feature rows.
-    for p in [us, them] {
-        let off = if p == us { 0 } else { H };
-        let mut dacc = [0.0f32; H];
-        for h in 0..H {
-            if a[p][h] > 0.0 && a[p][h] < QA {
-                dacc[h] = dsum * net.ow[off + h] * 2.0 * a[p][h];
-            }
+/// Both perspectives' active features: index 0 = side to move.
+struct Sample {
+    f: [[u16; 32]; 2],
+    n: usize,
+    bucket: usize,
+    target: f32,
+}
+
+#[inline]
+fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool) -> Sample {
+    let mut occ = u64::from_le_bytes(r[..8].try_into().unwrap());
+    let score = i16::from_le_bytes([r[24], r[25]]) as f32;
+    let stm_black = r[27] == 1;
+    let mut s = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
+    let flip = if mirror { 7u16 } else { 0 };
+    while occ != 0 {
+        let sq = occ.trailing_zeros() as u16 ^ flip;
+        occ &= occ - 1;
+        let nib = r[8 + s.n / 2] >> (4 * (s.n & 1)) & 0xF;
+        let black = nib >> 3 == 1;
+        let kind = (nib & 7) as u16;
+        // Perspective 0 is the side to move, 1 the opponent.
+        for (i, persp_black) in [stm_black, !stm_black].into_iter().enumerate() {
+            let side = if black == persp_black { 0 } else { 384 };
+            let rel = if persp_black { sq ^ 56 } else { sq };
+            s.f[i][s.n] = side + kind * 64 + rel;
         }
-        for i in 0..s.counts[p] as usize {
-            let row = s.feats[p][i] as usize * H;
-            for (gw, d) in g.w[row..row + H].iter_mut().zip(&dacc) {
-                *gw += *d;
-            }
-        }
-        for (gb, d) in g.b.iter_mut().zip(&dacc) {
-            *gb += *d;
-        }
+        s.n += 1;
+    }
+    s.bucket = if buckets == 1 { 0 } else { ((s.n.saturating_sub(2)) * buckets / 32).min(buckets - 1) };
+    let mut wdl = r[26] as f32 / 2.0;
+    let mut sc = score;
+    if stm_black {
+        wdl = 1.0 - wdl;
+        sc = -sc;
+    }
+    s.target = lambda * wdl + (1.0 - lambda) * sigmoid(sc / SCALE);
+    s
+}
+
+// ---------------------------------------------------------------- network
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Shape {
+    h: usize,
+    buckets: usize,
+}
+
+impl Shape {
+    fn ft_b(&self) -> usize {
+        INPUTS * self.h
+    }
+    fn out_w(&self) -> usize {
+        self.ft_b() + self.h
+    }
+    fn out_b(&self) -> usize {
+        self.out_w() + self.buckets * 2 * self.h
+    }
+    fn len(&self) -> usize {
+        self.out_b() + self.buckets
+    }
+    /// Size of the exported i16 file.
+    fn file_bytes(&self) -> usize {
+        self.len() * 2
+    }
+    fn from_file_bytes(bytes: usize, buckets: usize) -> Option<Self> {
+        let words = bytes / 2;
+        let h = words.checked_sub(buckets)? / (INPUTS + 1 + 2 * buckets);
+        let s = Shape { h, buckets };
+        (s.file_bytes() == bytes).then_some(s)
     }
 }
 
-fn run_batch(net: &Net, batch: &[Sample], grads: &mut [Grad], lambda: f32) -> f64 {
-    for g in grads.iter_mut() {
-        g.clear();
+/// Forward pass. `acc` (len 2h) receives the pre-activation accumulators.
+#[inline]
+fn forward(p: &[f32], sh: Shape, s: &Sample, acc: &mut [f32]) -> f32 {
+    let h = sh.h;
+    let fw = &p[..INPUTS * h];
+    let fb = &p[sh.ft_b()..sh.ft_b() + h];
+    for side in 0..2 {
+        let a = &mut acc[side * h..(side + 1) * h];
+        a.copy_from_slice(fb);
+        for &f in &s.f[side][..s.n] {
+            let row = &fw[f as usize * h..f as usize * h + h];
+            for (x, w) in a.iter_mut().zip(row) {
+                *x += *w;
+            }
+        }
     }
-    let chunk = batch.len().div_ceil(grads.len()).max(1);
-    std::thread::scope(|scope| {
-        for (g, part) in grads.iter_mut().zip(batch.chunks(chunk)) {
-            scope.spawn(move || {
-                for s in part {
-                    accumulate(g, net, s, lambda);
+    let ow = &p[sh.out_w() + s.bucket * 2 * h..sh.out_w() + (s.bucket + 1) * 2 * h];
+    let mut out = p[sh.out_b() + s.bucket];
+    let mut sum = 0.0f32;
+    for (x, w) in acc.iter().zip(ow) {
+        let a = x.clamp(0.0, 1.0);
+        sum += a * a * *w;
+    }
+    out += sum;
+    out
+}
+
+/// Forward + backward for one sample into gradient buffer `g`; returns loss.
+#[inline]
+fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32], dacc: &mut [f32]) -> f32 {
+    let h = sh.h;
+    let out = forward(p, sh, s, acc);
+    let pred = sigmoid(out);
+    let err = pred - s.target;
+    let grad = 2.0 * err * pred * (1.0 - pred);
+
+    let ow0 = sh.out_w() + s.bucket * 2 * h;
+    g[sh.out_b() + s.bucket] += grad;
+    {
+        let ow = &p[ow0..ow0 + 2 * h];
+        let gow = &mut g[ow0..ow0 + 2 * h];
+        for i in 0..2 * h {
+            let x = acc[i];
+            let a = x.clamp(0.0, 1.0);
+            gow[i] += grad * a * a;
+            dacc[i] = if x > 0.0 && x < 1.0 { grad * ow[i] * 2.0 * a } else { 0.0 };
+        }
+    }
+    let (gw, rest) = g.split_at_mut(INPUTS * h);
+    let gb = &mut rest[..h];
+    for side in 0..2 {
+        let d = &dacc[side * h..(side + 1) * h];
+        for (x, y) in gb.iter_mut().zip(d) {
+            *x += *y;
+        }
+        for &f in &s.f[side][..s.n] {
+            let row = &mut gw[f as usize * h..f as usize * h + h];
+            for (x, y) in row.iter_mut().zip(d) {
+                *x += *y;
+            }
+        }
+    }
+    err * err
+}
+
+fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
+    let mut p = vec![0.0f32; sh.len()];
+    let a = 1.0 / (32.0f32).sqrt();
+    for x in &mut p[..INPUTS * sh.h] {
+        *x = rng.uniform(a);
+    }
+    let a = 1.0 / ((2 * sh.h) as f32).sqrt();
+    for x in &mut p[sh.out_w()..sh.out_b()] {
+        *x = rng.uniform(a);
+    }
+    p
+}
+
+fn quantize(p: &[f32], sh: Shape) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sh.file_bytes());
+    for (i, &x) in p.iter().enumerate() {
+        let scale = if i < sh.out_w() {
+            QA
+        } else if i < sh.out_b() {
+            QB
+        } else {
+            QA * QB
+        };
+        let q = (x * scale).round().clamp(-32768.0, 32767.0) as i16;
+        out.extend_from_slice(&q.to_le_bytes());
+    }
+    out
+}
+
+fn dequantize(bytes: &[u8], sh: Shape) -> Vec<f32> {
+    bytes
+        .chunks_exact(2)
+        .enumerate()
+        .map(|(i, c)| {
+            let q = i16::from_le_bytes([c[0], c[1]]) as f32;
+            let scale = if i < sh.out_w() {
+                QA
+            } else if i < sh.out_b() {
+                QB
+            } else {
+                QA * QB
+            };
+            q / scale
+        })
+        .collect()
+}
+
+fn load_net(path: &Path, buckets: usize) -> (Vec<f32>, Shape) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let sh = Shape::from_file_bytes(bytes.len(), buckets)
+        .unwrap_or_else(|| panic!("{}: {} bytes is no (768->H)x2->{buckets} net", path.display(), bytes.len()));
+    (dequantize(&bytes, sh), sh)
+}
+
+/// Mean validation loss, plus the mean |eval| in cp as a scale check.
+fn validate(p: &[f32], sh: Shape, val: &[Rec], lambda: f32, threads: usize) -> (f64, f64) {
+    if val.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    let chunk = val.len().div_ceil(threads);
+    let parts: Vec<(f64, f64)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = val
+            .chunks(chunk)
+            .map(|part| {
+                sc.spawn(move || {
+                    let mut acc = vec![0.0f32; 2 * sh.h];
+                    let (mut l, mut e) = (0.0f64, 0.0f64);
+                    for r in part {
+                        let s = decode(r, lambda, sh.buckets, false);
+                        let o = forward(p, sh, &s, &mut acc);
+                        let d = sigmoid(o) - s.target;
+                        l += (d * d) as f64;
+                        e += (o * SCALE).abs() as f64;
+                    }
+                    (l, e)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let n = val.len() as f64;
+    (parts.iter().map(|x| x.0).sum::<f64>() / n, parts.iter().map(|x| x.1).sum::<f64>() / n)
+}
+
+// ---------------------------------------------------------------- optimiser
+
+struct Adam {
+    m: Vec<f32>,
+    v: Vec<f32>,
+    step: u64,
+}
+
+/// Sum the per-thread gradients, then one AdamW step with clipping, in parallel.
+fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32, inv_batch: f32, threads: usize) {
+    opt.step += 1;
+    let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
+    let c1 = 1.0 - b1.powi(opt.step.min(1 << 20) as i32);
+    let c2 = 1.0 - b2.powi(opt.step.min(1 << 20) as i32);
+    let chunk = p.len().div_ceil(threads);
+    std::thread::scope(|sc| {
+        for (k, ((pc, mc), vc)) in p.chunks_mut(chunk).zip(opt.m.chunks_mut(chunk)).zip(opt.v.chunks_mut(chunk)).enumerate() {
+            let base = k * chunk;
+            sc.spawn(move || {
+                for i in 0..pc.len() {
+                    let mut g = 0.0f32;
+                    for gr in grads {
+                        g += gr[base + i];
+                    }
+                    g *= inv_batch;
+                    mc[i] = b1 * mc[i] + (1.0 - b1) * g;
+                    vc[i] = b2 * vc[i] + (1.0 - b2) * g * g;
+                    let upd = (mc[i] / c1) / ((vc[i] / c2).sqrt() + eps);
+                    let x = pc[i] * (1.0 - lr * wd) - lr * upd;
+                    pc[i] = x.clamp(-CLIP, CLIP);
                 }
             });
         }
     });
-    grads.iter().map(|g| g.loss).sum()
 }
 
-fn adam(params: &mut [f32], m: &mut [f32], v: &mut [f32], grad: &[f32], lr: f32, t: u32, scale: f32) {
-    let b1 = 0.9f32;
-    let b2 = 0.999f32;
-    let eps = 1e-8f32;
-    let c1 = 1.0 - b1.powi(t as i32);
-    let c2 = 1.0 - b2.powi(t as i32);
-    for i in 0..params.len() {
-        let g = grad[i] * scale;
-        m[i] = b1 * m[i] + (1.0 - b1) * g;
-        v[i] = b2 * v[i] + (1.0 - b2) * g * g;
-        params[i] -= lr * (m[i] / c1) / ((v[i] / c2).sqrt() + eps);
+fn save_ckpt(path: &Path, sh: Shape, p: &[f32], opt: &Adam, seen: u64) {
+    let mut w = BufWriter::new(File::create(path).unwrap());
+    w.write_all(CKPT_MAGIC).unwrap();
+    for x in [sh.h as u64, sh.buckets as u64, opt.step, seen] {
+        w.write_all(&x.to_le_bytes()).unwrap();
     }
-}
-
-struct Opt {
-    mw: Vec<f32>,
-    vw: Vec<f32>,
-    mb: Vec<f32>,
-    vb: Vec<f32>,
-    mow: Vec<f32>,
-    vow: Vec<f32>,
-    mob: f32,
-    vob: f32,
-    step: u32,
-}
-
-impl Opt {
-    fn new() -> Self {
-        Self {
-            mw: vec![0.0; INPUTS * H],
-            vw: vec![0.0; INPUTS * H],
-            mb: vec![0.0; H],
-            vb: vec![0.0; H],
-            mow: vec![0.0; 2 * H],
-            vow: vec![0.0; 2 * H],
-            mob: 0.0,
-            vob: 0.0,
-            step: 0,
+    for arr in [p, &opt.m[..], &opt.v[..]] {
+        for x in arr {
+            w.write_all(&x.to_le_bytes()).unwrap();
         }
     }
-
-    fn update(&mut self, net: &mut Net, grad: &Grad, count: usize, lr: f32) {
-        self.step += 1;
-        let inv = 1.0 / count as f32;
-        let gob = grad.ob * inv;
-
-        adam(&mut net.w, &mut self.mw, &mut self.vw, &grad.w, lr, self.step, inv);
-        adam(&mut net.b, &mut self.mb, &mut self.vb, &grad.b, lr, self.step, inv);
-        adam(&mut net.ow, &mut self.mow, &mut self.vow, &grad.ow, lr, self.step, inv);
-
-        // Scalar bias with the same Adam rules.
-        let b1 = 0.9f32;
-        let b2 = 0.999f32;
-        let eps = 1e-8f32;
-        let c1 = 1.0 - b1.powi(self.step as i32);
-        let c2 = 1.0 - b2.powi(self.step as i32);
-        self.mob = b1 * self.mob + (1.0 - b1) * gob;
-        self.vob = b2 * self.vob + (1.0 - b2) * gob * gob;
-        net.ob -= lr * (self.mob / c1) / ((self.vob / c2).sqrt() + eps);
-    }
 }
 
-fn save_checkpoint(path: &PathBuf, net: &Net, opt: &Opt) -> std::io::Result<()> {
-    let mut out = Vec::with_capacity(8 + 12 + (INPUTS * H + H + 2 * H + 1) * 4 * 3);
-    out.extend_from_slice(CHECKPOINT_MAGIC);
-    out.extend_from_slice(&(H as u32).to_le_bytes());
-    out.extend_from_slice(&opt.step.to_le_bytes());
-    for arr in [&net.w, &net.b, &net.ow] {
-        for x in arr.iter() {
-            out.extend_from_slice(&x.to_le_bytes());
-        }
-    }
-    out.extend_from_slice(&net.ob.to_le_bytes());
-    for arr in [&opt.mw, &opt.vw, &opt.mb, &opt.vb, &opt.mow, &opt.vow] {
-        for x in arr.iter() {
-            out.extend_from_slice(&x.to_le_bytes());
-        }
-    }
-    out.extend_from_slice(&opt.mob.to_le_bytes());
-    out.extend_from_slice(&opt.vob.to_le_bytes());
-    let mut f = File::create(path)?;
-    f.write_all(&out)
+fn load_ckpt(path: &Path, sh: Shape) -> (Vec<f32>, Adam, u64) {
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(&bytes[..8], CKPT_MAGIC, "not a v2 checkpoint");
+    let word = |i: usize| u64::from_le_bytes(bytes[8 + 8 * i..16 + 8 * i].try_into().unwrap());
+    assert_eq!((word(0) as usize, word(1) as usize), (sh.h, sh.buckets), "checkpoint shape differs");
+    let floats: Vec<f32> = bytes[40..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let n = sh.len();
+    assert_eq!(floats.len(), 3 * n);
+    (floats[..n].to_vec(), Adam { m: floats[n..2 * n].to_vec(), v: floats[2 * n..].to_vec(), step: word(2) }, word(3))
 }
 
-fn load_checkpoint(path: &PathBuf, net: &mut Net, opt: &mut Opt) -> std::io::Result<()> {
-    let mut bytes = Vec::new();
-    File::open(path)?.read_to_end(&mut bytes)?;
-    if bytes.len() < 20 || &bytes[..8] != CHECKPOINT_MAGIC {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a trainer checkpoint"));
-    }
-    let h = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    if h as usize != H {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "hidden size differs"));
-    }
-    if bytes.len() != 16 + (INPUTS * H + H + 2 * H + 1) * 4 * 3 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "checkpoint size differs"));
-    }
-    opt.step = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-    let mut pos = 16;
-    net.w = take_f32(&bytes, &mut pos, INPUTS * H);
-    net.b = take_f32(&bytes, &mut pos, H);
-    net.ow = take_f32(&bytes, &mut pos, 2 * H);
-    net.ob = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
-    pos += 4;
-    opt.mw = take_f32(&bytes, &mut pos, INPUTS * H);
-    opt.vw = take_f32(&bytes, &mut pos, INPUTS * H);
-    opt.mb = take_f32(&bytes, &mut pos, H);
-    opt.vb = take_f32(&bytes, &mut pos, H);
-    opt.mow = take_f32(&bytes, &mut pos, 2 * H);
-    opt.vow = take_f32(&bytes, &mut pos, 2 * H);
-    opt.mob = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
-    pos += 4;
-    opt.vob = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
-    Ok(())
+// ---------------------------------------------------------------- data feed
+
+/// Streams records from files in order, shuffling within 1M-record chunks.
+struct Feed {
+    files: Vec<PathBuf>,
+    idx: usize,
+    reader: Option<BufReader<File>>,
+    buf: Vec<Rec>,
+    pos: usize,
+    rng: Rng,
 }
 
-fn take_f32(bytes: &[u8], pos: &mut usize, n: usize) -> Vec<f32> {
-    let mut v = Vec::with_capacity(n);
-    for _ in 0..n {
-        v.push(f32::from_le_bytes(bytes[*pos..*pos + 4].try_into().unwrap()));
-        *pos += 4;
-    }
-    v
-}
+impl Feed {
+    const CHUNK: usize = 1 << 20;
 
-/// Round to the runtime's little-endian i16 layout and report what got clipped.
-fn net_bytes(net: &Net, clip_out: Option<i16>) -> (Vec<u8>, usize, bool) {
-    let mut out = Vec::with_capacity(NET_BYTES);
-    let mut clipped = 0usize;
-    let mut small_out = true;
-    let push = |x: f32, out: &mut Vec<u8>, clipped: &mut usize| {
-        let r = x.round();
-        if r < -32768.0 || r > 32767.0 {
-            *clipped += 1;
-        }
-        let q = r.clamp(-32768.0, 32767.0) as i16;
-        out.extend_from_slice(&q.to_le_bytes());
-        q
-    };
-    for &x in &net.w {
-        push(x, &mut out, &mut clipped);
+    fn new(files: Vec<PathBuf>, seed: u64) -> Self {
+        Self { files, idx: 0, reader: None, buf: Vec::new(), pos: 0, rng: Rng::new(seed) }
     }
-    for &x in &net.b {
-        push(x, &mut out, &mut clipped);
-    }
-    for &x0 in &net.ow {
-        let x = match clip_out {
-            Some(limit) => x0.clamp(-(limit as f32), limit as f32),
-            None => x0,
-        };
-        let q = push(x, &mut out, &mut clipped);
-        if !(-127..=127).contains(&q) {
-            small_out = false;
-        }
-    }
-    push(net.ob, &mut out, &mut clipped);
-    assert_eq!(out.len(), NET_BYTES);
-    (out, clipped, small_out)
-}
 
-fn export(net: &Net, path: &PathBuf, clip_out: Option<i16>) -> std::io::Result<()> {
-    let (out, clipped, small_out) = net_bytes(net, clip_out);
-    File::create(path)?.write_all(&out)?;
-    println!(
-        "wrote {} ({} bytes): {} values clipped to i16, output weights {}",
-        path.display(),
-        out.len(),
-        clipped,
-        if small_out { "use the fast i32 path" } else { "need the wide i64 path" }
-    );
-    Ok(())
-}
-
-struct Args {
-    data: Vec<PathBuf>,
-    out: PathBuf,
-    epochs: u32,
-    batch: usize,
-    lr: f32,
-    lambda: f32,
-    threads: usize,
-    buffer: usize,
-    max_positions: Option<u64>,
-    seed: u64,
-    checkpoint_every: u64,
-    checkpoint: Option<PathBuf>,
-    resume: Option<PathBuf>,
-    log_every: u64,
-    /// Randomly mirror each sample horizontally (file ^ 7) while training.
-    mirror: bool,
-    /// Clamp output weights to this magnitude on export (e.g. 127 keeps the
-    /// fast i32 path at H=256).
-    clip_out: Option<i16>,
-    /// Start from this existing net instead of random weights.
-    init: Option<PathBuf>,
-}
-
-impl Args {
-    fn parse() -> Self {
-        let mut a = Self {
-            data: Vec::new(),
-            out: PathBuf::from("net.bin"),
-            epochs: 1,
-            batch: 1024,
-            lr: 1e-3,
-            lambda: 0.5,
-            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
-            buffer: 262144,
-            max_positions: None,
-            seed: 1,
-            checkpoint_every: 0,
-            checkpoint: None,
-            resume: None,
-            log_every: 10000,
-            mirror: false,
-            clip_out: None,
-            init: None,
-        };
-        let mut it = std::env::args().skip(1);
-        while let Some(flag) = it.next() {
-            let mut value = || it.next().unwrap_or_else(|| panic!("missing value for {flag}"));
-            match flag.as_str() {
-                "--data" => a.data.push(PathBuf::from(value())),
-                "--out" => a.out = PathBuf::from(value()),
-                "--epochs" => a.epochs = value().parse().unwrap(),
-                "--batch" => a.batch = value().parse().unwrap(),
-                "--lr" => a.lr = value().parse().unwrap(),
-                "--lambda" => a.lambda = value().parse().unwrap(),
-                "--threads" => a.threads = value().parse().unwrap(),
-                "--shuffle-buffer" => a.buffer = value().parse().unwrap(),
-                "--max-positions" => a.max_positions = Some(value().parse().unwrap()),
-                "--seed" => a.seed = value().parse().unwrap(),
-                "--checkpoint-every" => a.checkpoint_every = value().parse().unwrap(),
-                "--checkpoint" => a.checkpoint = Some(PathBuf::from(value())),
-                "--resume" => a.resume = Some(PathBuf::from(value())),
-                "--log-every" => a.log_every = value().parse().unwrap(),
-                "--mirror" => a.mirror = true,
-                "--clip-out" => a.clip_out = Some(value().parse().unwrap()),
-                "--init" => a.init = Some(PathBuf::from(value())),
-                "--help" | "-h" => {
-                    println!(
-                        "usage: nnue-trainer --data FILE [--data FILE...] --out net.bin\n\
-                         \t[--epochs N] [--batch N] [--lr F] [--lambda F] [--threads N]\n\
-                         \t[--shuffle-buffer N] [--max-positions N] [--seed N]\n\
-                         \t[--checkpoint-every N] [--checkpoint FILE] [--resume FILE] [--mirror] [--clip-out N] [--init FILE]\n\
-                         \t[--log-every N]\n\n\
-                         Data is plain text from `gunzip -c datagen-*.gz` in the format\n\
-                         `<FEN> | <score_cp White POV> | <result White POV>`."
-                    );
-                    std::process::exit(0);
+    /// Next record, wrapping around to the first file at the end (epochs are
+    /// counted in positions, not passes).
+    fn refill(&mut self) {
+        self.buf.clear();
+        self.pos = 0;
+        let mut raw = vec![0u8; Self::CHUNK * REC];
+        let mut filled = 0;
+        while filled < raw.len() {
+            if self.reader.is_none() {
+                let f = &self.files[self.idx % self.files.len()];
+                self.reader = Some(BufReader::with_capacity(1 << 22, File::open(f).unwrap()));
+            }
+            let n = self.reader.as_mut().unwrap().read(&mut raw[filled..]).unwrap();
+            if n == 0 {
+                self.reader = None;
+                self.idx += 1;
+                if filled > 0 {
+                    break;
                 }
-                other => panic!("unknown option {other}"),
+                continue;
+            }
+            filled += n;
+        }
+        filled -= filled % REC;
+        self.buf.extend(raw[..filled].chunks_exact(REC).map(|c| -> Rec { c.try_into().unwrap() }));
+        shuffle(&mut self.buf, &mut self.rng);
+    }
+
+    fn batch(&mut self, out: &mut Vec<Rec>, n: usize) {
+        out.clear();
+        while out.len() < n {
+            if self.pos == self.buf.len() {
+                self.refill();
+            }
+            let take = (n - out.len()).min(self.buf.len() - self.pos);
+            out.extend_from_slice(&self.buf[self.pos..self.pos + take]);
+            self.pos += take;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- commands
+
+fn cmd_convert(args: &[String]) {
+    assert!(args.len() == 2, "usage: convert <in.txt|-> <out.bin>");
+    let input: Box<dyn BufRead> = if args[0] == "-" {
+        Box::new(BufReader::with_capacity(1 << 22, std::io::stdin()))
+    } else {
+        Box::new(BufReader::with_capacity(1 << 22, File::open(&args[0]).unwrap()))
+    };
+    let mut out = BufWriter::with_capacity(1 << 22, File::create(&args[1]).unwrap());
+    let (mut ok, mut bad) = (0u64, 0u64);
+    for line in input.lines() {
+        let line = line.unwrap();
+        match encode(&line) {
+            Some(r) => {
+                out.write_all(&r).unwrap();
+                ok += 1;
+            }
+            None => bad += 1,
+        }
+    }
+    out.flush().unwrap();
+    eprintln!("{}: {ok} positions, {bad} skipped", args[1]);
+}
+
+fn cmd_shuffle(args: &[String]) {
+    let mut out_path = None;
+    let mut inputs = Vec::new();
+    let mut seed = 1u64;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--out" => out_path = Some(PathBuf::from(it.next().unwrap())),
+            "--seed" => seed = it.next().unwrap().parse().unwrap(),
+            _ => inputs.push(PathBuf::from(a)),
+        }
+    }
+    let out_path = out_path.expect("--out required");
+    let total: u64 = inputs.iter().map(|p| std::fs::metadata(p).unwrap().len() / REC as u64).sum();
+    let buckets = (total / (16 << 20) + 1) as usize; // ~512 MB per bucket in RAM
+    let tmp: Vec<PathBuf> = (0..buckets).map(|i| out_path.with_extension(format!("tmp{i}"))).collect();
+    let mut rng = Rng::new(seed);
+    {
+        let mut ws: Vec<BufWriter<File>> =
+            tmp.iter().map(|p| BufWriter::with_capacity(1 << 20, File::create(p).unwrap())).collect();
+        for inp in &inputs {
+            let mut r = BufReader::with_capacity(1 << 22, File::open(inp).unwrap());
+            let mut rec = [0u8; REC];
+            while r.read_exact(&mut rec).is_ok() {
+                ws[rng.below(buckets)].write_all(&rec).unwrap();
             }
         }
-        assert!(!a.data.is_empty(), "--data is required");
-        a
     }
+    let mut out = BufWriter::with_capacity(1 << 22, File::create(&out_path).unwrap());
+    for p in &tmp {
+        let mut recs = read_recs(p);
+        shuffle(&mut recs, &mut rng);
+        for r in &recs {
+            out.write_all(r).unwrap();
+        }
+        std::fs::remove_file(p).unwrap();
+    }
+    out.flush().unwrap();
+    eprintln!("{}: {total} positions in {buckets} buckets", out_path.display());
+}
+
+fn cmd_eval(args: &[String]) {
+    let (mut net, mut val, mut buckets, mut lambda) = (None, None, 1usize, 0.5f32);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--val" => val = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--lambda" => lambda = it.next().unwrap().parse().unwrap(),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets);
+    let val = read_recs(&val.expect("--val"));
+    let (l, e) = validate(&p, sh, &val, lambda, threads_default());
+    println!("H={} buckets={} val positions {} loss {:.6} mean|eval| {:.1}cp", sh.h, sh.buckets, val.len(), l, e);
+}
+
+fn cmd_train(args: &[String]) {
+    let mut data = Vec::new();
+    let mut val_path = None;
+    let mut out = PathBuf::from("net.bin");
+    let mut sh = Shape { h: 256, buckets: 1 };
+    let (mut epochs, mut epoch_size) = (10u64, 0u64);
+    let (mut batch, mut lr, mut lr_end, mut wd, mut lambda) = (16384usize, 1e-3f32, 1e-5f32, 0.0f32, 0.5f32);
+    let (mut threads, mut seed, mut mirror) = (threads_default(), 1u64, false);
+    let (mut init, mut resume, mut ckpt) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
+        match a.as_str() {
+            "--data" => data.push(PathBuf::from(v())),
+            "--val" => val_path = Some(PathBuf::from(v())),
+            "--out" => out = PathBuf::from(v()),
+            "--hidden" => sh.h = v().parse().unwrap(),
+            "--buckets" => sh.buckets = v().parse().unwrap(),
+            "--epochs" => epochs = v().parse().unwrap(),
+            "--epoch-size" => epoch_size = v().parse().unwrap(),
+            "--batch" => batch = v().parse().unwrap(),
+            "--lr" => lr = v().parse().unwrap(),
+            "--lr-end" => lr_end = v().parse().unwrap(),
+            "--wd" => wd = v().parse().unwrap(),
+            "--lambda" => lambda = v().parse().unwrap(),
+            "--threads" => threads = v().parse().unwrap(),
+            "--seed" => seed = v().parse().unwrap(),
+            "--mirror" => mirror = true,
+            "--init" => init = Some(PathBuf::from(v())),
+            "--resume" => resume = Some(PathBuf::from(v())),
+            "--checkpoint" => ckpt = Some(PathBuf::from(v())),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    assert!(!data.is_empty(), "--data required");
+    if epoch_size == 0 {
+        epoch_size = data.iter().map(|p| std::fs::metadata(p).unwrap().len() / REC as u64).sum();
+    }
+    let total = epochs * epoch_size;
+    let ckpt = ckpt.unwrap_or_else(|| out.with_extension("ckpt"));
+
+    let mut rng = Rng::new(seed);
+    let (mut p, mut opt, mut seen) = match (&resume, &init) {
+        (Some(r), _) => load_ckpt(r, sh),
+        (None, Some(i)) => {
+            let (p, s) = load_net(i, sh.buckets);
+            assert_eq!(s, sh, "init net shape differs from --hidden/--buckets");
+            let n = p.len();
+            (p.into_iter().map(|x| x.clamp(-CLIP, CLIP)).collect(), Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
+        }
+        (None, None) => {
+            let p = init_params(sh, &mut rng);
+            let n = p.len();
+            (p, Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
+        }
+    };
+    let val = val_path.as_deref().map(read_recs).unwrap_or_default();
+    println!(
+        "train H={} buckets={} params={} epochs={epochs} x {epoch_size} batch={batch} lr {lr}->{lr_end} wd={wd} lambda={lambda} mirror={mirror} threads={threads} val={}",
+        sh.h,
+        sh.buckets,
+        sh.len(),
+        val.len()
+    );
+    let (vl, ve) = validate(&p, sh, &val, lambda, threads);
+    println!("start val loss {vl:.6} mean|eval| {ve:.1}cp");
+
+    let mut feed = Feed::new(data, seed ^ 0xF00D ^ seen);
+    let mut grads: Vec<Vec<f32>> = (0..threads).map(|_| vec![0.0f32; sh.len()]).collect();
+    let mut recs: Vec<Rec> = Vec::with_capacity(batch);
+    let started = Instant::now();
+    let start_seen = seen;
+    let mut epoch_loss = 0.0f64;
+    let mut epoch_n = 0u64;
+    let mut ep = seen / epoch_size;
+    while seen < total {
+        let t = seen as f64 / total as f64;
+        let cur_lr = lr_end + 0.5 * (lr - lr_end) * (1.0 + (std::f64::consts::PI * t).cos() as f32);
+        feed.batch(&mut recs, batch);
+        let chunk = recs.len().div_ceil(threads);
+        let seed_b = rng.next_u64();
+        let loss: f64 = std::thread::scope(|sc| {
+            let p = &p;
+            let hs: Vec<_> = grads
+                .iter_mut()
+                .zip(recs.chunks(chunk))
+                .enumerate()
+                .map(|(k, (g, part))| {
+                    sc.spawn(move || {
+                        g.fill(0.0);
+                        let mut acc = vec![0.0f32; 2 * sh.h];
+                        let mut dacc = vec![0.0f32; 2 * sh.h];
+                        let mut mr = Rng::new(seed_b ^ k as u64);
+                        let mut l = 0.0f64;
+                        for r in part {
+                            let m = mirror && mr.next_u64() & 1 == 1;
+                            let s = decode(r, lambda, sh.buckets, m);
+                            l += train_sample(p, sh, &s, g, &mut acc, &mut dacc) as f64;
+                        }
+                        l
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).sum()
+        });
+        let used = &grads[..recs.len().div_ceil(chunk)];
+        adam_step(&mut p, &mut opt, used, cur_lr, wd, 1.0 / recs.len() as f32, threads);
+        seen += recs.len() as u64;
+        epoch_loss += loss;
+        epoch_n += recs.len() as u64;
+
+        if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total {
+            ep += 1;
+            let secs = started.elapsed().as_secs_f64();
+            let (vl, ve) = validate(&p, sh, &val, lambda, threads);
+            let q = quantize(&p, sh);
+            let (ql, _) = validate(&dequantize(&q, sh), sh, &val, lambda, threads);
+            let path = out.with_extension(format!("e{ep}.bin"));
+            File::create(&path).unwrap().write_all(&q).unwrap();
+            save_ckpt(&ckpt, sh, &p, &opt, seen);
+            println!(
+                "epoch {ep} lr {cur_lr:.2e} train {:.6} val {vl:.6} (quantized {ql:.6}) mean|eval| {ve:.1}cp {:.0} pos/s -> {}",
+                epoch_loss / epoch_n as f64,
+                (seen - start_seen) as f64 / secs,
+                path.display()
+            );
+            epoch_loss = 0.0;
+            epoch_n = 0;
+        }
+    }
+    let q = quantize(&p, sh);
+    File::create(&out).unwrap().write_all(&q).unwrap();
+    println!("wrote {} ({} bytes, H={} buckets={})", out.display(), q.len(), sh.h, sh.buckets);
 }
 
 fn main() {
-    let args = Args::parse();
-    let mut rng = Rng::new(args.seed);
-    let mut net = match &args.init {
-        Some(path) => {
-            let net = Net::load(path).unwrap_or_else(|e| panic!("init {path:?}: {e}"));
-            println!("initialised from {}", path.display());
-            net
-        }
-        None => Net::new(&mut rng),
-    };
-    let mut opt = Opt::new();
-    if let Some(path) = &args.resume {
-        load_checkpoint(path, &mut net, &mut opt).unwrap_or_else(|e| panic!("resume {path:?}: {e}"));
-        println!("resumed from {} at step {}", path.display(), opt.step);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval> ... (see the module docs)";
+    let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
+    match cmd.as_str() {
+        "convert" => cmd_convert(rest),
+        "shuffle" => cmd_shuffle(rest),
+        "train" => cmd_train(rest),
+        "eval" => cmd_eval(rest),
+        _ => panic!("{usage}"),
     }
-
-    let mut shuffler = Shuffler::new(args.data.clone(), args.buffer, args.seed);
-    let mut grads: Vec<Grad> = (0..args.threads).map(|_| Grad::new()).collect();
-    let mut batch: Vec<Sample> = Vec::with_capacity(args.batch);
-    let mut mirror_rng = Rng::new(args.seed ^ 0x5EED_1234);
-    let started = Instant::now();
-    let mut seen: u64 = 0;
-    let mut total_loss = 0.0f64;
-    let mut loss_count: u64 = 0;
-    let mut overall_loss = 0.0f64;
-    let mut overall_count: u64 = 0;
-    let mut last_ckpt: u64 = 0;
-
-    'epochs: for epoch in 1..=args.epochs {
-        shuffler.rewind();
-        let mut limit = args.max_positions.unwrap_or(u64::MAX);
-        loop {
-            batch.clear();
-            while batch.len() < args.batch && limit > 0 {
-                match shuffler.next() {
-                    Some(s) => {
-                        batch.push(s);
-                        limit -= 1;
-                    }
-                    None => break,
-                }
-            }
-            if batch.is_empty() {
-                break;
-            }
-            if args.mirror {
-                for s in batch.iter_mut() {
-                    if mirror_rng.below(2) == 1 {
-                        mirror_sample(s);
-                    }
-                }
-            }
-            let loss = run_batch(&net, &batch, &mut grads, args.lambda);
-            let (first, rest) = grads.split_first_mut().unwrap();
-            for g in rest {
-                add_grad(first, g);
-            }
-            opt.update(&mut net, first, batch.len(), args.lr);
-            seen += batch.len() as u64;
-            total_loss += loss;
-            loss_count += batch.len() as u64;
-            overall_loss += loss;
-            overall_count += batch.len() as u64;
-
-            if opt.step as u64 % args.log_every.max(1) == 0 {
-                let secs = started.elapsed().as_secs_f64().max(1e-9);
-                println!(
-                    "epoch {epoch} step {} positions {} loss {:.6} ({:.0} pos/s)",
-                    opt.step,
-                    seen,
-                    total_loss / loss_count as f64,
-                    seen as f64 / secs
-                );
-                total_loss = 0.0;
-                loss_count = 0;
-            }
-            if args.checkpoint_every > 0 && seen - last_ckpt >= args.checkpoint_every {
-                let path = args.checkpoint.clone().unwrap_or_else(|| PathBuf::from("checkpoint.bin"));
-                save_checkpoint(&path, &net, &opt).unwrap();
-                last_ckpt = seen;
-                println!("checkpoint {}", path.display());
-            }
-            if args.max_positions.is_some() && limit == 0 {
-                continue 'epochs;
-            }
-        }
-    }
-
-    println!(
-        "trained {} positions in {:.1}s, average loss {:.6}",
-        seen,
-        started.elapsed().as_secs_f64(),
-        if overall_count > 0 { overall_loss / overall_count as f64 } else { 0.0 }
-    );
-    export(&net, &args.out, args.clip_out).unwrap();
-    println!("skipped {} malformed lines", shuffler.skipped);
-}
-
-fn add_grad(dst: &mut Grad, src: &Grad) {
-    for (a, b) in dst.w.iter_mut().zip(&src.w) {
-        *a += *b;
-    }
-    for (a, b) in dst.b.iter_mut().zip(&src.b) {
-        *a += *b;
-    }
-    for (a, b) in dst.ow.iter_mut().zip(&src.ow) {
-        *a += *b;
-    }
-    dst.ob += src.ob;
 }
 
 #[cfg(test)]
@@ -854,95 +731,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startpos_features_match_runtime_layout() {
-        let (s, white) =
-            parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
-        assert!(white);
-        assert_eq!(s.counts, [32, 32]);
-        // Both kings are feature 324 in their own perspective (king kind 5,
-        // e1/e8 flip to the same relative square); the other king is 764.
-        for p in 0..2 {
-            let f = &s.feats[p][..s.counts[p] as usize];
-            assert!(f.contains(&324), "perspective {p} missing own king");
-            assert!(f.contains(&764), "perspective {p} missing enemy king");
-            let mut sorted = f.to_vec();
-            sorted.sort_unstable();
-            sorted.dedup();
-            assert_eq!(sorted.len(), f.len(), "duplicate features in perspective {p}");
+    fn features_match_runtime_layout() {
+        // Startpos, White to move: perspective 0 = White.
+        let r = encode("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 10 | 0.5").unwrap();
+        let s = decode(&r, 0.5, 1, false);
+        assert_eq!(s.n, 32);
+        for side in 0..2 {
+            let f = &s.f[side][..32];
+            assert!(f.contains(&324), "own king e1/e8 -> 5*64+4");
+            assert!(f.contains(&764), "enemy king -> 384+5*64+60");
         }
-        // Pawn on a2 (sq 8): white perspective kind 0 square 8; black
-        // perspective 384 + (8 ^ 56 = 48) = 432.
-        assert!(s.feats[0][..32].contains(&8));
-        assert!(s.feats[1][..32].contains(&432));
+        // a2 pawn: White persp 8, Black persp 384 + (8^56).
+        assert!(s.f[0].contains(&8));
+        assert!(s.f[1].contains(&(384 + 48)));
     }
 
     #[test]
-    fn mirror_is_an_involution() {
-        let (mut s, _) = parse_fen("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3").unwrap();
-        let original = s.feats;
-        mirror_sample(&mut s);
-        mirror_sample(&mut s);
-        assert_eq!(original, s.feats);
+    fn black_to_move_flips_targets_and_perspectives() {
+        let r = encode("4k3/8/8/8/8/8/8/4K2R b - - 0 1 | 400 | 1.0").unwrap();
+        let s = decode(&r, 1.0, 1, false);
+        assert_eq!(s.target, 0.0, "White won, Black to move");
+        // Perspective 0 is Black: its own king on e8 -> 60^56 = 4 -> 324.
+        assert!(s.f[0][..s.n].contains(&324));
+        // White rook h1 seen from Black: enemy 384 + 3*64 + (7^56=63).
+        assert!(s.f[0][..s.n].contains(&(384 + 192 + 63)));
+        let s = decode(&r, 0.0, 1, false);
+        assert!((s.target - sigmoid(-1.0)).abs() < 1e-6);
     }
 
     #[test]
-    fn black_to_move_data_is_mirrored() {
-        let s = parse_line("4k3/8/8/8/8/8/8/4K3 b - - 0 1 | 50 | 1.0").unwrap();
-        assert!(!s.stm_white);
-        assert_eq!(s.score, -50.0);
-        assert_eq!(s.result, 0.0);
-        let s = parse_line("4k3/8/8/8/8/8/8/4K3 w - - 0 1 | -30 | 0.0").unwrap();
-        assert_eq!(s.score, -30.0);
-        assert_eq!(s.result, 0.0);
+    fn quantize_roundtrip_and_shape() {
+        let sh = Shape { h: 32, buckets: 8 };
+        let mut rng = Rng::new(3);
+        let p = init_params(sh, &mut rng);
+        let q = quantize(&p, sh);
+        assert_eq!(Shape::from_file_bytes(q.len(), 8), Some(sh));
+        let d = dequantize(&q, sh);
+        for i in 0..p.len() {
+            let tol = if i < sh.out_w() { 0.5 / QA } else { 0.5 / QB };
+            assert!((p[i] - d[i]).abs() <= tol + 1e-6);
+        }
+        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1), Some(Shape { h: 512, buckets: 1 }));
     }
 
     #[test]
-    fn export_rounds_to_little_endian_i16() {
-        let mut net = Net {
-            w: vec![0.0; INPUTS * H],
-            b: vec![0.0; H],
-            ow: vec![0.0; 2 * H],
-            ob: 0.0,
+    fn gradient_matches_finite_difference() {
+        let sh = Shape { h: 16, buckets: 2 };
+        let mut rng = Rng::new(7);
+        let mut p = init_params(sh, &mut rng);
+        for x in &mut p[sh.ft_b()..sh.out_w()] {
+            *x = 0.3;
+        }
+        let r = encode("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 | 35 | 1.0").unwrap();
+        let s = decode(&r, 0.5, sh.buckets, false);
+        let mut g = vec![0.0f32; sh.len()];
+        let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        train_sample(&p, sh, &s, &mut g, &mut acc, &mut dacc);
+        let loss = |p: &[f32]| {
+            let mut acc = vec![0.0; 2 * sh.h];
+            let d = sigmoid(forward(p, sh, &s, &mut acc)) - s.target;
+            (d * d) as f64
         };
-        net.w[0] = 1.4;
-        net.w[1] = -1.6;
-        net.w[2] = 40000.0;
-        net.b[0] = -300.4;
-        net.ow[0] = 200.0; // outside the fast i32 output path
-        net.ob = 123.0;
-        let (bytes, clipped, small_out) = net_bytes(&net, None);
-        assert_eq!(bytes.len(), NET_BYTES);
-        assert_eq!(clipped, 1);
-        assert!(!small_out);
-        assert_eq!(i16::from_le_bytes([bytes[0], bytes[1]]), 1);
-        assert_eq!(i16::from_le_bytes([bytes[2], bytes[3]]), -2);
-        assert_eq!(i16::from_le_bytes([bytes[4], bytes[5]]), 32767);
-        let b_off = INPUTS * H * 2;
-        assert_eq!(i16::from_le_bytes([bytes[b_off], bytes[b_off + 1]]), -300);
-    }
-
-    #[test]
-    fn eval_matches_manual_formula_for_hand_net() {
-        // Same hand net as nnue.rs's tiny_net test, in float/trainer units.
-        let mut net = Net {
-            w: vec![0.0; INPUTS * H],
-            b: vec![0.0; H],
-            ow: vec![0.0; 2 * H],
-            ob: 0.0,
-        };
-        net.b[0] = 100.0;
-        net.b[1] = 300.0;
-        net.w[324 * H] = 50.0;
-        net.w[764 * H] = -200.0;
-        net.w[764 * H + 2] = 20.0;
-        net.ow[0] = 3.0;
-        net.ow[1] = -2.0;
-        net.ow[H + 2] = 7.0;
-        net.ob = 11.0;
-        let (s, _) = parse_fen("8/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
-        // (150^2*3 + 255^2*(-2) + 20^2*7) = 22500*3 - 65025*2 + 400*7
-        let sum = 150.0 * 150.0 * 3.0 + 255.0 * 255.0 * -2.0 + 20.0 * 20.0 * 7.0;
-        let want = (sum / QA + 11.0) * OUT_SCALE;
-        assert!((net.eval(&s) - want).abs() < 1e-3, "{} vs {}", net.eval(&s), want);
+        let f0 = s.f[0][0] as usize * sh.h;
+        for &i in &[f0, f0 + 3, sh.ft_b() + 1, sh.out_w() + s.bucket * 2 * sh.h + 5, sh.out_b() + s.bucket] {
+            let eps = 1e-3;
+            let mut a = p.clone();
+            a[i] += eps;
+            let mut b = p.clone();
+            b[i] -= eps;
+            let num = (loss(&a) - loss(&b)) / (2.0 * eps as f64);
+            assert!((num - g[i] as f64).abs() < 1e-4 + 1e-2 * num.abs(), "param {i}: numeric {num} vs analytic {}", g[i]);
+        }
     }
 }
