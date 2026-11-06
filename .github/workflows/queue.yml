@@ -9,7 +9,8 @@ name: Merge queue
 # (writes a request file to queue-state's inbox/; never pass work as workflow
 # inputs, since GitHub cancels all but one pending run per concurrency group).
 # The schedule is a heartbeat: it picks up inbox requests and, if a callback was
-# lost, finds the current test's final result itself.
+# lost, finds the current test's final result itself. datagen.yml also calls
+# back when a run ends, so the background lane gets its next seed at once.
 
 on:
   schedule:
@@ -18,6 +19,9 @@ on:
     inputs:
       result:
         description: "Final SPRT result JSON (sent by sprt.yml; leave empty to start/resume)"
+        default: ""
+      finished_run:
+        description: "Run id of a background-lane run that is calling back as it ends (sent by datagen.yml)"
         default: ""
 
 concurrency:
@@ -41,6 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ inputs.result }}
+          FINISHED_RUN: ${{ inputs.finished_run }}
         run: |
           git config user.name "rustfish-queue"
           git config user.email "rustfish-queue@users.noreply.github.com"

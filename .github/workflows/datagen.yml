@@ -3,9 +3,10 @@ name: Datagen
 # Self-play training data (NNUE + Texel) on GitHub runners. Shard s plays games
 # [s * games_per_shard, (s + 1) * games_per_shard) of one seed, so the merged
 # file is exactly what a single `datagen` run over all games would write, and a
-# rerun with the same inputs and ref reproduces it byte for byte. Manual trigger
-# only; it competes with the SPRT queue for runners, so cap max_parallel when
-# the queue is busy. See docs/nnue.md ("Data generation").
+# rerun with the same inputs and ref reproduces it byte for byte. Dispatched by
+# the merge queue's background lane (3 runners) or by hand; it competes with the
+# SPRT queue for runners, so cap max_parallel when the queue is busy. When a run
+# ends it calls the queue back (see `callback`). See docs/nnue.md ("Data generation").
 
 run-name: "Datagen ${{ inputs.ref }} seed ${{ inputs.seed }} (${{ inputs.shards }}x${{ inputs.games_per_shard }} games, ${{ inputs.nodes }} nodes)"
 
@@ -33,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  actions: write    # call the merge queue back when the run ends
 
 jobs:
   plan:
@@ -157,3 +159,16 @@ jobs:
           path: merged
           compression-level: 0
           retention-days: 90
+
+  # Hand the background lane back to the merge queue as soon as this run ends,
+  # instead of waiting up to 30 min for its heartbeat. The queue ignores this
+  # run (still in progress while this job runs) when checking the lane is idle.
+  callback:
+    needs: [merge]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch the merge queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run queue.yml --repo "$GITHUB_REPOSITORY" --ref main -f finished_run="$GITHUB_RUN_ID"
