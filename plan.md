@@ -13,7 +13,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 | | |
 |---|---|
 | Strength | **3168 CCRL Blitz** (95% CI 3144-3193) on `d08c97b` (net4). Earlier rows reading ~3200 were inflated ~30 by a broken anchor (black-marlin-4.0), now refit and removed. |
-| Target | 3400 (dashboard). Single-CPU list: 3400 is ~#131; top 100 ~3500; top 50 ~3650. Stockfish 17 skill 17 is ~3140 on our scale: parity within error. |
+| Goals | **Short term 3400** (~#131 on the single-CPU blitz list). **Mid term top 100 (~3500) then top 50 (~3650).** **Long term top 10** (~3700+). Competing with Stockfish itself is out of scope for our resources. Stockfish 17 skill 17 (~3140) is already passed within error. |
 | Eval | NNUE net4, (768 -> 256) x 2 -> 1 SCReLU, i16; HCE is the fallback. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
@@ -74,6 +74,23 @@ Training efficiently:
 - Screen by validation loss (minutes) before spending CI games (hours).
 - One variable per run; record every run in `docs/nnue-experiments.md`.
 - Keep the laptop busy with the next run while CI gates the last one.
+
+## CI efficiency (measured 2026-11-06)
+
+- STC waves: ~90% of wall time is games. Fine.
+- Net-gate waves (5+0.05): ~170 s, of which ~60 s was rebuilding engines;
+  fixed by caching the engines across waves (`34091d5`).
+- The largest waste was *what* was tested (~10 doomed nets, ~24 rejected
+  search patches, ~200k games in two days): screen by validation loss first.
+- Datagen must leave runners free: dispatch with `max_parallel` <= 16 so the
+  queue's own jobs and SPRT builds are never blocked behind it.
+- Unused lever: runners can run *independent* training runs (ablation
+  sweeps scored by validation loss) overnight, when no SPRT needs them.
+- Owner decisions: GitHub Pro (20 -> 40 concurrent jobs, 2x throughput) and a
+  self-hosted runner on the 9600X desktop (outside the job cap).
+- Ladder cost: a 120+1 ladder is ~10 SPRTs of runner time; run it only after
+  real gains. A 10+0.1 ladder is ~12x cheaper and comparable with other
+  short-TC claims (e.g. the 3463 "24h" engine, which was rated at 10+0.1).
 
 ## Known problems
 
