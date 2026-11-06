@@ -157,6 +157,12 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
   </section>
 
   <section class="card">
+    <h2>Conditional projection (illustrative, not a forecast)</h2>
+    <div id="projection"></div>
+    <div class="note" id="projection-note"></div>
+  </section>
+
+  <section class="card">
     <h2>NNUE nets (trainer v2 experiments)</h2>
     <div class="scroll" id="net-gates"></div>
     <div class="note" id="net-gates-note"></div>
@@ -492,6 +498,33 @@ function renderGains(s) {
   <div class="note">Each bar is <b>gate Elo</b>, not CCRL: the SPRT against the main of its day at the gate's time control (<span class="mono">stc</span> 10+0.1, <span class="mono">net-gate</span> 5+0.05, <span class="mono">ltc-gainer</span> 60+0.6), with a 95% CI whisker. Gate Elo is inflated relative to CCRL and not additive. Solid bars were merged by the queue${sure ? ` (sum ${signed(sure)})` : ""}; faded bars passed before the queue existed and were merged by hand.${exact ? ` ${exact} speedup${exact === 1 ? "" : "s"} merged on bench identity (no Elo) are not shown.` : ""} The ladder chart is the real cumulative number.</div>`;
 }
 
+// Deliberately a scenario table, not a predicted date: the per-generation
+// gain is not known and diminishing returns are real. The assumptions are
+// printed next to the numbers so the reader can reject them.
+function renderProjection(s) {
+  const st = s.strength, c = st && st.measured;
+  const targets = (s.ccrl_targets && s.ccrl_targets.targets) || [];
+  if (!c || !targets.length) {
+    $("projection").innerHTML = `<div class="empty">No measured ladder yet.</div>`;
+    $("projection-note").textContent = "";
+    return;
+  }
+  const rates = [8, 15, 25];
+  const gensPerDay = 4; // one generation per 6h, the current observed cadence
+  const rows = targets.map((t) => {
+    const gap = t.rating - c.rating;
+    const cells = rates.map((r) => {
+      if (gap <= 0) return `<td class="num">reached</td>`;
+      const gens = Math.ceil(gap / r);
+      const days = gens / gensPerDay;
+      return `<td class="num">${gens} gen · ${days < 1 ? "<1" : days.toFixed(1)}d</td>`;
+    }).join("");
+    return `<tr><td>${esc(t.name)} <span class="meta">${fmt(t.rating)}</span></td><td class="num">${gap > 0 ? fmt(gap) : "—"}</td>${cells}</tr>`;
+  }).join("");
+  $("projection").innerHTML = `<div class="scroll"><table><thead><tr><th>Target</th><th class="num">Gap</th><th class="num">+8 Elo/gen</th><th class="num">+15 Elo/gen</th><th class="num">+25 Elo/gen</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  $("projection-note").textContent = `From measured ${fmt(c.rating)}. Assumes a constant gain per generation and ${gensPerDay} generations/day (one per 6h); no diminishing returns. If the next gates are +8 rather than +25, use the left column. Recalculate only when a new ladder lands.`;
+}
+
 function renderChart(s) {
   const pts = s.ladder.filter((p) => p.when);
   const el = $("chart");
@@ -669,7 +702,7 @@ async function refresh() {
     const s = await r.json();
     window.STATUS = s;
     renderBanner(s); renderTiles(s); renderTargets(s); renderRunners(s); renderBackground(s); renderInflight(s); renderPending(s);
-    renderChart(s); renderNetGates(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
+    renderChart(s); renderNetGates(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderProjection(s); renderGains(s); renderCommits(s);
     if (s.plan) $("plan").innerHTML = markdown(s.plan);
     const rm = s.roadmap || {};
     $("plan-meta").innerHTML = `<a class="mono" href="${ghRepo()}/blob/main/plan.md">plan.md</a> on main, the maintained roadmap${rm.last_updated ? ` · last updated <b>${esc(rm.last_updated)}</b>` : ""}${s.sources.plan && s.sources.plan.fetched_at ? ` · fetched ${ago(s.sources.plan.fetched_at)}` : ""}`;
