@@ -1,5 +1,5 @@
 {
-  "note": "NNUE generation history. Net6-r2 was rejected by the local pre-gate (49.25%, -5.2 Elo over 200 games) and never queued; capacity work is next.",
+  "note": "NNUE generation history. From E1 on, nets come from trainer v2 with validation loss; see net/experiments.jsonl and docs/nnue-experiments.md.",
   "nets": [
     {
       "net": 1,
@@ -136,6 +136,27 @@
         "verdict": "pre-gate flat"
       },
       "note": "Cumulative valid pool; local 5+0.05 pre-gate 200 games 49.25%, no gain. Not queued; capacity pivot."
+    },
+    {
+      "net": "E1",
+      "branch": "nnue-e1",
+      "positions": 350469128,
+      "nodes": "5000/8000",
+      "seed": "4+5+6+8+9+10",
+      "epochs": 6,
+      "loss": 0.026979,
+      "loss_note": "held-out val (seed 9 last 1M), v2 trainer; net4 scores 0.031130 on the same set",
+      "bench": 422085,
+      "gate": {
+        "elo": 151.84,
+        "ci": [
+          120.79,
+          185.36
+        ],
+        "games": 304,
+        "verdict": "merged"
+      },
+      "note": "Same shape as net4, retrained properly (v2 trainer, whole pool, 6 epochs, cosine LR). 5+0.05 UHO overstates CCRL-scale Elo."
     }
   ]
 }
