@@ -16,8 +16,8 @@ on:
         description: "Engine ref (branch, tag or SHA) to generate with"
         default: "main"
       shards:
-        description: "Number of parallel jobs"
-        default: "20"
+        description: "Number of shard jobs; keep it a multiple of max_parallel or the remainder runs as a second, mostly idle round"
+        default: "16"
       games_per_shard:
         description: "Games per shard (est. ~36k games/h on a 4-vCPU runner at 5000 nodes)"
         default: "40000"
