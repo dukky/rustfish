@@ -381,7 +381,7 @@ final class Trainer {
         enc.setComputePipelineState(g.gradFused)
         enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_], offsets: [0, 0, 0, 0, 0, 0, 0, 0], range: 0..<8)
         enc.setBytes(&c, length: cl, index: 8)
-        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: 1), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
         enc.setComputePipelineState(g.gradOb)
         enc.setBuffers([gs, b.meta, pob], offsets: [0, 0, 0], range: 0..<3)
         enc.setBytes(&c, length: cl, index: 3)
@@ -524,7 +524,7 @@ func cmdTrain(_ args: [String]) {
 
     // Loader thread: fills ring slots with raw records (+ mirror flag in byte 28),
     // drawing seed_b from the main RNG exactly as the CPU trainer does per batch.
-    let slots = 3
+    let slots = 16
     let ring = (0..<slots).map { _ in Batch(g, batch) }
     let free = DispatchSemaphore(value: slots), filled = DispatchSemaphore(value: 0)
     let feed = Feed(data, seed: seed ^ 0xF00D ^ seen)
@@ -559,10 +559,12 @@ func cmdTrain(_ args: [String]) {
     var ep = seen / epochSize
     var pending: [(MTLCommandBuffer, Batch)] = []
     var k = 0
+    var loaderWait = 0.0, gpuWait = 0.0, gpuBusy = 0.0
     func retire() {
         let (cb, b) = pending.removeFirst()
-        cb.waitUntilCompleted()
+        let tg0 = Date(); cb.waitUntilCompleted(); gpuWait += Date().timeIntervalSince(tg0)
         if let e = cb.error { die("GPU error: \(e)") }
+        gpuBusy += cb.gpuEndTime - cb.gpuStartTime
         epochLoss += b.sum(b.loss)
         free.signal()
     }
@@ -570,7 +572,7 @@ func cmdTrain(_ args: [String]) {
     while seen < total {
         let t = Double(seen) / Double(total)
         let curLr = lrEnd + 0.5 * (lr - lrEnd) * (1.0 + Float(cos(Double.pi * t)))
-        filled.wait()
+        let tw0 = Date(); filled.wait(); loaderWait += Date().timeIntervalSince(tw0)
         let b = ring[k % slots]
         k += 1
         step += 1
@@ -580,7 +582,7 @@ func cmdTrain(_ args: [String]) {
         tr.encodeStep(cb, b, lr: curLr, wd: wd, c1: c1, c2: c2)
         cb.commit()
         pending.append((cb, b))
-        if pending.count >= 2 { retire() }
+        if pending.count >= 3 { retire() }
         seen += UInt64(batch)
         epochN += UInt64(batch)
 
@@ -604,6 +606,7 @@ func cmdTrain(_ args: [String]) {
     let q = quantize(pP, sh)
     writeFile(outPath, q)
     out("wrote \(outPath) (\(q.count) bytes, H=\(sh.h) buckets=\(sh.buckets))")
+    FileHandle.standardError.write(String(format: "waits: loader %.1fs gpu %.1fs gpu-busy %.1fs total %.1fs\n", loaderWait, gpuWait, gpuBusy, Date().timeIntervalSince(started)).data(using: .utf8)!)
     exit(0)
 }
 

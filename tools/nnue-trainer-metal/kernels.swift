@@ -15,9 +15,11 @@ import Foundation
 let TW = 32
 let RS = 128
 let MAXB = 16
+/// grad_fused simdgroups per threadgroup (768 / NSG gradient registers per lane).
+let NSG = Int(ProcessInfo.processInfo.environment["NNUE_NSG"] ?? "32")!
 
 func kernelSource() -> String {
-    "#include <metal_stdlib>\nusing namespace metal;\n#define TW \(TW)\n#define RS \(RS)\n#define MAXB \(MAXB)\n" + kernelBody
+    "#include <metal_stdlib>\nusing namespace metal;\n#define TW \(TW)\n#define RS \(RS)\n#define MAXB \(MAXB)\n#define NSG \(NSG)\n" + kernelBody
 }
 
 let kernelBody = """
@@ -228,15 +230,16 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
     }
 }
 
-// Backward, step 2. Threadgroup (tile, sr): 256 threads = 8 simdgroups x 32
+// Backward, step 2. Threadgroup (tile, sr): NSG simdgroups x 32
 // lanes; lane = one of 32 columns [tile*32, +32) of both perspectives.
 // For each sample range of super-range sr it stages dacc[row][32] in
 // threadgroup memory (accumulating the FT-bias and output-weight gradients
 // from the same acc values), then simdgroup k sums, for each feature
-// f = k, k+8, ..., the staged rows of f's run: uniform control flow, one
-// broadcast index load and one conflict-free threadgroup load per entry,
-// no atomics. The per-(feature, column) sums go to this threadgroup's own
-// region of the partial-gradient buffer, so the result is deterministic.
+// f = k, k+NSG, ..., the staged rows of f's run into a register: uniform
+// control flow, one broadcast index load and one conflict-free threadgroup
+// load per entry, no atomics. At the end the per-(feature, column) sums go
+// to this threadgroup's own region of the partial-gradient buffer, so the
+// result is deterministic.
 kernel void grad_fused(device const float* p [[buffer(0)]],
                        device const uint* meta [[buffer(1)]],
                        device const float* acc [[buffer(2)]],
@@ -253,7 +256,7 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
     uint h = c.h;
     uint j = tg.x * 32 + lane;
     bool live = j < h;
-    uint side = sg & 1;                   // this thread stages rows sg + 8k
+    uint side = sg & 1;                   // this thread stages rows sg + NSG * k
     uint nranges = (c.count + RS - 1) / RS;
     uint per = (nranges + c.rf - 1) / c.rf;
     uint r0 = min(nranges, tg.y * per), r1 = min(nranges, r0 + per);
@@ -262,12 +265,11 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
     float bacc = 0.0f;
     float oacc[MAXB];
     for (uint b = 0; b < MAXB; b++) oacc[b] = 0.0f;
-    if (r0 == r1 && live) {
-        for (uint f = sg; f < 768; f += 8) G[f * h + j] = 0.0f;
-    }
+    float gr[768 / NSG];                  // this lane's sums for features sg + NSG * i
+    for (uint i = 0; i < 768 / NSG; i++) gr[i] = 0.0f;
     for (uint rg = r0; rg < r1; rg++) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint row = sg; row < 2 * RS; row += 8) {
+        for (uint row = sg; row < 2 * RS; row += NSG) {
             uint s = rg * RS + row / 2;
             float d = 0.0f;
             if (s < c.count && live) {
@@ -284,7 +286,9 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
         threadgroup_barrier(mem_flags::mem_threadgroup);
         device const uint* off = offs + rg * 769;
         device const ushort* srt = sorted + rg * RS * 64;
-        for (uint f = sg; f < 768; f += 8) {
+#pragma unroll
+        for (uint i = 0; i < 768 / NSG; i++) {
+            uint f = sg + NSG * i;
             uint a = off[f], b = off[f + 1];
             float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
             uint e = a;
@@ -295,30 +299,29 @@ kernel void grad_fused(device const float* p [[buffer(0)]],
                 s3 += dt[uint(srt[e + 3]) * 32 + lane];
             }
             for (; e < b; e++) s0 += dt[uint(srt[e]) * 32 + lane];
-            float sum = (s0 + s1) + (s2 + s3);
-            if (live) {
-                if (rg == r0) G[f * h + j] = sum;
-                else G[f * h + j] += sum;
-            }
+            gr[i] += (s0 + s1) + (s2 + s3);
         }
     }
-    // FT bias: reduce the 8 simdgroups per column, fixed order.
+    if (live) {
+        for (uint i = 0; i < 768 / NSG; i++) G[(sg + NSG * i) * h + j] = gr[i];
+    }
+    // FT bias: reduce the NSG simdgroups per column, fixed order.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     dt[sg * 32 + lane] = bacc;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && live) {
         float t = 0.0f;
-        for (uint k = 0; k < 8; k++) t += dt[k * 32 + lane];
+        for (uint k = 0; k < NSG; k++) t += dt[k * 32 + lane];
         G[768 * h + j] = t;
     }
-    // Output weights: reduce the 4 simdgroups sharing (side, column), per bucket.
+    // Output weights: reduce the NSG / 2 simdgroups sharing (side, column), per bucket.
     for (uint b = 0; b < c.nb; b++) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         dt[sg * 32 + lane] = oacc[b];
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (sg < 2 && live) {
             float t = 0.0f;
-            for (uint k = sg; k < 8; k += 2) t += dt[k * 32 + lane];
+            for (uint k = sg; k < NSG; k += 2) t += dt[k * 32 + lane];
             pow_[tg.y * c.nb * 2 * h + b * 2 * h + sg * h + j] = t;
         }
     }
