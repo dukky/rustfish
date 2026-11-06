@@ -5,18 +5,36 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-06._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-06 14:30._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **3168 CCRL Blitz** (95% CI 3144-3193) on `d08c97b` (net4). Earlier rows reading ~3200 were inflated ~30 by a broken anchor (black-marlin-4.0), now refit and removed. |
+| Strength | **~3330 CCRL Blitz** (partial ladder, 95% CI 3223-3460) on `ad53daa` (E1 net + halved eval scale); rerun with 3273-3491 anchors in progress. Was 3168 (net4) this morning. |
 | Goals | **Short term 3400** (~#131 on the single-CPU blitz list). **Mid term top 100 (~3500) then top 50 (~3650).** **Long term top 10** (~3700+). Competing with Stockfish itself is out of scope for our resources. Stockfish 17 skill 17 (~3140) is already passed within error. |
-| Eval | NNUE net4, (768 -> 256) x 2 -> 1 SCReLU, i16; HCE is the fallback. |
+| Eval | NNUE E1, (768 -> 256) x 2 -> 1 SCReLU, i16, output halved to the HCE scale the search margins were tuned on (+123); HCE is the fallback. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
+
+## Status 2026-11-06 afternoon
+
+- Merged today: E1 (+152 net gate), eval scale 1/2 (+123 stc). Rejected: E3 (8
+  output buckets, +4.9 inconclusive), bigbang-r2 (-103).
+- Testing: eval scale 3/8 and 5/8 (bracketing 1/2), nnue-speed (+4% NPS at
+  256, +14% at 512, search-identical), ladder rerun, then g2a/g2b.
+- Generation 2: g2a = 256x8 on pool2 (442M positions: pool1 + seeds 11, 12),
+  15 epochs on the CPU; g2b = 512x8 on pool2, 10 epochs on the GPU.
+- **Metal GPU trainer** (`tools/nnue-trainer-metal`): parity with trainer v2,
+  2.7-3.3x faster. GPU does production training; the CPU now does local
+  datagen. Generations are now **data-bound**, not training-bound.
+- **CI lanes:** queue SPRTs and ladders on 16 runners (16 shards);
+  background lane (4 runners) self-feeds datagen from main every heartbeat.
+- In progress (subagents): king-bucketed inputs (engine + both trainers, off by
+  default), time management for 120+1 and 40/15, search-identical speedups.
+- SPSA of 22 search parameters is ready on `spsa-nnue` (8 shards, ~14 h); run
+  overnight when the queue is empty.
 
 ## Strategy (2026-11-06): train the net properly
 
