@@ -19,6 +19,10 @@
     {
       "branch": "king-buckets",
       "mode": "speedup"
+    },
+    {
+      "branch": "speed-r3",
+      "mode": "speedup"
     }
   ],
   "current": {
