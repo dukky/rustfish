@@ -1,8 +1,8 @@
 {
   "pending": [
     {
-      "branch": "nnue-e1",
-      "mode": "net-gate"
+      "branch": "bigbang-r2",
+      "mode": "stc"
     },
     {
       "branch": "netloop",
@@ -10,13 +10,13 @@
     }
   ],
   "current": {
-    "branch": "bigbang-r2",
-    "mode": "stc",
-    "test_id": "q-bigbang-r2-1106-1007",
-    "sha": "a3dd7f54b6bb4034a0fa0a8dd092cafa5e70604c",
-    "base_sha": "1192ee58d3e95c2507a207cca581e41fbcb9f9e6",
-    "started": "2026-11-06T10:07:41Z",
-    "bench": 530040
+    "branch": "nnue-e1",
+    "mode": "net-gate",
+    "test_id": "q-nnue-e1-1106-1015",
+    "sha": "3f9185b9a2e89452bb4c79a769e1f0602ac4fc54",
+    "base_sha": "bd9cf16071518c7e326cc89d5b653e1cb142ab6f",
+    "started": "2026-11-06T10:15:16Z",
+    "bench": 422085
   },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
