@@ -1105,8 +1105,8 @@ fn mobility_side<T: Tracer>(
 pub(crate) fn evaluate(board: &Board) -> i32 {
     if let Some(st) = board.nnue.as_ref() {
         // NNUE scores run ~2x the HCE's scale (slope 2.0 over 1680 positions),
-        // and the search margins were tuned on the HCE: halve to match.
-        let s = st.evaluate(board.side_to_move, board.bb.occ_all().count_ones()) / 2;
+        // and the search margins were tuned on the HCE: scale to match (5/8; 1/2 merged at +123).
+        let s = st.evaluate(board.side_to_move, board.bb.occ_all().count_ones()) * 5 / 8;
         return if board.side_to_move == Color::White { s } else { -s };
     }
     evaluate_impl(board, &mut NoTrace, None)
