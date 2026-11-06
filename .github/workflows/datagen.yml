@@ -28,8 +28,8 @@ on:
         description: "RNG seed; use a new one for every run you want to add to the pool"
         default: "1"
       max_parallel:
-        description: "Max shards running at once (leave runners for the SPRT queue)"
-        default: "20"
+        description: "Max shards running at once (<= 16 leaves 4 of the 20 runners for the merge queue)"
+        default: "16"
 
 permissions:
   contents: read

@@ -76,6 +76,8 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      # At most 16 of the 20 runners: long jobs must never block the merge queue.
+      max-parallel: 16
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: ${{ matrix.name }} / shard ${{ matrix.shard }}
     steps:
