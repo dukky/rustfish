@@ -43,6 +43,15 @@ POSITIONS_PER_GAME = 79
 # The strategy switched after plan.md was written; point the roadmap at the audit.
 AUDIT_DOC = "docs/opus-audit-2026-11-04.md"
 
+# NNUE nets: the v1 chain (net1..net13, net/chain.json) ran until the trainer-v2
+# pivot; since then each net is an experiment (E0, E1, ..., generations g2a, ...)
+# recorded by `scripts/netloop.py record` in net/experiments.jsonl. Gate results
+# come straight from the queue log, so a net appears as soon as it is queued.
+NET_PIVOT = "2026-11-06T08:00:00Z"
+NET_V1_AUDIT = "docs/nnue-experiments.md#audit-of-the-v1-chain-2026-11-06"
+# Where net/experiments.jsonl lives: main once merged, else the netloop branch.
+EXPERIMENT_REFS = ("main", "netloop")
+
 
 class Cache:
     """URL -> (fetched_at, payload, etag). Serves stale data when GitHub fails."""
@@ -137,6 +146,80 @@ def parse_when(s):
     return s + "Z"
 
 
+def is_net_row(branch, mode):
+    """A net candidate: an nnue-* branch or a net-gate test, but not engine code
+    shipped as a speedup (nnue-inference, nnue-arch-r2, ...)."""
+    return mode == "net-gate" or (bool(branch) and branch.startswith("nnue-") and mode != "speedup")
+
+
+def build_net_gates(qlog, queue, experiments, v1_branches):
+    """Every net branch's latest queue status joined with its training record.
+
+    Returns {"v2": [...], "v1": [...]}: v2 is everything gated after the
+    trainer-v2 pivot (or with an experiments row), newest first; v1 is the older
+    gate history. A gated branch without an experiments row is kept and flagged
+    (training_record False) so a missing record is visible, not silently absent.
+    """
+    by_branch = {}
+    for r in experiments:
+        b = r.get("branch") or (f"nnue-{str(r['id']).lower()}" if r.get("id") else None)
+        if b and b != "main":
+            by_branch[b] = r
+    current = queue.get("current") or {}
+    gates = {}  # branch -> latest state
+    for r in qlog:
+        b = r.get("branch")
+        if not is_net_row(b, r.get("mode")):
+            continue
+        when = parse_when(r.get("logged_at"))
+        g = gates.setdefault(b, {"branch": b, "first_at": when})
+        g.update(mode=r.get("mode"), outcome=r.get("outcome"), when=when,
+                 sha=(r.get("sha") or "")[:7] or g.get("sha"), test_id=r.get("test_id") or g.get("test_id"))
+        if r.get("outcome") != "dispatched":
+            g.update(elo=r.get("elo"), ci=r.get("elo_ci95"), games=r.get("games"), llr=r.get("llr"),
+                     verdict=r.get("verdict"), reason=r.get("reason"))
+    if is_net_row(current.get("branch"), current.get("mode")):
+        started = parse_when(current.get("started"))
+        g = gates.setdefault(current["branch"], {"branch": current["branch"], "first_at": started})
+        g.update(mode=current.get("mode"), status="testing", test_id=current.get("test_id"),
+                 when=started, sha=(current.get("sha") or "")[:7])
+    for p in queue.get("pending", []):
+        if not is_net_row(p.get("branch"), p.get("mode")):
+            continue
+        g = gates.setdefault(p["branch"], {"branch": p["branch"], "first_at": None})
+        if g.get("status") != "testing":
+            g.update(status="queued", mode=p.get("mode"))
+    for g in gates.values():
+        if not g.get("status"):
+            # A dispatch with no final row yet is still being judged.
+            g["status"] = "testing" if g.get("outcome") == "dispatched" else g.get("outcome")
+    # Trained nets nobody has queued yet still belong in the table.
+    for b, r in by_branch.items():
+        if b not in gates:
+            gates[b] = {"branch": b, "first_at": parse_when(r.get("date")), "status": "not gated"}
+    v1, v2 = [], []
+    for g in gates.values():
+        e = by_branch.get(g["branch"])
+        g["training_record"] = bool(e)
+        if e:
+            sprt = e.get("sprt") or {}
+            g.update(id=e.get("id"), hidden=e.get("hidden"), buckets=e.get("buckets"),
+                     seeds=e.get("seeds"), epochs=e.get("epochs"),
+                     positions_per_epoch=e.get("positions_per_epoch"), val_loss=e.get("val_loss"),
+                     val_loss_quantized=e.get("val_loss_quantized"), baseline=e.get("baseline"),
+                     notes=e.get("notes"), tc=sprt.get("tc"))
+            # A gate run outside the queue only exists in the training record.
+            if g.get("elo") is None and sprt.get("elo") is not None:
+                g.update(elo=sprt.get("elo"), ci=sprt.get("ci"), games=sprt.get("games"),
+                         mode=g.get("mode") or sprt.get("mode"), gate_from="experiments.jsonl")
+        old = g["branch"] in v1_branches or (g.get("first_at") or "9999") < NET_PIVOT
+        (v1 if old and not e else v2).append(g)
+    order = lambda g: g.get("first_at") or "9999"  # queued, never dispatched: newest
+    v2.sort(key=order, reverse=True)
+    v1.sort(key=order, reverse=True)
+    return {"v2": v2, "v1": v1, "pivot": NET_PIVOT}
+
+
 def build_status():
     sources = {}
 
@@ -177,6 +260,20 @@ def build_status():
                      "loss": n.get("loss"), "loss_note": n.get("loss_note"), "bench": n.get("bench"),
                      "note": n.get("note"), "gate_elo": gate.get("elo"), "gate_ci": gate.get("ci"),
                      "gate_games": gate.get("games"), "gate_verdict": gate.get("verdict")})
+
+    # NNUE experiments (trainer v2): training metadata joined to queue gates.
+    experiments, exp_ref, exp_err = None, None, None
+    for ref in EXPERIMENT_REFS:
+        data, at, err = CACHE.get(f"{RAW}/{ref}/net/experiments.jsonl", TTL_RAW, jsonl)
+        if data:
+            experiments, exp_ref = data, ref
+            sources["net_experiments"] = {"fetched_at": iso(at), "error": None, "ref": ref}
+            break
+        exp_err = exp_err or err
+    if experiments is None:
+        sources["net_experiments"] = {"fetched_at": None, "error": exp_err or "no net/experiments.jsonl"}
+    net_gates = build_net_gates(qlog, queue, experiments or [], {n["branch"] for n in nets})
+    net_gates["experiments_ref"] = exp_ref
 
     # Strength over time.
     points = []
@@ -309,6 +406,10 @@ def build_status():
                                "when": ((c.get("commit") or {}).get("committer") or {}).get("date"),
                                "bench": int(bench[-1]) if bench else None, "url": c.get("html_url")})
 
+    for g in net_gates["v2"] + net_gates["v1"]:
+        if inflight and g["branch"] == inflight.get("branch"):
+            g.update(games_est=inflight.get("games_est"), run_url=inflight.get("run_url"))
+
     latest = points[-1] if points else None
     # Measured strength is the last ladder run; estimated adds the queue SPRTs
     # merged after it. Estimated is never presented as an official CCRL rating.
@@ -341,7 +442,8 @@ def build_status():
         "repo": REPO,
         "target": TARGET,
         "strength": strength,
-        "net_chain": {"nets": nets, "ref": chain_ref},
+        "net_chain": {"nets": nets, "ref": chain_ref, "audit_doc": NET_V1_AUDIT},
+        "net_gates": net_gates,
         "datagen": datagen,
         "roadmap": {"audit_doc": AUDIT_DOC, "plan_stale": True},
         "current": latest and {k: latest[k] for k in ("rating", "ci", "sha", "when", "url", "games")},

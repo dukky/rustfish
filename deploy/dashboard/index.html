@@ -137,9 +137,14 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
   </section>
 
   <section class="card">
-    <h2>NNUE net chain</h2>
-    <div class="scroll" id="nets"></div>
-    <div class="note" id="nets-note"></div>
+    <h2>NNUE nets (trainer v2 experiments)</h2>
+    <div class="scroll" id="net-gates"></div>
+    <div class="note" id="net-gates-note"></div>
+    <details style="margin-top:12px"><summary>v1 history (superseded, see <a id="v1-audit" href="https://github.com/dukky/rustfish/blob/main/docs/nnue-experiments.md#audit-of-the-v1-chain-2026-11-06">audit</a>)</summary>
+      <div class="scroll" id="nets" style="margin-top:8px"></div>
+      <div class="note" id="nets-note"></div>
+      <div class="scroll" id="net-gates-v1" style="margin-top:12px"></div>
+    </details>
   </section>
 
   <div class="grid row2">
@@ -183,7 +188,7 @@ const OUTCOME = {
   dispatched: ["started", "b-accent"],
 };
 const badge = (k) => { const [t, c] = OUTCOME[k] || [k, "b-neutral"]; return `<span class="badge ${c}">${esc(t)}</span>`; };
-const MODE = {stc: "STC gainer", nonreg: "non-regression", "ltc-gainer": "LTC gainer", "ltc-check": "LTC check", speedup: "speedup"};
+const MODE = {stc: "STC gainer", nonreg: "non-regression", "ltc-gainer": "LTC gainer", "ltc-check": "LTC check", speedup: "speedup", "net-gate": "net gate"};
 
 function renderTiles(s) {
   const st = s.strength;
@@ -244,6 +249,49 @@ function renderNets(s) {
         <td><span class="badge ${NET_BADGE[v] || "b-neutral"}">${esc(v)}</span></td></tr>`;
     }).join("") + `</tbody></table>`;
   $("nets-note").innerHTML = `From <span class="mono">net/chain.json</span> on <span class="mono">${esc(s.net_chain.ref || "?")}</span>. Gate Elo is the merge-queue SPRT against the previous net, not a CCRL rating.`;
+}
+
+const GATE_STATUS = {
+  merged: ["merged", "b-good"], rejected: ["rejected", "b-bad"], "needs-human": ["needs human", "b-warn"],
+  preempted: ["preempted", "b-warn"], testing: ["testing", "b-accent"], queued: ["queued", "b-accent"],
+  "not gated": ["not gated", "b-neutral"],
+};
+const gateBadge = (k) => { const [t, c] = GATE_STATUS[k] || [k || "unknown", "b-neutral"]; return `<span class="badge ${c}">${esc(t)}</span>`; };
+const shortNum = (n) => n == null ? "–" : n >= 1e9 ? fmt(n / 1e9, 2) + "B" : n >= 1e6 ? fmt(n / 1e6, 0) + "M" : fmt(n);
+function gateCells(g) {
+  const elo = g.elo != null
+    ? `${eloCi(g.elo, g.ci)}${g.gate_from ? `<div class="meta">from ${esc(g.gate_from)}</div>` : ""}`
+    : g.status === "testing" ? `<span class="meta">${g.run_url ? `<a href="${esc(g.run_url)}">running</a>` : "running"}</span>` : "–";
+  const games = g.games != null ? fmt(g.games) : g.games_est != null ? `≈ ${fmt(g.games_est)}` : "–";
+  const status = gateBadge(g.status) + (g.reason && g.status !== "merged" ? `<div class="meta">${esc(g.reason).slice(0, 60)}</div>` : "") +
+    (g.when ? `<div class="meta">${shortDate(g.when)}</div>` : "");
+  return `<td>${esc(MODE[g.mode] || g.mode || "–")}${g.tc ? `<div class="meta">${esc(g.tc)}</div>` : ""}</td>
+    <td class="num">${elo}</td><td class="num">${games}</td><td>${status}</td>`;
+}
+function renderNetGates(s) {
+  const ng = s.net_gates || {v2: [], v1: []};
+  const branchLink = (b) => `<a class="mono" href="${ghRepo()}/tree/${esc(b)}">${esc(b)}</a>`;
+  $("net-gates").innerHTML = ng.v2.length ? `<table><thead><tr><th>Experiment</th><th class="num">Shape H×B</th><th class="num">Data / positions</th><th class="num">Epochs</th><th class="num">Val loss</th><th>Gate mode</th><th class="num">Gate Elo ± CI</th><th class="num">Games</th><th>Status</th></tr></thead><tbody>` +
+    ng.v2.map((g) => {
+      const rec = g.training_record;
+      const name = rec
+        ? `<b>${esc(g.id)}</b><div>${branchLink(g.branch)}</div>${g.baseline ? `<div class="meta">vs ${esc(g.baseline)}</div>` : ""}`
+        : `<div>${branchLink(g.branch)}</div><span class="badge b-warn" title="No row for this branch in net/experiments.jsonl">no training record</span>`;
+      const data = rec ? `${g.seeds ? `<div>seeds ${esc(g.seeds.join(", "))}</div>` : ""}<div class="meta">${shortNum(g.positions_per_epoch)} pos/epoch</div>` : "–";
+      const loss = rec && g.val_loss != null
+        ? `${Number(g.val_loss).toFixed(5)}${g.val_loss_quantized != null ? `<div class="meta">q ${Number(g.val_loss_quantized).toFixed(5)}</div>` : ""}` : "–";
+      return `<tr title="${esc(g.notes || "")}"><td>${name}</td>
+        <td class="num mono">${rec && g.hidden != null ? `${fmt(g.hidden)}×${fmt(g.buckets ?? 1)}` : "–"}</td>
+        <td class="num">${data}</td><td class="num">${rec ? fmt(g.epochs) : "–"}</td><td class="num">${loss}</td>${gateCells(g)}</tr>`;
+    }).join("") + `</tbody></table>`
+    : `<div class="empty">No v2 nets gated yet.</div>`;
+  const missing = ng.v2.filter((g) => !g.training_record).length;
+  $("net-gates-note").innerHTML = `Gate status from the merge-queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>), updated automatically; training data from <span class="mono">net/experiments.jsonl</span> on <span class="mono">${esc(ng.experiments_ref || "?")}</span>.` +
+    (missing ? ` <b>${missing} gated net${missing === 1 ? " has" : "s have"} no training record</b> (run <span class="mono">scripts/netloop.py record</span>).` : "") +
+    ` Gate Elo is the queue SPRT against the main of its day, not a CCRL rating.`;
+  $("net-gates-v1").innerHTML = ng.v1.length ? `<div class="meta" style="margin-bottom:6px">All v1 net gates in the queue log</div><table><thead><tr><th>Branch</th><th>Gate mode</th><th class="num">Gate Elo ± CI</th><th class="num">Games</th><th>Status</th></tr></thead><tbody>` +
+    ng.v1.map((g) => `<tr><td>${branchLink(g.branch)}</td>${gateCells(g)}</tr>`).join("") + `</tbody></table>` : "";
+  if (s.net_chain && s.net_chain.audit_doc) $("v1-audit").href = `${ghRepo()}/blob/main/${s.net_chain.audit_doc}`;
 }
 
 function renderDatagen(s) {
@@ -496,7 +544,7 @@ async function refresh() {
     const s = await r.json();
     window.STATUS = s;
     renderBanner(s); renderTiles(s); renderDatagen(s); renderInflight(s); renderPending(s);
-    renderChart(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
+    renderChart(s); renderNetGates(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
     if (s.plan) $("plan").innerHTML = markdown(s.plan);
     if (s.roadmap) $("audit-link").href = `${ghRepo()}/blob/main/${s.roadmap.audit_doc}`;
     const oldest = Object.values(s.sources).map((v) => v.fetched_at).filter(Boolean).sort()[0];

@@ -8,7 +8,12 @@ the changes that passed in between, and `plan.md` rendered.
 `server.py` is Python stdlib only. It reads public data (no token):
 
 - `raw.githubusercontent.com`: `tests/ladder-log.jsonl`, `tests/sprt-log.jsonl`
-  and `plan.md` on `main`; `queue.json` and `log.jsonl` on `queue-state`.
+  and `plan.md` on `main`; `queue.json` and `log.jsonl` on `queue-state`;
+  `net/experiments.jsonl` (main, else the `netloop` branch) and the v1
+  `net/chain.json`. The NNUE panel lists every net branch's latest gate
+  status straight from the queue log (testing, queued, merged, rejected, ...)
+  joined by branch name to its `netloop record` row; a gated net with no row
+  is flagged "no training record".
 - `api.github.com` (unauthenticated, 60 req/h): recent Actions runs, the jobs
   of the current SPRT wave (to count finished shards), and recent `main` commits.
 
