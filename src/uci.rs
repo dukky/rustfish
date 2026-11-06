@@ -187,6 +187,8 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "lmplimitd3" => engine.search_params.lmp_limit_d3 = v.clamp(0, 40),
             "lmrminmoveindex" => engine.search_params.lmr_min_move_index = v.clamp(1, 24),
             "lmrextramoveindex" => engine.search_params.lmr_extra_move_index = v.clamp(1, 32),
+            "nodetmbase" => engine.search_params.node_tm_base = (v.max(0) as u64).clamp(110, 300),
+            "nodetmscale" => engine.search_params.node_tm_scale = (v.max(0) as u64).clamp(50, 300),
             _ => {}
         }
     }
