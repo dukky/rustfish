@@ -39,6 +39,25 @@ Suggested: allocate dynamically. If a datagen job is pending, run 16 test +
 4 datagen; if not, give the gate all 20. Measure generations/hour, not runner
 occupancy. For a single ladder, 20 shards is simply faster.
 
+## CI-lane guard suggestions
+
+The current `ltc-gainer` is correctly at **16 shards**, so the 4-runner
+background lane can run datagen concurrently (16 + 4 = 20). That should be
+enforced, not left to each mode's config:
+
+- Add a validation in `scripts/queue.py` (or a small CI check) that rejects any
+  foreground mode with `shards > 16`. A mode silently set to 20 starves the
+  background lane, which is what I initially assumed had happened.
+- Keep `datagen.yml` `max_parallel <= 4` when the foreground lane is active;
+  the background lane is only useful if the foreground cap really is 16.
+- Update the dashboard's `MAX_PARALLEL`/runner estimate if the caps change; it
+  is currently showing the correct 16 + 4.
+- For docs-only branches, `check_bench.py` currently fails if their `Bench:`
+  trailer is stale (my two proposal branches did). Either auto-rewrite the
+  trailer from `main-bench.json` for docs-only commits, or add a `--docs-only`
+  path that compares against main's measured bench. The queue already fixes
+  stale trailers when it merges; CI on standalone docs branches does not.
+
 ## Other things that may matter
 
 - E1's gain came from the whole valid pool (350M) and 6 epochs with cosine LR,
