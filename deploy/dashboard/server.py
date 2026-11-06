@@ -178,6 +178,24 @@ def build_status():
                      "note": n.get("note"), "gate_elo": gate.get("elo"), "gate_ci": gate.get("ci"),
                      "gate_games": gate.get("games"), "gate_verdict": gate.get("verdict")})
 
+    # Net-training experiments (file may not exist yet; a 404 just means none logged).
+    exp_file = os.environ.get("EXPERIMENTS_FILE")  # local override, for testing only
+    if exp_file:
+        try:
+            with open(exp_file) as fh:
+                exp_rows = jsonl(fh.read())
+            sources["experiments"] = {"fetched_at": iso(time.time()), "error": None}
+        except OSError as exc:
+            exp_rows = []
+            sources["experiments"] = {"fetched_at": None, "error": str(exc)}
+    else:
+        exp_rows, at, err = CACHE.get(f"{RAW}/main/net/experiments.jsonl", TTL_RAW, jsonl)
+        if err and "HTTP 404" in err:
+            err = None
+        sources["experiments"] = {"fetched_at": iso(at), "error": err}
+    experiments = sorted((r for r in exp_rows or [] if isinstance(r, dict)),
+                         key=lambda r: str(r.get("date") or ""))
+
     # Strength over time.
     points = []
     for r in ladder:
@@ -187,6 +205,7 @@ def build_status():
                        "ci": r.get("ci"), "sha": (r.get("sha") or "")[:7], "note": r.get("note"),
                        "games": r.get("games"), "tc": r.get("tc"), "url": r.get("url"),
                        "anchors_file": r.get("anchors_file", "scripts/anchors.json"),
+                       "rating_with_black_marlin": r.get("rating_with_black_marlin"),
                        "anchors": [{k: a.get(k) for k in ("anchor", "ccrl", "score", "games")}
                                    for a in r.get("anchors", [])]})
     points.sort(key=lambda p: p["when"] or "")
@@ -343,6 +362,7 @@ def build_status():
         "strength": strength,
         "net_chain": {"nets": nets, "ref": chain_ref},
         "datagen": datagen,
+        "experiments": experiments,
         "roadmap": {"audit_doc": AUDIT_DOC, "plan_stale": True},
         "current": latest and {k: latest[k] for k in ("rating", "ci", "sha", "when", "url", "games")},
         "gap": latest and round(TARGET["rating"] - latest["rating"], 1),

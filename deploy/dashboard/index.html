@@ -142,6 +142,13 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
     <div class="note" id="nets-note"></div>
   </section>
 
+  <section class="card">
+    <h2>Net experiments</h2>
+    <div class="chart-wrap" id="exp-chart"></div>
+    <div class="scroll" id="experiments"></div>
+    <div class="note">From <span class="mono">net/experiments.jsonl</span> on main. Δ is validation loss vs the latest earlier experiment with verdict <i>merged</i>; lower is better.</div>
+  </section>
+
   <div class="grid row2">
     <section class="card"><h2>Recent outcomes</h2><div class="scroll" id="outcomes"></div></section>
     <section class="card"><h2>Elo from accepted changes</h2><div id="estimate"></div><div id="gains"></div></section>
@@ -398,7 +405,7 @@ function renderChart(s) {
         const between = s.merged.filter((c) => c.when && (!prev || c.when > prev.when) && c.when <= p.when).map((c) => c.name);
         tip.innerHTML = `<b>${fmt(p.rating)}</b> (95% CI ${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])})${prev ? ` · ${signed(p.rating - prev.rating, 0)} vs previous` : ""}<br>
           <span class="mono">${esc(p.sha)}</span> · ${shortDate(p.when)} · ${fmt(p.games)} games<br>
-          <span class="meta">${esc(p.note || "")}</span>${between.length ? `<br><span class="meta">Changes since previous: ${esc(between.join(", "))}</span>` : ""}`;
+          <span class="meta">${esc(p.note || "")}</span>${p.rating_with_black_marlin != null ? `<br><span class="meta">refit without black-marlin; raw ${fmt(p.rating_with_black_marlin, 1)}</span>` : ""}${between.length ? `<br><span class="meta">Changes since previous: ${esc(between.join(", "))}</span>` : ""}`;
       } else {
         const c = s.merged[i];
         tip.innerHTML = `<b class="mono">${esc(c.name)}</b><br>${signed(c.elo)} Elo ${c.ci ? `[${fmt(c.ci[0], 1)}, ${fmt(c.ci[1], 1)}]` : ""}<br><span class="meta">${esc(c.how)}, ${fmt(c.games)} games, ${shortDate(c.when)}</span>`;
@@ -416,7 +423,7 @@ function renderChart(s) {
   });
   $("ladder-table").innerHTML = `<table><thead><tr><th>When</th><th>Main</th><th class="num">Rating</th><th class="num">95% CI</th><th class="num">Games</th><th>Anchors / note</th></tr></thead><tbody>` +
     pts.slice().reverse().map((p) => `<tr><td style="white-space:nowrap">${p.url ? `<a href="${esc(p.url)}">${shortDate(p.when)}</a>` : shortDate(p.when)}</td><td class="mono">${esc(p.sha)}</td><td class="num">${fmt(p.rating, 1)}</td><td class="num">${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])}</td><td class="num">${fmt(p.games)}</td>
-      <td><span class="mono">${esc(p.anchors_file)}</span> (${p.anchors.length}: ${fmt(Math.min(...p.anchors.map((a) => a.ccrl)))}–${fmt(Math.max(...p.anchors.map((a) => a.ccrl)))})<div class="meta">${esc(p.note || "")}</div></td></tr>`).join("") + "</tbody></table>";
+      <td><span class="mono">${esc(p.anchors_file)}</span> (${p.anchors.length}: ${fmt(Math.min(...p.anchors.map((a) => a.ccrl)))}–${fmt(Math.max(...p.anchors.map((a) => a.ccrl)))})<div class="meta">${esc(p.note || "")}${p.rating_with_black_marlin != null ? ` · refit without black-marlin; raw ${fmt(p.rating_with_black_marlin, 1)}` : ""}</div></td></tr>`).join("") + "</tbody></table>";
 }
 document.addEventListener("click", (e) => { if (!e.target.closest("[data-tip]")) $("tip").style.display = "none"; });
 
@@ -482,6 +489,44 @@ function markdown(src) {
   return out;
 }
 
+function renderExperiments(s) {
+  const ex = s.experiments || [], el = $("experiments"), ch = $("exp-chart");
+  if (!ex.length) { el.innerHTML = `<div class="empty">No experiments logged yet.</div>`; ch.innerHTML = ""; return; }
+  const loss = (e) => e.val_loss ?? e.val_loss_quantized;
+  const rows = ex.map((e, i) => {
+    let base = null;
+    for (let j = i - 1; j >= 0; j--) if (ex[j].verdict === "merged") { base = ex[j]; break; }
+    const d = base && loss(e) != null && loss(base) != null ? loss(e) - loss(base) : null;
+    const v = e.verdict || "–";
+    const badge = v === "merged" ? "b-good" : /fail|reject|h0/i.test(v) ? "b-bad" : "b-neutral";
+    const seeds = Array.isArray(e.seeds) ? e.seeds.join(", ") : (e.seeds ?? "–");
+    const sprt = e.sprt_elo != null ? `${signed(e.sprt_elo)}${e.sprt_ci ? ` <span class="meta">±${fmt((e.sprt_ci[1] - e.sprt_ci[0]) / 2, 1)}</span>` : ""}${e.sprt_games ? `<div class="meta">${fmt(e.sprt_games)} games</div>` : ""}` : "–";
+    return `<tr title="${esc(e.notes || "")}"><td class="mono">${e.branch ? `<a href="${ghRepo()}/tree/${esc(e.branch)}">${esc(e.id)}</a>` : esc(e.id)}<div class="meta">${esc(e.date || "")}</div></td>
+      <td class="mono">${e.hidden ?? "?"}x${e.buckets ?? "?"}</td><td class="mono">${esc(seeds)}</td><td class="num">${fmt(e.epochs)}</td>
+      <td class="num">${loss(e) != null ? Number(loss(e)).toFixed(4) : "–"}${e.val_loss_quantized != null && e.val_loss != null ? `<div class="meta">q ${Number(e.val_loss_quantized).toFixed(4)}</div>` : ""}</td>
+      <td class="num" style="color:${d == null ? "inherit" : d < 0 ? "var(--good)" : "var(--bad)"}">${d == null ? "–" : (d > 0 ? "+" : "−") + Math.abs(d).toFixed(4)}</td>
+      <td class="num">${sprt}</td><td><span class="badge ${badge}">${esc(v)}</span></td></tr>`;
+  });
+  el.innerHTML = `<table><thead><tr><th>Experiment</th><th>Shape</th><th>Data seeds</th><th class="num">Epochs</th><th class="num">Val loss</th><th class="num">Δ vs merged</th><th class="num">SPRT Elo</th><th>Verdict</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  const pts = ex.map((e, i) => ({e, i, v: loss(e)})).filter((p) => p.v != null);
+  if (pts.length < 1) { ch.innerHTML = ""; return; }
+  const W = Math.max(320, ch.clientWidth), H = 140, m = {l: 54, r: 10, t: 10, b: 22};
+  let lo = Math.min(...pts.map((p) => p.v)), hi = Math.max(...pts.map((p) => p.v));
+  const pad = (hi - lo) * 0.15 || Math.abs(hi) * 0.01 || 0.001; lo -= pad; hi += pad;
+  const bw = (W - m.l - m.r) / pts.length;
+  const y = (v) => m.t + (hi - v) / (hi - lo) * (H - m.t - m.b);
+  let g = "";
+  [lo + pad, hi - pad].forEach((v) => g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${v.toFixed(4)}</text>`);
+  pts.forEach((p, k) => {
+    const cx = m.l + bw * (k + .5), cy = y(p.v);
+    const col = p.e.verdict === "merged" ? "var(--good)" : "var(--accent)";
+    g += `<circle cx="${cx}" cy="${cy}" r="4.5" fill="${col}" stroke="var(--surface)" stroke-width="1.5"><title>${esc(p.e.id)}: ${p.v.toFixed(4)}${p.e.verdict ? " (" + esc(p.e.verdict) + ")" : ""}</title></circle>`;
+    if (bw > 46) g += `<text x="${cx}" y="${H - 6}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(String(p.e.id).slice(0, Math.floor(bw / 6)))}</text>`;
+  });
+  if (pts.length > 1) g = `<path d="M${pts.map((p, k) => `${m.l + bw * (k + .5)},${y(p.v)}`).join("L")}" fill="none" stroke="var(--accent)" stroke-width="1.5" opacity=".5"/>` + g;
+  ch.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Validation loss by experiment">${g}</svg>`;
+}
+
 function renderBanner(s) {
   const errs = Object.entries(s.sources).filter(([, v]) => v.error);
   const b = $("banner");
@@ -496,7 +541,7 @@ async function refresh() {
     const s = await r.json();
     window.STATUS = s;
     renderBanner(s); renderTiles(s); renderDatagen(s); renderInflight(s); renderPending(s);
-    renderChart(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
+    renderChart(s); renderNets(s); renderExperiments(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
     if (s.plan) $("plan").innerHTML = markdown(s.plan);
     if (s.roadmap) $("audit-link").href = `${ghRepo()}/blob/main/${s.roadmap.audit_doc}`;
     const oldest = Object.values(s.sources).map((v) => v.fetched_at).filter(Boolean).sort()[0];
@@ -509,7 +554,7 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, REFRESH_MS);
-let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => window.STATUS && renderChart(window.STATUS), 150); });
+let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => window.STATUS && (renderChart(window.STATUS), renderExperiments(window.STATUS)), 150); });
 </script>
 </body>
 </html>
