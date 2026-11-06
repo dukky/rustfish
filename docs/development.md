@@ -132,7 +132,11 @@ against the current `main`, so a stale base can't happen.
   (make/undo along each walk), so it also catches NNUE update/SIMD changes.
 - To add work: push the branch, then
   `python3 scripts/queue.py add <branch>:<mode>[,<branch>:<mode>]` (`--front`
-  to jump the queue, e.g. for speedups). This drops a request file in
+  to jump the queue, e.g. for speedups; `--preempt` additionally cancels the
+  in-flight SPRT, which goes back to the queue right behind the new item and
+  is retested from scratch: use it for net generations on the critical path,
+  never for ladders or LTC checks, which it does not interrupt). Re-adding a
+  waiting branch moves it rather than queueing it twice. This drops a request file in
   `queue-state`'s `inbox/`, which the next queue run consumes. Don't pass work
   as workflow inputs or edit `queue.json` by hand: GitHub cancels all but one
   pending run per concurrency group, so inputs can silently vanish.

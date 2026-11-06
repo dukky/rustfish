@@ -72,15 +72,42 @@ def load_state():
         with open(path) as fh:
             req = json.load(fh)
         adds = parse_adds(req.get("add", ""))
+        # Re-adding a waiting branch moves it instead of testing it twice.
+        keys = {(a["branch"], a["mode"]) for a in adds}
+        state["pending"] = [p for p in state["pending"] if (p["branch"], p["mode"]) not in keys]
         if req.get("front"):
             state["pending"][:0] = adds
         else:
             state["pending"] += adds
         if req.get("unpause"):
             state.pop("paused", None)
+        if req.get("preempt"):
+            preempt(state, len(adds))
         os.remove(path)
         print(f"inbox {name}: {req}")
     return state
+
+
+def preempt(state, after):
+    """Stop the in-flight SPRT so the items just put at the front run first.
+
+    The interrupted item goes back to the queue right behind them (position
+    `after`) and is tested from scratch later; ladders and LTC checks are never
+    interrupted. Its runs are cancelled, so a late callback for it is ignored
+    as "not the current item"."""
+    cur = state.get("current")
+    if not cur or cur.get("mode") in ("ladder", "ltc-check"):
+        return
+    runs = json.loads(sh("gh", "run", "list", "-w", "sprt.yml", "-L", "50",
+                         "--json", "databaseId,displayTitle,status").stdout or "[]")
+    for run in runs:
+        if run["displayTitle"].startswith(f"SPRT {cur['test_id']} ") and run["status"] != "completed":
+            sh("gh", "run", "cancel", str(run["databaseId"]), check=False)
+    item = {k: cur[k] for k in ("branch", "mode", "base") if k in cur}
+    state["pending"].insert(after, item)
+    state["current"] = None
+    log({"branch": cur["branch"], "mode": cur["mode"], "test_id": cur["test_id"],
+         "outcome": "preempted", "reason": "a front item with --preempt was added"})
 
 
 def push_state():
@@ -428,12 +455,13 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if args == ["advance"]:
         advance()
-    elif len(args) >= 2 and args[0] == "add" and set(args[2:]) <= {"--front"}:
+    elif len(args) >= 2 and args[0] == "add" and set(args[2:]) <= {"--front", "--preempt"}:
         parse_adds(args[1])  # validate before pushing
-        request({"add": args[1], "front": "--front" in args})
+        preempting = "--preempt" in args
+        request({"add": args[1], "front": "--front" in args or preempting, "preempt": preempting})
     elif args == ["unpause"]:
         request({"unpause": True})
     else:
         sys.exit("usage: queue.py advance            (CI; RESULT env = final SPRT result JSON)\n"
-                 "       queue.py add <branch:mode,...> [--front]\n"
+                 "       queue.py add <branch:mode,...> [--front] [--preempt]\n"
                  "       queue.py unpause")
