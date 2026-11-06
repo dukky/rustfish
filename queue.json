@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-g3",
-      "mode": "net-gate"
-    },
-    {
       "branch": "spike-book-off-default",
       "mode": "speedup"
     },
@@ -17,6 +13,14 @@
       "mode": "speedup"
     },
     {
+      "branch": "datagen-r2",
+      "mode": "speedup"
+    },
+    {
+      "branch": "nnue-g3",
+      "mode": "net-gate"
+    },
+    {
       "branch": "nnue-g2b",
       "mode": "net-gate"
     },
@@ -27,10 +31,6 @@
     {
       "branch": "correction-history-r2",
       "mode": "stc"
-    },
-    {
-      "branch": "datagen-r2",
-      "mode": "speedup"
     }
   ],
   "current": {
