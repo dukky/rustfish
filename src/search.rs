@@ -2,9 +2,9 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
-// Singular extensions: minimum depth, and singular-beta margin per ply of depth.
+// Singular extensions: minimum depth (the per-ply singular-beta margin is
+// SearchParams::se_margin_per_depth).
 const SE_MIN_DEPTH: i32 = 8;
-const SE_MARGIN_PER_DEPTH: i32 = 2;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
@@ -18,9 +18,9 @@ const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
-// margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
+// margins it grows by SearchParams::rfp_deep_step per ply, and shrinks by a
+// quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
-const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
 
@@ -38,21 +38,22 @@ fn stop_requested() -> bool {
     active != 0 && STOP_UPTO.load(Ordering::Relaxed) >= active
 }
 // Quiet SEE pruning: at depth <= this, a non-priority quiet in a non-PV node
-// is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
+// is skipped when SEE < -see_quiet_margin * depth^2 (SearchParams).
 const SEE_QUIET_MAX_DEPTH: i32 = 8;
-const SEE_QUIET_MARGIN: i32 = 20;
-// Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
+// Non-PV nodes up to this depth skip losing captures with SEE below
+// -see_capture_margin * depth (SearchParams).
 const SEE_PRUNE_MAX_DEPTH: i32 = 6;
-const SEE_PRUNE_CAPTURE_MARGIN: i32 = 100;
-// ProbCut: minimum depth, margin over beta, and depth reduction for the
-// verification search (child searched at depth - 1 - PROBCUT_REDUCTION).
+// ProbCut: minimum depth and depth reduction for the verification search
+// (child searched at depth - 1 - PROBCUT_REDUCTION); margin is SearchParams.
 const PROBCUT_MIN_DEPTH: i32 = 5;
-const PROBCUT_MARGIN: i32 = 190;
 const PROBCUT_REDUCTION: i32 = 3;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
 
-pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
+/// `base` and `divisor` are in hundredths: r = ln(d) * ln(m) / (divisor / 100) + base / 100.
+pub(crate) fn build_lmr_table(base: i32, divisor: i32) -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
+    let base = base as f64 / 100.0;
+    let divisor = divisor as f64 / 100.0;
     let mut table = [[0i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH];
     for d in 1..LMR_MAX_DEPTH {
         for m in 1..LMR_MAX_MOVES {
@@ -95,8 +96,9 @@ pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
                 }
                 result
             };
-            // Base reduction: ln(d) * ln(m) / 2.0
-            table[d][m] = (ln_d * ln_m / 2.0 + 0.5) as i32;
+            // Base reduction: ln(d) * ln(m) / divisor + base (defaults 2.0, 0.5).
+            // Truncation toward zero; clamp so a negative base cannot go below 0.
+            table[d][m] = ((ln_d * ln_m / divisor + base) as i32).max(0);
         }
     }
     table
@@ -182,17 +184,14 @@ fn continuation_history_score(
 
 /// Bound on |history| and |continuation history| under the gravity update.
 const HISTORY_MAX: i32 = 16_384;
-/// Cap on a single history bonus/malus. 16 * d^2 reaches it at depth 10, so
-/// one deep cutoff moves an entry at most ~9% of the way to the bound.
-const HISTORY_BONUS_MAX: i32 = 1_536;
-/// LMR adjusts the reduction for quiets whose history passes +/- this value.
-/// The old threshold was 2000 under linear `d^2` accumulation; with a 16x
-/// bonus and gravity, the same number of net same-depth cutoffs lands at
-/// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
-const LMR_HISTORY_THRESHOLD: i32 = 14_000;
-
-fn history_bonus(depth: i32) -> i32 {
-    (16 * depth * depth).min(HISTORY_BONUS_MAX)
+/// History bonus/malus: history_bonus_scale * d^2, capped at history_bonus_max
+/// (SearchParams; defaults 16 and 1536, which reaches the cap at depth 10, so
+/// one deep cutoff moves an entry at most ~9% of the way to the bound).
+/// LMR adjusts the reduction for quiets whose history passes
+/// +/- SearchParams::lmr_history_threshold (default 14000 ~= 0.86 * HISTORY_MAX,
+/// the old linear-accumulation threshold of 2000 mapped through gravity).
+fn history_bonus(params: &SearchParams, depth: i32) -> i32 {
+    (params.history_bonus_scale * depth * depth).min(params.history_bonus_max)
 }
 
 /// "Gravity" update: h += delta - h * |delta| / HISTORY_MAX. Large values
@@ -624,6 +623,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         .map(|ms| ms >= 100)
         .unwrap_or_else(|| depth >= MIN_PARALLEL_DEPTH);
 
+    let aspiration_window = engine.search_params.aspiration_window;
     for d in 1..=depth.max(1) {
         let use_threads = threaded && parallel_allowed && d >= MIN_PARALLEL_DEPTH;
         if !use_threads && search.should_stop() {
@@ -633,8 +633,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         let mut alpha = -INF;
         let mut beta = INF;
         if d >= 4 {
-            alpha = best_score - ASPIRATION_WINDOW;
-            beta = best_score + ASPIRATION_WINDOW;
+            alpha = best_score - aspiration_window;
+            beta = best_score + aspiration_window;
         }
 
         let (score, mv, completed, depth_nodes) = loop {
@@ -661,11 +661,11 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     break (result.0, result.1, result.2, result.3);
                 }
                 if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    alpha = (alpha - aspiration_window * 2).max(-INF);
                     continue;
                 }
                 if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    beta = (beta + aspiration_window * 2).min(INF);
                     continue;
                 }
                 break (result.0, result.1, result.2, result.3);
@@ -687,11 +687,11 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     break (result.0, result.1, result.2, nodes_after - nodes_before);
                 }
                 if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    alpha = (alpha - aspiration_window * 2).max(-INF);
                     continue;
                 }
                 if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    beta = (beta + aspiration_window * 2).min(INF);
                     continue;
                 }
                 break (result.0, result.1, result.2, nodes_after - nodes_before);
@@ -1141,7 +1141,7 @@ fn negamax(
             let mut margin = match depth {
                 1 => params.reverse_futility_margin_d1,
                 2 => params.reverse_futility_margin_d2,
-                d => params.reverse_futility_margin_d3 + (d - 3) * RFP_DEEP_STEP,
+                d => params.reverse_futility_margin_d3 + (d - 3) * params.rfp_deep_step,
             };
             if improving {
                 margin -= margin / 4;
@@ -1219,7 +1219,7 @@ fn negamax(
         && depth >= PROBCUT_MIN_DEPTH
         && beta.abs() < MATE_SCORE - MAX_PLY as i32 * 2
     {
-        let probcut_beta = beta + PROBCUT_MARGIN;
+        let probcut_beta = beta + params.probcut_margin;
         let tt_says_no = tt_entry
             .map(|e| {
                 e.depth as i32 >= depth - 3 && score_from_tt(e.score, ply) < probcut_beta
@@ -1332,7 +1332,7 @@ fn negamax(
                     && entry.depth as i32 >= depth - 3
                     && tt_score.abs() < MATE_SCORE - MAX_PLY as i32
                 {
-                    let singular_beta = tt_score - SE_MARGIN_PER_DEPTH * depth;
+                    let singular_beta = tt_score - params.se_margin_per_depth * depth;
                     search.excluded[ply] = Some(mv);
                     let s = negamax(
                         board,
@@ -1403,7 +1403,7 @@ fn negamax(
             && idx > 0
             && depth <= SEE_QUIET_MAX_DEPTH
             && best > -(MATE_SCORE - 1000)
-            && see(board, mv) < -SEE_QUIET_MARGIN * depth * depth
+            && see(board, mv) < -params.see_quiet_margin * depth * depth
         {
             continue;
         }
@@ -1414,7 +1414,7 @@ fn negamax(
             && depth <= SEE_PRUNE_MAX_DEPTH
             && idx > 0
             && best > -(MATE_SCORE - 1000)
-            && see(board, mv) < -SEE_PRUNE_CAPTURE_MARGIN * depth
+            && see(board, mv) < -params.see_capture_margin * depth
         {
             continue;
         }
@@ -1462,11 +1462,11 @@ fn negamax(
                     r -= 1;
                 }
                 // Reduce more for moves with bad history
-                if quiet_history < -LMR_HISTORY_THRESHOLD {
+                if quiet_history < -params.lmr_history_threshold {
                     r += 1;
                 }
                 // Reduce less for moves with good history
-                if quiet_history > LMR_HISTORY_THRESHOLD {
+                if quiet_history > params.lmr_history_threshold {
                     r -= 1;
                 }
                 r.clamp(0, depth - 2)
@@ -1539,7 +1539,7 @@ fn negamax(
         }
         if alpha >= beta {
             if quiet {
-                let bonus = history_bonus(depth);
+                let bonus = history_bonus(&params, depth);
                 if let Some(prev) = prev_move {
                     engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
                         Some(mv);
@@ -1700,7 +1700,7 @@ fn quiescence(
                     .unwrap_or(0)
             };
             if let Some(stand_pat) = static_eval {
-                if alpha > -INF / 2 && stand_pat + victim + 150 < alpha {
+                if alpha > -INF / 2 && stand_pat + victim + engine.search_params.qs_delta_margin < alpha {
                     continue;
                 }
             }

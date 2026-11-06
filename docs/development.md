@@ -190,10 +190,15 @@ monthly, whichever comes first:
 ## Tuning search parameters (SPSA)
 
 The search margins and limits (`FutilityMarginD1`, `ReverseFutilityMarginD*`,
-`NullMargin*`, `NullReduction*`, `LmpLimitD*`, `Lmr*`) are UCI spin options, so
-they can be tuned by SPSA on GitHub without rebuilding per point. The state
-(theta, bounds, `c_end`, `r_end`, iteration counter, schedule length) lives in
-`tune/spsa-params.json`; `scripts/spsa.py` implements fishtest-style SPSA
+`NullMargin*`, `NullReduction*`, `LmpLimitD*`, `Lmr*`, plus `RfpDeepStep`,
+`AspirationWindow`, `ProbcutMargin`, `SeMarginPerDepth`, `SeeQuietMargin`,
+`SeeCaptureMargin`, `QsDeltaMargin`, `LmrBase`/`LmrDivisor` (LMR table, in
+hundredths), `LmrHistoryThreshold`, `HistoryBonusScale`, `HistoryBonusMax`) are
+UCI spin options, so they can be tuned by SPSA on GitHub without rebuilding per
+point. The state (theta, bounds, `c_end`, `r_end`, iteration counter, schedule
+length) lives in `tune/spsa-params.json` (HCE-era set) or `tune/spsa-nnue.json`
+(the eval-scale-sensitive set for NNUE, sized for `combine: sum`, 8 shards x 40
+iterations x 12 rounds); `scripts/spsa.py` implements fishtest-style SPSA
 (alpha 0.602, gamma 0.101, A = 10% of `total_iterations`).
 
 ```bash

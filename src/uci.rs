@@ -176,6 +176,27 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
             "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),
             "lmrextradepth" => engine.search_params.lmr_extra_depth = v.clamp(1, 16),
+            "rfpdeepstep" => engine.search_params.rfp_deep_step = v.clamp(0, 400),
+            "aspirationwindow" => engine.search_params.aspiration_window = v.clamp(5, 300),
+            "probcutmargin" => engine.search_params.probcut_margin = v.clamp(0, 600),
+            "semarginperdepth" => engine.search_params.se_margin_per_depth = v.clamp(0, 16),
+            "seequietmargin" => engine.search_params.see_quiet_margin = v.clamp(0, 200),
+            "seecapturemargin" => engine.search_params.see_capture_margin = v.clamp(0, 400),
+            "qsdeltamargin" => engine.search_params.qs_delta_margin = v.clamp(0, 1000),
+            "lmrbase" | "lmrdivisor" => {
+                let sp = &mut engine.search_params;
+                if n == "lmrbase" {
+                    sp.lmr_base = v.clamp(-100, 300);
+                } else {
+                    sp.lmr_divisor = v.clamp(100, 600);
+                }
+                engine.lmr_table = crate::search::build_lmr_table(sp.lmr_base, sp.lmr_divisor);
+            }
+            "lmrhistorythreshold" => {
+                engine.search_params.lmr_history_threshold = v.clamp(0, 16_384)
+            }
+            "historybonusscale" => engine.search_params.history_bonus_scale = v.clamp(1, 64),
+            "historybonusmax" => engine.search_params.history_bonus_max = v.clamp(64, 8192),
             _ => {}
         }
     }

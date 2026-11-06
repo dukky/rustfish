@@ -29,7 +29,6 @@ use uci::{flush_stdout, handle_bench, handle_divide, handle_evalhash, spawn_inpu
 const MATE_SCORE: i32 = 30_000;
 const INF: i32 = 1_000_000;
 const MAX_PLY: usize = 128;
-const ASPIRATION_WINDOW: i32 = 35;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) enum BookStyle {
@@ -944,6 +943,20 @@ struct SearchParams {
     lmr_min_move_index: usize,
     lmr_extra_depth: i32,
     lmr_extra_move_index: usize,
+    // Formerly constants; exposed for SPSA (see tune/spsa-nnue.json).
+    rfp_deep_step: i32,
+    aspiration_window: i32,
+    probcut_margin: i32,
+    se_margin_per_depth: i32,
+    see_quiet_margin: i32,
+    see_capture_margin: i32,
+    qs_delta_margin: i32,
+    /// LMR table base: r = ln(d) * ln(m) / (lmr_divisor / 100) + lmr_base / 100.
+    lmr_base: i32,
+    lmr_divisor: i32,
+    lmr_history_threshold: i32,
+    history_bonus_scale: i32,
+    history_bonus_max: i32,
 }
 
 impl Default for SearchParams {
@@ -965,6 +978,18 @@ impl Default for SearchParams {
             lmr_min_move_index: 3,
             lmr_extra_depth: 5,
             lmr_extra_move_index: 8,
+            rfp_deep_step: 100,
+            aspiration_window: 35,
+            probcut_margin: 190,
+            se_margin_per_depth: 2,
+            see_quiet_margin: 20,
+            see_capture_margin: 100,
+            qs_delta_margin: 150,
+            lmr_base: 50,
+            lmr_divisor: 200,
+            lmr_history_threshold: 14_000,
+            history_bonus_scale: 16,
+            history_bonus_max: 1_536,
         }
     }
 }
@@ -1012,7 +1037,7 @@ impl EngineState {
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
             search_params: SearchParams::default(),
-            lmr_table: build_lmr_table(),
+            lmr_table: build_lmr_table(50, 200),
             searches_since_decay: 0,
             threads: 1,
             hash_mb,
@@ -1168,6 +1193,18 @@ fn main() {
             println!("option name LmrMinMoveIndex type spin default 3 min 1 max 24");
             println!("option name LmrExtraDepth type spin default 5 min 1 max 16");
             println!("option name LmrExtraMoveIndex type spin default 8 min 1 max 32");
+            println!("option name RfpDeepStep type spin default 100 min 0 max 400");
+            println!("option name AspirationWindow type spin default 35 min 5 max 300");
+            println!("option name ProbcutMargin type spin default 190 min 0 max 600");
+            println!("option name SeMarginPerDepth type spin default 2 min 0 max 16");
+            println!("option name SeeQuietMargin type spin default 20 min 0 max 200");
+            println!("option name SeeCaptureMargin type spin default 100 min 0 max 400");
+            println!("option name QsDeltaMargin type spin default 150 min 0 max 1000");
+            println!("option name LmrBase type spin default 50 min -100 max 300");
+            println!("option name LmrDivisor type spin default 200 min 100 max 600");
+            println!("option name LmrHistoryThreshold type spin default 14000 min 0 max 16384");
+            println!("option name HistoryBonusScale type spin default 16 min 1 max 64");
+            println!("option name HistoryBonusMax type spin default 1536 min 64 max 8192");
             println!("uciok");
             flush_stdout();
             continue;
