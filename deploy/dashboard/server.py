@@ -284,6 +284,7 @@ def build_status():
                        "ci": r.get("ci"), "sha": (r.get("sha") or "")[:7], "note": r.get("note"),
                        "games": r.get("games"), "tc": r.get("tc"), "url": r.get("url"),
                        "anchors_file": r.get("anchors_file", "scripts/anchors.json"),
+                       "rating_with_black_marlin": r.get("rating_with_black_marlin"),
                        "anchors": [{k: a.get(k) for k in ("anchor", "ccrl", "score", "games")}
                                    for a in r.get("anchors", [])]})
     points.sort(key=lambda p: p["when"] or "")

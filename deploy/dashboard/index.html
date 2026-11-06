@@ -446,7 +446,7 @@ function renderChart(s) {
         const between = s.merged.filter((c) => c.when && (!prev || c.when > prev.when) && c.when <= p.when).map((c) => c.name);
         tip.innerHTML = `<b>${fmt(p.rating)}</b> (95% CI ${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])})${prev ? ` · ${signed(p.rating - prev.rating, 0)} vs previous` : ""}<br>
           <span class="mono">${esc(p.sha)}</span> · ${shortDate(p.when)} · ${fmt(p.games)} games<br>
-          <span class="meta">${esc(p.note || "")}</span>${between.length ? `<br><span class="meta">Changes since previous: ${esc(between.join(", "))}</span>` : ""}`;
+          <span class="meta">${esc(p.note || "")}</span>${p.rating_with_black_marlin != null ? `<br><span class="meta">refit without black-marlin; raw ${fmt(p.rating_with_black_marlin, 1)}</span>` : ""}${between.length ? `<br><span class="meta">Changes since previous: ${esc(between.join(", "))}</span>` : ""}`;
       } else {
         const c = s.merged[i];
         tip.innerHTML = `<b class="mono">${esc(c.name)}</b><br>${signed(c.elo)} Elo ${c.ci ? `[${fmt(c.ci[0], 1)}, ${fmt(c.ci[1], 1)}]` : ""}<br><span class="meta">${esc(c.how)}, ${fmt(c.games)} games, ${shortDate(c.when)}</span>`;
@@ -464,7 +464,7 @@ function renderChart(s) {
   });
   $("ladder-table").innerHTML = `<table><thead><tr><th>When</th><th>Main</th><th class="num">Rating</th><th class="num">95% CI</th><th class="num">Games</th><th>Anchors / note</th></tr></thead><tbody>` +
     pts.slice().reverse().map((p) => `<tr><td style="white-space:nowrap">${p.url ? `<a href="${esc(p.url)}">${shortDate(p.when)}</a>` : shortDate(p.when)}</td><td class="mono">${esc(p.sha)}</td><td class="num">${fmt(p.rating, 1)}</td><td class="num">${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])}</td><td class="num">${fmt(p.games)}</td>
-      <td><span class="mono">${esc(p.anchors_file)}</span> (${p.anchors.length}: ${fmt(Math.min(...p.anchors.map((a) => a.ccrl)))}–${fmt(Math.max(...p.anchors.map((a) => a.ccrl)))})<div class="meta">${esc(p.note || "")}</div></td></tr>`).join("") + "</tbody></table>";
+      <td><span class="mono">${esc(p.anchors_file)}</span> (${p.anchors.length}: ${fmt(Math.min(...p.anchors.map((a) => a.ccrl)))}–${fmt(Math.max(...p.anchors.map((a) => a.ccrl)))})<div class="meta">${esc(p.note || "")}${p.rating_with_black_marlin != null ? ` · refit without black-marlin; raw ${fmt(p.rating_with_black_marlin, 1)}` : ""}</div></td></tr>`).join("") + "</tbody></table>";
 }
 document.addEventListener("click", (e) => { if (!e.target.closest("[data-tip]")) $("tip").style.display = "none"; });
 
