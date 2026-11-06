@@ -657,25 +657,33 @@ fn cmd_train(args: &[String]) {
         let t = seen as f64 / total as f64;
         let cur_lr = lr_end + 0.5 * (lr - lr_end) * (1.0 + (std::f64::consts::PI * t).cos() as f32);
         feed.batch(&mut recs, batch);
-        let chunk = recs.len().div_ceil(threads);
+        // Small chunks pulled from a shared counter: the M3's efficiency
+        // cores take fewer of them instead of holding up the whole batch.
+        let chunk = 256usize;
+        let n_chunks = recs.len().div_ceil(chunk);
+        let next = std::sync::atomic::AtomicUsize::new(0);
         let seed_b = rng.next_u64();
         let loss: f64 = std::thread::scope(|sc| {
-            let p = &p;
+            let (p, recs, next) = (&p, &recs, &next);
             let hs: Vec<_> = grads
                 .iter_mut()
-                .zip(recs.chunks(chunk))
-                .enumerate()
-                .map(|(k, (g, part))| {
+                .map(|g| {
                     sc.spawn(move || {
                         g.fill(0.0);
                         let mut acc = vec![0.0f32; 2 * sh.h];
                         let mut dacc = vec![0.0f32; 2 * sh.h];
-                        let mut mr = Rng::new(seed_b ^ k as u64);
                         let mut l = 0.0f64;
-                        for r in part {
-                            let m = mirror && mr.next_u64() & 1 == 1;
-                            let s = decode(r, lambda, sh.buckets, m);
-                            l += train_sample(p, sh, &s, g, &mut acc, &mut dacc) as f64;
+                        loop {
+                            let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if c >= n_chunks {
+                                break;
+                            }
+                            let mut mr = Rng::new(seed_b ^ c as u64);
+                            for r in &recs[c * chunk..((c + 1) * chunk).min(recs.len())] {
+                                let m = mirror && mr.next_u64() & 1 == 1;
+                                let s = decode(r, lambda, sh.buckets, m);
+                                l += train_sample(p, sh, &s, g, &mut acc, &mut dacc) as f64;
+                            }
                         }
                         l
                     })
@@ -683,7 +691,7 @@ fn cmd_train(args: &[String]) {
                 .collect();
             hs.into_iter().map(|h| h.join().unwrap()).sum()
         });
-        let used = &grads[..recs.len().div_ceil(chunk)];
+        let used = &grads[..];
         adam_step(&mut p, &mut opt, used, cur_lr, wd, 1.0 / recs.len() as f32, threads);
         seen += recs.len() as u64;
         epoch_loss += loss;
