@@ -1,8 +1,8 @@
 //! Self-play data generation (training data for NNUE and the Texel tuner).
 //!
-//! `datagen <out.txt> <games> [nodes] [threads] [seed] [first_game]` plays
-//! fixed-node self-play games from random openings and writes one position
-//! per line in the shared training format:
+//! `datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N]`
+//! plays fixed-node self-play games from random openings and writes one
+//! position per line in the shared training format:
 //!
 //! `<FEN> | <score_cp from White's view> | <result from White's view: 1.0/0.5/0.0>`
 //!
@@ -21,10 +21,18 @@
 //! or are adjudicated: a win once |score| >= WIN_SCORE for WIN_PLIES plies in a
 //! row (same sign) or on a mate score, a draw once |score| <= DRAW_SCORE for
 //! DRAW_PLIES plies in a row after DRAW_MIN_PLY. No effect on normal play.
+//!
+//! `softnodes=N` (off by default) changes how a move's search ends: iterative
+//! deepening stops after the first iteration that completes past N nodes, and
+//! `nodes` becomes only the hard cap that aborts an iteration. Without it the
+//! search always runs into the `nodes` cap and throws the unfinished
+//! iteration away (the score and move come from the last completed one), so a
+//! soft limit spends fewer nodes per completed depth. It changes the data
+//! (search depth per label), which is why it is opt-in.
 
 use super::*;
 use crate::movegen::square_to_string;
-use crate::search::{LAST_SEARCH_SCORE, QUIET_SEARCH};
+use crate::search::{LAST_SEARCH_DEPTH, LAST_SEARCH_SCORE, QUIET_SEARCH, SOFT_NODE_LIMIT};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufWriter;
@@ -54,21 +62,42 @@ struct Shared {
     first_game: u64,
     end_game: u64,
     nodes: u64,
+    soft_nodes: Option<u64>,
     seed: u64,
     next_game: AtomicU64,
     games_done: AtomicU64,
     positions: AtomicU64,
     plies: AtomicU64,
     adjudicated: AtomicU64,
+    searches: AtomicU64,      // game-move searches (opening probes excluded)
+    search_nodes: AtomicU64,  // their nodes
+    search_depth: AtomicU64,  // sum of their completed depths
     results: [AtomicU64; 3], // white wins, draws, black wins
     output: Mutex<Output>,
     start: Instant,
 }
 
 pub(crate) fn handle_datagen(cmd: &str) {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    // Positional arguments, then optional `key=value` options in any order.
+    let tokens: Vec<&str> = cmd.split_whitespace().filter(|t| !t.contains('=')).collect();
+    let mut soft_nodes = None;
+    for opt in cmd.split_whitespace().filter(|t| t.contains('=')) {
+        match opt.split_once('=') {
+            Some(("softnodes", v)) => match v.parse::<u64>() {
+                Ok(n) if n > 0 => soft_nodes = Some(n),
+                _ => {
+                    eprintln!("datagen: bad softnodes value {:?}", v);
+                    return;
+                }
+            },
+            _ => {
+                eprintln!("datagen: unknown option {:?}", opt);
+                return;
+            }
+        }
+    }
     let Some(path) = tokens.get(1) else {
-        eprintln!("usage: datagen <out.txt> <games> [nodes] [threads] [seed] [first_game]");
+        eprintln!("usage: datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N]");
         return;
     };
     let arg = |i: usize, default: u64| tokens.get(i).and_then(|t| t.parse::<u64>().ok()).unwrap_or(default);
@@ -89,12 +118,16 @@ pub(crate) fn handle_datagen(cmd: &str) {
         first_game,
         end_game: first_game.saturating_add(games),
         nodes,
+        soft_nodes,
         seed,
         next_game: AtomicU64::new(first_game),
         games_done: AtomicU64::new(0),
         positions: AtomicU64::new(0),
         plies: AtomicU64::new(0),
         adjudicated: AtomicU64::new(0),
+        searches: AtomicU64::new(0),
+        search_nodes: AtomicU64::new(0),
+        search_depth: AtomicU64::new(0),
         results: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
         output: Mutex::new(Output {
             out: BufWriter::with_capacity(1 << 20, file),
@@ -104,8 +137,14 @@ pub(crate) fn handle_datagen(cmd: &str) {
         start: Instant::now(),
     });
     eprintln!(
-        "datagen: games {}..{} seed {} nodes {} threads {} -> {}",
-        first_game, shared.end_game, seed, nodes, threads, path
+        "datagen: games {}..{} seed {} nodes {} softnodes {} threads {} -> {}",
+        first_game,
+        shared.end_game,
+        seed,
+        nodes,
+        soft_nodes.map_or("off".to_string(), |n| n.to_string()),
+        threads,
+        path
     );
 
     let handles: Vec<_> = (0..threads)
@@ -133,9 +172,10 @@ fn report(shared: &Shared, final_line: bool) {
     let adj = shared.adjudicated.load(Ordering::Relaxed);
     let secs = shared.start.elapsed().as_secs_f64().max(1e-3);
     let r: Vec<u64> = shared.results.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    let searches = shared.searches.load(Ordering::Relaxed).max(1) as f64;
     eprintln!(
         "datagen{}: games {}/{} positions {} ({:.1}/game, {:.1} plies/game, {} adjudicated) \
-         {:.0}s {:.2} games/s {:.0} pos/s  W/D/L {}/{}/{}",
+         {:.0}s {:.2} games/s {:.0} pos/s  W/D/L {}/{}/{}  {:.0} nodes/move depth {:.2}",
         if final_line { " done" } else { "" },
         done,
         shared.end_game - shared.first_game,
@@ -148,7 +188,9 @@ fn report(shared: &Shared, final_line: bool) {
         pos as f64 / secs,
         r[0],
         r[1],
-        r[2]
+        r[2],
+        shared.search_nodes.load(Ordering::Relaxed) as f64 / searches,
+        shared.search_depth.load(Ordering::Relaxed) as f64 / searches,
     );
 }
 
@@ -158,10 +200,14 @@ struct Game {
     positions: Vec<(String, i32)>, // FEN, White-POV score
     plies: usize,
     adjudicated: bool,
+    searches: u64,
+    search_nodes: u64,
+    search_depth: u64,
 }
 
 fn worker(shared: &Shared) {
     QUIET_SEARCH.with(|q| q.set(true));
+    let soft_nodes = shared.soft_nodes.unwrap_or(u64::MAX);
     let mut board = Board::new();
     let mut engine = EngineState::new();
     engine.set_hash(DATAGEN_HASH_MB);
@@ -183,7 +229,7 @@ fn worker(shared: &Shared) {
         }
         let mut rng = splitmix64(splitmix64(shared.seed) ^ g);
         let mut game = Game::default();
-        play_game(&mut board, &mut engine, &mut probe, &go, &go_probe, &mut rng, &mut game);
+        play_game(&mut board, &mut engine, &mut probe, &go, &go_probe, soft_nodes, &mut rng, &mut game);
 
         let (res_str, idx) = match game.result {
             r if r > 0 => ("1.0", 0),
@@ -210,6 +256,9 @@ fn worker(shared: &Shared) {
         if game.adjudicated {
             shared.adjudicated.fetch_add(1, Ordering::Relaxed);
         }
+        shared.searches.fetch_add(game.searches, Ordering::Relaxed);
+        shared.search_nodes.fetch_add(game.search_nodes, Ordering::Relaxed);
+        shared.search_depth.fetch_add(game.search_depth, Ordering::Relaxed);
         let done = shared.games_done.fetch_add(1, Ordering::Relaxed) + 1;
         if done % REPORT_EVERY == 0 {
             report(shared, false);
@@ -292,12 +341,14 @@ fn threefold(engine: &EngineState, halfmove_clock: u32) -> bool {
 }
 
 /// Plays one game into `game` (result, recorded positions, length).
+#[allow(clippy::too_many_arguments)]
 fn play_game(
     board: &mut Board,
     engine: &mut EngineState,
     probe: &mut EngineState,
     go: &str,
     go_probe: &str,
+    soft_nodes: u64,
     rng: &mut u64,
     game: &mut Game,
 ) {
@@ -325,7 +376,14 @@ fn play_game(
             return;
         }
 
-        let Some(uci) = handle_go(go, board, engine) else { return };
+        // The soft limit applies to game moves only, never to opening probes.
+        SOFT_NODE_LIMIT.with(|s| s.set(soft_nodes));
+        let searched = handle_go(go, board, engine);
+        SOFT_NODE_LIMIT.with(|s| s.set(u64::MAX));
+        let Some(uci) = searched else { return };
+        game.searches += 1;
+        game.search_nodes += engine.last_search_nodes;
+        game.search_depth += LAST_SEARCH_DEPTH.with(|d| d.get()) as u64;
         let Some(mv) = parse_uci_move(board, &uci) else { return };
         let score = LAST_SEARCH_SCORE.with(|s| s.get());
         let white_score = if white { score } else { -score };

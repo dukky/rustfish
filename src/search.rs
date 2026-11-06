@@ -104,10 +104,15 @@ pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
 
 // Per-thread datagen hooks: QUIET_SEARCH suppresses `info` output from
 // handle_go, LAST_SEARCH_SCORE holds the last completed iteration's score
-// (side to move). Normal play never sets QUIET_SEARCH.
+// (side to move) and LAST_SEARCH_DEPTH its depth. SOFT_NODE_LIMIT stops
+// iterative deepening once an iteration completes past that many nodes
+// (datagen's `softnodes=`). Normal play never sets QUIET_SEARCH or
+// SOFT_NODE_LIMIT (u64::MAX: never triggers).
 thread_local! {
     pub(crate) static QUIET_SEARCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(crate) static LAST_SEARCH_SCORE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    pub(crate) static LAST_SEARCH_DEPTH: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    pub(crate) static SOFT_NODE_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
 }
 
 pub(crate) struct Search {
@@ -640,6 +645,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     }
     let mut best_move = Some(root_moves[0]);
     let mut stable_iterations = 0usize;
+    let mut completed_depth = 0i32;
     let worker_count = engine.threads.min(root_moves.len()).max(1);
     let threaded = worker_count > 1;
     let mut total_threaded_nodes = 0u64;
@@ -740,10 +746,14 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             }
         }
 
+        completed_depth = d;
         let elapsed = start.elapsed().as_millis() as u64;
         let nodes = search.nodes + total_threaded_nodes;
         if !QUIET_SEARCH.with(|q| q.get()) {
             print_info(d, best_score, nodes, elapsed, best_move);
+        }
+        if nodes >= SOFT_NODE_LIMIT.with(|s| s.get()) {
+            break;
         }
 
         if let Some(soft) = soft_ms {
@@ -760,6 +770,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
     engine.last_search_nodes = search.nodes + total_threaded_nodes;
     LAST_SEARCH_SCORE.with(|s| s.set(best_score));
+    LAST_SEARCH_DEPTH.with(|s| s.set(completed_depth));
     best_move.map(move_to_uci)
 }
 

@@ -42,7 +42,7 @@ capture is possible.
 
 ### Determinism
 
-`datagen <out.txt> <games> [nodes] [threads] [seed] [first_game]` plays games
+`datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N]` plays games
 `first_game .. first_game + games`. Game `g` depends only on `(seed, g, nodes)`
 and the engine version, and games are written in index order, so the output is
 byte-identical for any thread count, and shards that split one seed into
@@ -58,7 +58,36 @@ cargo build --release
 echo 'datagen data.txt 1000 5000 4 1' | ./target/release/rustfish
 ```
 
-Progress goes to stderr every 100 games (positions/game, games/s, pos/s, W/D/L).
+Progress goes to stderr every 100 games (positions/game, games/s, pos/s, W/D/L,
+mean nodes and completed depth per game move).
+
+### Soft node limit (`softnodes=N`, opt-in)
+
+By default every move's search runs into the `nodes` cap and throws the
+unfinished iteration away: the label comes from the last *completed*
+iteration. `softnodes=N` (any position after the positional arguments) stops
+iterative deepening after the first iteration that completes past N nodes;
+`nodes` stays as the hard cap. This changes the data (depth per label), so it
+is off unless asked for, and a dataset made with it should be judged on
+validation loss before it joins the pool.
+
+Measured 2026-11-06 (E2 net, seed 78, 150 games, 1 thread, M3 under load):
+
+| setting | nodes/move | mean depth | pos/CPU-s |
+|---|---|---|---|
+| `5000` (default) | 4997 | 6.22 | 227 |
+| `10000 softnodes=2000` | 4548 | 6.35 | 248 |
+| `10000 softnodes=1200` | 2907 | 5.59 | 403 |
+| `25000 softnodes=5000` | 11545 | 7.84 | 98 |
+
+`10000 softnodes=2000` is ~9% cheaper per move *and* slightly deeper than the
+default; interpolating, the default's mean depth costs ~15% fewer nodes with
+a soft limit (~1850). W/D/L and mean |score| differences between these runs
+are within 150-game noise.
+
+```bash
+echo 'datagen data.txt 1000 10000 4 1 0 softnodes=2000' | ./target/release/rustfish
+```
 
 ### On GitHub Actions
 
