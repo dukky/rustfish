@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "main",
-      "mode": "ladder"
-    },
-    {
       "branch": "nnue-e2",
       "mode": "stc"
     },
@@ -19,12 +15,11 @@
   ],
   "current": {
     "branch": "main",
-    "mode": "ltc-check",
-    "base": "7159f91f53ec20999c0d851aceb827b10bceade2",
-    "test_id": "q-main-ltc-check-1106-1315",
+    "mode": "ladder",
+    "test_id": "q-ladder-1106-1336",
     "sha": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-    "base_sha": "7159f91f53ec20999c0d851aceb827b10bceade2",
-    "started": "2026-11-06T13:15:24Z"
+    "base_sha": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
+    "started": "2026-11-06T13:36:15Z"
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 0,
