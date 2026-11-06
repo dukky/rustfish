@@ -6,16 +6,27 @@ only ever moves by fast-forward merges of candidates that passed.
 
 Each `advance`:
   1. If RESULT holds the final SPRT result for the current item: H1 ->
-     fast-forward main to the tested candidate (only if main hasn't moved;
-     otherwise requeue it at the front); anything else -> drop. Log it.
-  2. Start pending items in order until one is dispatched: rebase onto main,
-     build, test, perft, selftest, bench (refreshing the Bench: trailer), push
-     the rebased branch, and dispatch an SPRT whose final report calls back
-     here. Conflicts and failed checks are logged as needs-human and skipped.
-     'speedup' items merge directly if bench nodes equal main's.
+     fast-forward main to the tested candidate (replayed over main if main
+     moved only outside the engine or by behaviour-identical speedup merges,
+     see fast_forward_main; otherwise requeue it at the front); anything
+     else -> drop. Log it.
+  2. Merge every pending 'speedup' item (bench and evalhash identical to
+     main's, no games), even while an SPRT or ladder is in flight: they cost
+     no runners, and their merges are recorded in state["identical_merges"]
+     so the in-flight candidate can still be replayed over them.
+  3. If nothing is in flight, start pending items until one is dispatched,
+     picked by pick_next (front items, then scheduled ladders/ltc-checks in
+     place, else the best expected Elo per runner-hour from log.jsonl base
+     rates): rebase onto main, build, test, perft, selftest, bench (refreshing
+     the Bench: trailer), push the rebased branch, and dispatch an SPRT whose
+     final report calls back here. Conflicts and failed checks are logged as
+     needs-human and skipped.
+  4. Keep the background lane (datagen) busy; datagen.yml calls back here
+     when a run ends, so the next seed starts at once.
 
-Item modes: stc (gainer [0, 10]), nonreg ([-5, 0] STC), ltc-gainer
-([0, 10] at 60+0.6), speedup (no SPRT; bench must be unchanged).
+Item modes: the SPRT modes in queue-settings.json (stc, nonreg, ltc-gainer,
+net-gate; ltc-check is queued automatically), speedup (no SPRT; bench and
+evalhash must be unchanged) and ladder (CCRL ladder on main).
 """
 import datetime
 import json
@@ -33,6 +44,23 @@ STATE_BRANCH = "queue-state"
 # CHECK_EVERY merges back.
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue-settings.json")) as _fh:
     _CFG = json.load(_fh)
+
+# Foreground SPRTs get the 16 runners not held by the background lane (3) or
+# the queue's own job (1); a mode wider than that would starve both.
+MAX_FOREGROUND_SHARDS = 16
+
+
+def validate_settings(cfg):
+    """Fail loudly at load time on settings that would oversubscribe runners."""
+    bad = [f"{mode} (shards={s.get('shards')!r})" for mode, s in cfg["modes"].items()
+           if not isinstance(s.get("shards"), int) or not 1 <= s["shards"] <= MAX_FOREGROUND_SHARDS]
+    if bad:
+        raise SystemExit(f"queue-settings.json: foreground modes must use 1..{MAX_FOREGROUND_SHARDS} "
+                         f"shards (the rest of the 20 runners are the background lane and the "
+                         f"queue's own job); fix: {', '.join(bad)}")
+
+
+validate_settings(_CFG)
 SETTINGS = _CFG["modes"]
 CHECK_EVERY = _CFG["check_every"]
 # A CCRL ladder on main every LADDER_EVERY merges (ccrl-ladder.yml logs it).
@@ -71,7 +99,10 @@ def load_state():
         path = os.path.join(inbox, name)
         with open(path) as fh:
             req = json.load(fh)
-        adds = parse_adds(req.get("add", ""))
+        adds = parse_adds(req.get("add", ""), req.get("expect"))
+        if req.get("front"):
+            # Front items run in order before anything is scored (pick_next).
+            adds = [dict(a, front=True) for a in adds]
         # Re-adding a waiting branch moves it instead of testing it twice.
         keys = {(a["branch"], a["mode"]) for a in adds}
         state["pending"] = [p for p in state["pending"] if (p["branch"], p["mode"]) not in keys]
@@ -103,7 +134,7 @@ def preempt(state, after):
     for run in runs:
         if run["displayTitle"].startswith(f"SPRT {cur['test_id']} ") and run["status"] != "completed":
             sh("gh", "run", "cancel", str(run["databaseId"]), check=False)
-    item = {k: cur[k] for k in ("branch", "mode", "base") if k in cur}
+    item = dict(requeue_item(cur), front=True)
     state["pending"].insert(after, item)
     state["current"] = None
     log({"branch": cur["branch"], "mode": cur["mode"], "test_id": cur["test_id"],
@@ -189,23 +220,68 @@ def run_engine(cmds):
 ENGINE_PATHS = ["src", "net/nnue.bin", "Cargo.toml", "Cargo.lock", "build.rs"]
 
 
-def fast_forward_main(sha, base_sha=None, branch=None, bench=None):
-    """Move main to the tested sha. If main moved since base_sha but only outside
-    the engine sources (tooling, docs, logs), the tested binary is unchanged, so
-    replay the candidate on top of main instead of retesting."""
+def engine_moves(base_sha, main_sha, identical):
+    """How main moved since base_sha, as far as the engine is concerned: False
+    if no commit in base_sha..main_sha touches ENGINE_PATHS, True if the only
+    ones that do are recorded behaviour-identical merges (speedups), None if
+    any other engine change landed (or main was rewritten)."""
+    if sh("git", "merge-base", "--is-ancestor", base_sha, main_sha, check=False).returncode != 0:
+        return None
+    known, touched = set(identical), False
+    for c in out("git", "rev-list", f"{base_sha}..{main_sha}").split():
+        if sh("git", "diff", "--quiet", f"{c}^", c, "--", *ENGINE_PATHS, check=False).returncode == 0:
+            continue
+        if c not in known:
+            return None
+        touched = True
+    if not touched and sh("git", "diff", "--quiet", base_sha, main_sha, "--", *ENGINE_PATHS,
+                          check=False).returncode != 0:
+        return None
+    return touched
+
+
+def checked_bench():
+    """Build the checkout and run the start() checks; bench nodes, or None if anything failed."""
+    if sh("cargo", "build", "--release", "-q", check=False).returncode != 0:
+        return None
+    checks = run_engine("perfttest\nselftest 300\nquit\n")
+    if not re.search(r"perfttest summary (\d+)/\1 passed", checks) or "selftest ok" not in checks:
+        return None
+    m = re.search(r"Nodes searched\s*:\s*(\d+)", run_engine("bench\nquit\n"))
+    return int(m.group(1)) if m else None
+
+
+def fast_forward_main(sha, base_sha=None, branch=None, bench=None, identical=()):
+    """Move main to the tested sha. Returns None on success, else why not.
+
+    If main moved since base_sha, replay the candidate on top of main instead
+    of retesting when the tested binary's behaviour is unchanged: main moved
+    only outside the engine sources (tooling, docs, logs; the replayed engine
+    tree is then byte-identical), or also by merges recorded in `identical`
+    (speedups: bench and evalhash equal to main's). In the second case the
+    replayed tree differs, so it is rebuilt, checked, and must give exactly
+    the tested candidate's `bench` before main moves."""
     sh("git", "fetch", "-q", "origin", "main")
+    if branch:  # make sure the tested sha is present in this checkout
+        sh("git", "fetch", "-q", "origin", branch, check=False)
     main_sha = out("git", "rev-parse", "origin/main")
     if sh("git", "merge-base", "--is-ancestor", main_sha, sha, check=False).returncode != 0:
-        if not base_sha or sh("git", "diff", "--quiet", base_sha, main_sha, "--",
-                              *ENGINE_PATHS, check=False).returncode != 0:
-            return False
+        if not base_sha:
+            return "main moved"
+        moved = engine_moves(base_sha, main_sha, identical)
+        if moved is None:
+            return "main moved during test (engine change)"
         sh("git", "checkout", "-q", "-B", "replay", sha)
         if sh("git", "rebase", "-q", main_sha, check=False).returncode != 0:
             sh("git", "rebase", "--abort", check=False)
-            return False
+            return "main moved during test (replay conflict)"
         if sh("git", "diff", "--quiet", sha, "replay", "--", *ENGINE_PATHS,
               check=False).returncode != 0:
-            return False
+            if not moved or bench is None:
+                return "main moved during test (replayed engine differs)"
+            got = checked_bench()
+            if got != bench:
+                return f"main moved during test (replayed bench {got} != tested {bench})"
         sha = out("git", "rev-parse", "replay")
         if branch:
             sh("git", "push", "-q", "--force", "origin", f"replay:{branch}")
@@ -214,15 +290,16 @@ def fast_forward_main(sha, base_sha=None, branch=None, bench=None):
         with open(os.path.join(STATE, "main-bench.json"), "w") as fh:
             json.dump({"sha": sha, "nodes": bench}, fh)
             fh.write("\n")
-    return True
+    return None
 
 
-def start(item):
+def start(item, state=None, priority=None):
     """Prepare and launch one item. Returns the in-flight record, or None if it finished/skipped."""
     branch, mode = item["branch"], item["mode"]
     base = {"branch": branch, "mode": mode}
     if mode == "ltc-check":
-        return dispatch(base, out("git", "rev-parse", "origin/main"), item["base"], "main-ltc-check")
+        return dispatch(base, out("git", "rev-parse", "origin/main"), item["base"], "main-ltc-check",
+                        priority)
     if mode == "ladder":
         main_sha = out("git", "rev-parse", "origin/main")
         test_id = f"q-ladder-{datetime.datetime.utcnow().strftime('%m%d-%H%M')}"
@@ -230,7 +307,8 @@ def start(item):
            *[a for k, v in LADDER.items() for a in ("-f", f"{k}={v}")])
         # Foreground on 16 runners: on the 4-runner background lane a 120+1
         # ladder would take ~12 h. Datagen keeps the other 4 busy meanwhile.
-        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha))
+        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha,
+                 **({"priority": priority} if priority else {})))
         return dict(base, test_id=test_id, sha=main_sha, base_sha=main_sha, started=now())
     sh("git", "fetch", "-q", "origin", "main", branch)
     sh("git", "checkout", "-q", "-B", "candidate", f"origin/{branch}")
@@ -274,13 +352,22 @@ def start(item):
         elif mismatch:
             log(dict(base, outcome="needs-human", reason=f"speedup changed the eval ({mismatch}); "
                      "eval changes need an SPRT: re-add as stc or nonreg"))
-        elif fast_forward_main(sha, bench=nodes):
-            log(dict(base, outcome="merged", sha=sha, reason="speedup, bench identical"))
         else:
-            log(dict(base, outcome="needs-human", reason="main moved during speedup merge"))
+            commits = out("git", "rev-list", "origin/main..candidate").split()
+            refused = fast_forward_main(sha, bench=nodes)
+            if refused:
+                log(dict(base, outcome="needs-human", reason=f"speedup merge refused: {refused}"))
+            else:
+                if state is not None:
+                    # Behaviour-identical: an in-flight SPRT can be replayed over these.
+                    ident = state.setdefault("identical_merges", [])
+                    ident += commits
+                    del ident[:-IDENTICAL_KEEP]
+                log(dict(base, outcome="merged", sha=sha, reason="speedup, bench identical"))
         return None
 
-    return dict(dispatch(base, sha, out("git", "rev-parse", "origin/main"), branch), bench=nodes)
+    return dict(dispatch(base, sha, out("git", "rev-parse", "origin/main"), branch, priority),
+                bench=nodes)
 
 
 def eval_hash(binary):
@@ -310,7 +397,7 @@ def eval_mismatch():
     return None
 
 
-def dispatch(base, sha, base_sha, name):
+def dispatch(base, sha, base_sha, name, priority=None):
     """Start the SPRT for an item; its final report calls back into the queue."""
     settings = dict(SETTINGS[base["mode"]], candidate_name=name, base_name=base_sha[:7],
                     callback="queue")
@@ -318,7 +405,8 @@ def dispatch(base, sha, base_sha, name):
     sh("gh", "workflow", "run", "sprt.yml", "--ref", "main",
        "-f", f"test_id={test_id}", "-f", f"candidate={sha}", "-f", f"base={base_sha}",
        "-f", f"settings={json.dumps(settings)}")
-    log(dict(base, outcome="dispatched", test_id=test_id, sha=sha, base_sha=base_sha))
+    log(dict(base, outcome="dispatched", test_id=test_id, sha=sha, base_sha=base_sha,
+             **({"priority": priority} if priority else {})))
     return dict(base, test_id=test_id, sha=sha, base_sha=base_sha, started=now())
 
 
@@ -360,26 +448,146 @@ def find_result(test_id):
     return res if res.get("final") else None
 
 
-def parse_adds(spec):
-    """'branch:mode,branch2:mode2' -> pending items (mode defaults to stc)."""
+def parse_adds(spec, expect=None):
+    """'branch:mode,branch2:mode2' -> pending items (mode defaults to stc).
+
+    `expect` (Elo) replaces the base-rate gain in pick_next's score for these
+    items, e.g. for a net with a big validation-loss lead."""
     items = []
     for part in filter(None, (p.strip() for p in spec.split(","))):
         branch, _, mode = part.partition(":")
         mode = mode or "stc"
         if mode not in SETTINGS and mode not in ("speedup", "ladder") or mode == "ltc-check":
             raise SystemExit(f"unknown mode {mode!r} for {branch}")
-        items.append({"branch": branch, "mode": mode})
+        item = {"branch": branch, "mode": mode}
+        if expect is not None:
+            item["expect"] = float(expect)
+        items.append(item)
     return items
+
+
+# Priority. Base rates per SPRT mode come from log.jsonl, shrunk towards these
+# priors with PSEUDO pseudo-samples so a mode with few results gets sane
+# numbers. Gains are clipped to GAIN_CAP: a handful of +100 bug fixes would
+# otherwise dominate the mean.
+PRIOR_P, PRIOR_GAIN, PSEUDO, GAIN_CAP = 0.25, 5.0, 3, 30.0
+PRIOR_HOURS = {"stc": 1.0, "nonreg": 1.5, "ltc-gainer": 3.0, "net-gate": 0.3}
+SCHEDULED = ("ladder", "ltc-check")  # measurement: never reordered
+MAX_PASSED_OVER = 3
+IDENTICAL_KEEP = 500
+
+
+def _parse_time(stamp):
+    return datetime.datetime.fromisoformat(stamp.rstrip("Z"))
+
+
+def base_rates(entries):
+    """Per SPRT mode: acceptance rate, mean (clipped) Elo of accepted tests,
+    mean wall-clock hours of accepted and of other final tests (dispatched ->
+    final row), and the sample count, each shrunk towards the priors."""
+    started, stats = {}, {}
+    for e in entries:
+        if e.get("outcome") == "dispatched" and e.get("test_id"):
+            started[e["test_id"]] = e.get("logged_at")
+            continue
+        mode = e.get("mode")
+        if e.get("outcome") not in ("merged", "rejected", "requeued") or mode not in SETTINGS \
+                or e.get("verdict") not in ("H1", "H0", "inconclusive"):
+            continue
+        st = stats.setdefault(mode, {"n": 0, "acc": 0, "gain": 0.0, "h_acc": [], "h_rej": []})
+        st["n"] += 1
+        ok = e["verdict"] == "H1"
+        if ok:
+            st["acc"] += 1
+            st["gain"] += max(0.0, min(GAIN_CAP, float(e.get("elo") or 0.0)))
+        try:
+            hours = (_parse_time(e["logged_at"]) - _parse_time(started[e["test_id"]])).total_seconds() / 3600
+            st["h_acc" if ok else "h_rej"].append(hours)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            pass
+    rates = {}
+    for mode in SETTINGS:
+        st = stats.get(mode, {"n": 0, "acc": 0, "gain": 0.0, "h_acc": [], "h_rej": []})
+        h0 = PRIOR_HOURS.get(mode, 1.0)
+        rates[mode] = {
+            "n": st["n"],
+            "p_accept": (st["acc"] + PSEUDO * PRIOR_P) / (st["n"] + PSEUDO),
+            "gain": (st["gain"] + PSEUDO * PRIOR_GAIN) / (st["acc"] + PSEUDO),
+            "hours_accept": (sum(st["h_acc"]) + PSEUDO * h0) / (len(st["h_acc"]) + PSEUDO),
+            "hours_reject": (sum(st["h_rej"]) + PSEUDO * h0) / (len(st["h_rej"]) + PSEUDO),
+        }
+    return rates
+
+
+def priority_of(item, rates):
+    """Expected Elo per runner-hour: p_accept * gain / expected runner-hours,
+    where runner-hours = shards * (p * hours_accept + (1 - p) * hours_reject).
+    Speedups cost no runners and score infinity."""
+    mode = item["mode"]
+    if mode == "speedup":
+        return {"rule": "speedup", "score": float("inf")}
+    r = rates.get(mode)
+    if r is None:
+        return {"rule": "score", "score": 0.0, "reason": f"no base rate for {mode}"}
+    p = r["p_accept"]
+    expect = item.get("expect")
+    gain = expect if expect is not None else r["gain"]
+    runner_hours = SETTINGS[mode]["shards"] * (p * r["hours_accept"] + (1 - p) * r["hours_reject"])
+    return {"rule": "score", "score": round(p * gain / runner_hours, 4), "p_accept": round(p, 3),
+            "gain": round(gain, 2), "gain_source": "expect" if expect is not None else "base-rate",
+            "runner_hours": round(runner_hours, 2), "samples": r["n"]}
+
+
+def pick_next(pending, rates):
+    """Index of the item to start next, and the priority record for its log.
+
+    Items added with --front (and requeued/preempted ones) go first, in order.
+    A ladder or ltc-check keeps its place: nothing queued behind it can jump
+    ahead, so measurement isn't starved. Among the items before it, the best
+    score wins (ties: the earlier one), except that an item jumped over
+    MAX_PASSED_OVER times goes next (cheap stc items would otherwise starve a
+    costly ltc-gainer forever)."""
+    end = next((i for i, p in enumerate(pending) if p["mode"] in SCHEDULED), len(pending))
+    for i, p in enumerate(pending[:end]):
+        if p.get("front"):
+            return i, {"rule": "front"}
+    if end == 0:
+        return 0, {"rule": "scheduled"}
+    for i, p in enumerate(pending[:end]):
+        if p.get("passed_over", 0) >= MAX_PASSED_OVER:
+            return i, dict(priority_of(p, rates), rule="starvation-guard", passed_over=p["passed_over"])
+    scored = [(priority_of(p, rates), i) for i, p in enumerate(pending[:end])]
+    best, idx = max(scored, key=lambda s: (s[0]["score"], -s[1]))
+    for p in pending[:idx]:
+        p["passed_over"] = p.get("passed_over", 0) + 1
+    return idx, dict(best, considered=end)
+
+
+def read_log():
+    entries = []
+    try:
+        with open(os.path.join(STATE, "log.jsonl")) as fh:
+            for line in fh:
+                try:
+                    entries.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return entries
 
 
 def background_lane(state):
     """Keep the 3 background runners busy (1 of 20 stays free for the queue's own job): when no datagen or SPSA run
     is queued or running, generate the next datagen seed from main (only
     merged nets generate data)."""
+    # datagen.yml's final job dispatches the queue with its own run id
+    # (FINISHED_RUN): that run is still in progress while it calls back.
+    finished = os.environ.get("FINISHED_RUN", "").strip()
     for wf in ("datagen.yml", "spsa.yml"):
         runs = json.loads(out("gh", "run", "list", "--workflow", wf, "--limit", "10",
-                              "--json", "status"))
-        if any(r["status"] != "completed" for r in runs):
+                              "--json", "databaseId,status"))
+        if any(r["status"] != "completed" and str(r.get("databaseId")) != finished for r in runs):
             return
     seed = state.get("next_seed", 14)
     sh("gh", "workflow", "run", "datagen.yml", "--ref", "main", "-f", "ref=main",
@@ -388,6 +596,70 @@ def background_lane(state):
     state["next_seed"] = seed + 1
     log({"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
          "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"})
+
+
+def requeue_item(cur):
+    """The pending item to put back for an in-flight record."""
+    return {k: cur[k] for k in ("branch", "mode", "base", "expect") if k in cur}
+
+
+def finish(state, cur, res):
+    """Act on the final result for the current item and log it."""
+    verdict = res.get("status")
+    record = {k: cur[k] for k in ("branch", "mode", "test_id", "sha")}
+    record.update(elo=res.get("elo"), elo_ci95=res.get("elo_ci95"), games=res.get("games"),
+                  llr=res.get("llr"), verdict=verdict)
+    item = requeue_item(cur)
+    if verdict == "broken":
+        # Infrastructure failure: retry once, then hand to a human.
+        if retry(state, item, cur):
+            log(dict(record, outcome="retrying", reason="SPRT run ended without a report"))
+        else:
+            log(dict(record, outcome="needs-human", reason="SPRT run ended without a report, twice"))
+    elif cur["mode"] == "ladder":
+        log(dict(record, outcome="ladder-logged", rating=res.get("rating"), ci=res.get("ci")))
+    elif cur["mode"] == "ltc-check":
+        if verdict == "H0":
+            state["paused"] = f"LTC check {cur['test_id']} failed: main regressed vs {cur['base_sha'][:7]}"
+            log(dict(record, outcome="regression-alert", reason=state["paused"]))
+        else:
+            log(dict(record, outcome="check-passed" if verdict == "H1" else "check-inconclusive"))
+    elif verdict == "H1":
+        refused = fast_forward_main(cur["sha"], cur.get("base_sha"), cur["branch"], cur.get("bench"),
+                                    state.get("identical_merges", []))
+        if not refused:
+            log(dict(record, outcome="merged"))
+            schedule_check(state, cur["base_sha"])
+        else:
+            log(dict(record, outcome="requeued", reason=refused))
+            state["pending"].insert(0, dict(item, front=True))
+    else:
+        log(dict(record, outcome="rejected"))
+
+
+def run_item(state, item, priority=None):
+    """start() with the queue's error handling. Returns the in-flight record or None."""
+    try:
+        launched = start(item, state, priority)
+        # Keep item fields (retried, base, expect) on the in-flight record.
+        return dict(item, **launched) if launched else None
+    except Exception as exc:  # keep the queue moving past unexpected failures
+        sh("git", "rebase", "--abort", check=False)
+        reason = f"queue error: {exc}"[:500]
+        if retry(state, item, item, back=True):
+            log({"branch": item["branch"], "mode": item["mode"], "outcome": "retrying", "reason": reason})
+        else:
+            log({"branch": item["branch"], "mode": item["mode"], "outcome": "needs-human", "reason": reason})
+        return None
+
+
+def process_speedups(state):
+    """Merge every pending speedup now, whatever is in flight (no runners needed)."""
+    if state.get("paused"):
+        return
+    for item in [p for p in state["pending"] if p["mode"] == "speedup"]:
+        state["pending"].remove(item)
+        run_item(state, item, {"rule": "speedup"})
 
 
 def advance():
@@ -403,62 +675,20 @@ def advance():
         res = json.loads(raw)
         if not cur or res.get("test_id") != cur["test_id"]:
             print(f"ignoring result for {res.get('test_id')}: not the current item")
-            save_state(state, "queue: add items")
-            return
-        verdict = res.get("status")
-        record = {k: cur[k] for k in ("branch", "mode", "test_id", "sha")}
-        record.update(elo=res.get("elo"), elo_ci95=res.get("elo_ci95"), games=res.get("games"),
-                      llr=res.get("llr"), verdict=verdict)
-        item = {k: cur[k] for k in ("branch", "mode", "base") if k in cur}
-        if verdict == "broken":
-            # Infrastructure failure: retry once, then hand to a human.
-            if retry(state, item, cur):
-                log(dict(record, outcome="retrying", reason="SPRT run ended without a report"))
-            else:
-                log(dict(record, outcome="needs-human", reason="SPRT run ended without a report, twice"))
-        elif cur["mode"] == "ladder":
-            log(dict(record, outcome="ladder-logged", rating=res.get("rating"), ci=res.get("ci")))
-        elif cur["mode"] == "ltc-check":
-            if verdict == "H0":
-                state["paused"] = f"LTC check {cur['test_id']} failed: main regressed vs {cur['base_sha'][:7]}"
-                log(dict(record, outcome="regression-alert", reason=state["paused"]))
-            else:
-                log(dict(record, outcome="check-passed" if verdict == "H1" else "check-inconclusive"))
-        elif verdict == "H1":
-            if fast_forward_main(cur["sha"], cur.get("base_sha"), cur["branch"], cur.get("bench")):
-                log(dict(record, outcome="merged"))
-                schedule_check(state, cur["base_sha"])
-            else:
-                log(dict(record, outcome="requeued", reason="main moved during test"))
-                state["pending"].insert(0, item)
         else:
-            log(dict(record, outcome="rejected"))
-        state["current"] = None
-    elif cur:
-        print(f"{cur['test_id']} still in flight; nothing to do")
-        try:
-            background_lane(state)
-        except Exception as exc:  # never let the background lane stall the queue
-            print(f"background lane: {exc}")
-        save_state(state, "queue: add items")
-        return
+            finish(state, cur, res)
+            state["current"] = None
 
     if state.get("paused"):
         print(f"paused: {state['paused']} (resume with: python3 scripts/queue.py unpause)")
+    process_speedups(state)
+    if state.get("current"):
+        print(f"{state['current']['test_id']} still in flight")
+    rates = None
     while state["pending"] and not state.get("current") and not state.get("paused"):
-        item = state["pending"].pop(0)
-        try:
-            launched = start(item)
-            # Keep item fields (retried, base) on the in-flight record.
-            state["current"] = dict(item, **launched) if launched else None
-        except Exception as exc:  # keep the queue moving past unexpected failures
-            sh("git", "rebase", "--abort", check=False)
-            reason = f"queue error: {exc}"[:500]
-            if retry(state, item, item, back=True):
-                log({"branch": item["branch"], "mode": item["mode"], "outcome": "retrying", "reason": reason})
-            else:
-                log({"branch": item["branch"], "mode": item["mode"], "outcome": "needs-human", "reason": reason})
-            state["current"] = None
+        rates = rates or base_rates(read_log())
+        idx, priority = pick_next(state["pending"], rates)
+        state["current"] = run_item(state, state["pending"].pop(idx), priority)
     try:
         background_lane(state)
     except Exception as exc:  # never let the background lane stall the queue
@@ -472,9 +702,10 @@ def retry(state, item, prev, back=False):
         return False
     item = dict(item, retried=True)
     if back:
+        item.pop("front", None)
         state["pending"].append(item)
     else:
-        state["pending"].insert(0, item)
+        state["pending"].insert(0, dict(item, front=True))
     return True
 
 
@@ -494,17 +725,56 @@ def schedule_check(state, base_sha):
         state["merges_since_check"] = 0
 
 
+def show_rates():
+    """Dry run: base rates and the pick order for origin/queue-state (read-only)."""
+    sh("git", "fetch", "-q", "origin", STATE_BRANCH, check=False)
+    entries = [json.loads(l) for l in out("git", "show", f"origin/{STATE_BRANCH}:log.jsonl").splitlines() if l]
+    state = json.loads(out("git", "show", f"origin/{STATE_BRANCH}:queue.json"))
+    rates = base_rates(entries)
+    for mode, r in rates.items():
+        print(f"{mode:11s} n={r['n']:3d} p={r['p_accept']:.2f} gain={r['gain']:.1f} "
+              f"h_acc={r['hours_accept']:.2f} h_rej={r['hours_reject']:.2f}")
+    print(f"speedups, merged at once: {[p['branch'] for p in state['pending'] if p['mode'] == 'speedup']}")
+    pending = [p for p in state["pending"] if p["mode"] != "speedup"]
+    while pending:
+        idx, pri = pick_next(pending, rates)
+        item = pending.pop(idx)
+        print(f"next: {item['branch']}:{item['mode']}  {json.dumps(pri)}")
+
+
+def parse_add_args(args):
+    """['spec', '--front', '--expect', '12'] -> request dict; SystemExit on bad args."""
+    spec, flags, expect, rest = args[0], set(), None, list(args[1:])
+    while rest:
+        a = rest.pop(0)
+        if a in ("--front", "--preempt"):
+            flags.add(a)
+        elif a == "--expect" and rest:
+            try:
+                expect = float(rest.pop(0))
+            except ValueError:
+                raise SystemExit("--expect takes an Elo number")
+        else:
+            raise SystemExit(f"unknown argument {a!r}")
+    parse_adds(spec, expect)  # validate before pushing
+    req = {"add": spec, "front": bool(flags), "preempt": "--preempt" in flags}
+    if expect is not None:
+        req["expect"] = expect
+    return req
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args == ["advance"]:
         advance()
-    elif len(args) >= 2 and args[0] == "add" and set(args[2:]) <= {"--front", "--preempt"}:
-        parse_adds(args[1])  # validate before pushing
-        preempting = "--preempt" in args
-        request({"add": args[1], "front": "--front" in args or preempting, "preempt": preempting})
+    elif len(args) >= 2 and args[0] == "add":
+        request(parse_add_args(args[1:]))
     elif args == ["unpause"]:
         request({"unpause": True})
+    elif args == ["rates"]:
+        show_rates()
     else:
         sys.exit("usage: queue.py advance            (CI; RESULT env = final SPRT result JSON)\n"
-                 "       queue.py add <branch:mode,...> [--front] [--preempt]\n"
-                 "       queue.py unpause")
+                 "       queue.py add <branch:mode,...> [--front] [--preempt] [--expect <elo>]\n"
+                 "       queue.py unpause\n"
+                 "       queue.py rates              (read-only: base rates and pick order)")

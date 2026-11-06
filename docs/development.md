@@ -132,7 +132,9 @@ against the current `main`, so a stale base can't happen.
   (make/undo along each walk), so it also catches NNUE update/SIMD changes.
 - To add work: push the branch, then
   `python3 scripts/queue.py add <branch>:<mode>[,<branch>:<mode>]` (`--front`
-  to jump the queue, e.g. for speedups; `--preempt` additionally cancels the
+  to jump the queue; `--expect <elo>` to replace the base-rate gain in the
+  priority score, e.g. for a net with a big validation-loss lead; `--preempt`
+  additionally cancels the
   in-flight SPRT, which goes back to the queue right behind the new item and
   is retested from scratch: use it for net generations on the critical path,
   never for ladders or LTC checks, which it does not interrupt). Re-adding a
@@ -140,12 +142,38 @@ against the current `main`, so a stale base can't happen.
   `queue-state`'s `inbox/`, which the next queue run consumes. Don't pass work
   as workflow inputs or edit `queue.json` by hand: GitHub cancels all but one
   pending run per concurrency group, so inputs can silently vanish.
+- **Speedups don't wait.** Every queue run merges all pending `speedup` items
+  at once, even while an SPRT or ladder is in flight (they use no runners).
+  Their commits are recorded in `queue.json`'s `identical_merges`.
+- **Priority, not FIFO.** The next SPRT is the pending item with the highest
+  expected Elo per runner-hour: `p_accept * gain / runner_hours`, with
+  `runner_hours = shards * (p * hours_if_accepted + (1 - p) * hours_if_rejected)`.
+  The per-mode base rates come from `log.jsonl` (accepted Elo clipped at 30 so
+  bug fixes don't dominate; every rate is shrunk towards a prior with 3
+  pseudo-samples, so a mode with few results gets sane defaults). Ties go to
+  the older item. Overrides, in order: `--front` items (and requeued, retried
+  or preempted ones) run first in queue order; a `ladder` or `ltc-check` keeps
+  its place, so nothing queued behind it jumps ahead; an item jumped over 3
+  times goes next, so a costly ltc-gainer can't starve behind cheap STCs.
+  The `dispatched` log row carries a `priority` field with the score and its
+  inputs. `python3 scripts/queue.py rates` prints the base rates and the pick
+  order for the live queue without changing anything.
 - A schedule runs the queue every 30 minutes as a heartbeat: it picks up inbox
   requests, and if the SPRT callback was lost it finds the current test's final
-  result itself.
+  result itself. `datagen.yml` also calls the queue back when a run ends, so
+  the background lane starts its next seed at once.
 - If `main` moved during a test only outside the engine sources (`src/`,
-  `Cargo.*`), a passing candidate is replayed onto `main` without a retest;
-  any engine change in between requeues it.
+  `net/nnue.bin`, `Cargo.*`, `build.rs`) or by recorded speedup merges, a
+  passing candidate is replayed onto `main` without a retest. After speedups
+  the replayed tree differs from the tested one, so it is rebuilt, perft and
+  selftest are rerun, and its bench must equal the tested candidate's;
+  otherwise (or after any other engine change, or a replay conflict) it is
+  requeued at the front.
+- `scripts/queue-settings.json` is validated on load: every SPRT mode must use
+  at most 16 shards (the 16 foreground runners; 3 are the background lane and
+  1 is kept for the queue's own job).
+- Tests: `python3 scripts/test_queue.py` (stdlib unittest; real git in a temp
+  dir, cargo/gh/engine mocked).
 - `needs-human` entries (rebase conflict, failed checks) are skipped; fix the
   branch and re-add it. Infrastructure failures (an SPRT run that ends with no
   report, a queue error) are retried once first.
