@@ -363,6 +363,11 @@ impl MovePicker {
             bufs,
             total: 0,
         };
+        // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
+        // with each history table read once per move.
+        let side_hist = &history[color_index(side)];
+        let cont_row = prev_move
+            .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
 
         for mv in move_buf.iter().copied() {
             picker.total += 1;
@@ -382,11 +387,31 @@ impl MovePicker {
                 continue;
             }
 
-            let score = quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
-            if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
+            let h = side_hist[mv.from as usize][mv.to as usize];
+            let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
+            let is_k0 = Some(mv) == killers[0];
+            let is_k1 = Some(mv) == killers[1];
+            let is_counter = Some(mv) == counter_move;
+            let mut score = h + ch / 2;
+            if is_k0 {
+                score += 30_000;
+            } else if is_counter {
+                score += 20_000;
+            } else if is_k1 {
+                score += 10_000;
+            }
+            if mv.is_castle {
+                score += 10;
+            }
+            score += mv
+                .promotion
+                .map(piece_value)
+                .unwrap_or(0)
+                .saturating_sub(piece_value(PieceType::Pawn));
+            if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
                 picker.bufs.priority_quiets.push((mv, score));
             } else {
-                picker.bufs.quiets.push((mv, score.max(history_score(history, side, mv))));
+                picker.bufs.quiets.push((mv, score.max(h)));
             }
         }
 
@@ -1785,49 +1810,6 @@ fn order_moves(
 
 fn is_capture_move(board: &Board, mv: Move) -> bool {
     mv.is_en_passant || board.squares[mv.to as usize].is_some()
-}
-
-fn is_priority_quiet(
-    engine: &EngineState,
-    side: Color,
-    mv: Move,
-    counter_move: Option<Move>,
-    prev_move: Option<Move>,
-    killers: &[Option<Move>; 2],
-) -> bool {
-    Some(mv) == killers[0]
-        || Some(mv) == killers[1]
-        || Some(mv) == counter_move
-        || history_score(&engine.history, side, mv) > 0
-        || continuation_history_score(engine, side, prev_move, mv) > 0
-}
-
-fn quiet_stage_score(
-    engine: &EngineState,
-    side: Color,
-    mv: Move,
-    counter_move: Option<Move>,
-    prev_move: Option<Move>,
-    killers: &[Option<Move>; 2],
-) -> i32 {
-    let mut score = history_score(&engine.history, side, mv)
-        + continuation_history_score(engine, side, prev_move, mv) / 2;
-    if Some(mv) == killers[0] {
-        score += 30_000;
-    } else if Some(mv) == counter_move {
-        score += 20_000;
-    } else if Some(mv) == killers[1] {
-        score += 10_000;
-    }
-    if mv.is_castle {
-        score += 10;
-    }
-    score += mv
-        .promotion
-        .map(piece_value)
-        .unwrap_or(0)
-        .saturating_sub(piece_value(PieceType::Pawn));
-    score
 }
 
 fn capture_stage_score_from_see(board: &Board, mv: Move, see_score: i32) -> i32 {
