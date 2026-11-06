@@ -228,11 +228,10 @@ def start(item):
         test_id = f"q-ladder-{datetime.datetime.utcnow().strftime('%m%d-%H%M')}"
         sh("gh", "workflow", "run", "ccrl-ladder.yml", "--ref", "main", "-f", f"test_id={test_id}",
            *[a for k, v in LADDER.items() for a in ("-f", f"{k}={v}")])
-        # Background lane: a ladder gates nothing, so the queue moves straight on
-        # (the workflow logs its own rating to tests/ladder-log.jsonl; its
-        # callback is ignored as "not the current item").
-        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha, reason="background"))
-        return None
+        # Foreground on 16 runners: on the 4-runner background lane a 120+1
+        # ladder would take ~12 h. Datagen keeps the other 4 busy meanwhile.
+        log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha))
+        return dict(base, test_id=test_id, sha=main_sha, base_sha=main_sha, started=now())
     sh("git", "fetch", "-q", "origin", "main", branch)
     sh("git", "checkout", "-q", "-B", "candidate", f"origin/{branch}")
     if sh("git", "rebase", "-q", "origin/main", check=False).returncode != 0:
@@ -374,10 +373,10 @@ def parse_adds(spec):
 
 
 def background_lane(state):
-    """Keep the 4 background runners busy: when no datagen, ladder or SPSA run
+    """Keep the 4 background runners busy: when no datagen or SPSA run
     is queued or running, generate the next datagen seed from main (only
     merged nets generate data)."""
-    for wf in ("datagen.yml", "ccrl-ladder.yml", "spsa.yml"):
+    for wf in ("datagen.yml", "spsa.yml"):
         runs = json.loads(out("gh", "run", "list", "--workflow", wf, "--limit", "10",
                               "--json", "status"))
         if any(r["status"] != "completed" for r in runs):

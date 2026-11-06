@@ -2,7 +2,7 @@
   "check_every": 5,
   "ladder_every": 5,
   "ladder": {
-    "games_per_anchor": "96",
+    "games_per_anchor": "64",
     "tc": "120+1",
     "anchors_file": "scripts/anchors-elite.json",
     "anchors": "viridithas-4.0.0,stash-28.0,stash-30.0,stash-31.0,stash-33.0,weiss-2.0,stash-35.0,reckless-0.6.0,stash-37.0,koivisto-6.0,reckless-0.7.0"

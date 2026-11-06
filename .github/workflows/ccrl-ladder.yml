@@ -76,9 +76,8 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
-      # Background lane: the merge queue's SPRTs use 16 runners, the rest is shared
-      # by one background job at a time (ladder, datagen or SPSA).
-      max-parallel: 4
+      # 16 of the 20 runners; the background lane (datagen) keeps the other 4.
+      max-parallel: 16
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: ${{ matrix.name }} / shard ${{ matrix.shard }}
     steps:
