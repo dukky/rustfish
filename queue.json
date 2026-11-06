@@ -1,30 +1,6 @@
 {
   "pending": [
     {
-      "branch": "datagen-netscale",
-      "mode": "speedup"
-    },
-    {
-      "branch": "spike-book-off-default",
-      "mode": "speedup"
-    },
-    {
-      "branch": "king-buckets",
-      "mode": "speedup"
-    },
-    {
-      "branch": "speed-r3",
-      "mode": "speedup"
-    },
-    {
-      "branch": "datagen-r2",
-      "mode": "speedup"
-    },
-    {
-      "branch": "nnue-g3",
-      "mode": "net-gate"
-    },
-    {
       "branch": "nnue-g2b",
       "mode": "net-gate"
     },
@@ -38,16 +14,16 @@
     }
   ],
   "current": {
-    "branch": "tm-ccrl",
-    "mode": "ltc-gainer",
-    "test_id": "q-tm-ccrl-1106-1643",
-    "sha": "773ae42b564ced28c982d6a36658807c890247ab",
-    "base_sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a",
-    "started": "2026-11-06T16:43:34Z",
-    "bench": 634443
+    "branch": "nnue-g3",
+    "mode": "net-gate",
+    "test_id": "q-nnue-g3-1106-2150",
+    "sha": "51402f5322a308f935643407e580d9fbd7d565c1",
+    "base_sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf",
+    "started": "2026-11-06T21:50:13Z",
+    "bench": 624185
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
-  "next_seed": 19
+  "next_seed": 20
 }

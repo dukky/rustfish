@@ -205,3 +205,11 @@
 {"branch": "main", "logged_at": "2026-11-06T17:33:19Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 16, "sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a"}
 {"branch": "main", "logged_at": "2026-11-06T18:51:11Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 17, "sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a"}
 {"branch": "main", "logged_at": "2026-11-06T20:12:52Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 18, "sha": "849ff63863561cc6636d8a326e90fe976528c647"}
+{"branch": "tm-ccrl", "elo": 5.9, "elo_ci95": [0.88, 10.92], "games": 5184, "llr": 1.374, "logged_at": "2026-11-06T21:46:11Z", "mode": "ltc-gainer", "outcome": "rejected", "sha": "773ae42b564ced28c982d6a36658807c890247ab", "test_id": "q-tm-ccrl-1106-1643", "verdict": "inconclusive"}
+{"branch": "datagen-netscale", "logged_at": "2026-11-06T21:47:04Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "9e2105e560ac66307955c0d6560fccbc11292f3b"}
+{"branch": "spike-book-off-default", "logged_at": "2026-11-06T21:47:43Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "78670b7161df84495f69cc71e587ae5f78373e01"}
+{"branch": "king-buckets", "logged_at": "2026-11-06T21:48:23Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "7ec412ce8396991db7707f69c3cef407f075283b"}
+{"branch": "speed-r3", "logged_at": "2026-11-06T21:49:03Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "47c97298916785c70b39f404f83efd274cde6fbd"}
+{"branch": "datagen-r2", "logged_at": "2026-11-06T21:49:44Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf"}
+{"base_sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf", "branch": "nnue-g3", "logged_at": "2026-11-06T21:50:13Z", "mode": "net-gate", "outcome": "dispatched", "sha": "51402f5322a308f935643407e580d9fbd7d565c1", "test_id": "q-nnue-g3-1106-2150"}
+{"branch": "main", "logged_at": "2026-11-06T21:50:16Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 19, "sha": "f996e7b22b593565d2ccb45e1edb5a5636bc43bf"}
