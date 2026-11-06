@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-scale-58",
-      "mode": "stc"
-    },
-    {
       "branch": "nnue-e2",
       "mode": "stc"
     },
@@ -22,15 +18,16 @@
     }
   ],
   "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "test_id": "q-ladder-1106-1432",
-    "sha": "91d0311627f64e062d30076e966a2f740c1a0f0a",
-    "base_sha": "91d0311627f64e062d30076e966a2f740c1a0f0a",
-    "started": "2026-11-06T14:32:24Z"
+    "branch": "nnue-scale-58",
+    "mode": "stc",
+    "test_id": "q-nnue-scale-58-1106-1609",
+    "sha": "5fcd838a139a25f66662c8966338963eba4c0b7f",
+    "base_sha": "991594cd15c5d62400feaa5f60c8e49414942f34",
+    "started": "2026-11-06T16:09:11Z",
+    "bench": 531213
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
-  "next_seed": 15
+  "next_seed": 16
 }
