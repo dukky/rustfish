@@ -198,3 +198,7 @@
 {"branch": "main", "logged_at": "2026-11-06T16:09:14Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 15, "sha": "991594cd15c5d62400feaa5f60c8e49414942f34"}
 {"branch": "nnue-scale-58", "elo": -22.2, "elo_ci95": [-33.62, -10.82], "games": 1536, "llr": -3.677, "logged_at": "2026-11-06T16:25:52Z", "mode": "stc", "outcome": "rejected", "sha": "5fcd838a139a25f66662c8966338963eba4c0b7f", "test_id": "q-nnue-scale-58-1106-1609", "verdict": "H0"}
 {"base_sha": "991594cd15c5d62400feaa5f60c8e49414942f34", "branch": "nnue-e2", "logged_at": "2026-11-06T16:26:20Z", "mode": "stc", "outcome": "dispatched", "sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a", "test_id": "q-nnue-e2-1106-1626"}
+{"branch": "nnue-e2", "elo": 26.06, "elo_ci95": [14.03, 38.16], "games": 1536, "llr": 3.14, "logged_at": "2026-11-06T16:42:55Z", "mode": "stc", "outcome": "merged", "sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a", "test_id": "q-nnue-e2-1106-1626", "verdict": "H1"}
+{"branch": "netloop", "logged_at": "2026-11-06T16:42:55Z", "mode": "speedup", "outcome": "skipped", "reason": "no commits beyond main"}
+{"branch": "dashboard-netlog", "logged_at": "2026-11-06T16:42:55Z", "mode": "speedup", "outcome": "skipped", "reason": "no commits beyond main"}
+{"base_sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a", "branch": "tm-ccrl", "logged_at": "2026-11-06T16:43:34Z", "mode": "ltc-gainer", "outcome": "dispatched", "sha": "773ae42b564ced28c982d6a36658807c890247ab", "test_id": "q-tm-ccrl-1106-1643"}

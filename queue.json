@@ -1,29 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "netloop",
-      "mode": "speedup"
-    },
-    {
-      "branch": "dashboard-netlog",
-      "mode": "speedup"
-    },
-    {
-      "branch": "tm-ccrl",
-      "mode": "ltc-gainer"
-    }
-  ],
+  "pending": [],
   "current": {
-    "branch": "nnue-e2",
-    "mode": "stc",
-    "test_id": "q-nnue-e2-1106-1626",
-    "sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a",
-    "base_sha": "991594cd15c5d62400feaa5f60c8e49414942f34",
-    "started": "2026-11-06T16:26:20Z",
+    "branch": "tm-ccrl",
+    "mode": "ltc-gainer",
+    "test_id": "q-tm-ccrl-1106-1643",
+    "sha": "773ae42b564ced28c982d6a36658807c890247ab",
+    "base_sha": "7b14e7d3d712f3e1d210e918f7c09d6dd393a58a",
+    "started": "2026-11-06T16:43:34Z",
     "bench": 634443
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-  "merges_since_check": 0,
-  "merges_since_ladder": 0,
+  "merges_since_check": 1,
+  "merges_since_ladder": 1,
   "next_seed": 16
 }
