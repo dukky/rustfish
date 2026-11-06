@@ -1102,11 +1102,14 @@ fn mobility_side<T: Tracer>(
     s.add(P::QueenMobility, sign * queen_mob);
 }
 
+/// The engine evaluates in net units divided by this (NNUE scores run ~2x the
+/// HCE's scale and the search margins were tuned on the HCE). Datagen
+/// multiplies search scores back by it so training targets stay in net units.
+pub(crate) const NNUE_EVAL_DIV: i32 = 2;
+
 pub(crate) fn evaluate(board: &Board) -> i32 {
     if let Some(st) = board.nnue.as_ref() {
-        // NNUE scores run ~2x the HCE's scale (slope 2.0 over 1680 positions),
-        // and the search margins were tuned on the HCE: halve to match.
-        let s = st.evaluate(board.side_to_move, board.bb.occ_all().count_ones()) / 2;
+        let s = st.evaluate(board.side_to_move, board.bb.occ_all().count_ones()) / NNUE_EVAL_DIV;
         return if board.side_to_move == Color::White { s } else { -s };
     }
     evaluate_impl(board, &mut NoTrace, None)

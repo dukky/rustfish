@@ -332,7 +332,10 @@ fn play_game(
 
         let noisy = mv.is_en_passant || mv.promotion.is_some() || board.squares[mv.to as usize].is_some();
         if !in_check && !noisy && white_score.abs() < MATE_THRESHOLD {
-            game.positions.push((board_to_fen(board), white_score));
+            // Record in net units (the engine searches in net units / NNUE_EVAL_DIV),
+            // so every generation trains on the same score scale.
+            let div = if board.nnue.is_some() { crate::eval::NNUE_EVAL_DIV } else { 1 };
+            game.positions.push((board_to_fen(board), white_score * div));
         }
 
         if white_score.abs() >= MATE_THRESHOLD {
