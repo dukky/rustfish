@@ -5,36 +5,48 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-06 14:30._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-07 00:00._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **~3330 CCRL Blitz** (partial ladder, 95% CI 3223-3460) on `ad53daa` (E1 net + halved eval scale); rerun with 3273-3491 anchors in progress. Was 3168 (net4) this morning. |
+| Strength | **3429 CCRL Blitz** (95% CI 3401-3459) on g3 (512x8 NNUE, gen-3 data). Was 3168 on the morning of 2026-11-06. |
 | Goals | From the CCRL Blitz single-CPU list (best versions, 2026-10-31; `scripts/ccrl-targets.json`): **short term 3400** (#131), **mid term top 100 = 3504**, **long term top 10 = 3751**. ~3330 today would rank ~#158. Competing with Stockfish itself (3792) is out of scope. |
 | Eval | NNUE E1, (768 -> 256) x 2 -> 1 SCReLU, i16, output halved to the HCE scale the search margins were tuned on (+123); HCE is the fallback. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
 
-## Status 2026-11-06 afternoon
+## Status 2026-11-07 00:00
 
-- Merged today: E1 (+152 net gate), eval scale 1/2 (+123 stc). Rejected: E3 (8
-  output buckets, +4.9 inconclusive), bigbang-r2 (-103).
-- Testing: eval scale 3/8 and 5/8 (bracketing 1/2), nnue-speed (+4% NPS at
-  256, +14% at 512, search-identical), ladder rerun, then g2a/g2b.
-- Generation 2: g2a = 256x8 on pool2 (442M positions: pool1 + seeds 11, 12),
-  15 epochs on the CPU; g2b = 512x8 on pool2, 10 epochs on the GPU.
-- **Metal GPU trainer** (`tools/nnue-trainer-metal`): parity with trainer v2,
-  2.7-3.3x faster. GPU does production training; the CPU now does local
-  datagen. Generations are now **data-bound**, not training-bound.
-- **CI lanes:** queue SPRTs and ladders on 16 runners (16 shards);
-  background lane (4 runners) self-feeds datagen from main every heartbeat.
-- In progress (subagents): king-bucketed inputs (engine + both trainers, off by
-  default), time management for 120+1 and 40/15, search-identical speedups.
-- SPSA of 22 search parameters is ready on `spsa-nnue` (8 shards, ~14 h); run
-  overnight when the queue is empty.
+- **Ladder 3429 CCRL Blitz (CI 3401-3459)** on main after g3: past the 3400
+  short-term target (~#122). Next: top 100 = 3504.
+- Merged 2026-11-06: E1 (+152 net gate), eval scale 1/2 (+123 stc), E2 512x1
+  (+26 stc), **g3 512x8 gen-3 (+81.5 net gate)**, speedups (nnue-speed,
+  speed-r3, datagen-r2), king-bucket support (off), datagen net-scale fix,
+  OwnBook off by default. Rejected: E3, scale 3/8 and 5/8, bigbang-r2.
+  TM node-fraction (tm-ccrl): +5.9 [0.9, 10.9] at 60+0.6 but hit the wave
+  cap; queued as nonreg at stc to merge on the LTC evidence.
+- **Data bug fixed:** after the eval halving, datagen wrote scores at half
+  the net scale (seeds 14-18, all local data). Fixed in code; corrected copies
+  in ~/rustfish-data/fix and auto/. `nnue-trainer scalecheck` catches it.
+- Testing: correction-history-r2 (stc), then g4w (warm start from g3f on new
+  data, best on the newest val sets) and g3f (g3 on corrected data, better on
+  all val sets).
+- **Laptop:** Metal GPU trainer (~3x CPU; king buckets ~1.3x one bucket) does
+  all training. `scripts/netloop.py auto` runs unattended: ingests CI and local
+  datagen, scale-checks, warm-starts a candidate per ~30M new positions, screens
+  on validation, embeds and queues a net gate. GPU training throttles CPU
+  datagen 4-5x on this fanless M3; CI datagen carries data meanwhile.
+- **CI:** smarter queue (af32031): speedups merge without waiting; priority by
+  expected Elo per runner-hour (`--expect`); datagen calls the queue back.
+  Foreground 16 runners, background datagen 3.
+- **King buckets:** one kb8m run overfit (confounded: mirrored warm start,
+  scale bug, no factoriser). Not dropped: factoriser + active-row weight decay
+  in progress, then a from-scratch kb8m+factor run vs g3f (KB-PLAN.txt).
+- Next: SPSA of 22 search params (`spsa-nnue`) when the queue is quiet;
+  threat inputs after king buckets; simplification (nonreg) pass later.
 
 ## Strategy (2026-11-06): train the net properly
 
