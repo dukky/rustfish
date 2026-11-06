@@ -2,9 +2,15 @@
 //! shared spec (see `docs`/build brief):
 //!
 //! - feature for perspective p, piece (colour c, type t) on square s:
-//!   `(c == p ? 0 : 384) + t*64 + (p == White ? s : s ^ 56)`
-//! - net file: little-endian i16, feature weights [768][H], feature biases
-//!   [H], output weights [2H] (stm half first), output bias [1]; no header.
+//!   `kb*768 + (c == p ? 0 : 384) + t*64 + (o(s) ^ m)` with
+//!   `o(s) = (p == White ? s : s ^ 56)` (the perspective's own orientation),
+//!   `kb = KING_LAYOUT.buckets[o(king_p)]` (king bucket of p's own king) and
+//!   `m = 7` when the layout mirrors and p's king is on files e-h, else 0.
+//!   With the default layout (`LAYOUT_NONE`: one bucket, no mirror) this is
+//!   the original `(c == p ? 0 : 384) + t*64 + o(s)`.
+//! - net file: little-endian i16, feature weights [KB][768][H], feature
+//!   biases [H], output weights [B][2H] (stm half first), output biases [B];
+//!   no header.
 //! - `eval = ((Σ screlu(us)·w[i] + Σ screlu(them)·w[H+i]) / QA + b) · SCALE / (QA·QB)`
 //!   with `screlu(x) = clamp(x, 0, QA)²`, integer division truncating to zero.
 //!
@@ -12,11 +18,17 @@
 //! records the move's feature delta through `NnueState::push_move` (one stack
 //! entry per ply), `undo_move` pops it, and `evaluate` materialises pending
 //! entries (copy-and-update fused in one pass) only when an eval is needed.
+//! A king move that changes its own perspective's bucket (or crosses the
+//! mirror line) marks that perspective for a refresh instead, done at
+//! materialisation from a per-(perspective, bucket) accumulator cache
+//! ("finny table") with the post-move piece bitboards saved in the slot;
+//! with one unmirrored bucket that path compiles away.
 //! Every SIMD kernel has a scalar twin and both are exact (wrapping i16 adds;
 //! output sums proven not to overflow i32, otherwise the i64 scalar path is
 //! used), so results never depend on the target.
 
 use std::cell::{Cell, RefCell};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::{Board, Color, Move, Piece, PieceType};
@@ -29,16 +41,180 @@ pub(crate) const SCALE: i32 = 400;
 /// Output buckets, selected by piece count: `(pieces - 2) * BUCKETS / 32`.
 pub(crate) const BUCKETS: usize = 1;
 
-/// Bytes in a net file: (768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
-pub(crate) const NET_BYTES: usize = (INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2;
+// ------------------------------------------------------------ king buckets
+
+/// Input (king) buckets: each perspective picks its feature-transformer
+/// block from its own king square, seen in its own orientation (a Black
+/// perspective flips ranks first). With `mirror`, a king on files e-h also
+/// flips every square's file (`sq ^ 7`) for that perspective, so the table
+/// only needs to distinguish files a-d and must be left-right symmetric.
+/// The layouts (names and tables) match `tools/nnue-trainer --king-buckets`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct KingLayout {
+    /// Bucket of each king square (a1 = 0, h8 = 63, perspective-relative).
+    pub(crate) buckets: [u8; 64],
+    pub(crate) mirror: bool,
+}
+
+/// Rank-major half-board (files a-d, rank 1 first) -> left-right symmetric table.
+const fn mirrored(half: [u8; 32]) -> [u8; 64] {
+    let mut t = [0u8; 64];
+    let mut i = 0;
+    while i < 32 {
+        let (r, f) = (i / 4, i % 4);
+        t[r * 8 + f] = half[i];
+        t[r * 8 + 7 - f] = half[i];
+        i += 1;
+    }
+    t
+}
+
+/// One bucket, no mirroring: the original 768-input net.
+#[allow(dead_code)]
+pub(crate) const LAYOUT_NONE: KingLayout = KingLayout { buckets: [0; 64], mirror: false };
+/// One bucket with horizontal mirroring (`m1`).
+#[allow(dead_code)]
+pub(crate) const LAYOUT_M1: KingLayout = KingLayout { buckets: [0; 64], mirror: true };
+/// Four buckets, no mirroring (`kb4`): back rank queenside / kingside,
+/// second rank, everything further up.
+#[allow(dead_code)]
+#[rustfmt::skip]
+pub(crate) const LAYOUT_KB4: KingLayout = KingLayout {
+    buckets: [
+        0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 2, 2, 2, 2,
+        3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3,
+    ],
+    mirror: false,
+};
+/// Four buckets with mirroring (`kb4m`): back rank a-b / c-d, second rank, rest.
+#[allow(dead_code)]
+#[rustfmt::skip]
+pub(crate) const LAYOUT_KB4M: KingLayout = KingLayout {
+    buckets: mirrored([
+        0, 0, 1, 1,
+        2, 2, 2, 2,
+        3, 3, 3, 3,
+        3, 3, 3, 3,
+        3, 3, 3, 3,
+        3, 3, 3, 3,
+        3, 3, 3, 3,
+        3, 3, 3, 3,
+    ]),
+    mirror: true,
+};
+/// Eight buckets with mirroring (`kb8m`), the common half-board layout:
+/// every back-rank file on its own, second rank in pairs, ranks 3-4, 5-8.
+#[allow(dead_code)]
+#[rustfmt::skip]
+pub(crate) const LAYOUT_KB8M: KingLayout = KingLayout {
+    buckets: mirrored([
+        0, 1, 2, 3,
+        4, 4, 5, 5,
+        6, 6, 6, 6,
+        6, 6, 6, 6,
+        7, 7, 7, 7,
+        7, 7, 7, 7,
+        7, 7, 7, 7,
+        7, 7, 7, 7,
+    ]),
+    mirror: true,
+};
+
+/// The layout the engine runs. Switching it changes the net format (KB
+/// blocks of 768 feature rows): embed a net trained with the same layout.
+pub(crate) const KING_LAYOUT: KingLayout = LAYOUT_NONE;
+
+pub(crate) const fn layout_buckets(l: &KingLayout) -> usize {
+    let mut m = 0;
+    let mut i = 0;
+    while i < 64 {
+        if l.buckets[i] as usize > m {
+            m = l.buckets[i] as usize;
+        }
+        i += 1;
+    }
+    m + 1
+}
+
+/// A king layout as a type, so the accumulator code is monomorphised per
+/// layout: the active one compiles to exactly the old code when it has one
+/// unmirrored bucket, and tests can drive other layouts side by side.
+pub(crate) trait Layout: Clone {
+    const L: KingLayout;
+    const KB: usize = layout_buckets(&Self::L);
+    /// Whether a king move can change its perspective's feature block.
+    const REFRESH: bool = Self::KB > 1 || Self::L.mirror;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Active;
+impl Layout for Active {
+    const L: KingLayout = KING_LAYOUT;
+}
+
+/// Input buckets of the active layout.
+pub(crate) const KB: usize = layout_buckets(&KING_LAYOUT);
+
+/// Bytes in a net file with `kb` king buckets:
+/// (kb*768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
+pub(crate) const fn net_bytes(kb: usize) -> usize {
+    (kb * INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2
+}
+
+/// Bytes in a net file for the active layout.
+#[allow(dead_code)]
+pub(crate) const NET_BYTES: usize = net_bytes(KB);
+
+/// A perspective's king context: feature block offset (`bucket * 768`) and
+/// the square xor (7 when mirrored).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct KingCtx {
+    base: usize,
+    flip: u8,
+}
+
+impl KingCtx {
+    const ZERO: Self = Self { base: 0, flip: 0 };
+
+    /// Finny-table slot within one perspective: bucket * 2 + mirrored.
+    fn slot(self) -> usize {
+        self.base / INPUTS * 2 + (self.flip != 0) as usize
+    }
+}
+
+#[inline(always)]
+pub(crate) fn king_ctx<L: Layout>(persp: Color, ksq: u8) -> KingCtx {
+    if !L::REFRESH {
+        return KingCtx::ZERO;
+    }
+    let s = if persp == Color::White { ksq } else { ksq ^ 56 };
+    let flip = if L::L.mirror && s & 7 >= 4 { 7 } else { 0 };
+    KingCtx { base: L::L.buckets[s as usize] as usize * INPUTS, flip }
+}
+
+#[inline(always)]
+fn board_ctx<L: Layout>(board: &Board, persp: Color) -> KingCtx {
+    if !L::REFRESH {
+        return KingCtx::ZERO;
+    }
+    king_ctx::<L>(persp, board.king_square(persp).unwrap_or(0))
+}
 
 /// NNUE scores are clamped well inside the mate range.
 const EVAL_LIMIT: i32 = 20_000;
 
 #[derive(Clone)]
 pub(crate) struct Network {
-    /// Feature-major: weights of feature f are `ft_w[f*H .. (f+1)*H]`.
+    /// Feature-major: weights of feature f are `ft_w[f*H .. (f+1)*H]`,
+    /// `kb * 768` features.
     ft_w: Vec<i16>,
+    kb: usize,
     ft_b: [i16; H],
     /// Bucket-major: bucket b's weights are `out_w[b*2H .. (b+1)*2H]`, stm half first.
     out_w: Vec<i16>,
@@ -49,12 +225,21 @@ pub(crate) struct Network {
 }
 
 impl Network {
+    /// A net for the active king layout.
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != NET_BYTES {
-            return Err(format!("net is {} bytes, expected {}", bytes.len(), NET_BYTES));
+        Self::from_bytes_kb(bytes, KB)
+    }
+
+    pub(crate) fn from_bytes_kb(bytes: &[u8], kb: usize) -> Result<Self, String> {
+        if bytes.len() != net_bytes(kb) {
+            return Err(format!(
+                "net is {} bytes, expected {} (H={H}, {kb} king bucket(s), {BUCKETS} output bucket(s))",
+                bytes.len(),
+                net_bytes(kb)
+            ));
         }
         let mut words = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]));
-        let ft_w: Vec<i16> = words.by_ref().take(INPUTS * H).collect();
+        let ft_w: Vec<i16> = words.by_ref().take(kb * INPUTS * H).collect();
         let mut ft_b = [0i16; H];
         for v in ft_b.iter_mut() {
             *v = words.next().unwrap();
@@ -68,10 +253,11 @@ impl Network {
     }
 
     fn from_parts(ft_w: Vec<i16>, ft_b: [i16; H], out_w: Vec<i16>, out_b: [i16; BUCKETS]) -> Self {
-        assert_eq!(ft_w.len(), INPUTS * H);
+        assert!(!ft_w.is_empty() && ft_w.len() % (INPUTS * H) == 0);
         assert_eq!(out_w.len(), BUCKETS * 2 * H);
+        let kb = ft_w.len() / (INPUTS * H);
         let small_out = out_w.iter().all(|w| (-127..=127).contains(w));
-        Self { ft_w, ft_b, out_w, out_b, small_out }
+        Self { ft_w, kb, ft_b, out_w, out_b, small_out }
     }
 
     pub(crate) fn load(path: &str) -> Result<Self, String> {
@@ -81,7 +267,7 @@ impl Network {
 
     #[cfg(test)]
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(NET_BYTES);
+        let mut out = Vec::with_capacity(net_bytes(self.kb));
         let all = self.ft_w.iter().chain(self.ft_b.iter()).chain(self.out_w.iter());
         for w in all.chain(self.out_b.iter()) {
             out.extend_from_slice(&w.to_le_bytes());
@@ -93,6 +279,11 @@ impl Network {
     /// `out_range` bounds |out_w|; > 127 exercises the wide (i64) output path.
     #[cfg(test)]
     pub(crate) fn random(seed: u64, ft_range: i16, out_range: i16) -> Self {
+        Self::random_kb(seed, ft_range, out_range, KB)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn random_kb(seed: u64, ft_range: i16, out_range: i16, kb: usize) -> Self {
         let mut s = seed | 1;
         let mut next = move |range: i16| -> i16 {
             s ^= s << 13;
@@ -101,7 +292,7 @@ impl Network {
             let span = 2 * range as i64 + 1;
             ((s % span as u64) as i64 - range as i64) as i16
         };
-        let ft_w = (0..INPUTS * H).map(|_| next(ft_range)).collect();
+        let ft_w = (0..kb * INPUTS * H).map(|_| next(ft_range)).collect();
         let mut ft_b = [0i16; H];
         ft_b.iter_mut().for_each(|v| *v = next(ft_range));
         let out_w = (0..BUCKETS * 2 * H).map(|_| next(out_range)).collect();
@@ -116,11 +307,18 @@ impl Network {
     }
 }
 
+/// Feature of piece `p` on `sq` for perspective `persp`, whose king context is `k`.
 #[inline(always)]
-pub(crate) fn feature(persp: Color, p: Piece, sq: u8) -> usize {
-    let side = if p.color == persp { 0 } else { 384 };
+pub(crate) fn feature(persp: Color, p: Piece, sq: u8, k: KingCtx) -> usize {
+    feature_ck(persp, p.color as usize, p.kind as usize, sq, k)
+}
+
+/// `feature` with the piece as (colour index, kind index).
+#[inline(always)]
+fn feature_ck(persp: Color, color: usize, kind: usize, sq: u8, k: KingCtx) -> usize {
+    let side = if color == persp as usize { 0 } else { 384 };
     let s = if persp == Color::White { sq } else { sq ^ 56 };
-    side + p.kind as usize * 64 + s as usize
+    k.base + side + kind * 64 + (s ^ k.flip) as usize
 }
 
 #[derive(Clone, Copy)]
@@ -133,12 +331,20 @@ pub(crate) struct Accumulator {
 impl Accumulator {
     const ZERO: Self = Self { v: [[0; H]; 2] };
 
+    /// From scratch, for the active layout.
+    #[cfg(test)]
     pub(crate) fn refresh(net: &Network, board: &Board) -> Self {
+        Self::refresh_with::<Active>(net, board)
+    }
+
+    pub(crate) fn refresh_with<L: Layout>(net: &Network, board: &Board) -> Self {
+        debug_assert_eq!(net.kb, L::KB);
+        let ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
         let mut acc = Self { v: [net.ft_b; 2] };
         for sq in 0..64u8 {
             if let Some(p) = board.squares[sq as usize] {
                 for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
-                    let row = net.row(feature(persp, p, sq));
+                    let row = net.row(feature(persp, p, sq, ctx[pi]));
                     for (a, w) in acc.v[pi].iter_mut().zip(row.iter()) {
                         *a = a.wrapping_add(*w);
                     }
@@ -147,6 +353,57 @@ impl Accumulator {
         }
         acc
     }
+}
+
+/// Piece bitboards, `[colour][kind]` (as `BoardBB::pieces`).
+type PieceBBs = [[u64; 6]; 2];
+
+/// Finny-table entry: the accumulator of one perspective in one king
+/// context for the pieces in `bb`. Refreshing applies only the difference
+/// between `bb` and the new position, then stores the result back.
+#[derive(Clone)]
+struct CacheEntry {
+    acc: [i16; H],
+    bb: PieceBBs,
+}
+
+/// Refresh perspective `persp` in king context `k` for the position `bb`
+/// through its cache entry; the result goes to `out` and the entry.
+/// Exact: wrapping i16 sums do not depend on the order of the rows.
+fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, bb: &PieceBBs, out: &mut [i16; H]) {
+    let mut adds = [0usize; 32];
+    let mut subs = [0usize; 32];
+    let (mut na, mut ns) = (0, 0);
+    for c in 0..2 {
+        for t in 0..6 {
+            let (new, old) = (bb[c][t], e.bb[c][t]);
+            let (mut a, mut s) = (new & !old, old & !new);
+            while a != 0 && na < 32 {
+                adds[na] = feature_ck(persp, c, t, a.trailing_zeros() as u8, k);
+                na += 1;
+                a &= a - 1;
+            }
+            while s != 0 && ns < 32 {
+                subs[ns] = feature_ck(persp, c, t, s.trailing_zeros() as u8, k);
+                ns += 1;
+                s &= s - 1;
+            }
+            debug_assert!(a == 0 && s == 0, "more than 32 pieces");
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    while i < na || j < ns {
+        let ka = (na - i).min(4);
+        let ks = (ns - j).min(4);
+        let ar: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(adds[(i + x.min(ka.saturating_sub(1))).min(31)]));
+        let sr: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(subs[(j + x.min(ks.saturating_sub(1))).min(31)]));
+        let src = e.acc;
+        update(&mut e.acc, &src, &ar[..ka], &sr[..ks]);
+        i += ka;
+        j += ks;
+    }
+    e.bb = *bb;
+    *out = e.acc;
 }
 
 /// Feature changes of one move: at most two additions and two removals
@@ -160,6 +417,8 @@ struct Delta {
 }
 
 impl Delta {
+    const EMPTY: Self = Self { add: [(0, None); 2], sub: [(0, None); 2], n_add: 0, n_sub: 0 };
+
     fn add(&mut self, sq: u8, p: Piece) {
         self.add[self.n_add] = (sq, Some(p));
         self.n_add += 1;
@@ -204,15 +463,42 @@ fn move_delta(board: &Board, mv: Move) -> Delta {
     d
 }
 
+/// Piece bitboards after `d` is applied to `board`.
+fn bb_after(board: &Board, d: &Delta) -> PieceBBs {
+    let mut bb = board.bb.pieces;
+    for &(sq, p) in d.sub[..d.n_sub].iter().chain(d.add[..d.n_add].iter()) {
+        let p = p.unwrap();
+        bb[p.color as usize][p.kind as usize] ^= 1u64 << sq;
+    }
+    bb
+}
+
 /// One ply of the accumulator stack: the move's feature delta from the
-/// entry below, and the accumulator it yields once materialised.
+/// entry below, and the accumulator it yields once materialised. With king
+/// buckets (`L::REFRESH`) also each perspective's king context after the
+/// move and whether it needs a refresh; `bb` (the post-move pieces) is only
+/// written when one does.
 #[derive(Clone, Copy)]
 struct Slot {
     acc: Accumulator,
     delta: Delta,
+    ctx: [KingCtx; 2],
+    refresh: [bool; 2],
+    bb: PieceBBs,
 }
 
-/// Per-board NNUE state: the net and one accumulator per ply.
+impl Slot {
+    const EMPTY: Self = Self {
+        acc: Accumulator::ZERO,
+        delta: Delta::EMPTY,
+        ctx: [KingCtx::ZERO; 2],
+        refresh: [false; 2],
+        bb: [[0; 6]; 2],
+    };
+}
+
+/// Per-board NNUE state: the net and one accumulator per ply, for king
+/// layout `L` (the active one unless a test picks another).
 ///
 /// Updates are lazy: `push_move` only records the move's feature delta, and
 /// `evaluate` materialises the missing accumulators bottom-up from the last
@@ -220,7 +506,7 @@ struct Slot {
 /// checks, repetitions) then cost no accumulator work at all. The values
 /// are identical to eager updating: the same wrapping adds in the same chain.
 #[derive(Clone)]
-pub(crate) struct NnueState {
+pub(crate) struct NnueState<L: Layout = Active> {
     net: Arc<Network>,
     /// `stack[..=computed]` hold valid accumulators for the current line;
     /// `computed <= top` always. Behind a RefCell so `evaluate(&self)` can
@@ -228,21 +514,38 @@ pub(crate) struct NnueState {
     stack: RefCell<Vec<Slot>>,
     computed: Cell<usize>,
     top: usize,
+    /// Finny table, `[perspective][bucket * 2 + mirrored]`; empty unless
+    /// `L::REFRESH`.
+    cache: RefCell<Vec<CacheEntry>>,
+    _layout: PhantomData<L>,
 }
 
-impl PartialEq for NnueState {
+impl<L: Layout> PartialEq for NnueState<L> {
     /// Board equality is about the position; the accumulator is derived data.
     fn eq(&self, _: &Self) -> bool {
         true
     }
 }
-impl Eq for NnueState {}
+impl<L: Layout> Eq for NnueState<L> {}
 
-impl NnueState {
+impl<L: Layout> NnueState<L> {
     pub(crate) fn new(net: Arc<Network>, board: &Board) -> Self {
+        assert_eq!(net.kb, L::KB, "net has {} king buckets, layout needs {}", net.kb, L::KB);
+        let cache = if L::REFRESH {
+            vec![CacheEntry { acc: net.ft_b, bb: [[0; 6]; 2] }; 2 * L::KB * 2]
+        } else {
+            Vec::new()
+        };
         let mut v = Vec::with_capacity(256);
-        v.push(Slot { acc: Accumulator::ZERO, delta: Delta::default() });
-        let mut s = Self { net, stack: RefCell::new(v), computed: Cell::new(0), top: 0 };
+        v.push(Slot::EMPTY);
+        let mut s = Self {
+            net,
+            stack: RefCell::new(v),
+            computed: Cell::new(0),
+            top: 0,
+            cache: RefCell::new(cache),
+            _layout: PhantomData,
+        };
         s.refresh(board);
         s
     }
@@ -251,7 +554,11 @@ impl NnueState {
     pub(crate) fn refresh(&mut self, board: &Board) {
         self.top = 0;
         self.computed.set(0);
-        self.stack.get_mut()[0].acc = Accumulator::refresh(&self.net, board);
+        let stack = self.stack.get_mut();
+        stack[0].acc = Accumulator::refresh_with::<L>(&self.net, board);
+        if L::REFRESH {
+            stack[0].ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
+        }
     }
 
     /// The (materialised) accumulator of the current position.
@@ -268,9 +575,25 @@ impl NnueState {
         let stack = self.stack.get_mut();
         self.top += 1;
         if self.top == stack.len() {
-            stack.push(Slot { acc: Accumulator::ZERO, delta });
+            stack.push(Slot { delta, ..Slot::EMPTY });
         } else {
             stack[self.top].delta = delta;
+        }
+        if L::REFRESH {
+            let prev = stack[self.top - 1].ctx;
+            let slot = &mut stack[self.top];
+            slot.ctx = prev;
+            slot.refresh = [false; 2];
+            let moving = delta.sub[0].1.unwrap();
+            if moving.kind == PieceType::King {
+                let pi = moving.color as usize;
+                let k = king_ctx::<L>(moving.color, mv.to);
+                if k != prev[pi] {
+                    slot.ctx[pi] = k;
+                    slot.refresh[pi] = true;
+                    slot.bb = bb_after(board, &delta);
+                }
+            }
         }
     }
 
@@ -294,7 +617,7 @@ impl NnueState {
         let net = &*self.net;
         while k < self.top {
             let (lo, hi) = stack.split_at_mut(k + 1);
-            apply_delta(net, &lo[k].acc, &mut hi[0]);
+            apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache);
             k += 1;
         }
         self.computed.set(k);
@@ -310,12 +633,20 @@ impl NnueState {
     }
 }
 
-/// `dst.acc = src + dst.delta`, both perspectives in one copy-and-update pass.
+/// `dst.acc = src + dst.delta`, both perspectives in one copy-and-update
+/// pass; a perspective marked for refresh is rebuilt from the finny table.
 #[inline(always)]
-fn apply_delta(net: &Network, src: &Accumulator, dst: &mut Slot) {
+fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
     let d = dst.delta;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
-        let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0));
+        let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
+        if L::REFRESH && dst.refresh[pi] {
+            let mut c = cache.borrow_mut();
+            let bb = dst.bb;
+            refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
+            continue;
+        }
+        let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
         let a0 = f(d.add[0]);
         let s0 = f(d.sub[0]);
         let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
@@ -713,10 +1044,10 @@ mod tests {
         out_w[H + 2] = 7; // them[2]
         let out_b = [11; BUCKETS];
         let net = Network::from_parts(ft_w, ft_b, out_w, out_b);
-        let net2 = Network::from_bytes(&net.to_bytes()).unwrap();
+        let net2 = Network::from_bytes_kb(&net.to_bytes(), 1).unwrap();
         let mut board = Board::new();
         board.set_fen("8/8/8/8/8/8/8/4K3 w - - 0 1");
-        let acc = Accumulator::refresh(&net2, &board);
+        let acc = Accumulator::refresh_with::<None1>(&net2, &board);
         assert_eq!(acc.v[0][0], 150);
         assert_eq!(acc.v[1][0], -100);
         assert_eq!(acc.v[1][2], 20);
@@ -779,6 +1110,181 @@ mod tests {
         }
     }
 
+    macro_rules! layout {
+        ($name:ident, $l:expr) => {
+            #[derive(Clone, Copy)]
+            struct $name;
+            impl Layout for $name {
+                const L: KingLayout = $l;
+            }
+        };
+    }
+    layout!(None1, LAYOUT_NONE);
+    layout!(M1, LAYOUT_M1);
+    layout!(Kb4, LAYOUT_KB4);
+    layout!(Kb4m, LAYOUT_KB4M);
+    layout!(Kb8m, LAYOUT_KB8M);
+
+    #[test]
+    fn layouts_are_well_formed() {
+        assert_eq!((None1::KB, None1::REFRESH), (1, false));
+        assert_eq!((M1::KB, M1::REFRESH), (1, true));
+        assert_eq!((Kb4::KB, Kb4m::KB, Kb8m::KB), (4, 4, 8));
+        for l in [LAYOUT_NONE, LAYOUT_M1, LAYOUT_KB4, LAYOUT_KB4M, LAYOUT_KB8M] {
+            let kb = layout_buckets(&l);
+            for b in 0..kb as u8 {
+                assert!(l.buckets.contains(&b), "bucket {b} unused");
+            }
+            if l.mirror {
+                for sq in 0..64 {
+                    assert_eq!(l.buckets[sq], l.buckets[sq ^ 7], "mirrored layout must be symmetric");
+                }
+            }
+        }
+        // The kb8m table, rank 1 and 2 (files a-h).
+        assert_eq!(&LAYOUT_KB8M.buckets[..16], &[0, 1, 2, 3, 3, 2, 1, 0, 4, 4, 5, 5, 5, 5, 4, 4]);
+    }
+
+    /// KB = 1 without mirroring is exactly the original 768-input net.
+    #[test]
+    fn kb1_matches_legacy_layout() {
+        assert_eq!(KING_LAYOUT, LAYOUT_NONE, "the active layout must stay KB=1 on main");
+        assert_eq!(NET_BYTES, (768 * H + H + BUCKETS * (2 * H + 1)) * 2);
+        assert_eq!(net_bytes(1), NET_BYTES);
+        for ksq in 0..64 {
+            for persp in [Color::White, Color::Black] {
+                assert_eq!(king_ctx::<Active>(persp, ksq), KingCtx::ZERO);
+                assert_eq!(king_ctx::<None1>(persp, ksq), KingCtx::ZERO);
+            }
+        }
+        for persp in [Color::White, Color::Black] {
+            for color in [Color::White, Color::Black] {
+                for kind in [PieceType::Pawn, PieceType::Knight, PieceType::Bishop, PieceType::Rook, PieceType::Queen, PieceType::King] {
+                    for sq in 0..64u8 {
+                        let side = if color == persp { 0 } else { 384 };
+                        let s = if persp == Color::White { sq } else { sq ^ 56 };
+                        let legacy = side + kind as usize * 64 + s as usize;
+                        assert_eq!(feature(persp, Piece { color, kind }, sq, KingCtx::ZERO), legacy);
+                    }
+                }
+            }
+        }
+        // The embedded net still loads.
+        assert!(Network::from_bytes(include_bytes!("../net/nnue.bin")).is_ok());
+    }
+
+    /// Hand-checked indices; `tools/nnue-trainer` has the same cases.
+    #[test]
+    fn bucketed_feature_indices() {
+        let wp = Piece { color: Color::White, kind: PieceType::Pawn };
+        let bp = Piece { color: Color::Black, kind: PieceType::Pawn };
+        // White king g1 (6): kb8m, file g mirrors -> b1, bucket 1, flip 7.
+        let kw = king_ctx::<Kb8m>(Color::White, 6);
+        assert_eq!(kw, KingCtx { base: 768, flip: 7 });
+        // a2 pawn (8) -> h2 (15).
+        assert_eq!(feature(Color::White, wp, 8, kw), 768 + 15);
+        // Black king e8 (60): oriented e1 (4), file e mirrors -> d1, bucket 3.
+        let kb = king_ctx::<Kb8m>(Color::Black, 60);
+        assert_eq!(kb, KingCtx { base: 3 * 768, flip: 7 });
+        // Own h7 pawn (55): oriented h2 (15), mirrored a2 (8).
+        assert_eq!(feature(Color::Black, bp, 55, kb), 3 * 768 + 8);
+        // Enemy (white) a2 pawn from Black: oriented a7 (48) -> h7 (55).
+        assert_eq!(feature(Color::Black, wp, 8, kb), 3 * 768 + 384 + 55);
+        // Unmirrored kb4: white king e1 -> bucket 1, no flip; black king e8 -> e1 -> 1.
+        assert_eq!(king_ctx::<Kb4>(Color::White, 4), KingCtx { base: 768, flip: 0 });
+        assert_eq!(king_ctx::<Kb4>(Color::Black, 60), KingCtx { base: 768, flip: 0 });
+        // Black king on d7 (51): oriented d2 (11) -> bucket 2.
+        assert_eq!(king_ctx::<Kb4>(Color::Black, 51), KingCtx { base: 2 * 768, flip: 0 });
+        // m1: one bucket, only the flip.
+        assert_eq!(king_ctx::<M1>(Color::White, 3), KingCtx::ZERO);
+        assert_eq!(king_ctx::<M1>(Color::White, 4), KingCtx { base: 0, flip: 7 });
+    }
+
+    /// Incremental updates (including finny-table refreshes on king moves
+    /// across buckets and the mirror line) match a from-scratch refresh
+    /// over random games, for every layout.
+    fn incremental_matches_refresh_for<L: Layout>(seed: u64) {
+        let net = Arc::new(Network::random_kb(seed, 64, 100, L::KB));
+        let mut next = rng(seed * 31 + 5);
+        let mut legal = Vec::new();
+        let (mut king_moves, mut refreshes, mut flips) = (0, 0, 0);
+        let fens = [
+            FENS[0],
+            FENS[2],
+            FENS[3],
+            "8/8/3k4/8/8/4K3/8/8 w - - 0 1",
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            "4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1",
+        ];
+        for game in 0..80 {
+            let mut board = Board::new();
+            board.set_fen(fens[game % fens.len()]);
+            let mut st = NnueState::<L>::new(net.clone(), &board);
+            let mut history = Vec::new();
+            for _ in 0..120 {
+                board.generate_legal_moves(false, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                // Prefer king moves half the time so buckets change often.
+                let kings: Vec<Move> = legal
+                    .iter()
+                    .copied()
+                    .filter(|m| board.squares[m.from as usize].unwrap().kind == PieceType::King)
+                    .collect();
+                let mv = if !kings.is_empty() && next() % 2 == 0 {
+                    kings[(next() as usize) % kings.len()]
+                } else {
+                    legal[(next() as usize) % legal.len()]
+                };
+                let mover = board.side_to_move;
+                if board.squares[mv.from as usize].unwrap().kind == PieceType::King {
+                    king_moves += 1;
+                    let (a, b) = (king_ctx::<L>(mover, mv.from), king_ctx::<L>(mover, mv.to));
+                    refreshes += (a != b) as usize;
+                    flips += (a.flip != b.flip) as usize;
+                }
+                st.push_move(&board, mv);
+                let undo = board.make_move(mv);
+                history.push((mv, undo));
+                let full = Accumulator::refresh_with::<L>(&net, &board);
+                assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+            }
+            while let Some((mv, undo)) = history.pop() {
+                board.undo_move(mv, undo);
+                st.pop();
+                assert!(st.current().v == Accumulator::refresh_with::<L>(&net, &board).v);
+            }
+        }
+        assert!(king_moves > 1000, "{king_moves}");
+        if L::REFRESH {
+            assert!(refreshes > 200, "{refreshes}");
+        }
+        if L::L.mirror {
+            assert!(flips > 100, "{flips}");
+        }
+    }
+
+    #[test]
+    fn incremental_matches_refresh_all_layouts() {
+        incremental_matches_refresh_for::<Active>(3);
+        incremental_matches_refresh_for::<None1>(4);
+        incremental_matches_refresh_for::<M1>(5);
+        incremental_matches_refresh_for::<Kb4>(6);
+        incremental_matches_refresh_for::<Kb4m>(7);
+        incremental_matches_refresh_for::<Kb8m>(8);
+    }
+
+    #[test]
+    fn bucketed_net_roundtrip_and_size() {
+        let net = Network::random_kb(11, 64, 100, 8);
+        let bytes = net.to_bytes();
+        assert_eq!(bytes.len(), net_bytes(8));
+        assert_eq!(bytes.len(), (8 * 768 * H + H + BUCKETS * (2 * H + 1)) * 2);
+        assert!(Network::from_bytes_kb(&bytes, 8).is_ok());
+        assert!(Network::from_bytes_kb(&bytes, 1).is_err());
+    }
+
     #[test]
     fn simd_matches_scalar() {
         let mut next = rng(12345);
@@ -832,7 +1338,7 @@ mod tests {
         let net = Arc::new(Network::random(42, 64, 100));
         let mut board = Board::new();
         board.set_fen(FENS[1]);
-        let mut st = NnueState::new(net.clone(), &board);
+        let mut st = NnueState::<Active>::new(net.clone(), &board);
         let n = 200_000;
         let t = Instant::now();
         let mut x = 0i64;

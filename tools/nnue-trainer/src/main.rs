@@ -1,8 +1,16 @@
 //! NNUE trainer for rustfish (v2).
 //!
-//! Trains `(768 -> H) x 2 -> B` SCReLU networks (B = output buckets by piece
-//! count; B = 1 is the layout `src/nnue.rs` runs today) from datagen output.
-//! Std only, like the engine.
+//! Trains `(KB*768 -> H) x 2 -> B` SCReLU networks (B = output buckets by
+//! piece count, KB = king (input) buckets from `--king-buckets`; KB = B = 1
+//! is the layout `src/nnue.rs` runs today) from datagen output. Std only,
+//! like the engine.
+//!
+//! King buckets: each perspective's features live in the block of its own
+//! king's bucket (`feature = bucket*768 + side*384 + kind*64 + sq`, squares
+//! in the perspective's orientation); mirrored layouts also flip every file
+//! (`sq ^ 7`) for a perspective whose king is on files e-h. The layouts and
+//! their names match `KingLayout` in `src/nnue.rs`. `--init` from a
+//! one-bucket net copies its 768 rows into every bucket.
 //!
 //! Pipeline:
 //!
@@ -41,6 +49,103 @@ const CKPT_MAGIC: &[u8; 8] = b"RFNNT2\0\0";
 /// score cp White POV i16 (2), result 0/1/2 = Black win/draw/White win (1),
 /// side to move 0 = White (1), padding (4).
 type Rec = [u8; REC];
+
+// ---------------------------------------------------------------- king buckets
+
+/// A king-bucket layout: bucket per king square (perspective-relative,
+/// a1 = 0) and horizontal mirroring. Identical to `src/nnue.rs`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct KingLayout {
+    name: &'static str,
+    buckets: [u8; 64],
+    mirror: bool,
+}
+
+/// Rank-major half-board (files a-d, rank 1 first) -> left-right symmetric table.
+const fn mirrored(half: [u8; 32]) -> [u8; 64] {
+    let mut t = [0u8; 64];
+    let mut i = 0;
+    while i < 32 {
+        let (r, f) = (i / 4, i % 4);
+        t[r * 8 + f] = half[i];
+        t[r * 8 + 7 - f] = half[i];
+        i += 1;
+    }
+    t
+}
+
+/// Index = layout id stored in checkpoints (0 = `none`, the original net).
+#[rustfmt::skip]
+const LAYOUTS: [KingLayout; 5] = [
+    KingLayout { name: "none", buckets: [0; 64], mirror: false },
+    KingLayout { name: "m1", buckets: [0; 64], mirror: true },
+    KingLayout {
+        name: "kb4",
+        buckets: [
+            0, 0, 0, 0, 1, 1, 1, 1,
+            2, 2, 2, 2, 2, 2, 2, 2,
+            3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3,
+        ],
+        mirror: false,
+    },
+    KingLayout {
+        name: "kb4m",
+        buckets: mirrored([
+            0, 0, 1, 1,
+            2, 2, 2, 2,
+            3, 3, 3, 3,
+            3, 3, 3, 3,
+            3, 3, 3, 3,
+            3, 3, 3, 3,
+            3, 3, 3, 3,
+            3, 3, 3, 3,
+        ]),
+        mirror: true,
+    },
+    KingLayout {
+        name: "kb8m",
+        buckets: mirrored([
+            0, 1, 2, 3,
+            4, 4, 5, 5,
+            6, 6, 6, 6,
+            6, 6, 6, 6,
+            7, 7, 7, 7,
+            7, 7, 7, 7,
+            7, 7, 7, 7,
+            7, 7, 7, 7,
+        ]),
+        mirror: true,
+    },
+];
+
+impl KingLayout {
+    fn by_name(name: &str) -> &'static KingLayout {
+        LAYOUTS.iter().find(|l| l.name == name).unwrap_or_else(|| {
+            let names: Vec<_> = LAYOUTS.iter().map(|l| l.name).collect();
+            panic!("unknown --king-buckets {name} (one of {})", names.join(", "))
+        })
+    }
+    fn id(&self) -> usize {
+        LAYOUTS.iter().position(|l| l == self).unwrap()
+    }
+    fn kb(&self) -> usize {
+        *self.buckets.iter().max().unwrap() as usize + 1
+    }
+    /// Feature offset and square xor for a perspective whose own king is on
+    /// `ksq_rel` (already in the perspective's orientation).
+    #[inline]
+    fn ctx(&self, ksq_rel: u16) -> (u16, u16) {
+        let flip = if self.mirror && ksq_rel & 7 >= 4 { 7 } else { 0 };
+        (self.buckets[ksq_rel as usize] as u16 * INPUTS as u16, flip)
+    }
+}
+
+const NO_BUCKETS: &KingLayout = &LAYOUTS[0];
 
 // ---------------------------------------------------------------- utilities
 
@@ -160,13 +265,35 @@ struct Sample {
     target: f32,
 }
 
+/// `mirror` is the `--mirror` data augmentation (flip the whole board's
+/// files), applied before anything else; `kl` the king-bucket layout.
 #[inline]
-fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool) -> Sample {
-    let mut occ = u64::from_le_bytes(r[..8].try_into().unwrap());
+fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool, kl: &KingLayout) -> Sample {
+    let occ0 = u64::from_le_bytes(r[..8].try_into().unwrap());
     let score = i16::from_le_bytes([r[24], r[25]]) as f32;
     let stm_black = r[27] == 1;
     let mut s = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
     let flip = if mirror { 7u16 } else { 0 };
+    // King contexts of both perspectives (0 = side to move), from their own kings.
+    let mut ctx = [(0u16, 0u16); 2];
+    if kl.kb() > 1 || kl.mirror {
+        let (mut occ, mut n) = (occ0, 0);
+        let mut ksq = [0u16; 2]; // by colour: 0 = White
+        while occ != 0 {
+            let sq = occ.trailing_zeros() as u16 ^ flip;
+            occ &= occ - 1;
+            let nib = r[8 + n / 2] >> (4 * (n & 1)) & 0xF;
+            if nib & 7 == 5 {
+                ksq[(nib >> 3) as usize] = sq;
+            }
+            n += 1;
+        }
+        for (i, persp_black) in [stm_black, !stm_black].into_iter().enumerate() {
+            let k = ksq[persp_black as usize];
+            ctx[i] = kl.ctx(if persp_black { k ^ 56 } else { k });
+        }
+    }
+    let mut occ = occ0;
     while occ != 0 {
         let sq = occ.trailing_zeros() as u16 ^ flip;
         occ &= occ - 1;
@@ -177,7 +304,7 @@ fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool) -> Sample {
         for (i, persp_black) in [stm_black, !stm_black].into_iter().enumerate() {
             let side = if black == persp_black { 0 } else { 384 };
             let rel = if persp_black { sq ^ 56 } else { sq };
-            s.f[i][s.n] = side + kind * 64 + rel;
+            s.f[i][s.n] = ctx[i].0 + side + kind * 64 + (rel ^ ctx[i].1);
         }
         s.n += 1;
     }
@@ -198,11 +325,13 @@ fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool) -> Sample {
 struct Shape {
     h: usize,
     buckets: usize,
+    /// King (input) buckets: the FT has `kb * 768` rows.
+    kb: usize,
 }
 
 impl Shape {
     fn ft_b(&self) -> usize {
-        INPUTS * self.h
+        self.kb * INPUTS * self.h
     }
     fn out_w(&self) -> usize {
         self.ft_b() + self.h
@@ -217,10 +346,10 @@ impl Shape {
     fn file_bytes(&self) -> usize {
         self.len() * 2
     }
-    fn from_file_bytes(bytes: usize, buckets: usize) -> Option<Self> {
+    fn from_file_bytes(bytes: usize, buckets: usize, kb: usize) -> Option<Self> {
         let words = bytes / 2;
-        let h = words.checked_sub(buckets)? / (INPUTS + 1 + 2 * buckets);
-        let s = Shape { h, buckets };
+        let h = words.checked_sub(buckets)? / (kb * INPUTS + 1 + 2 * buckets);
+        let s = Shape { h, buckets, kb };
         (s.file_bytes() == bytes).then_some(s)
     }
 }
@@ -229,7 +358,7 @@ impl Shape {
 #[inline]
 fn forward(p: &[f32], sh: Shape, s: &Sample, acc: &mut [f32]) -> f32 {
     let h = sh.h;
-    let fw = &p[..INPUTS * h];
+    let fw = &p[..sh.ft_b()];
     let fb = &p[sh.ft_b()..sh.ft_b() + h];
     for side in 0..2 {
         let a = &mut acc[side * h..(side + 1) * h];
@@ -273,7 +402,7 @@ fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32]
             dacc[i] = if x > 0.0 && x < 1.0 { grad * ow[i] * 2.0 * a } else { 0.0 };
         }
     }
-    let (gw, rest) = g.split_at_mut(INPUTS * h);
+    let (gw, rest) = g.split_at_mut(sh.ft_b());
     let gb = &mut rest[..h];
     for side in 0..2 {
         let d = &dacc[side * h..(side + 1) * h];
@@ -293,7 +422,7 @@ fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32]
 fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
     let mut p = vec![0.0f32; sh.len()];
     let a = 1.0 / (32.0f32).sqrt();
-    for x in &mut p[..INPUTS * sh.h] {
+    for x in &mut p[..sh.ft_b()] {
         *x = rng.uniform(a);
     }
     let a = 1.0 / ((2 * sh.h) as f32).sqrt();
@@ -337,15 +466,40 @@ fn dequantize(bytes: &[u8], sh: Shape) -> Vec<f32> {
         .collect()
 }
 
-fn load_net(path: &Path, buckets: usize) -> (Vec<f32>, Shape) {
+fn load_net(path: &Path, buckets: usize, kb: usize) -> (Vec<f32>, Shape) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let sh = Shape::from_file_bytes(bytes.len(), buckets)
-        .unwrap_or_else(|| panic!("{}: {} bytes is no (768->H)x2->{buckets} net", path.display(), bytes.len()));
+    let sh = Shape::from_file_bytes(bytes.len(), buckets, kb).unwrap_or_else(|| {
+        panic!("{}: {} bytes is no ({kb}*768->H)x2->{buckets} net", path.display(), bytes.len())
+    });
     (dequantize(&bytes, sh), sh)
 }
 
+/// Warm start: a net with `kb` king buckets from `path`, which may also be a
+/// one-bucket net; its 768 FT rows are then copied into every bucket.
+fn load_init(path: &Path, buckets: usize, kb: usize) -> (Vec<f32>, Shape) {
+    let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
+    if kb == 1 || Shape::from_file_bytes(bytes, buckets, kb).is_some() {
+        return load_net(path, buckets, kb);
+    }
+    let (p1, s1) = load_net(path, buckets, 1);
+    println!("init: {} is a one-bucket net; copying its FT rows into all {kb} king buckets", path.display());
+    (expand_buckets(&p1, s1, kb), Shape { kb, ..s1 })
+}
+
+/// One-bucket params -> `kb` buckets, each a copy of the 768 FT rows.
+fn expand_buckets(p1: &[f32], s1: Shape, kb: usize) -> Vec<f32> {
+    assert_eq!(s1.kb, 1);
+    let ft = &p1[..s1.ft_b()];
+    let mut p = Vec::with_capacity(p1.len() + (kb - 1) * ft.len());
+    for _ in 0..kb {
+        p.extend_from_slice(ft);
+    }
+    p.extend_from_slice(&p1[s1.ft_b()..]);
+    p
+}
+
 /// Mean validation loss, plus the mean |eval| in cp as a scale check.
-fn validate(p: &[f32], sh: Shape, val: &[Rec], lambda: f32, threads: usize) -> (f64, f64) {
+fn validate(p: &[f32], sh: Shape, kl: &KingLayout, val: &[Rec], lambda: f32, threads: usize) -> (f64, f64) {
     if val.is_empty() {
         return (f64::NAN, f64::NAN);
     }
@@ -358,7 +512,7 @@ fn validate(p: &[f32], sh: Shape, val: &[Rec], lambda: f32, threads: usize) -> (
                     let mut acc = vec![0.0f32; 2 * sh.h];
                     let (mut l, mut e) = (0.0f64, 0.0f64);
                     for r in part {
-                        let s = decode(r, lambda, sh.buckets, false);
+                        let s = decode(r, lambda, sh.buckets, false, kl);
                         let o = forward(p, sh, &s, &mut acc);
                         let d = sigmoid(o) - s.target;
                         l += (d * d) as f64;
@@ -410,10 +564,12 @@ fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32
     });
 }
 
-fn save_ckpt(path: &Path, sh: Shape, p: &[f32], opt: &Adam, seen: u64) {
+/// Header word 1 = output buckets | king layout id << 32 (0 for `none`, so
+/// one-bucket checkpoints are unchanged).
+fn save_ckpt(path: &Path, sh: Shape, kl: &KingLayout, p: &[f32], opt: &Adam, seen: u64) {
     let mut w = BufWriter::new(File::create(path).unwrap());
     w.write_all(CKPT_MAGIC).unwrap();
-    for x in [sh.h as u64, sh.buckets as u64, opt.step, seen] {
+    for x in [sh.h as u64, sh.buckets as u64 | (kl.id() as u64) << 32, opt.step, seen] {
         w.write_all(&x.to_le_bytes()).unwrap();
     }
     for arr in [p, &opt.m[..], &opt.v[..]] {
@@ -423,11 +579,12 @@ fn save_ckpt(path: &Path, sh: Shape, p: &[f32], opt: &Adam, seen: u64) {
     }
 }
 
-fn load_ckpt(path: &Path, sh: Shape) -> (Vec<f32>, Adam, u64) {
+fn load_ckpt(path: &Path, sh: Shape, kl: &KingLayout) -> (Vec<f32>, Adam, u64) {
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[..8], CKPT_MAGIC, "not a v2 checkpoint");
     let word = |i: usize| u64::from_le_bytes(bytes[8 + 8 * i..16 + 8 * i].try_into().unwrap());
-    assert_eq!((word(0) as usize, word(1) as usize), (sh.h, sh.buckets), "checkpoint shape differs");
+    let got = (word(0) as usize, word(1) as u32 as usize, (word(1) >> 32) as usize);
+    assert_eq!(got, (sh.h, sh.buckets, kl.id()), "checkpoint shape (H, buckets, king layout id) differs");
     let floats: Vec<f32> = bytes[40..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
     let n = sh.len();
     assert_eq!(floats.len(), 3 * n);
@@ -562,27 +719,34 @@ fn cmd_shuffle(args: &[String]) {
 
 fn cmd_eval(args: &[String]) {
     let (mut net, mut val, mut buckets, mut lambda) = (None, None, 1usize, 0.5f32);
+    let mut kl = NO_BUCKETS;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--net" => net = Some(PathBuf::from(it.next().unwrap())),
             "--val" => val = Some(PathBuf::from(it.next().unwrap())),
             "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
             "--lambda" => lambda = it.next().unwrap().parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
     }
-    let (p, sh) = load_net(&net.expect("--net"), buckets);
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
     let val = read_recs(&val.expect("--val"));
-    let (l, e) = validate(&p, sh, &val, lambda, threads_default());
-    println!("H={} buckets={} val positions {} loss {:.6} mean|eval| {:.1}cp", sh.h, sh.buckets, val.len(), l, e);
+    let (l, e) = validate(&p, sh, kl, &val, lambda, threads_default());
+    print!("H={} buckets={} ", sh.h, sh.buckets);
+    if kl.id() != 0 {
+        print!("king-buckets={} ", kl.name);
+    }
+    println!("val positions {} loss {:.6} mean|eval| {:.1}cp", val.len(), l, e);
 }
 
 fn cmd_train(args: &[String]) {
     let mut data = Vec::new();
     let mut val_path = None;
     let mut out = PathBuf::from("net.bin");
-    let mut sh = Shape { h: 256, buckets: 1 };
+    let mut sh = Shape { h: 256, buckets: 1, kb: 1 };
+    let mut kl = NO_BUCKETS;
     let (mut epochs, mut epoch_size) = (10u64, 0u64);
     let (mut batch, mut lr, mut lr_end, mut wd, mut lambda) = (16384usize, 1e-3f32, 1e-5f32, 0.0f32, 0.5f32);
     let (mut threads, mut seed, mut mirror) = (threads_default(), 1u64, false);
@@ -596,6 +760,7 @@ fn cmd_train(args: &[String]) {
             "--out" => out = PathBuf::from(v()),
             "--hidden" => sh.h = v().parse().unwrap(),
             "--buckets" => sh.buckets = v().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(&v()),
             "--epochs" => epochs = v().parse().unwrap(),
             "--epoch-size" => epoch_size = v().parse().unwrap(),
             "--batch" => batch = v().parse().unwrap(),
@@ -613,6 +778,7 @@ fn cmd_train(args: &[String]) {
         }
     }
     assert!(!data.is_empty(), "--data required");
+    sh.kb = kl.kb();
     if epoch_size == 0 {
         epoch_size = data.iter().map(|p| std::fs::metadata(p).unwrap().len() / REC as u64).sum();
     }
@@ -621,10 +787,10 @@ fn cmd_train(args: &[String]) {
 
     let mut rng = Rng::new(seed);
     let (mut p, mut opt, mut seen) = match (&resume, &init) {
-        (Some(r), _) => load_ckpt(r, sh),
+        (Some(r), _) => load_ckpt(r, sh, kl),
         (None, Some(i)) => {
-            let (p, s) = load_net(i, sh.buckets);
-            assert_eq!(s, sh, "init net shape differs from --hidden/--buckets");
+            let (p, s) = load_init(i, sh.buckets, sh.kb);
+            assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
             let n = p.len();
             (p.into_iter().map(|x| x.clamp(-CLIP, CLIP)).collect(), Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
         }
@@ -635,14 +801,15 @@ fn cmd_train(args: &[String]) {
         }
     };
     let val = val_path.as_deref().map(read_recs).unwrap_or_default();
+    let kb_note = if kl.id() != 0 { format!(" king-buckets={} (KB={})", kl.name, sh.kb) } else { String::new() };
     println!(
-        "train H={} buckets={} params={} epochs={epochs} x {epoch_size} batch={batch} lr {lr}->{lr_end} wd={wd} lambda={lambda} mirror={mirror} threads={threads} val={}",
+        "train H={} buckets={}{kb_note} params={} epochs={epochs} x {epoch_size} batch={batch} lr {lr}->{lr_end} wd={wd} lambda={lambda} mirror={mirror} threads={threads} val={}",
         sh.h,
         sh.buckets,
         sh.len(),
         val.len()
     );
-    let (vl, ve) = validate(&p, sh, &val, lambda, threads);
+    let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
     println!("start val loss {vl:.6} mean|eval| {ve:.1}cp");
 
     let mut feed = Feed::new(data, seed ^ 0xF00D ^ seen);
@@ -681,7 +848,7 @@ fn cmd_train(args: &[String]) {
                             let mut mr = Rng::new(seed_b ^ c as u64);
                             for r in &recs[c * chunk..((c + 1) * chunk).min(recs.len())] {
                                 let m = mirror && mr.next_u64() & 1 == 1;
-                                let s = decode(r, lambda, sh.buckets, m);
+                                let s = decode(r, lambda, sh.buckets, m, kl);
                                 l += train_sample(p, sh, &s, g, &mut acc, &mut dacc) as f64;
                             }
                         }
@@ -700,12 +867,12 @@ fn cmd_train(args: &[String]) {
         if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total {
             ep += 1;
             let secs = started.elapsed().as_secs_f64();
-            let (vl, ve) = validate(&p, sh, &val, lambda, threads);
+            let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
             let q = quantize(&p, sh);
-            let (ql, _) = validate(&dequantize(&q, sh), sh, &val, lambda, threads);
+            let (ql, _) = validate(&dequantize(&q, sh), sh, kl, &val, lambda, threads);
             let path = out.with_extension(format!("e{ep}.bin"));
             File::create(&path).unwrap().write_all(&q).unwrap();
-            save_ckpt(&ckpt, sh, &p, &opt, seen);
+            save_ckpt(&ckpt, sh, kl, &p, &opt, seen);
             println!(
                 "epoch {ep} lr {cur_lr:.2e} train {:.6} val {vl:.6} (quantized {ql:.6}) mean|eval| {ve:.1}cp {:.0} pos/s -> {}",
                 epoch_loss / epoch_n as f64,
@@ -718,7 +885,7 @@ fn cmd_train(args: &[String]) {
     }
     let q = quantize(&p, sh);
     File::create(&out).unwrap().write_all(&q).unwrap();
-    println!("wrote {} ({} bytes, H={} buckets={})", out.display(), q.len(), sh.h, sh.buckets);
+    println!("wrote {} ({} bytes, H={} buckets={}{kb_note})", out.display(), q.len(), sh.h, sh.buckets);
 }
 
 fn main() {
@@ -742,7 +909,7 @@ mod tests {
     fn features_match_runtime_layout() {
         // Startpos, White to move: perspective 0 = White.
         let r = encode("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 | 10 | 0.5").unwrap();
-        let s = decode(&r, 0.5, 1, false);
+        let s = decode(&r, 0.5, 1, false, NO_BUCKETS);
         assert_eq!(s.n, 32);
         for side in 0..2 {
             let f = &s.f[side][..32];
@@ -757,41 +924,164 @@ mod tests {
     #[test]
     fn black_to_move_flips_targets_and_perspectives() {
         let r = encode("4k3/8/8/8/8/8/8/4K2R b - - 0 1 | 400 | 1.0").unwrap();
-        let s = decode(&r, 1.0, 1, false);
+        let s = decode(&r, 1.0, 1, false, NO_BUCKETS);
         assert_eq!(s.target, 0.0, "White won, Black to move");
         // Perspective 0 is Black: its own king on e8 -> 60^56 = 4 -> 324.
         assert!(s.f[0][..s.n].contains(&324));
         // White rook h1 seen from Black: enemy 384 + 3*64 + (7^56=63).
         assert!(s.f[0][..s.n].contains(&(384 + 192 + 63)));
-        let s = decode(&r, 0.0, 1, false);
+        let s = decode(&r, 0.0, 1, false, NO_BUCKETS);
         assert!((s.target - sigmoid(-1.0)).abs() < 1e-6);
+    }
+
+    /// Same cases as `bucketed_feature_indices` in `src/nnue.rs`.
+    #[test]
+    fn king_bucket_features() {
+        // kb8m; White king g1, Black king e8; pawns a2 (White), h7 (Black).
+        let r = encode("4k3/7p/8/8/8/8/P7/6K1 w - - 0 1 | 0 | 0.5").unwrap();
+        let kl = KingLayout::by_name("kb8m");
+        assert_eq!((kl.kb(), kl.mirror), (8, true));
+        let s = decode(&r, 0.5, 1, false, kl);
+        // Perspective 0 = White: king g1 -> mirrored b1, bucket 1.
+        assert!(s.f[0][..s.n].contains(&(768 + 15)), "a2 pawn -> h2 in bucket 1");
+        // Perspective 1 = Black: king e8 -> oriented e1 -> mirrored d1, bucket 3.
+        assert!(s.f[1][..s.n].contains(&(3 * 768 + 8)), "own h7 pawn -> a2");
+        assert!(s.f[1][..s.n].contains(&(3 * 768 + 384 + 55)), "enemy a2 pawn -> a7 -> h7");
+        // Own king: White g1 -> b1 (1) in bucket 1; Black e8 -> d1 (3) in bucket 3.
+        assert!(s.f[0][..s.n].contains(&(768 + 5 * 64 + 1)));
+        assert!(s.f[1][..s.n].contains(&(3 * 768 + 5 * 64 + 3)));
+        // Every feature of a perspective sits in that perspective's block.
+        for (side, b) in [(0, 1u16), (1, 3)] {
+            assert!(s.f[side][..s.n].iter().all(|&f| f / 768 == b));
+        }
+        // kb4 (no mirror): Black king d7 -> oriented d2 -> bucket 2, no flip.
+        let r = encode("8/3k4/8/8/8/8/8/4K3 b - - 0 1 | 0 | 0.5").unwrap();
+        let s = decode(&r, 0.5, 1, false, KingLayout::by_name("kb4"));
+        assert!(s.f[0][..s.n].contains(&(2 * 768 + 5 * 64 + 11)), "Black (stm) king d7 -> d2");
+        assert!(s.f[1][..s.n].contains(&(768 + 5 * 64 + 4)), "White king e1 -> bucket 1");
+    }
+
+    /// `none` is bit-for-bit the original encoding; m1 only flips files.
+    #[test]
+    fn no_buckets_is_legacy_and_m1_mirrors() {
+        let fens = [
+            "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 | 35 | 1.0",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1 | -20 | 0.5",
+        ];
+        for fen in fens {
+            let r = encode(fen).unwrap();
+            for aug in [false, true] {
+                let a = decode(&r, 0.5, 1, aug, NO_BUCKETS);
+                // Legacy formula, recomputed here.
+                let mut occ = u64::from_le_bytes(r[..8].try_into().unwrap());
+                let stm_black = r[27] == 1;
+                let mut n = 0;
+                while occ != 0 {
+                    let sq = occ.trailing_zeros() as u16 ^ if aug { 7 } else { 0 };
+                    occ &= occ - 1;
+                    let nib = r[8 + n / 2] >> (4 * (n & 1)) & 0xF;
+                    for (i, pb) in [stm_black, !stm_black].into_iter().enumerate() {
+                        let side = if (nib >> 3 == 1) == pb { 0 } else { 384 };
+                        let rel = if pb { sq ^ 56 } else { sq };
+                        assert_eq!(a.f[i][n], side + (nib & 7) as u16 * 64 + rel);
+                    }
+                    n += 1;
+                }
+                // m1: a perspective whose king is on files e-h sees every file flipped.
+                let m = decode(&r, 0.5, 1, aug, KingLayout::by_name("m1"));
+                for i in 0..2 {
+                    let king = a.f[i][..a.n].iter().find(|&&f| (320..384).contains(&f)).unwrap();
+                    let flip = if king % 8 >= 4 { 7 } else { 0 };
+                    for k in 0..a.n {
+                        assert_eq!(m.f[i][k], a.f[i][k] ^ flip);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn warm_start_copies_rows_into_every_bucket() {
+        let s1 = Shape { h: 8, buckets: 2, kb: 1 };
+        let mut rng = Rng::new(5);
+        let p1 = init_params(s1, &mut rng);
+        let p = expand_buckets(&p1, s1, 8);
+        let s8 = Shape { kb: 8, ..s1 };
+        assert_eq!(p.len(), s8.len());
+        for b in 0..8 {
+            assert_eq!(&p[b * s1.ft_b()..(b + 1) * s1.ft_b()], &p1[..s1.ft_b()]);
+        }
+        assert_eq!(&p[s8.ft_b()..], &p1[s1.ft_b()..]);
+        // A bucketed net built that way evaluates exactly like the original.
+        let r = encode("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 | 35 | 1.0").unwrap();
+        let (mut a1, mut a8) = (vec![0.0; 2 * s1.h], vec![0.0; 2 * s1.h]);
+        let o1 = forward(&p1, s1, &decode(&r, 0.5, 2, false, NO_BUCKETS), &mut a1);
+        let o8 = forward(&p, s8, &decode(&r, 0.5, 2, false, KingLayout::by_name("kb4")), &mut a8);
+        assert_eq!(o1, o8);
+        // File sizes: KB=1 unchanged, KB=8 has 8x the FT rows.
+        assert_eq!(s1.file_bytes(), (768 * 8 + 8 + 2 * 17) * 2);
+        assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 8), Some(s8));
+        assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 1), None);
+    }
+
+    #[test]
+    fn layouts_match_engine_tables() {
+        assert_eq!(LAYOUTS[0].name, "none");
+        let kb8m = KingLayout::by_name("kb8m");
+        assert_eq!(&kb8m.buckets[..16], &[0, 1, 2, 3, 3, 2, 1, 0, 4, 4, 5, 5, 5, 5, 4, 4]);
+        for l in &LAYOUTS {
+            if l.mirror {
+                assert!((0..64).all(|s| l.buckets[s] == l.buckets[s ^ 7]));
+            }
+        }
+        // The engine's tables, parsed from its source, must be identical.
+        let src = include_str!("../../../src/nnue.rs");
+        for (engine, name) in [("LAYOUT_KB4", "kb4"), ("LAYOUT_KB4M", "kb4m"), ("LAYOUT_KB8M", "kb8m")] {
+            let start = src.find(&format!("const {engine}: KingLayout")).unwrap();
+            let body = &src[start..start + src[start..].find("};").unwrap()];
+            let nums: Vec<u8> = body
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse().unwrap())
+                .collect();
+            let l = KingLayout::by_name(name);
+            // Skip the digits in the constant's name (e.g. "4" of KB4).
+            let nums = &nums[nums.len() - if l.mirror { 32 } else { 64 }..];
+            let want: Vec<u8> = if l.mirror {
+                (0..32).map(|i| l.buckets[(i / 4) * 8 + i % 4]).collect()
+            } else {
+                l.buckets.to_vec()
+            };
+            assert_eq!(nums, &want[..], "{name}");
+            assert_eq!(body.contains("mirror: true"), l.mirror, "{name}");
+        }
     }
 
     #[test]
     fn quantize_roundtrip_and_shape() {
-        let sh = Shape { h: 32, buckets: 8 };
+        let sh = Shape { h: 32, buckets: 8, kb: 1 };
         let mut rng = Rng::new(3);
         let p = init_params(sh, &mut rng);
         let q = quantize(&p, sh);
-        assert_eq!(Shape::from_file_bytes(q.len(), 8), Some(sh));
+        assert_eq!(Shape::from_file_bytes(q.len(), 8, 1), Some(sh));
         let d = dequantize(&q, sh);
         for i in 0..p.len() {
             let tol = if i < sh.out_w() { 0.5 / QA } else { 0.5 / QB };
             assert!((p[i] - d[i]).abs() <= tol + 1e-6);
         }
-        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1), Some(Shape { h: 512, buckets: 1 }));
+        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1, 1), Some(Shape { h: 512, buckets: 1, kb: 1 }));
     }
 
     #[test]
     fn gradient_matches_finite_difference() {
-        let sh = Shape { h: 16, buckets: 2 };
+        let sh = Shape { h: 16, buckets: 2, kb: 1 };
         let mut rng = Rng::new(7);
         let mut p = init_params(sh, &mut rng);
         for x in &mut p[sh.ft_b()..sh.out_w()] {
             *x = 0.3;
         }
         let r = encode("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 | 35 | 1.0").unwrap();
-        let s = decode(&r, 0.5, sh.buckets, false);
+        let s = decode(&r, 0.5, sh.buckets, false, NO_BUCKETS);
         let mut g = vec![0.0f32; sh.len()];
         let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
         train_sample(&p, sh, &s, &mut g, &mut acc, &mut dacc);
