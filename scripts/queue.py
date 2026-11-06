@@ -163,7 +163,17 @@ def log(entry):
 
 
 def main_bench():
-    """Latest Bench: trailer reachable from origin/main."""
+    """main's bench as measured when the queue last merged (main-bench.json), if
+    main has not changed the engine since; else the latest Bench: trailer, which
+    can be stale (a cherry-picked trailer once hid a net change)."""
+    try:
+        with open(os.path.join(STATE, "main-bench.json")) as fh:
+            rec = json.load(fh)
+        if sh("git", "diff", "--quiet", rec["sha"], "origin/main", "--", *ENGINE_PATHS,
+              check=False).returncode == 0:
+            return rec["nodes"]
+    except (OSError, ValueError, KeyError):
+        pass
     for body in out("git", "log", "-z", "--format=%B", "origin/main").split("\0"):
         m = re.findall(r"^Bench:\s*(\d+)\s*$", body, re.M)
         if m:
@@ -176,10 +186,10 @@ def run_engine(cmds):
                           capture_output=True, text=True).stdout
 
 
-ENGINE_PATHS = ["src", "Cargo.toml", "Cargo.lock", "build.rs"]
+ENGINE_PATHS = ["src", "net/nnue.bin", "Cargo.toml", "Cargo.lock", "build.rs"]
 
 
-def fast_forward_main(sha, base_sha=None, branch=None):
+def fast_forward_main(sha, base_sha=None, branch=None, bench=None):
     """Move main to the tested sha. If main moved since base_sha but only outside
     the engine sources (tooling, docs, logs), the tested binary is unchanged, so
     replay the candidate on top of main instead of retesting."""
@@ -200,6 +210,10 @@ def fast_forward_main(sha, base_sha=None, branch=None):
         if branch:
             sh("git", "push", "-q", "--force", "origin", f"replay:{branch}")
     sh("git", "push", "-q", "origin", f"{sha}:refs/heads/main")
+    if bench:
+        with open(os.path.join(STATE, "main-bench.json"), "w") as fh:
+            json.dump({"sha": sha, "nodes": bench}, fh)
+            fh.write("\n")
     return True
 
 
@@ -257,7 +271,7 @@ def start(item):
         elif mismatch:
             log(dict(base, outcome="needs-human", reason=f"speedup changed the eval ({mismatch}); "
                      "eval changes need an SPRT: re-add as stc or nonreg"))
-        elif fast_forward_main(sha):
+        elif fast_forward_main(sha, bench=nodes):
             log(dict(base, outcome="merged", sha=sha, reason="speedup, bench identical"))
         else:
             log(dict(base, outcome="needs-human", reason="main moved during speedup merge"))
@@ -390,7 +404,7 @@ def advance():
             else:
                 log(dict(record, outcome="check-passed" if verdict == "H1" else "check-inconclusive"))
         elif verdict == "H1":
-            if fast_forward_main(cur["sha"], cur.get("base_sha"), cur["branch"]):
+            if fast_forward_main(cur["sha"], cur.get("base_sha"), cur["branch"], cur.get("bench")):
                 log(dict(record, outcome="merged"))
                 schedule_check(state, cur["base_sha"])
             else:
