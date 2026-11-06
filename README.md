@@ -1,7 +1,17 @@
 # rustfish
 
-A chess engine in Rust with no dependencies beyond the standard library, aiming
-to beat Stockfish 17 at skill level 17.
+A chess engine in Rust with no dependencies beyond the standard library.
+Stockfish 17 at skill level 17 (the original goal) is passed; the targets are
+now places on the CCRL Blitz list (single-CPU engines, best versions; list of
+2026-10-31, numbers in `scripts/ccrl-targets.json`):
+
+| Target | CCRL Blitz | Rank today |
+|---|---|---|
+| Short term | 3400 | ~#131 of 865 |
+| Mid term: top 100 | 3504 | #100 |
+| Long term: top 10 | 3751 | #10 |
+
+rustfish is ~3330 (2026-11-06, which would rank ~#158).
 
 **Live progress dashboard: https://rustfish-dash.dev.duk.im**: current strength,
 the test in flight, the merge queue, recent results, strength over time and the
@@ -12,11 +22,11 @@ Actions, so it never needs updating by hand; redeploy only when
 
 | | |
 |---|---|
-| Strength | see the dashboard; history in `tests/ladder-log.jsonl` (CCRL Blitz scale) |
+| Strength | ~3330 CCRL Blitz; live on the dashboard, history in `tests/ladder-log.jsonl` |
 | Roadmap | [`plan.md`](plan.md) |
 | How changes are tested and merged | [`docs/development.md`](docs/development.md) |
 | Working on the code | [`AGENTS.md`](AGENTS.md), and [`docs/handoff.md`](docs/handoff.md) for a new agent |
-| NNUE (in progress) | [`docs/nnue.md`](docs/nnue.md) |
+| NNUE | [`docs/nnue.md`](docs/nnue.md), experiments in [`docs/nnue-experiments.md`](docs/nnue-experiments.md) |
 
 ## Build and run
 
