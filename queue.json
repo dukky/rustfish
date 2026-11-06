@@ -1,6 +1,14 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "nnue-net13-teacher",
+    "mode": "net-gate",
+    "test_id": "q-nnue-net13-teacher-1106-0724",
+    "sha": "115ea4f83e11e14ce4c5a9bdc6549d75fd41d6e0",
+    "base_sha": "a9fe766590aff94bccfe1cf3517f9e62cc5fd533",
+    "started": "2026-11-06T07:24:50Z",
+    "bench": 646243
+  },
   "check_base": "7159f91f53ec20999c0d851aceb827b10bceade2",
   "merges_since_check": 3,
   "merges_since_ladder": 3
