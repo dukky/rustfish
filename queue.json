@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "nnue-g3",
+      "mode": "net-gate"
+    },
+    {
       "branch": "spike-book-off-default",
       "mode": "speedup"
     },
@@ -41,5 +45,5 @@
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
-  "next_seed": 18
+  "next_seed": 19
 }
