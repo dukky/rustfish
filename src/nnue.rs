@@ -24,9 +24,11 @@ pub(crate) const H: usize = 256;
 pub(crate) const QA: i32 = 255;
 pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
+/// Output buckets, selected by piece count: `(pieces - 2) * BUCKETS / 32`.
+pub(crate) const BUCKETS: usize = 1;
 
-/// Bytes in a net file: (768*H + H + 2H + 1) little-endian i16.
-pub(crate) const NET_BYTES: usize = (INPUTS * H + H + 2 * H + 1) * 2;
+/// Bytes in a net file: (768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
+pub(crate) const NET_BYTES: usize = (INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2;
 
 /// NNUE scores are clamped well inside the mate range.
 const EVAL_LIMIT: i32 = 20_000;
@@ -36,8 +38,9 @@ pub(crate) struct Network {
     /// Feature-major: weights of feature f are `ft_w[f*H .. (f+1)*H]`.
     ft_w: Vec<i16>,
     ft_b: [i16; H],
-    out_w: [i16; 2 * H],
-    out_b: i16,
+    /// Bucket-major: bucket b's weights are `out_w[b*2H .. (b+1)*2H]`, stm half first.
+    out_w: Vec<i16>,
+    out_b: [i16; BUCKETS],
     /// All |out_w| <= 127: the SIMD output kernel's i16 products and i32
     /// per-perspective sums cannot overflow (256 * 255^2 * 127 < 2^31).
     small_out: bool,
@@ -54,16 +57,17 @@ impl Network {
         for v in ft_b.iter_mut() {
             *v = words.next().unwrap();
         }
-        let mut out_w = [0i16; 2 * H];
-        for v in out_w.iter_mut() {
+        let out_w: Vec<i16> = words.by_ref().take(BUCKETS * 2 * H).collect();
+        let mut out_b = [0i16; BUCKETS];
+        for v in out_b.iter_mut() {
             *v = words.next().unwrap();
         }
-        let out_b = words.next().unwrap();
         Ok(Self::from_parts(ft_w, ft_b, out_w, out_b))
     }
 
-    fn from_parts(ft_w: Vec<i16>, ft_b: [i16; H], out_w: [i16; 2 * H], out_b: i16) -> Self {
+    fn from_parts(ft_w: Vec<i16>, ft_b: [i16; H], out_w: Vec<i16>, out_b: [i16; BUCKETS]) -> Self {
         assert_eq!(ft_w.len(), INPUTS * H);
+        assert_eq!(out_w.len(), BUCKETS * 2 * H);
         let small_out = out_w.iter().all(|w| (-127..=127).contains(w));
         Self { ft_w, ft_b, out_w, out_b, small_out }
     }
@@ -77,7 +81,7 @@ impl Network {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(NET_BYTES);
         let all = self.ft_w.iter().chain(self.ft_b.iter()).chain(self.out_w.iter());
-        for w in all.chain(std::iter::once(&self.out_b)) {
+        for w in all.chain(self.out_b.iter()) {
             out.extend_from_slice(&w.to_le_bytes());
         }
         out
@@ -98,9 +102,9 @@ impl Network {
         let ft_w = (0..INPUTS * H).map(|_| next(ft_range)).collect();
         let mut ft_b = [0i16; H];
         ft_b.iter_mut().for_each(|v| *v = next(ft_range));
-        let mut out_w = [0i16; 2 * H];
-        out_w.iter_mut().for_each(|v| *v = next(out_range));
-        let out_b = next(out_range);
+        let out_w = (0..BUCKETS * 2 * H).map(|_| next(out_range)).collect();
+        let mut out_b = [0i16; BUCKETS];
+        out_b.iter_mut().for_each(|v| *v = next(out_range));
         Self::from_parts(ft_w, ft_b, out_w, out_b)
     }
 
@@ -264,30 +268,41 @@ impl NnueState {
         self.top -= 1;
     }
 
-    /// Score from the side to move's point of view, in centipawns.
+    /// Score from the side to move's point of view, in centipawns, for a
+    /// position with `pieces` pieces on the board (selects the output bucket).
     #[inline]
-    pub(crate) fn evaluate(&self, stm: Color) -> i32 {
-        evaluate_acc(&self.net, self.current(), stm)
+    pub(crate) fn evaluate(&self, stm: Color, pieces: u32) -> i32 {
+        evaluate_acc(&self.net, self.current(), stm, pieces)
     }
 }
 
-pub(crate) fn evaluate_acc(net: &Network, acc: &Accumulator, stm: Color) -> i32 {
+#[inline(always)]
+pub(crate) fn bucket(pieces: u32) -> usize {
+    if BUCKETS == 1 {
+        0
+    } else {
+        (pieces.saturating_sub(2) as usize * BUCKETS / 32).min(BUCKETS - 1)
+    }
+}
+
+pub(crate) fn evaluate_acc(net: &Network, acc: &Accumulator, stm: Color, pieces: u32) -> i32 {
     let (us, them) = match stm {
         Color::White => (&acc.v[0], &acc.v[1]),
         Color::Black => (&acc.v[1], &acc.v[0]),
     };
-    let sum = output_sum(net, us, them);
-    let raw = (sum / QA as i64 + net.out_b as i64) * SCALE as i64 / (QA as i64 * QB as i64);
+    let b = bucket(pieces);
+    let sum = output_sum(net, b, us, them);
+    let raw = (sum / QA as i64 + net.out_b[b] as i64) * SCALE as i64 / (QA as i64 * QB as i64);
     raw.clamp(-EVAL_LIMIT as i64, EVAL_LIMIT as i64) as i32
 }
 
 #[inline(always)]
-fn output_sum(net: &Network, us: &[i16; H], them: &[i16; H]) -> i64 {
-    let (w_us, w_them) = net.out_w.split_at(H);
+fn output_sum(net: &Network, b: usize, us: &[i16; H], them: &[i16; H]) -> i64 {
+    let (w_us, w_them) = net.out_w[b * 2 * H..(b + 1) * 2 * H].split_at(H);
     let w_us: &[i16; H] = w_us.try_into().unwrap();
     let w_them: &[i16; H] = w_them.try_into().unwrap();
     if net.small_out {
-        simd::screlu_dot(us, w_us) as i64 + simd::screlu_dot(them, w_them) as i64
+        simd::screlu_dot(us, w_us) + simd::screlu_dot(them, w_them)
     } else {
         simd::screlu_dot_wide(us, w_us) + simd::screlu_dot_wide(them, w_them)
     }
@@ -327,13 +342,13 @@ pub(crate) mod scalar {
         sum
     }
 
-    /// Requires |w| <= 127 (see `Network::small_out`): no overflow in i32.
+    /// Requires |w| <= 127 (see `Network::small_out`): each product fits i32.
     #[allow(dead_code)]
-    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i32 {
-        let mut sum = 0i32;
+    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        let mut sum = 0i64;
         for i in 0..H {
             let c = (acc[i] as i32).clamp(0, QA);
-            sum += c * w[i] as i32 * c;
+            sum += (c * w[i] as i32 * c) as i64;
         }
         sum
     }
@@ -366,10 +381,10 @@ pub(crate) mod simd {
     }
 
     #[inline(always)]
-    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i32 {
-        // SAFETY: as above. c in [0,255], |w| <= 127 so c*w fits i16; the
-        // widening multiply-accumulate by c is exact in i32 (bound in
-        // `Network::small_out`).
+    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        // SAFETY: as above. c in [0,255], |w| <= 127 so c*w fits i16; each
+        // i32 lane sums H/8 products of at most 255^2*127 (exact for H <= 2048)
+        // and the lanes are reduced in i64.
         unsafe {
             let zero = vdupq_n_s16(0);
             let qa = vdupq_n_s16(QA as i16);
@@ -383,7 +398,7 @@ pub(crate) mod simd {
                 s1 = vmlal_high_s16(s1, cw, c);
                 i += 8;
             }
-            vaddvq_s32(vaddq_s32(s0, s1))
+            vaddlvq_s32(s0) + vaddlvq_s32(s1)
         }
     }
 }
@@ -414,7 +429,7 @@ pub(crate) mod simd {
     }
 
     #[inline(always)]
-    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i32 {
+    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
         // SAFETY: as above. c*w fits i16 (|w| <= 127), madd(c*w, c) sums two
         // exact i32 products; total bounded by `Network::small_out`.
         unsafe {
@@ -430,12 +445,10 @@ pub(crate) mod simd {
                 sum = _mm256_add_epi32(sum, _mm256_madd_epi16(cw, c));
                 i += 16;
             }
-            let lo = _mm256_castsi256_si128(sum);
-            let hi = _mm256_extracti128_si256(sum, 1);
-            let s = _mm_add_epi32(lo, hi);
-            let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
-            let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
-            _mm_cvtsi128_si32(s)
+            // Each i32 lane holds H/8 products (exact for H <= 2048); reduce in i64.
+            let mut lanes = [0i32; 8];
+            _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, sum);
+            lanes.iter().map(|&x| x as i64).sum()
         }
     }
 
@@ -529,7 +542,7 @@ pub(crate) mod simd {
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn screlu_dot_avx2(acc: &[i16; H], w: &[i16; H]) -> i32 {
+    unsafe fn screlu_dot_avx2(acc: &[i16; H], w: &[i16; H]) -> i64 {
         let zero = _mm256_setzero_si256();
         let qa = _mm256_set1_epi16(QA as i16);
         let mut sum = _mm256_setzero_si256();
@@ -542,16 +555,14 @@ pub(crate) mod simd {
             sum = _mm256_add_epi32(sum, _mm256_madd_epi16(cw, c));
             i += 16;
         }
-        let lo = _mm256_castsi256_si128(sum);
-        let hi = _mm256_extracti128_si256(sum, 1);
-        let s = _mm_add_epi32(lo, hi);
-        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
-        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
-        _mm_cvtsi128_si32(s)
+        // Each i32 lane holds H/8 products (exact for H <= 2048); reduce in i64.
+        let mut lanes = [0i32; 8];
+        _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, sum);
+        lanes.iter().map(|&x| x as i64).sum()
     }
 
     #[inline(always)]
-    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i32 {
+    pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
         if avx2() {
             // SAFETY: detected above; |w| <= 127 bound as in the scalar path.
             unsafe { screlu_dot_avx2(acc, w) }
@@ -634,7 +645,7 @@ mod tests {
     fn tiny_net_matches_formula() {
         let mut ft_w = vec![0i16; INPUTS * H];
         let mut ft_b = [0i16; H];
-        let mut out_w = [0i16; 2 * H];
+        let mut out_w = vec![0i16; BUCKETS * 2 * H];
         ft_b[0] = 100;
         ft_b[1] = 300; // clamps to QA
         // White king on e1 (sq 4): white persp feature 5*64+4 = 324,
@@ -645,7 +656,7 @@ mod tests {
         out_w[0] = 3; // us[0]
         out_w[1] = -2; // us[1]
         out_w[H + 2] = 7; // them[2]
-        let out_b = 11;
+        let out_b = [11; BUCKETS];
         let net = Network::from_parts(ft_w, ft_b, out_w, out_b);
         let net2 = Network::from_bytes(&net.to_bytes()).unwrap();
         let mut board = Board::new();
@@ -657,12 +668,12 @@ mod tests {
         // White to move: us = white.
         let sum_w: i64 = 150 * 150 * 3 + 255 * 255 * -2 + 20 * 20 * 7;
         let want_w = (sum_w / 255 + 11) * 400 / (255 * 64);
-        assert_eq!(evaluate_acc(&net2, &acc, Color::White) as i64, want_w);
+        assert_eq!(evaluate_acc(&net2, &acc, Color::White, 1) as i64, want_w);
         // Black to move: us = black acc (0, 255, 20...), them = white acc.
         // us[0]=0 (clamped), us[1]=255 -> -2*255^2; them[2]=white acc[2]=0.
         let sum_b: i64 = 255 * 255 * -2;
         let want_b = (sum_b / 255 + 11) * 400 / (255 * 64);
-        assert_eq!(evaluate_acc(&net2, &acc, Color::Black) as i64, want_b);
+        assert_eq!(evaluate_acc(&net2, &acc, Color::Black, 1) as i64, want_b);
         // ((22500*3 - 65025*2 + 400*7)/255 + 11)*400/16320 = (-234+11)*400/16320
         assert_eq!(want_w, -5);
         assert_eq!(want_b, -12);
@@ -698,7 +709,8 @@ mod tests {
                     let full = Accumulator::refresh(&net, &board);
                     assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
                     for stm in [Color::White, Color::Black] {
-                        assert_eq!(st.evaluate(stm), evaluate_acc(&net, &full, stm));
+                        let n = board.bb.occ_all().count_ones();
+                        assert_eq!(st.evaluate(stm, n), evaluate_acc(&net, &full, stm, n));
                     }
                 }
                 // Unwind and check the root accumulator is intact.
@@ -747,7 +759,7 @@ mod tests {
         for w in [[127i16; H], [-127i16; H]] {
             let s = simd::screlu_dot(&acc, &w);
             assert_eq!(s as i64, scalar::screlu_dot_wide(&acc, &w));
-            assert_eq!(s as i64, 256 * 255 * 255 * w[0] as i64);
+            assert_eq!(s, H as i64 * 255 * 255 * w[0] as i64);
         }
     }
 
@@ -771,7 +783,7 @@ mod tests {
         let mut x = 0i64;
         for _ in 0..n {
             let acc = Accumulator::refresh(&net, &board);
-            x += evaluate_acc(&net, std::hint::black_box(&acc), Color::White) as i64;
+            x += evaluate_acc(&net, std::hint::black_box(&acc), Color::White, 32) as i64;
         }
         let full = n as f64 / t.elapsed().as_secs_f64();
         let mut legal = Vec::new();
@@ -781,13 +793,13 @@ mod tests {
         for i in 0..n {
             let mv = legal[i % legal.len()];
             st.push_move(&board, mv);
-            x += st.evaluate(std::hint::black_box(Color::Black)) as i64;
+            x += st.evaluate(std::hint::black_box(Color::Black), 32) as i64;
             st.pop();
         }
         let inc = n as f64 / t.elapsed().as_secs_f64();
         let t = Instant::now();
         for _ in 0..n {
-            x += st.evaluate(std::hint::black_box(Color::White)) as i64;
+            x += st.evaluate(std::hint::black_box(Color::White), 32) as i64;
         }
         let out_only = n as f64 / t.elapsed().as_secs_f64();
         let t = Instant::now();
