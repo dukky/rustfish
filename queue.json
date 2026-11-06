@@ -1,20 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "correction-history-r2",
-      "mode": "stc"
-    }
-  ],
+  "pending": [],
   "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "test_id": "q-ladder-1106-2153",
-    "sha": "fb4ece7ca7363693cccb14598dca31f703807689",
-    "base_sha": "fb4ece7ca7363693cccb14598dca31f703807689",
-    "started": "2026-11-06T21:53:23Z"
+    "branch": "correction-history-r2",
+    "mode": "stc",
+    "test_id": "q-correction-history-r2-1106-2332",
+    "sha": "d8fdc485335c196a3fed405448bf3bb408042f72",
+    "base_sha": "3ce5522bcf182a79102751179615bf435e714e70",
+    "started": "2026-11-06T23:32:43Z",
+    "bench": 605590
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
-  "next_seed": 20
+  "next_seed": 21
 }
