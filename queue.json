@@ -1,5 +1,20 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "nnue-g4w",
+      "mode": "net-gate",
+      "expect": 15.0
+    },
+    {
+      "branch": "nnue-g3f",
+      "mode": "net-gate",
+      "expect": 8.0
+    },
+    {
+      "branch": "tm-ccrl",
+      "mode": "nonreg"
+    }
+  ],
   "current": {
     "branch": "correction-history-r2",
     "mode": "stc",
