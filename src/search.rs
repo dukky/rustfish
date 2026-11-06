@@ -166,18 +166,27 @@ fn history_score(history: &HistoryTable, side: Color, mv: Move) -> i32 {
     history[color_index(side)][mv.from as usize][mv.to as usize]
 }
 
+/// Continuation history from the last two plies: `plied[0]` is the move
+/// played by the opponent one ply up, `plied[1]` the move two plies up (played
+/// by the side to move). The two-ply slot counts at half weight.
 fn continuation_history_score(
     engine: &EngineState,
     side: Color,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     mv: Move,
 ) -> i32 {
-    prev_move
-        .map(|prev| {
-            engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-                [mv.to as usize]
-        })
-        .unwrap_or(0)
+    let c = color_index(side);
+    let mut score = 0;
+    if let Some(prev) = plied[0] {
+        score +=
+            engine.continuation_history[0][c][prev.to as usize][mv.from as usize][mv.to as usize];
+    }
+    if let Some(prev) = plied[1] {
+        score += engine.continuation_history[1][c][prev.to as usize][mv.from as usize]
+            [mv.to as usize]
+            / 2;
+    }
+    score
 }
 
 /// Bound on |history| and |continuation history| under the gravity update.
@@ -211,16 +220,18 @@ fn apply_history_delta(engine: &mut EngineState, side: Color, mv: Move, delta: i
 fn apply_continuation_history_delta(
     engine: &mut EngineState,
     side: Color,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     mv: Move,
     delta: i32,
 ) {
-    let Some(prev) = prev_move else {
-        return;
-    };
-    let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-        [mv.to as usize];
-    apply_gravity(h, delta);
+    let c = color_index(side);
+    for (slot, prev) in plied.iter().enumerate() {
+        let Some(prev) = *prev else { continue };
+        let h = &mut engine.continuation_history[slot][c][prev.to as usize][mv.from as usize]
+            [mv.to as usize];
+        let delta = if slot == 1 { delta / 2 } else { delta };
+        apply_gravity(h, delta);
+    }
 }
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
@@ -335,7 +346,7 @@ impl MovePicker {
         engine: &EngineState,
         tt_move: Option<Move>,
         counter_move: Option<Move>,
-        prev_move: Option<Move>,
+        plied: &[Option<Move>; 2],
         killers: &[Option<Move>; 2],
         history: &HistoryTable,
         captures_only: bool,
@@ -382,8 +393,8 @@ impl MovePicker {
                 continue;
             }
 
-            let score = quiet_stage_score(engine, side, mv, counter_move, prev_move, killers);
-            if is_priority_quiet(engine, side, mv, counter_move, prev_move, killers) {
+            let score = quiet_stage_score(engine, side, mv, counter_move, plied, killers);
+            if is_priority_quiet(engine, side, mv, counter_move, plied, killers) {
                 picker.bufs.priority_quiets.push((mv, score));
             } else {
                 picker.bufs.quiets.push((mv, score.max(history_score(history, side, mv))));
@@ -601,7 +612,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         &mut root_moves,
         tt_root_move,
         None,
-        None,
+        &[None, None],
         &search.killers[0],
         &engine.history,
     );
@@ -903,7 +914,7 @@ fn search_root(
         root_moves,
         tt_move,
         None,
-        None,
+        &[None, None],
         &search.killers[0],
         &engine.history,
     );
@@ -932,7 +943,7 @@ fn search_root(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), None],
                 true,
             );
         } else {
@@ -946,7 +957,7 @@ fn search_root(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), None],
                 true,
             );
             if score > alpha && score < beta {
@@ -960,7 +971,7 @@ fn search_root(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), None],
                     true,
                 );
             }
@@ -1037,7 +1048,7 @@ fn negamax(
     engine: &mut EngineState,
     rep_stack: &mut Vec<u64>,
     key: u64,
-    prev_move: Option<Move>,
+    plied: [Option<Move>; 2],
     allow_null: bool,
 ) -> i32 {
     search.nodes += 1;
@@ -1192,7 +1203,7 @@ fn negamax(
                 engine,
                 rep_stack,
                 child_key,
-                None,
+                [None, None],
                 false,
             );
             rep_stack.pop();
@@ -1232,7 +1243,7 @@ fn negamax(
                 engine,
                 tt_move,
                 None,
-                None,
+                &[None, None],
                 &[None, None],
                 &engine.history,
                 true,
@@ -1267,7 +1278,7 @@ fn negamax(
                         engine,
                         rep_stack,
                         child_key,
-                        Some(mv),
+                        [Some(mv), plied[0]],
                         true,
                     );
                 }
@@ -1291,14 +1302,14 @@ fn negamax(
         }
     }
 
-    let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
+    let counter_move = counter_move_for(engine, board.side_to_move, plied[0]);
     let killers = search.killers[ply];
     let mut picker = MovePicker::new(
         board,
         engine,
         tt_move,
         counter_move,
-        prev_move,
+        &plied,
         &killers,
         &engine.history,
         false,
@@ -1344,7 +1355,7 @@ fn negamax(
                         engine,
                         rep_stack,
                         key,
-                        prev_move,
+                        plied,
                         false,
                     );
                     search.excluded[ply] = None;
@@ -1372,7 +1383,7 @@ fn negamax(
             0
         };
         let quiet_continuation = if quiet {
-            continuation_history_score(engine, side, prev_move, mv)
+            continuation_history_score(engine, side, &plied, mv)
         } else {
             0
         };
@@ -1441,7 +1452,7 @@ fn negamax(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), plied[0]],
                 true,
             );
         } else {
@@ -1486,7 +1497,7 @@ fn negamax(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), plied[0]],
                 true,
             );
 
@@ -1501,7 +1512,7 @@ fn negamax(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), plied[0]],
                     true,
                 );
             }
@@ -1517,7 +1528,7 @@ fn negamax(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), plied[0]],
                     true,
                 );
             }
@@ -1540,7 +1551,7 @@ fn negamax(
         if alpha >= beta {
             if quiet {
                 let bonus = history_bonus(depth);
-                if let Some(prev) = prev_move {
+                if let Some(prev) = plied[0] {
                     engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
                         Some(mv);
                 }
@@ -1549,11 +1560,11 @@ fn negamax(
                     search.killers[ply][0] = Some(mv);
                 }
                 apply_history_delta(engine, side, mv, bonus);
-                apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                apply_continuation_history_delta(engine, side, &plied, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, tried, -bonus);
-                        apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_continuation_history_delta(engine, side, &plied, tried, -bonus);
                     }
                 }
             }
@@ -1669,7 +1680,7 @@ fn quiescence(
         engine,
         tt_move,
         None,
-        None,
+        &[None, None],
         &[None, None],
         &engine.history,
         !in_check,
@@ -1750,7 +1761,7 @@ fn order_moves(
     moves: &mut Vec<Move>,
     tt_move: Option<Move>,
     counter_move: Option<Move>,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) {
@@ -1761,7 +1772,7 @@ fn order_moves(
             *m,
             tt_move,
             counter_move,
-            prev_move,
+            plied,
             killers,
             history,
         ))
@@ -1777,14 +1788,14 @@ fn is_priority_quiet(
     side: Color,
     mv: Move,
     counter_move: Option<Move>,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     killers: &[Option<Move>; 2],
 ) -> bool {
     Some(mv) == killers[0]
         || Some(mv) == killers[1]
         || Some(mv) == counter_move
         || history_score(&engine.history, side, mv) > 0
-        || continuation_history_score(engine, side, prev_move, mv) > 0
+        || continuation_history_score(engine, side, plied, mv) > 0
 }
 
 fn quiet_stage_score(
@@ -1792,11 +1803,11 @@ fn quiet_stage_score(
     side: Color,
     mv: Move,
     counter_move: Option<Move>,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     killers: &[Option<Move>; 2],
 ) -> i32 {
     let mut score = history_score(&engine.history, side, mv)
-        + continuation_history_score(engine, side, prev_move, mv) / 2;
+        + continuation_history_score(engine, side, plied, mv) / 2;
     if Some(mv) == killers[0] {
         score += 30_000;
     } else if Some(mv) == counter_move {
@@ -2230,7 +2241,7 @@ fn move_order_score(
     mv: Move,
     tt_move: Option<Move>,
     counter_move: Option<Move>,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) -> i32 {
@@ -2259,7 +2270,7 @@ fn move_order_score(
         .unwrap_or(0)
         .saturating_sub(piece_value(PieceType::Pawn));
     let castle = if mv.is_castle { 10 } else { 0 };
-    let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
+    let continuation = continuation_history_score(engine, board.side_to_move, plied, mv);
     history_score(history, board.side_to_move, mv) + continuation / 2 + promo + castle
 }
 
@@ -2278,6 +2289,31 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// Regression: with two continuation-history slots the table is 4 MB, and
+    /// holding it inline in EngineState overflowed the 8 MB stacks the engine
+    /// runs on. Build the engine and run a real depth-12 search (book off, so
+    /// the search is not skipped) on a stack of that size.
+    #[test]
+    fn deep_search_fits_default_stack() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_startpos();
+                let mut engine = EngineState::new();
+                engine.own_book = false;
+                let out = handle_go("go depth 12", &mut board, &mut engine);
+                assert!(
+                    out.as_deref().is_some_and(|s| !s.trim().is_empty()),
+                    "no root move: {out:?}"
+                );
+                assert!(engine.last_search_nodes > 0, "search did not run");
+            })
+            .expect("spawn")
+            .join()
+            .expect("depth-12 search panicked");
+    }
 
     #[test]
     fn insufficient_material_detector() {
