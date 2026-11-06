@@ -28,8 +28,8 @@ on:
         description: "RNG seed; use a new one for every run you want to add to the pool"
         default: "1"
       max_parallel:
-        description: "Max shards running at once (background lane: 4; the merge queue's SPRTs use 16)"
-        default: "4"
+        description: "Max shards running at once (background lane: 3; SPRTs use 16, 1 is kept for the queue's own runs)"
+        default: "3"
 
 permissions:
   contents: read

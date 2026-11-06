@@ -373,7 +373,7 @@ def parse_adds(spec):
 
 
 def background_lane(state):
-    """Keep the 4 background runners busy: when no datagen or SPSA run
+    """Keep the 3 background runners busy (1 of 20 stays free for the queue's own job): when no datagen or SPSA run
     is queued or running, generate the next datagen seed from main (only
     merged nets generate data)."""
     for wf in ("datagen.yml", "spsa.yml"):
@@ -384,7 +384,7 @@ def background_lane(state):
     seed = state.get("next_seed", 14)
     sh("gh", "workflow", "run", "datagen.yml", "--ref", "main", "-f", "ref=main",
        "-f", "shards=16", "-f", "games_per_shard=15000", "-f", "nodes=5000",
-       "-f", f"seed={seed}", "-f", "max_parallel=4")
+       "-f", f"seed={seed}", "-f", "max_parallel=3")
     state["next_seed"] = seed + 1
     log({"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
          "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"})
