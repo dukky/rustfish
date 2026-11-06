@@ -1,31 +1,37 @@
 # rustfish progress dashboard (Dokku)
 
-A live status page at https://rustfish-dash.dev.duk.im: current CCRL estimate
-vs the Stockfish 17 skill 17 target, the in-flight merge-queue SPRT, the
-pending queue, recent SPRT/queue outcomes, the ladder rating over time with
-the changes that passed in between, and `plan.md` rendered.
+A live status page at https://rustfish-dash.dev.duk.im: measured CCRL strength
+and the CCRL Blitz targets (3400 short term, top 100, top 10), CI runner usage
+across both queue lanes, the foreground lane (the in-flight SPRT or CCRL ladder
+and the pending merge queue), the background lane (datagen from main), the
+ladder rating over time, NNUE experiments, recent queue outcomes, gate Elo of
+accepted changes, recent commits and `plan.md` (the maintained roadmap) rendered.
 
 `server.py` is Python stdlib only. It reads public data (no token):
 
-- `raw.githubusercontent.com`: `tests/ladder-log.jsonl`, `tests/sprt-log.jsonl`
-  and `plan.md` on `main`; `queue.json` and `log.jsonl` on `queue-state`;
-  `net/experiments.jsonl` (main, else the `netloop` branch) and the v1
-  `net/chain.json`. The NNUE panel lists every net branch's latest gate
-  status straight from the queue log (testing, queued, merged, rejected, ...)
-  joined by branch name to its `netloop record` row; a gated net with no row
-  is flagged "no training record".
+- `raw.githubusercontent.com`: `tests/ladder-log.jsonl`, `tests/sprt-log.jsonl`,
+  `plan.md`, `scripts/queue-settings.json` (wave sizes, time controls) and
+  `scripts/ccrl-targets.json` (CCRL list thresholds) on `main`; `queue.json`
+  and `log.jsonl` on `queue-state`; `net/experiments.jsonl` (main, else the
+  `netloop` branch) and the v1 `net/chain.json`. The NNUE panel lists every net
+  branch's latest gate status straight from the queue log joined by branch
+  name to its `netloop record` row; a gated net with no row is flagged
+  "no training record".
 - `api.github.com` (unauthenticated, 60 req/h): recent Actions runs, the jobs
-  of the current SPRT wave (to count finished shards), and recent `main` commits.
+  of the in-flight foreground run (SPRT wave or ladder) and of the active
+  datagen run, and recent `main` commits.
 
 Each upstream URL is cached in memory (raw files 2 min, runs/jobs 3 min,
-commits 10 min) and refreshed only when a page asks, with ETags, so the API
-use stays under ~50 requests/hour even with the page open all day. If GitHub
-is unreachable the last good data is served with a warning banner. The page
-polls `/api/status` every minute.
+datagen jobs 5 min, commits 10 min) and refreshed only when a page asks, with
+ETags, so the API use stays under ~60 requests/hour even with the page open
+all day. The runner-usage panel reuses those fetches: exact job counts for the
+runs whose jobs are fetched anyway, other in-progress runs estimated at their
+workflow's max-parallel (`MAX_PARALLEL` in `server.py`). If GitHub is
+unreachable the last good data is served with a warning banner. The page polls
+`/api/status` every minute.
 
-Games played in the in-flight SPRT are estimated from finished shard jobs and
-the per-mode wave sizes mirrored from `scripts/queue.py` (`ROUNDS` in
-`server.py`); update that table if the queue settings change.
+Ladder runs with far fewer games than planned (a cancelled or partial run) are
+flagged `partial` and drawn hollow with their own CI bar.
 
 ## Run locally
 ```bash

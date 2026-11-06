@@ -52,6 +52,11 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .tile .big { font-size: 34px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.15; margin: 4px 0 2px; }
 .tile .sub { font-size: 13px; color: var(--muted); }
 .tile.est { border-style: dashed; }
+.targets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-top: 10px; padding: 10px 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 13.5px; }
+.targets .t { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.targets .t b { font-weight: 650; }
+.targets .src { flex-basis: 100%; color: var(--muted); font-size: 12.5px; }
 @media (max-width: 900px) { .tiles { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 520px) { .tiles { grid-template-columns: 1fr; } .tile .big { font-size: 28px; } }
 .banner { margin-top: 16px; padding: 10px 14px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: 14px; display: none; }
@@ -85,6 +90,13 @@ svg text { font-family: inherit; }
 .legend span::before { content: ""; display: inline-block; width: 14px; height: 0; margin-right: 6px; vertical-align: middle; border-top: 2px solid var(--accent); }
 .legend .l-ci::before { height: 10px; border: 0; background: var(--accent-soft); }
 .legend .l-target::before { border-top: 2px dashed var(--muted); }
+.legend .l-partial::before { width: 8px; height: 8px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
+.runbar { display: flex; height: 14px; background: var(--neutral-bg); border-radius: 99px; overflow: hidden; margin: 6px 0; }
+.runbar > div { height: 100%; }
+.runbar .fg { background: var(--accent); }
+.runbar .bg { background: var(--good); }
+.legend .l-fg::before { width: 10px; height: 10px; border: 0; background: var(--accent); }
+.legend .l-bg::before { width: 10px; height: 10px; border: 0; background: var(--good); }
 .legend .l-change::before { width: 8px; height: 8px; border: 0; background: var(--good); transform: rotate(45deg); }
 .bars .bar-row { display: grid; grid-template-columns: minmax(90px, 160px) 1fr 76px; align-items: center; gap: 10px; font-size: 13px; padding: 3px 0; }
 .bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -97,6 +109,8 @@ svg text { font-family: inherit; }
 .md h2 { font-size: 17px; text-transform: none; letter-spacing: 0; color: var(--text); margin: 22px 0 8px; }
 .md h3 { font-size: 15px; margin: 18px 0 6px; }
 .md table { margin: 8px 0; display: block; overflow-x: auto; }
+.md table.kvt td:first-child { font-weight: 600; white-space: nowrap; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
 .md code { font-family: var(--mono); font-size: 12.5px; background: var(--neutral-bg); padding: 1px 4px; border-radius: 4px; }
 .md pre { background: var(--neutral-bg); padding: 10px; border-radius: 6px; overflow-x: auto; }
 .md pre code { background: none; padding: 0; }
@@ -118,20 +132,26 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
   <div class="banner" id="banner"></div>
 
   <section class="tiles" id="tiles"></section>
+  <section class="targets" id="targets"></section>
 
-  <section class="card" id="datagen-card" style="display:none">
-    <h2>Datagen for the net chain</h2>
-    <div id="datagen"></div>
+  <section class="card" id="runners-card">
+    <h2>CI runners in use</h2>
+    <div id="runners" class="empty">loading...</div>
   </section>
 
   <div class="grid row2">
-    <section class="card" id="inflight"><h2>Now testing</h2><div class="empty">loading...</div></section>
+    <section class="card" id="inflight"><h2>Foreground lane: now testing</h2><div class="empty">loading...</div></section>
     <section class="card"><h2>Up next (merge queue)</h2><div id="pending" class="empty">loading...</div></section>
   </div>
 
   <section class="card">
+    <h2>Background lane: datagen from main</h2>
+    <div id="background" class="empty">loading...</div>
+  </section>
+
+  <section class="card">
     <h2>Strength over time (CCRL Blitz, 120+1)</h2>
-    <div class="legend"><span>rating</span><span class="l-ci">95% CI</span><span class="l-target">target</span><span class="l-change">change passed SPRT</span></div>
+    <div class="legend"><span>rating</span><span class="l-ci">95% CI</span><span class="l-partial">partial run (hollow, CI bar)</span><span class="l-target">3400 short-term goal</span><span class="l-change">change merged</span></div>
     <div class="chart-wrap" id="chart"></div>
     <details style="margin-top:10px"><summary>Ladder runs as a table</summary><div class="scroll" id="ladder-table"></div></details>
   </section>
@@ -147,16 +167,14 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
     </details>
   </section>
 
-  <div class="grid row2">
-    <section class="card"><h2>Recent outcomes</h2><div class="scroll" id="outcomes"></div></section>
-    <section class="card"><h2>Elo from accepted changes</h2><div id="estimate"></div><div id="gains"></div></section>
-  </div>
+  <section class="card"><h2>Recent outcomes</h2><div class="scroll" id="outcomes"></div></section>
+  <section class="card"><h2>Gate Elo from accepted changes</h2><div id="estimate"></div><div id="gains"></div></section>
 
   <section class="card"><h2>Recent commits on main</h2><div class="scroll" id="commits"></div></section>
   <section class="card">
     <h2>Roadmap</h2>
-    <div class="banner on" style="margin:0 0 12px"><b>plan.md is stale.</b> The project moved to the net-first chain; the current plan and open questions are in the <a id="audit-link" href="https://github.com/dukky/rustfish/blob/main/docs/opus-audit-2026-11-04.md">Opus audit of 2026-11-04</a>.</div>
-    <details><summary>plan.md (stale, kept for history)</summary><div class="md" id="plan"></div></details>
+    <div class="meta" id="plan-meta" style="margin-bottom:8px"></div>
+    <div class="md" id="plan"><span class="empty">loading plan.md...</span></div>
   </section>
   <p class="note" id="footer"></p>
 </main>
@@ -185,10 +203,15 @@ const OUTCOME = {
   "needs-human": ["needs human", "b-warn"], retrying: ["retrying", "b-warn"], requeued: ["requeued", "b-warn"],
   inconclusive: ["inconclusive", "b-neutral"], "check-inconclusive": ["check inconclusive", "b-neutral"],
   skipped: ["skipped", "b-neutral"], superseded: ["superseded", "b-neutral"], abandoned: ["abandoned", "b-neutral"],
-  dispatched: ["started", "b-accent"],
+  preempted: ["preempted", "b-warn"], "ladder-logged": ["ladder logged", "b-accent"],
+  dispatched: ["started", "b-accent"], "datagen-dispatched": ["datagen started", "b-accent"],
+  ladder: ["ladder", "b-accent"], invalid: ["invalid", "b-neutral"],
 };
-const badge = (k) => { const [t, c] = OUTCOME[k] || [k, "b-neutral"]; return `<span class="badge ${c}">${esc(t)}</span>`; };
-const MODE = {stc: "STC gainer", nonreg: "non-regression", "ltc-gainer": "LTC gainer", "ltc-check": "LTC check", speedup: "speedup", "net-gate": "net gate"};
+const badge = (k) => { const [t, c] = OUTCOME[k] || [k || "unknown", "b-neutral"]; return `<span class="badge ${c}">${esc(t)}</span>`; };
+const MODE = {stc: "STC gainer (10+0.1)", nonreg: "non-regression (10+0.1)", "ltc-gainer": "LTC gainer (60+0.6)",
+  "ltc-check": "LTC check (60+0.6)", speedup: "speedup (bench identical)", "net-gate": "net gate (5+0.05)",
+  ladder: "CCRL ladder (120+1)", datagen: "datagen (background lane)"};
+const modeName = (m) => MODE[m] || m || "–";
 
 function renderTiles(s) {
   const st = s.strength;
@@ -210,9 +233,36 @@ function renderTiles(s) {
       <div class="sub">unofficial · ${est ? (est.components.length
         ? `${signed(est.delta)} Elo from ${est.components.length} queue merge${est.components.length === 1 ? "" : "s"} since the ladder`
         : "no queue merges since the ladder") : "no measured baseline"}</div></div>
-    <div class="tile"><div class="label">Target</div><div class="big">${fmt(target.rating)}</div><div class="sub">${esc(target.label)}</div></div>
-    <div class="tile"><div class="label">Gap to target</div><div class="big">${fmt(target.rating - c.rating)}</div>
+    <div class="tile"><div class="label">Short-term goal</div><div class="big">${fmt(target.rating)}</div><div class="sub">${esc(target.label)}</div></div>
+    <div class="tile"><div class="label">Gap to short-term goal</div><div class="big">${fmt(target.rating - c.rating)}</div>
       <div class="sub">from measured${est && est.rating !== c.rating ? ` · ${fmt(target.rating - est.rating)} from estimated` : ""}${fromFirst != null ? ` · ${fmt(fromFirst)}% of the way from the first ladder (${fmt(s.ladder[0].rating)})` : ""}</div></div>`;
+}
+
+// Coarse rank on the CCRL list: interpolate between the (rating, rank) pairs
+// in scripts/ccrl-targets.json. Only as good as those few points.
+function approxRank(ct, rating) {
+  const pts = [...(ct.targets || []), ...(ct.reference || [])].filter((p) => p.rank && p.rating)
+    .map((p) => [p.rating, p.rank]).sort((a, b) => a[0] - b[0]);
+  if (!pts.length || rating == null) return null;
+  if (rating < pts[0][0]) return {text: `below #${pts[0][1]}`};
+  if (rating >= pts[pts.length - 1][0]) return {text: `#${pts[pts.length - 1][1]}`};
+  for (let i = 1; i < pts.length; i++) {
+    const [r0, k0] = pts[i - 1], [r1, k1] = pts[i];
+    if (rating <= r1) return {text: `≈ #${Math.round(k0 + (rating - r0) / (r1 - r0) * (k1 - k0))}`};
+  }
+  return null;
+}
+function renderTargets(s) {
+  const ct = s.ccrl_targets, st = s.strength, c = (st && st.measured) || s.current;
+  if (!ct || !c) { $("targets").style.display = "none"; return; }
+  $("targets").style.display = "";
+  const rank = approxRank(ct, c.rating);
+  const sf = (ct.reference || []).find((r) => r.rank === 1);
+  $("targets").innerHTML = `<span class="t">Now <b>${fmt(c.rating)}</b>${rank ? ` · rank ${esc(rank.text)}` : ""}</span>` +
+    ct.targets.map((t) => { const gap = t.rating - c.rating;
+      return `<span class="t" title="${esc(t.note || "")}">${esc(t.name)}: <b>${fmt(t.rating)}</b>${t.rank ? ` (#${t.rank})` : ""} · <span style="color:${gap > 0 ? "var(--text-2)" : "var(--good)"}">${gap > 0 ? `${fmt(gap)} to go` : "reached"}</span></span>`; }).join("") +
+    (sf ? `<span class="t meta">${esc(sf.name)} ${fmt(sf.rating)} (#1, out of scope)</span>` : "") +
+    `<span class="src">Thresholds from the <a href="${esc(ct.url)}">CCRL Blitz list</a> (single-CPU, best versions, computed ${esc(ct.computed || "?")}${ct.fetched ? `, fetched ${esc(ct.fetched)}` : ""}) via <a class="mono" href="${ghRepo()}/blob/main/scripts/ccrl-targets.json">scripts/ccrl-targets.json</a>${ct.fallback ? " (file unavailable, built-in copy)" : ""}. Rank is interpolated between those points.</span>`;
 }
 
 function renderEstimate(s) {
@@ -220,8 +270,10 @@ function renderEstimate(s) {
   if (!est || !m) { $("estimate").innerHTML = ""; return; }
   const rows = est.components.slice().reverse().map((c) =>
     `<tr><td class="mono">${esc(c.branch)}</td><td class="num">${signed(c.elo)}</td><td class="num">${fmt(c.games)}</td><td class="meta">${shortDate(c.when)}</td></tr>`).join("");
-  $("estimate").innerHTML = `<div class="meta" style="margin-bottom:8px">Estimated <b>${fmt(est.rating)}</b> = measured <b>${fmt(m.rating)}</b> ${signed(est.delta)} from ${est.components.length} queue SPRT${est.components.length === 1 ? "" : "s"} merged after ${shortDate(m.when)}. <span class="badge b-warn">not an official rating</span></div>` +
-    (rows ? `<div class="scroll" style="margin-bottom:14px"><table><thead><tr><th>Merged after the ladder</th><th class="num">Elo</th><th class="num">Games</th><th>When</th></tr></thead><tbody>${rows}</tbody></table></div>` : "");
+  $("estimate").innerHTML = (est.components.length
+    ? `<div class="meta" style="margin-bottom:8px">Estimated <b>${fmt(est.rating)}</b> = measured <b>${fmt(m.rating)}</b> ${signed(est.delta)} gate Elo from ${est.components.length} queue merge${est.components.length === 1 ? "" : "s"} after ${shortDate(m.when)}. <span class="badge b-warn">not an official rating</span></div>`
+    : `<div class="meta" style="margin-bottom:8px">No Elo-gated merges since the last ladder (${shortDate(m.when)}), so the estimate equals the measured ${fmt(m.rating)}.</div>`) +
+    (rows ? `<div class="scroll" style="margin-bottom:14px"><table><thead><tr><th>Merged after the ladder</th><th class="num">Gate Elo</th><th class="num">Games</th><th>When</th></tr></thead><tbody>${rows}</tbody></table></div>` : "");
 }
 
 const NET_BADGE = {merged: "b-good", "in queue": "b-accent", datagen: "b-warn", rejected: "b-bad", "check-failed": "b-bad"};
@@ -265,7 +317,7 @@ function gateCells(g) {
   const games = g.games != null ? fmt(g.games) : g.games_est != null ? `≈ ${fmt(g.games_est)}` : "–";
   const status = gateBadge(g.status) + (g.reason && g.status !== "merged" ? `<div class="meta">${esc(g.reason).slice(0, 60)}</div>` : "") +
     (g.when ? `<div class="meta">${shortDate(g.when)}</div>` : "");
-  return `<td>${esc(MODE[g.mode] || g.mode || "–")}${g.tc ? `<div class="meta">${esc(g.tc)}</div>` : ""}</td>
+  return `<td>${esc(modeName(g.mode))}${g.tc && !modeName(g.mode).includes(g.tc) ? `<div class="meta">${esc(g.tc)}</div>` : ""}</td>
     <td class="num">${elo}</td><td class="num">${games}</td><td>${status}</td>`;
 }
 function renderNetGates(s) {
@@ -294,51 +346,90 @@ function renderNetGates(s) {
   if (s.net_chain && s.net_chain.audit_doc) $("v1-audit").href = `${ghRepo()}/blob/main/${s.net_chain.audit_doc}`;
 }
 
-function renderDatagen(s) {
-  const d = s.datagen, card = $("datagen-card");
-  if (!d) { card.style.display = "none"; return; }
-  card.style.display = "";
-  const pct = d.shards_total ? Math.round(100 * d.shards_done / d.shards_total) : 0;
-  $("datagen").innerHTML = `
-    <div class="inflight-name">${esc(d.title)}</div>
-    <div style="margin-bottom:10px"><span class="badge ${d.status === "in_progress" ? "b-accent" : "b-neutral"}">${esc((d.status || "").replace("_", " "))}</span>
-      ${d.net ? `<span class="badge b-neutral">from ${esc(d.net)}</span>` : ""}
-      ${d.nodes ? `<span class="badge b-neutral">${fmt(d.nodes)} nodes</span>` : ""}</div>
+const RUN_STATUS = {in_progress: ["running", "b-accent"], queued: ["queued", "b-neutral"], waiting: ["waiting", "b-neutral"],
+  pending: ["pending", "b-neutral"], success: ["done", "b-good"], failure: ["failed", "b-bad"], cancelled: ["cancelled", "b-neutral"]};
+const runBadge = (status, conclusion) => {
+  const k = status === "completed" ? (conclusion || "completed") : status;
+  if (!k) return `<span class="badge b-neutral" title="Not in the last 50 Actions runs">older run</span>`;
+  const [t, c] = RUN_STATUS[k] || [String(k).replace("_", " "), "b-neutral"];
+  return `<span class="badge ${c}">${esc(t)}</span>`;
+};
+function renderBackground(s) {
+  const bg = s.background || {}, d = bg.current;
+  let h = `<div class="meta" style="margin-bottom:10px">The merge queue keeps ${fmt(bg.runners || 4)} runners busy outside the SPRT lane: whenever no datagen or SPSA run is active it dispatches the next datagen seed from <span class="mono">main</span> (only merged nets generate data)${bg.next_seed != null ? `; next seed <b>${fmt(bg.next_seed)}</b>` : ""}.</div>`;
+  if (d) {
+    const pct = d.shards_total ? Math.round(100 * d.shards_done / d.shards_total) : 0;
+    h += `<div class="inflight-name">seed ${esc(d.seed ?? "?")} from ${esc(d.ref || "?")}</div>
+    <div style="margin-bottom:10px">${runBadge(d.status)}
+      ${d.nodes ? `<span class="badge b-neutral">${fmt(d.nodes)} nodes</span>` : ""}
+      ${d.games_per_shard ? `<span class="badge b-neutral">${fmt(d.shards_total)} × ${fmt(d.games_per_shard)} games</span>` : ""}</div>
     <div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><div style="width:${pct}%"></div></div>
     <div class="meta">${d.shards_done}/${d.shards_total} shards done · ${d.shards_running} running · ${d.shards_queued} queued</div>
     <dl class="kv" style="margin-top:12px">
-      <dt>Positions so far</dt><dd>≈ ${fmt(d.estimated_positions)} <span class="meta">(${d.shards_done} shards × ${fmt(d.games_per_shard)} games × 79 positions/game)</span></dd>
-      <dt>Games per shard</dt><dd>${fmt(d.games_per_shard)} at ${fmt(d.nodes)} nodes</dd>
+      <dt>Positions so far</dt><dd>≈ ${fmt(d.estimated_positions)} <span class="meta">(finished shards × games × ~79 positions/game)</span></dd>
       <dt>Started</dt><dd>${shortDate(d.started)} (${ago(d.started)})</dd>
-      <dt>Run</dt><dd><a href="${esc(d.run_url)}">${esc((d.run_url || "").replace("https://github.com/", ""))}</a></dd>
+      <dt>Run</dt><dd><a href="${esc(d.run_url)}">${esc(d.title)}</a></dd>
     </dl>`;
+  } else {
+    h += `<div class="empty">No datagen run active right now.</div>`;
+  }
+  for (const r of bg.other || [])
+    h += `<div style="margin-top:8px">${runBadge(r.status)} <a href="${esc(r.url)}">${esc(r.title)}</a> <span class="meta">${ago(r.started)}</span></div>`;
+  const ds = bg.dispatches || [];
+  if (ds.length) {
+    h += `<div class="scroll" style="margin-top:14px"><table><thead><tr><th>Seed</th><th>From main</th><th>Dispatched</th><th>Run</th></tr></thead><tbody>` +
+      ds.map((x) => `<tr><td class="num" style="text-align:left"><b>${esc(x.seed ?? "–")}</b></td><td><a class="mono" href="${ghRepo()}/commit/${esc(x.sha)}">${esc(x.sha)}</a></td>
+        <td class="meta" style="white-space:nowrap">${shortDate(x.when)}<div>${esc(x.reason || "")}</div></td>
+        <td>${x.run_url ? `<a href="${esc(x.run_url)}">${runBadge(x.status, x.conclusion)}</a>` : runBadge(x.status, x.conclusion)}</td></tr>`).join("") + `</tbody></table></div>`;
+  }
+  h += `<div class="note">The laptop also generates data locally (CPU) and trains every net on its GPU (Metal trainer); this dashboard can't see the laptop, so local runs show up here only once a net branch is recorded and gated (NNUE panel below).</div>`;
+  $("background").className = "";
+  $("background").innerHTML = h;
+}
+
+function renderRunners(s) {
+  const u = s.runner_usage;
+  if (!u) { $("runners").innerHTML = `<div class="empty">No runner data.</div>`; return; }
+  const runsErr = s.sources.runs && s.sources.runs.error && !s.sources.runs.fetched_at;
+  const fg = Math.min(u.foreground, u.cap), bg = Math.min(u.background, u.cap - fg);
+  const idle = u.cap - fg - bg;
+  $("runners").className = "";
+  $("runners").innerHTML = runsErr ? `<div class="empty">Actions API unavailable; runner usage unknown.</div>` : `
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><span style="font-size:24px;font-weight:650;font-variant-numeric:tabular-nums">${u.estimated ? "≈ " : ""}${fmt(u.in_use)} / ${fmt(u.cap)}</span>
+      <span class="meta">jobs in progress${idle > 0 ? ` · <b style="color:var(--warn)">${fmt(idle)} idle</b>` : " · all busy"}</span></div>
+    <div class="runbar" role="img" aria-label="${fg} foreground, ${bg} background of ${u.cap} runners"><div class="fg" style="width:${100 * fg / u.cap}%"></div><div class="bg" style="width:${100 * bg / u.cap}%"></div></div>
+    <div class="legend" style="margin:0"><span class="l-fg">foreground ${fmt(u.foreground)} / ${fmt(u.foreground_cap)} (SPRTs, CCRL ladders)</span><span class="l-bg">background ${fmt(u.background)} / ${fmt(u.background_cap)} (datagen, SPSA)</span></div>
+    ${u.runs.length ? `<div class="meta" style="margin-top:6px">${u.runs.map((r) => `<a href="${esc(r.url)}">${esc(r.title || r.name)}</a>: ${r.exact ? "" : "≈"}${fmt(r.jobs)}`).join(" · ")}</div>` : ""}
+    <div class="note">From the Actions runs list (cached ~3 min${u.as_of ? `, as of ${ago(u.as_of)}` : ""}). Exact job counts for the in-flight SPRT wave or ladder and the active datagen run; other runs (≈) are estimated at their workflow's max-parallel, so no extra API calls are spent.</div>`;
 }
 
 function renderInflight(s) {
   const q = s.queue, cur = q.current;
-  let h = "<h2>Now testing</h2>";
+  let h = "<h2>Foreground lane: now testing</h2>";
   if (q.paused) h += `<div class="banner on" style="margin:0 0 12px">Queue paused: ${esc(q.paused)}</div>`;
   if (!cur) {
     h += `<div class="empty">Queue idle${q.pending.length ? "" : " and empty"}.</div>`;
   } else {
     const isQueue = (cur.test_id || "").startsWith("q-");
     const pct = cur.shards_total ? Math.round(100 * cur.shards_done / cur.shards_total) : 0;
-    h += `<div class="inflight-name">${esc(cur.branch)}</div>
-      <div style="margin-bottom:10px"><span class="badge b-accent">${esc(MODE[cur.mode] || cur.mode)}</span>
+    const ladder = cur.mode === "ladder";
+    h += `<div class="inflight-name">${esc(ladder ? "CCRL ladder on main" : cur.branch)}</div>
+      <div style="margin-bottom:10px"><span class="badge b-accent">${esc(modeName(cur.mode))}</span>
       ${cur.wave ? `<span class="badge b-neutral">wave ${cur.wave}</span>` : ""}
       ${cur.run_status ? `<span class="badge b-neutral">${esc(cur.run_status.replace("_", " "))}</span>` : ""}</div>`;
     if (cur.shards_total) {
       h += `<div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><div style="width:${pct}%"></div></div>
-        <div class="meta">${cur.shards_done}/${cur.shards_total} shards of this wave done, ${cur.shards_running} running</div>`;
+        <div class="meta">${cur.shards_done}/${cur.shards_total} ${ladder ? "anchor shards" : "shards of this wave"} done, ${cur.shards_running} running</div>`;
     }
     h += `<dl class="kv" style="margin-top:12px">
-      ${cur.games_est != null ? `<dt>Games</dt><dd>≈ ${fmt(cur.games_est)} finished (this wave adds ${fmt(cur.games_wave_total)})</dd>` : ""}
+      ${cur.games_est != null ? `<dt>Games</dt><dd>≈ ${fmt(cur.games_est)} finished (${ladder ? `of ${fmt(cur.games_wave_total)}` : `this wave adds ${fmt(cur.games_wave_total)}`})</dd>` : ""}
       <dt>Started</dt><dd>${shortDate(cur.started)} (${ago(cur.started)})</dd>
-      <dt>Candidate</dt><dd><a class="mono" href="${ghRepo()}/commit/${esc(cur.sha)}">${esc((cur.sha || "").slice(0, 7))}</a> vs main <a class="mono" href="${ghRepo()}/commit/${esc(cur.base_sha)}">${esc((cur.base_sha || "").slice(0, 7))}</a></dd>
+      ${ladder ? `<dt>Main</dt><dd><a class="mono" href="${ghRepo()}/commit/${esc(cur.sha)}">${esc((cur.sha || "").slice(0, 7))}</a></dd>`
+        : `<dt>Candidate</dt><dd><a class="mono" href="${ghRepo()}/commit/${esc(cur.sha)}">${esc((cur.sha || "").slice(0, 7))}</a> vs main <a class="mono" href="${ghRepo()}/commit/${esc(cur.base_sha)}">${esc((cur.base_sha || "").slice(0, 7))}</a></dd>`}
       <dt>Test</dt><dd class="mono">${cur.run_url ? `<a href="${esc(cur.run_url)}">${esc(cur.test_id)}</a>` : esc(cur.test_id)}</dd>
     </dl>`;
   }
-  const others = s.active_runs.filter((r) => !(r.title || "").startsWith("Datagen") && (!cur || !(r.title || "").includes(cur.test_id)));
+  const others = s.active_runs.filter((r) => !["datagen.yml", "spsa.yml", "train-sweep.yml", "queue.yml"].includes(r.workflow) && (!cur || !(r.title || "").includes(cur.test_id)));
   if (others.length) {
     h += `<div style="margin-top:14px" class="meta">Other active workflow runs</div><ul style="margin:4px 0 0;padding-left:18px;font-size:14px">` +
       others.map((r) => `<li><a href="${esc(r.url)}">${esc(r.title)}</a> <span class="meta">${esc(r.status.replace("_", " "))}, ${ago(r.started)}</span></li>`).join("") + "</ul>";
@@ -350,16 +441,27 @@ function renderPending(s) {
   const p = s.queue.pending;
   $("pending").className = p.length ? "" : "empty";
   $("pending").innerHTML = p.length
-    ? `<div class="meta" style="margin-bottom:8px">${p.length} waiting, run one at a time against the latest main</div><ol class="queue">` +
-      p.map((i) => `<li><span class="mono">${esc(i.branch)}</span> <span class="badge b-neutral">${esc(MODE[i.mode] || i.mode)}</span>${i.retried ? ' <span class="badge b-warn">retry</span>' : ""}</li>`).join("") + "</ol>"
+    ? `<div class="meta" style="margin-bottom:8px">${p.length} waiting. The foreground lane runs one item at a time on up to 16 runners: SPRTs against the latest main, CCRL ladders on main; speedups merge on bench identity without games.</div><ol class="queue">` +
+      p.map((i) => `<li><span class="mono">${esc(i.mode === "ladder" ? "CCRL ladder on main" : i.branch)}</span> <span class="badge b-neutral">${esc(modeName(i.mode))}</span>${i.retried ? ' <span class="badge b-warn">retry</span>' : ""}</li>`).join("") + "</ol>"
     : "Nothing queued.";
 }
 
 function renderOutcomes(s) {
   const rows = [];
   for (const e of s.queue_events) {
+    if (e.mode === "datagen") {
+      rows.push({when: e.when, name: `datagen seed ${e.seed ?? "?"}`, kind: "datagen-dispatched",
+        detail: `from main ${e.sha || ""} · ${e.reason || "background lane"}`});
+      continue;
+    }
     if (e.outcome === "dispatched") continue;
-    rows.push({when: e.when, name: e.branch, kind: e.outcome, elo: e.elo, ci: e.ci, games: e.games, detail: e.reason || (MODE[e.mode] || e.mode)});
+    if (e.outcome === "ladder-logged") {
+      rows.push({when: e.when, name: "CCRL ladder on main", kind: e.outcome, games: e.games,
+        rating: e.rating, rating_ci: e.rating_ci, detail: `${e.sha || ""} · ${e.test_id || ""}`});
+      continue;
+    }
+    rows.push({when: e.when, name: e.mode === "ltc-check" ? "main (LTC check)" : e.branch, kind: e.outcome, elo: e.elo, ci: e.ci, games: e.games,
+      detail: [modeName(e.mode), e.reason && !/^speedup, bench identical$/.test(e.reason) ? e.reason : ""].filter(Boolean).join(" · ")});
   }
   for (const t of s.sprt) {
     rows.push({when: t.when, name: t.candidate || t.test_id, kind: t.status, elo: t.elo, ci: t.ci, games: t.games,
@@ -368,13 +470,14 @@ function renderOutcomes(s) {
   rows.sort((a, b) => (b.when || "").localeCompare(a.when || ""));
   $("outcomes").innerHTML = rows.length ? `<table><thead><tr><th>Change</th><th>Result</th><th class="num">Elo ± CI</th><th class="num hide-sm">Games</th><th class="hide-sm">When</th></tr></thead><tbody>` +
     rows.slice(0, 25).map((r) => `<tr><td><span class="mono">${r.url ? `<a href="${esc(r.url)}">${esc(r.name)}</a>` : esc(r.name)}</span><div class="meta">${esc(r.detail).slice(0, 140)}<span class="show-sm"> · ${shortDate(r.when)}</span></div></td>
-      <td>${badge(r.kind)}</td><td class="num">${eloCi(r.elo, r.ci)}</td><td class="num hide-sm">${fmt(r.games)}</td><td class="meta hide-sm" style="white-space:nowrap">${shortDate(r.when)}</td></tr>`).join("") +
-    `</tbody></table><div class="note">SPRT results from <span class="mono">tests/sprt-log.jsonl</span> (tests later marked invalid are hidden) and the merge-queue log.</div>`
+      <td>${badge(r.kind)}</td><td class="num">${r.rating != null ? `<b>${fmt(r.rating)}</b> CCRL${r.rating_ci ? `<div class="meta">${fmt(r.rating_ci[0])}–${fmt(r.rating_ci[1])}</div>` : ""}` : eloCi(r.elo, r.ci)}</td><td class="num hide-sm">${fmt(r.games)}</td><td class="meta hide-sm" style="white-space:nowrap">${shortDate(r.when)}</td></tr>`).join("") +
+    `</tbody></table><div class="note">Merge-queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>) plus manual SPRTs from <span class="mono">tests/sprt-log.jsonl</span> (tests later marked invalid are hidden). Elo is gate Elo at the gate's own time control; only ladder rows are CCRL ratings.</div>`
     : `<div class="empty">No results yet.</div>`;
 }
 
 function renderGains(s) {
-  const m = s.merged;
+  const m = s.merged.filter((x) => x.elo != null);
+  const exact = s.merged.length - m.length;
   if (!m.length) { $("gains").innerHTML = `<div class="empty">No accepted changes yet.</div>`; return; }
   const max = Math.max(...m.map((x) => (x.ci ? x.ci[1] : x.elo) || 0), 10);
   const sure = m.filter((x) => x.certain).reduce((a, x) => a + (x.elo || 0), 0);
@@ -382,11 +485,11 @@ function renderGains(s) {
     const w = Math.max(0, x.elo) / max * 100;
     const wl = x.ci ? Math.max(0, x.ci[0]) / max * 100 : w, wr = x.ci ? x.ci[1] / max * 100 : w;
     return `<div class="bar-row" title="${esc(x.name)}: ${signed(x.elo)} Elo (${esc(x.how)}, ${fmt(x.games)} games${x.certain ? ", merged by the queue" : ""})">
-      <span class="name mono">${esc(x.name)}${x.certain ? "" : ""}</span>
+      <span class="name"><span class="mono">${esc(x.name)}</span><div class="meta" style="font-size:11.5px">${esc(x.how)}</div></span>
       <span class="track"><span class="fill${x.certain ? "" : " uncertain"}" style="width:${w}%"></span><span class="whisk" style="left:${wl}%;width:${Math.max(0, wr - wl)}%"></span></span>
       <span style="text-align:right;font-variant-numeric:tabular-nums">${signed(x.elo)}</span></div>`;
   }).join("") + `</div>
-  <div class="note">Each bar is the SPRT Elo measured against the main of its day, with a 95% CI whisker; these are not additive (overlap, short time control). Solid bars were merged by the queue${sure ? ` (sum ${signed(sure)})` : ""}; faded bars passed before the queue existed and were merged by hand or folded into a combined branch. The ladder chart is the real cumulative number.</div>`;
+  <div class="note">Each bar is <b>gate Elo</b>, not CCRL: the SPRT against the main of its day at the gate's time control (<span class="mono">stc</span> 10+0.1, <span class="mono">net-gate</span> 5+0.05, <span class="mono">ltc-gainer</span> 60+0.6), with a 95% CI whisker. Gate Elo is inflated relative to CCRL and not additive. Solid bars were merged by the queue${sure ? ` (sum ${signed(sure)})` : ""}; faded bars passed before the queue existed and were merged by hand.${exact ? ` ${exact} speedup${exact === 1 ? "" : "s"} merged on bench identity (no Elo) are not shown.` : ""} The ladder chart is the real cumulative number.</div>`;
 }
 
 function renderChart(s) {
@@ -396,9 +499,10 @@ function renderChart(s) {
   const W = Math.max(320, el.clientWidth), H = W < 560 ? 260 : 320;
   const m = {l: 46, r: 16, t: 14, b: 34};
   const tgt = s.target.rating;
+  const goals = ((s.ccrl_targets && s.ccrl_targets.targets) || [{name: "short term", rating: tgt}]);
   const t0 = Date.parse(pts[0].when) - 6 * 3600e3;
   const t1 = Math.max(Date.now(), Date.parse(pts[pts.length - 1].when)) + 3 * 3600e3;
-  let lo = Math.min(...pts.map((p) => p.ci ? p.ci[0] : p.rating)), hi = Math.max(tgt, ...pts.map((p) => p.ci ? p.ci[1] : p.rating));
+  let lo = Math.min(...pts.map((p) => p.ci ? p.ci[0] : p.rating)), hi = Math.max(tgt, ...goals.map((t) => t.rating), ...pts.map((p) => p.ci ? p.ci[1] : p.rating));
   lo = Math.floor((lo - 50) / 100) * 100; hi = Math.ceil((hi + 30) / 100) * 100;
   const x = (t) => m.l + (t - t0) / (t1 - t0) * (W - m.l - m.r);
   const y = (v) => m.t + (hi - v) / (hi - lo) * (H - m.t - m.b);
@@ -413,19 +517,39 @@ function renderChart(s) {
     g += `<line x1="${x(t)}" x2="${x(t)}" y1="${H - m.b}" y2="${H - m.b + 4}" stroke="var(--muted)"/><text x="${x(t)}" y="${H - m.b + 17}" text-anchor="middle" font-size="11" fill="var(--muted)">${new Date(t).toLocaleDateString(undefined, {month: "short", day: "numeric"})}</text>`;
   }
   g += `<line x1="${m.l}" x2="${W - m.r}" y1="${H - m.b}" y2="${H - m.b}" stroke="var(--border)"/>`;
-  g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(tgt)}" y2="${y(tgt)}" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4"/>
-        <text x="${W - m.r - 4}" y="${y(tgt) - 6}" text-anchor="end" font-size="12" fill="var(--text-2)">target ${tgt}</text>`;
-  // CI band through the points, then the line.
-  const band = pts.filter((p) => p.ci);
+  // CCRL list thresholds (scripts/ccrl-targets.json) as labelled reference lines.
+  goals.slice().sort((a, b) => a.rating - b.rating).forEach((t, i) => {
+    const short = t.rating === tgt;
+    const label = short ? `${fmt(t.rating)} short term${t.rank ? ` (#${t.rank})` : ""}`
+      : `${/top\s*(\d+)/i.test(t.name) ? `Top ${t.name.match(/top\s*(\d+)/i)[1]}` : esc(t.name)}: ${fmt(t.rating)}`;
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t.rating)}" y2="${y(t.rating)}" stroke="var(--muted)" stroke-width="${short ? 1.5 : 1}" stroke-dasharray="${short ? "5 4" : "2 4"}"/>
+        <text x="${m.l + 6}" y="${y(t.rating) - 5}" font-size="11.5" fill="var(--text-2)">${label}</text>`;
+  });
+  // CI band through full runs only; a partial run gets its own error bar so
+  // its wide CI is visible without ballooning the band.
+  const full = pts.filter((p) => !p.partial);
+  const band = full.filter((p) => p.ci);
   if (band.length > 1) g += `<path d="M${band.map((p) => `${x(Date.parse(p.when))},${y(p.ci[1])}`).join("L")}L${band.slice().reverse().map((p) => `${x(Date.parse(p.when))},${y(p.ci[0])}`).join("L")}Z" fill="var(--accent-soft)"/>`;
-  g += `<path d="M${pts.map((p) => `${x(Date.parse(p.when))},${y(p.rating)}`).join("L")}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  g += `<path d="M${full.map((p) => `${x(Date.parse(p.when))},${y(p.rating)}`).join("L")}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  pts.forEach((p, i) => {
+    if (!p.partial) return;
+    const prev = pts.slice(0, i).reverse().find((q) => !q.partial);
+    if (prev) g += `<line x1="${x(Date.parse(prev.when))}" y1="${y(prev.rating)}" x2="${x(Date.parse(p.when))}" y2="${y(p.rating)}" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 4"/>`;
+  });
   pts.forEach((p, i) => {
     const px = x(Date.parse(p.when)), py = y(p.rating);
-    if (p.ci) g += `<line x1="${px}" x2="${px}" y1="${y(p.ci[0])}" y2="${y(p.ci[1])}" stroke="var(--accent)" stroke-width="1.5" opacity=".6"/>`;
-    g += `<circle cx="${px}" cy="${py}" r="5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>`;
+    if (p.ci && p.partial) {
+      g += `<rect x="${px - 5}" y="${y(p.ci[1])}" width="10" height="${y(p.ci[0]) - y(p.ci[1])}" fill="var(--accent-soft)" rx="3"/>
+        <line x1="${px}" x2="${px}" y1="${y(p.ci[0])}" y2="${y(p.ci[1])}" stroke="var(--accent)" stroke-width="1.5"/>
+        <line x1="${px - 6}" x2="${px + 6}" y1="${y(p.ci[1])}" y2="${y(p.ci[1])}" stroke="var(--accent)" stroke-width="1.5"/>
+        <line x1="${px - 6}" x2="${px + 6}" y1="${y(p.ci[0])}" y2="${y(p.ci[0])}" stroke="var(--accent)" stroke-width="1.5"/>`;
+    } else if (p.ci) g += `<line x1="${px}" x2="${px}" y1="${y(p.ci[0])}" y2="${y(p.ci[1])}" stroke="var(--accent)" stroke-width="1.5" opacity=".6"/>`;
+    g += p.partial
+      ? `<circle cx="${px}" cy="${py}" r="5" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>`
+      : `<circle cx="${px}" cy="${py}" r="5" fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>`;
     const right = px < W - 80;
     if (i === pts.length - 1 || W >= 560)
-      g += `<text x="${px + (right ? 8 : -8)}" y="${py - 8}" text-anchor="${right ? "start" : "end"}" font-size="12" font-weight="600" fill="var(--text)">${fmt(p.rating)}</text>`;
+      g += `<text x="${px + (right ? 8 : -8)}" y="${p.partial && p.ci ? Math.min(H - m.b - 18, y(p.ci[0]) + 16) : py - 8}" text-anchor="${right ? "start" : "end"}" font-size="12" font-weight="600" fill="var(--text)">${fmt(p.rating)}${p.partial ? `<tspan font-weight="400" fill="var(--text-2)"> partial, CI ${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])}</tspan>` : ""}</text>`;
     g += `<circle cx="${px}" cy="${py}" r="16" fill="transparent" data-tip="ladder" data-i="${i}" style="cursor:pointer"/>`;
   });
   // Accepted changes as diamonds on the time axis.
@@ -444,12 +568,12 @@ function renderChart(s) {
         const p = pts[i];
         const prev = pts[i - 1];
         const between = s.merged.filter((c) => c.when && (!prev || c.when > prev.when) && c.when <= p.when).map((c) => c.name);
-        tip.innerHTML = `<b>${fmt(p.rating)}</b> (95% CI ${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])})${prev ? ` · ${signed(p.rating - prev.rating, 0)} vs previous` : ""}<br>
+        tip.innerHTML = `<b>${fmt(p.rating)}</b>${p.partial ? ' <span class="badge b-warn">partial run</span>' : ""} (95% CI ${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])})${prev ? ` · ${signed(p.rating - prev.rating, 0)} vs previous` : ""}<br>
           <span class="mono">${esc(p.sha)}</span> · ${shortDate(p.when)} · ${fmt(p.games)} games<br>
           <span class="meta">${esc(p.note || "")}</span>${p.rating_with_black_marlin != null ? `<br><span class="meta">refit without black-marlin; raw ${fmt(p.rating_with_black_marlin, 1)}</span>` : ""}${between.length ? `<br><span class="meta">Changes since previous: ${esc(between.join(", "))}</span>` : ""}`;
       } else {
         const c = s.merged[i];
-        tip.innerHTML = `<b class="mono">${esc(c.name)}</b><br>${signed(c.elo)} Elo ${c.ci ? `[${fmt(c.ci[0], 1)}, ${fmt(c.ci[1], 1)}]` : ""}<br><span class="meta">${esc(c.how)}, ${fmt(c.games)} games, ${shortDate(c.when)}</span>`;
+        tip.innerHTML = `<b class="mono">${esc(c.name)}</b><br>${c.elo != null ? `${signed(c.elo)} gate Elo` : ""} ${c.ci ? `[${fmt(c.ci[0], 1)}, ${fmt(c.ci[1], 1)}]` : ""}<br><span class="meta">${esc(c.how)}, ${fmt(c.games)} games, ${shortDate(c.when)}</span>`;
       }
       const r = el.getBoundingClientRect(), nr = n.getBoundingClientRect();
       tip.style.display = "block";
@@ -463,7 +587,7 @@ function renderChart(s) {
     n.addEventListener("mouseleave", () => tip.style.display = "none");
   });
   $("ladder-table").innerHTML = `<table><thead><tr><th>When</th><th>Main</th><th class="num">Rating</th><th class="num">95% CI</th><th class="num">Games</th><th>Anchors / note</th></tr></thead><tbody>` +
-    pts.slice().reverse().map((p) => `<tr><td style="white-space:nowrap">${p.url ? `<a href="${esc(p.url)}">${shortDate(p.when)}</a>` : shortDate(p.when)}</td><td class="mono">${esc(p.sha)}</td><td class="num">${fmt(p.rating, 1)}</td><td class="num">${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])}</td><td class="num">${fmt(p.games)}</td>
+    pts.slice().reverse().map((p) => `<tr><td style="white-space:nowrap">${p.url ? `<a href="${esc(p.url)}">${shortDate(p.when)}</a>` : shortDate(p.when)}</td><td class="mono">${esc(p.sha)}</td><td class="num">${fmt(p.rating, 1)}${p.partial ? '<div><span class="badge b-warn">partial</span></div>' : ""}</td><td class="num">${fmt(p.ci?.[0])}–${fmt(p.ci?.[1])}${p.ci_width ? `<div class="meta">width ${fmt(p.ci_width)}</div>` : ""}</td><td class="num">${fmt(p.games)}</td>
       <td><span class="mono">${esc(p.anchors_file)}</span> (${p.anchors.length}: ${fmt(Math.min(...p.anchors.map((a) => a.ccrl)))}–${fmt(Math.max(...p.anchors.map((a) => a.ccrl)))})<div class="meta">${esc(p.note || "")}${p.rating_with_black_marlin != null ? ` · refit without black-marlin; raw ${fmt(p.rating_with_black_marlin, 1)}` : ""}</div></td></tr>`).join("") + "</tbody></table>";
 }
 document.addEventListener("click", (e) => { if (!e.target.closest("[data-tip]")) $("tip").style.display = "none"; });
@@ -503,7 +627,8 @@ function markdown(src) {
       const head = cells(l); i += 2;
       const body = [];
       while (i < lines.length && /^\s*\|/.test(lines[i])) body.push(cells(lines[i++]));
-      out += `<table><thead><tr>${head.map((h) => `<th>${inline(h)}</th>`).join("")}</tr></thead><tbody>` +
+      // A header row of empty cells (a key/value table) gets no thead.
+      out += `<table${head.some((h) => h) ? "" : ' class="kvt"'}>${head.some((h) => h) ? `<thead><tr>${head.map((h) => `<th>${inline(h)}</th>`).join("")}</tr></thead>` : ""}<tbody>` +
         body.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("") + "</tbody></table>";
       continue;
     }
@@ -543,13 +668,14 @@ async function refresh() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const s = await r.json();
     window.STATUS = s;
-    renderBanner(s); renderTiles(s); renderDatagen(s); renderInflight(s); renderPending(s);
+    renderBanner(s); renderTiles(s); renderTargets(s); renderRunners(s); renderBackground(s); renderInflight(s); renderPending(s);
     renderChart(s); renderNetGates(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
     if (s.plan) $("plan").innerHTML = markdown(s.plan);
-    if (s.roadmap) $("audit-link").href = `${ghRepo()}/blob/main/${s.roadmap.audit_doc}`;
+    const rm = s.roadmap || {};
+    $("plan-meta").innerHTML = `<a class="mono" href="${ghRepo()}/blob/main/plan.md">plan.md</a> on main, the maintained roadmap${rm.last_updated ? ` · last updated <b>${esc(rm.last_updated)}</b>` : ""}${s.sources.plan && s.sources.plan.fetched_at ? ` · fetched ${ago(s.sources.plan.fetched_at)}` : ""}`;
     const oldest = Object.values(s.sources).map((v) => v.fetched_at).filter(Boolean).sort()[0];
     $("updated").textContent = `updated ${new Date(s.generated_at).toLocaleTimeString()} · GitHub data from ${ago(oldest) || "never"}`;
-    $("footer").innerHTML = `Data: <a href="${ghRepo()}">${esc(s.repo)}</a> (main, queue-state branch, Actions API), cached on the server for 2–10 minutes. Page refreshes every minute.${s.api_rate?.remaining != null ? ` API quota left: ${s.api_rate.remaining}.` : ""}`;
+    $("footer").innerHTML = `Data: <a href="${ghRepo()}">${esc(s.repo)}</a> (main, queue-state branch, Actions API), cached on the server for 2–10 minutes. Page refreshes every minute.${s.api_rate?.remaining != null ? ` Unauthenticated GitHub API quota left this hour: ${s.api_rate.remaining}/60.` : ""}`;
   } catch (e) {
     $("banner").className = "banner on";
     $("banner").textContent = `Dashboard server unreachable (${e.message}); showing the last data loaded.`;

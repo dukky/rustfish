@@ -21,11 +21,21 @@ REPO = os.environ.get("REPO", "dukky/rustfish")
 RAW = f"https://raw.githubusercontent.com/{REPO}"
 API = f"https://api.github.com/repos/{REPO}"
 HERE = os.path.dirname(os.path.abspath(__file__))
-TARGET = {"rating": 3400, "label": "Goal: 3400 CCRL Blitz"}
+# Goals come from scripts/ccrl-targets.json on main (real CCRL Blitz single-CPU
+# list thresholds); this copy is only the fallback if that file can't be fetched.
+CCRL_TARGETS_FALLBACK = {
+    "source": "CCRL Blitz rating list, single-CPU engines, best versions only",
+    "url": "https://computerchess.org.uk/ccrl/404/", "computed": "2026-10-31",
+    "targets": [{"name": "3400 (short term)", "rating": 3400, "rank": 131},
+                {"name": "Top 100 (mid term)", "rating": 3504, "rank": 100},
+                {"name": "Top 10 (long term)", "rating": 3751, "rank": 10}],
+    "reference": [{"rank": 1, "name": "Stockfish 19", "rating": 3792}]}
 
-# Seconds each source stays fresh. API calls: ~20/h runs + ~20/h jobs + ~12/h
-# datagen jobs + 6/h commits at worst, i.e. under the 60/h unauthenticated limit
-# even with someone watching all day.
+# Seconds each source stays fresh. API calls: ~20/h runs + ~20/h jobs of the
+# foreground run (SPRT wave or ladder) + ~12/h background datagen jobs + 6/h
+# commits at worst, i.e. under the 60/h unauthenticated limit even with someone
+# watching all day (ETag 304s do not count). The runner-usage indicator reuses
+# these same fetches and costs no extra requests.
 TTL_RAW = 120
 TTL_RUNS = 180
 TTL_JOBS = 180
@@ -40,8 +50,20 @@ ROUNDS = {"stc": (16, 64), "nonreg": (16, 64), "ltc-gainer": (6, 24), "ltc-check
 # Positions per game in the net3 datagen set (measured, not a guess).
 POSITIONS_PER_GAME = 79
 
-# The strategy switched after plan.md was written; point the roadmap at the audit.
-AUDIT_DOC = "docs/opus-audit-2026-11-04.md"
+# GitHub's concurrent-job cap and the queue's two lanes (scripts/queue.py).
+RUNNER_CAP = 20
+FOREGROUND_RUNNERS = 16
+BACKGROUND_RUNNERS = 4
+# Matrix max-parallel per workflow name, used to estimate the in-progress jobs
+# of runs whose job list is not fetched (keeps the API budget fixed).
+# Keyed by workflow file: a dispatched run's "name" is its run-name title.
+MAX_PARALLEL = {"sprt.yml": 16, "ccrl-ladder.yml": 16, "spsa.yml": 16, "datagen.yml": 4,
+                "train-sweep.yml": 4}
+BACKGROUND_WORKFLOWS = ("datagen.yml", "spsa.yml", "train-sweep.yml")
+
+
+def workflow_file(run):
+    return os.path.basename((run.get("path") or "").split("@")[0])
 
 # NNUE nets: the v1 chain (net1..net13, net/chain.json) ran until the trainer-v2
 # pivot; since then each net is an experiment (E0, E1, ..., generations g2a, ...)
@@ -233,11 +255,19 @@ def build_status():
     queue = fetch("queue", f"{RAW}/queue-state/queue.json", TTL_RAW, json.loads) or {}
     qlog = fetch("queue_log", f"{RAW}/queue-state/log.jsonl", TTL_RAW, jsonl) or []
     plan = fetch("plan", f"{RAW}/main/plan.md", TTL_RAW, lambda b: b)
+    m = re.search(r"Last updated:\s*([0-9][0-9 :T-]*[0-9](?: UTC)?)", plan or "")
+    plan_updated = m.group(1).strip() if m else None
     runs = (fetch("runs", f"{API}/actions/runs?per_page=50", TTL_RUNS, json.loads) or {}) \
         .get("workflow_runs", [])
     commits = fetch("commits", f"{API}/commits?sha=main&per_page=25", TTL_COMMITS, json.loads) or []
     # Wave sizes per queue mode, from the file scripts/queue.py itself reads.
     qcfg = fetch("queue_settings", f"{RAW}/main/scripts/queue-settings.json", TTL_RAW, json.loads) or {}
+    ccrl = fetch("ccrl_targets", f"{RAW}/main/scripts/ccrl-targets.json", TTL_RAW, json.loads)
+    if not (isinstance(ccrl, dict) and ccrl.get("targets")):
+        ccrl = dict(CCRL_TARGETS_FALLBACK, fallback=True)
+    short = min(ccrl["targets"], key=lambda t: t["rating"])
+    target = {"rating": short["rating"],
+              "label": "CCRL Blitz" + (f", #{short['rank']} on the single-CPU list" if short.get("rank") else "")}
     rounds = {m: (s["rounds_per_shard"], s.get("max_rounds_per_shard", s["rounds_per_shard"]))
               for m, s in qcfg.get("modes", {}).items()} or ROUNDS
 
@@ -280,7 +310,19 @@ def build_status():
     for r in ladder:
         if r.get("rating") is None:
             continue
-        points.append({"when": parse_when(r.get("logged_at")), "rating": r["rating"],
+        # A cancelled or partial run: far fewer games than its anchors x
+        # games_per_anchor (or < 40 games per anchor when that is not logged).
+        n_anchors = len(r.get("anchors", [])) or 1
+        gpa = r.get("games_per_anchor")
+        try:
+            expected = int(gpa) * n_anchors if gpa else 40 * n_anchors
+        except (TypeError, ValueError):
+            expected = 40 * n_anchors
+        partial = bool(r.get("partial") or r.get("status") in ("cancelled", "partial")
+                       or (r.get("games") or 0) < 0.9 * expected)
+        points.append({"partial": partial, "games_per_anchor": gpa,
+                       "ci_width": round(r["ci"][1] - r["ci"][0], 1) if r.get("ci") else None,
+"when": parse_when(r.get("logged_at")), "rating": r["rating"],
                        "ci": r.get("ci"), "sha": (r.get("sha") or "")[:7], "note": r.get("note"),
                        "games": r.get("games"), "tc": r.get("tc"), "url": r.get("url"),
                        "anchors_file": r.get("anchors_file", "scripts/anchors.json"),
@@ -308,7 +350,10 @@ def build_status():
                        "elo": r.get("elo"), "ci": r.get("elo_ci95"), "games": r.get("games"),
                        "verdict": r.get("verdict"), "reason": r.get("reason"),
                        "test_id": r.get("test_id"), "sha": (r.get("sha") or "")[:7],
-                       "when": parse_when(r.get("logged_at"))})
+                       "when": parse_when(r.get("logged_at")), "seed": r.get("seed"),
+                       # ladder-logged rows carry a CCRL fit, not a gate Elo
+                       "rating": r.get("rating"), "rating_ci": r.get("ci"),
+                       "tc": (qcfg.get("modes", {}).get(r.get("mode")) or {}).get("tc")})
 
     # Accepted changes and the Elo each measured against the main of its day.
     # A queue "merged" entry is authoritative. Before the queue existed, merges
@@ -329,42 +374,60 @@ def build_status():
             merged.pop(e["branch"], None)
             merged[e["branch"] + "@" + (e["when"] or "")] = {
                 "name": e["branch"], "elo": e["elo"], "ci": e["ci"], "when": e["when"],
-                "games": e["games"], "how": f"queue {e['mode']}", "certain": True}
+                "games": e["games"], "mode": e["mode"], "tc": e["tc"],
+                "how": "speedup, bench identical (no Elo)" if e["mode"] == "speedup"
+                       else {"net-gate": "net gate"}.get(e["mode"], f"{e['mode']} gate")
+                       + (f" at {e['tc']}" if e["tc"] else ""), "certain": True}
     merged = sorted(merged.values(), key=lambda m: m["when"] or "")
 
-    # In-flight test: its SPRT runs are titled "SPRT <test_id> wave <n>".
+    # In-flight foreground item: SPRT runs are titled "SPRT <test_id> wave <n>",
+    # queue ladders "CCRL ladder <test_id>" (one run, 2 shard jobs per anchor).
     current = queue.get("current")
     inflight = None
+    exact_jobs = {}  # run id -> in-progress job count, from job lists we fetched anyway
     if current:
         inflight = dict(current)
+        tid = re.escape(current.get("test_id", ""))
+        is_ladder = current.get("mode") == "ladder"
         waves = []
         for run in runs:
-            m = re.fullmatch(rf"SPRT {re.escape(current.get('test_id', ''))} wave (\d+)",
-                             run.get("display_title") or "")
+            title = run.get("display_title") or ""
+            m = re.fullmatch(rf"CCRL ladder {tid}()" if is_ladder else rf"SPRT {tid} wave (\d+)", title)
             if m:
-                waves.append((int(m.group(1)), run))
+                waves.append((int(m.group(1) or 1), run))
         if waves:
             wave, run = max(waves, key=lambda w: w[0])
-            inflight.update(wave=wave, run_url=run.get("html_url"), run_status=run.get("status"),
+            inflight.update(wave=None if is_ladder else wave, run_url=run.get("html_url"),
+                            run_status=run.get("status"),
                             run_started=run.get("run_started_at") or run.get("created_at"))
             ttl = TTL_JOBS if run.get("status") != "completed" else 3600
             jobs = (fetch("jobs", f"{API}/actions/runs/{run['id']}/jobs?per_page=100", ttl,
                           json.loads) or {}).get("jobs", [])
-            shards = [j for j in jobs if re.fullmatch(r"shard \d+", j.get("name", ""))]
+            exact_jobs[run["id"]] = sum(1 for j in jobs if j.get("status") == "in_progress")
+            shard_re = r".+ / shard \d+" if is_ladder else r"shard \d+"
+            shards = [j for j in jobs if re.fullmatch(shard_re, j.get("name", ""))]
             done = sum(1 for j in shards if j.get("status") == "completed")
             running = sum(1 for j in shards if j.get("status") == "in_progress")
             inflight.update(shards_total=len(shards), shards_done=done, shards_running=running)
+            if running:  # the run reads "queued" while some shards wait for runners
+                inflight["run_status"] = "in_progress"
             base, cap = rounds.get(current.get("mode"), (None, None))
-            if base and shards:
+            if is_ladder and shards:
+                # ccrl-ladder.yml default: 2 shards per anchor.
+                per_job = int((qcfg.get("ladder") or {}).get("games_per_anchor") or 96) // 2
+                inflight.update(games_est=done * per_job, games_wave_total=len(shards) * per_job,
+                                games_prior=0)
+            elif base and shards:
                 rpw = [min(cap, base * 2 ** i) for i in range(wave)]
                 prior = sum(len(shards) * r * 2 for r in rpw[:-1])
                 inflight.update(games_prior=prior, games_wave_total=len(shards) * rpw[-1] * 2,
                                 games_est=prior + done * rpw[-1] * 2)
 
-    active = [{"name": r.get("name"), "title": r.get("display_title"), "status": r.get("status"),
+    active = [{"name": r.get("name"), "workflow": workflow_file(r), "title": r.get("display_title"),
+               "status": r.get("status"),
                "url": r.get("html_url"), "started": r.get("run_started_at") or r.get("created_at")}
               for r in runs if r.get("status") in ("in_progress", "queued", "waiting", "pending")
-              and r.get("name") != "CI"]
+              and workflow_file(r) != "ci.yml"]
 
     # Live datagen wave for the next net: shard progress and positions produced.
     datagen = None
@@ -390,14 +453,75 @@ def build_status():
             games = int(mm.group(1).replace(",", "")) if mm else None
             mm = re.search(r"(\d+)\s+nodes?", title, re.I)
             nodes = int(mm.group(1)) if mm else None
-        mm = re.search(r"Datagen\s+(\S+)\s+seed", title, re.I)
+        mm = re.search(r"Datagen\s+(\S+)\s+seed\s+(\d+)", title, re.I)
         total = len(shards) or planned or 0
-        datagen = {"title": title, "net": mm.group(1) if mm else None,
-                   "run_url": dg.get("html_url"), "status": dg.get("status"),
+        exact_jobs[dg["id"]] = sum(1 for j in jobs if j.get("status") == "in_progress") if jobs else None
+        datagen = {"title": title, "ref": mm.group(1) if mm else None,
+                   "seed": int(mm.group(2)) if mm else None,
+                   "run_url": dg.get("html_url"),
+                   # GitHub reports the run "queued" while later shards wait for
+                   # the max_parallel slots, even with shards running.
+                   "status": "in_progress" if running else dg.get("status"),
                    "started": dg.get("run_started_at") or dg.get("created_at"),
                    "shards_total": total, "shards_done": done, "shards_running": running,
                    "shards_queued": queued, "games_per_shard": games, "nodes": nodes,
                    "estimated_positions": done * games * POSITIONS_PER_GAME if games else None}
+
+    # Background lane (4 runners): the queue dispatches datagen from main
+    # whenever no datagen/SPSA run is active ("dispatched" rows, mode datagen).
+    dg_runs = {}
+    for r in runs:
+        m = re.match(r"Datagen\s+(\S+)\s+seed\s+(\d+)", r.get("display_title") or "")
+        if m:
+            dg_runs.setdefault(int(m.group(2)), r)  # newest first
+    dispatches = []
+    for r in reversed(qlog):
+        if r.get("mode") != "datagen":
+            continue
+        run = dict(dg_runs.get(r.get("seed")) or {})
+        if datagen and run.get("html_url") == datagen["run_url"]:
+            run["status"] = datagen["status"]
+        dispatches.append({"seed": r.get("seed"), "sha": (r.get("sha") or "")[:7],
+                           "when": parse_when(r.get("logged_at")), "reason": r.get("reason"),
+                           "status": run.get("status"), "conclusion": run.get("conclusion"),
+                           "run_url": run.get("html_url")})
+        if len(dispatches) >= 8:
+            break
+    background = {
+        "runners": BACKGROUND_RUNNERS, "current": datagen, "dispatches": dispatches,
+        "next_seed": queue.get("next_seed"),
+        "other": [{"name": r.get("name"), "title": r.get("display_title"), "status": r.get("status"),
+                   "url": r.get("html_url"), "started": r.get("run_started_at") or r.get("created_at")}
+                  for r in runs if workflow_file(r) in ("spsa.yml", "train-sweep.yml")
+                  and r.get("status") in ("in_progress", "queued", "waiting", "pending")],
+    }
+
+    # Runner usage vs the account's concurrent-job cap. Exact for runs whose job
+    # list was fetched above; otherwise estimated from the workflow's max-parallel.
+    usage_rows = []
+    for r in runs:
+        # A run reads "queued" while some of its jobs wait, even with others running.
+        if r.get("status") not in ("in_progress", "queued", "waiting", "pending") :
+            continue
+        n = exact_jobs.get(r.get("id"))
+        exact = n is not None
+        if not exact:
+            if r.get("status") != "in_progress":
+                continue
+            n = MAX_PARALLEL.get(workflow_file(r), 1)
+        if not n:
+            continue
+        lane = "background" if workflow_file(r) in BACKGROUND_WORKFLOWS else "foreground"
+        usage_rows.append({"name": r.get("name"), "workflow": workflow_file(r), "title": r.get("display_title"), "jobs": n,
+                           "exact": exact, "lane": lane, "url": r.get("html_url")})
+    runner_usage = {
+        "cap": RUNNER_CAP, "foreground_cap": FOREGROUND_RUNNERS, "background_cap": BACKGROUND_RUNNERS,
+        "in_use": min(RUNNER_CAP, sum(u["jobs"] for u in usage_rows)),
+        "foreground": sum(u["jobs"] for u in usage_rows if u["lane"] == "foreground"),
+        "background": sum(u["jobs"] for u in usage_rows if u["lane"] == "background"),
+        "estimated": any(not u["exact"] for u in usage_rows), "runs": usage_rows,
+        "as_of": sources.get("runs", {}).get("fetched_at"),
+    }
 
     recent_commits = []
     for c in commits if isinstance(commits, list) else []:
@@ -441,14 +565,17 @@ def build_status():
     return {
         "generated_at": iso(time.time()),
         "repo": REPO,
-        "target": TARGET,
+        "target": target,
+        "ccrl_targets": ccrl,
         "strength": strength,
         "net_chain": {"nets": nets, "ref": chain_ref, "audit_doc": NET_V1_AUDIT},
         "net_gates": net_gates,
         "datagen": datagen,
-        "roadmap": {"audit_doc": AUDIT_DOC, "plan_stale": True},
+        "background": background,
+        "runner_usage": runner_usage,
+        "roadmap": {"source": "plan.md", "ref": "main", "last_updated": plan_updated},
         "current": latest and {k: latest[k] for k in ("rating", "ci", "sha", "when", "url", "games")},
-        "gap": latest and round(TARGET["rating"] - latest["rating"], 1),
+        "gap": latest and round(target["rating"] - latest["rating"], 1),
         "ladder": points,
         "queue": {"current": inflight, "pending": queue.get("pending", []), "paused": queue.get("paused")},
         "queue_events": events[-40:][::-1],
