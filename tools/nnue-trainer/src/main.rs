@@ -29,6 +29,8 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+mod uncert;
+
 const INPUTS: usize = 768;
 const QA: f32 = 255.0;
 const QB: f32 = 64.0;
@@ -723,13 +725,15 @@ fn cmd_train(args: &[String]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|uncert-train|uncert-dump> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
         "shuffle" => cmd_shuffle(rest),
         "train" => cmd_train(rest),
         "eval" => cmd_eval(rest),
+        "uncert-train" => uncert::cmd_uncert_train(rest),
+        "uncert-dump" => uncert::cmd_uncert_dump(rest),
         _ => panic!("{usage}"),
     }
 }
