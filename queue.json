@@ -4,43 +4,37 @@
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 2
+      "passed_over": 3
     },
     {
       "branch": "feat-se-negext",
       "mode": "stc",
       "expect": 5.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "simp2-qs-delta",
       "mode": "nonreg",
       "expect": 3.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "simp2-qs-failsoft",
       "mode": "stc",
       "expect": 2.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 1
-    },
-    {
-      "branch": "feat-threat-hist",
-      "mode": "stc",
-      "expect": 8.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "feat-lmr-improving",
@@ -67,19 +61,19 @@
     }
   ],
   "current": {
-    "branch": "feat-lmr-cutnode",
+    "branch": "feat-threat-hist",
     "mode": "stc",
     "expect": 8.0,
     "passed_over": 1,
-    "test_id": "q-feat-lmr-cutnode-1107-1136",
-    "sha": "479dc0acd9a175c52c5423210253b047614cb4a9",
-    "base_sha": "645a770a25b192e97b70bc9a6de47c9919cf4bf2",
-    "started": "2026-11-07T11:36:32Z",
-    "bench": 599090
+    "test_id": "q-feat-threat-hist-1107-1237",
+    "sha": "54cd2ae54fb9959eee6f449ec160c035ab59c2c0",
+    "base_sha": "479dc0acd9a175c52c5423210253b047614cb4a9",
+    "started": "2026-11-07T12:37:36Z",
+    "bench": 655180
   },
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1,
+  "merges_since_check": 2,
+  "merges_since_ladder": 2,
   "next_seed": 30,
   "consecutive_bursts": 0
 }
