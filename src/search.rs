@@ -1744,18 +1744,6 @@ fn quiescence(
             if stage == Stage::Tt && see(board, mv) < 0 {
                 continue;
             }
-            let victim = if mv.is_en_passant {
-                piece_value(PieceType::Pawn)
-            } else {
-                board.squares[mv.to as usize]
-                    .map(|p| piece_value(p.kind))
-                    .unwrap_or(0)
-            };
-            if let Some(stand_pat) = static_eval {
-                if alpha > -INF / 2 && stand_pat + victim + 150 < alpha {
-                    continue;
-                }
-            }
         }
 
         let undo = board.make_move(mv);
