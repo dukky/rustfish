@@ -150,6 +150,11 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
   </section>
 
   <section class="card">
+    <h2>Laptop (M3): local training and datagen</h2>
+    <div id="laptop" class="empty">loading...</div>
+  </section>
+
+  <section class="card">
     <h2>Strength over time (CCRL Blitz, 120+1)</h2>
     <div class="legend"><span>rating</span><span class="l-ci">95% CI</span><span class="l-partial">partial run (hollow, CI bar)</span><span class="l-target">CCRL goals</span><span class="l-change">change merged</span></div>
     <div class="chart-wrap" id="chart"></div>
@@ -390,9 +395,33 @@ function renderBackground(s) {
         <td class="meta" style="white-space:nowrap">${shortDate(x.when)}<div>${esc(x.reason || "")}</div></td>
         <td>${x.run_url ? `<a href="${esc(x.run_url)}">${runBadge(x.status, x.conclusion)}</a>` : runBadge(x.status, x.conclusion)}</td></tr>`).join("") + `</tbody></table></div>`;
   }
-  h += `<div class="note">The laptop also generates data locally (CPU) and trains every net on its GPU (Metal trainer); this dashboard can't see the laptop, so local runs show up here only once a net branch is recorded and gated (NNUE panel below).</div>`;
+  h += `<div class="note">The laptop also generates data locally (CPU) and trains every net on its GPU (Metal trainer); its live state is in the Laptop card below; nets appear in the NNUE panel once a net branch is recorded and gated.</div>`;
   $("background").className = "";
   $("background").innerHTML = h;
+}
+
+const dur = (sec) => sec == null ? "–" : sec < 90 ? Math.round(sec) + " s" : sec < 5400 ? Math.round(sec / 60) + " min" : (sec / 3600).toFixed(1) + " h";
+function renderLaptop(s) {
+  const el = $("laptop"), L = s.laptop;
+  if (!L || !L.payload) { el.className = "empty"; el.textContent = "No report yet from the laptop."; return; }
+  const p = L.payload, stale = L.age_s > 600;
+  let h = `<div style="margin-bottom:10px">${stale ? `<span class="badge b-warn">stale</span> ` : ""}<span class="meta">reported ${dur(L.age_s)} ago${p.load ? ` · load ${p.load.map((x) => fmt(x, 2)).join(" ")}` : ""}${p.disk_free_gb != null ? ` · ${fmt(p.disk_free_gb, 1)} GB free` : ""}</span></div>`;
+  const tr = p.trainers || [];
+  if (tr.length) {
+    h += `<div class="scroll"><table><thead><tr><th>Net</th><th>Trainer</th><th>Epoch</th><th>Val (quantized)</th><th>pos/s</th><th>ETA</th></tr></thead><tbody>` +
+      tr.map((t) => `<tr><td class="mono"><b>${esc(t.net)}</b>${t.paused ? ` <span class="badge b-warn">paused</span>` : ""}</td><td>${esc(t.kind)}</td>
+        <td class="num">${fmt(t.epoch)}/${fmt(t.epochs)}</td><td class="num">${t.val != null ? fmt(t.val, 6) : "–"}${t.val_q != null ? ` <span class="meta">(${fmt(t.val_q, 6)})</span>` : ""}</td>
+        <td class="num">${t.pos_s ? fmt(t.pos_s) : "–"}</td><td class="num">${t.done ? "done" : dur(t.eta_s)}</td></tr>`).join("") + `</tbody></table></div>`;
+  } else h += `<div class="empty">No trainer running.</div>`;
+  const d = p.datagen || {}, nl = p.netloop || {};
+  const dg = d.running ? `<span class="badge ${d.state === "paused" ? "b-warn" : "b-good"}">${esc(d.state)}</span>` : `<span class="badge b-neutral">not running</span>`;
+  h += `<dl class="kv" style="margin-top:12px">
+    <dt>Chain</dt><dd>${(p.chains || []).length ? p.chains.map((c) => `<span class="mono">${esc(c.name)}</span> <span class="meta">(${esc(c.elapsed)})</span>: ${esc(c.last || "–")}`).join("<br>") : `<span class="meta">none running</span>`}</dd>
+    <dt>Local datagen</dt><dd>${dg}${d.file ? ` <span class="mono">${esc(d.file)}</span> ${fmt((d.bytes || 0) / 1e9, 2)} GB` : ""}${d.gate_last ? ` <span class="meta">· gate: ${esc(d.gate_last)}</span>` : ""}</dd>
+    <dt>Auto loop</dt><dd><span class="badge ${nl.running ? "b-good" : "b-neutral"}">${nl.running ? "running" : "stopped"}</span> <span class="meta">${esc(nl.last || "")}</span></dd>
+    <dt>Caffeinate</dt><dd>${(p.caffeinate || []).length ? p.caffeinate.map((c) => `<span class="mono">${esc(c.args)}</span>${c.remaining_s != null ? ` <span class="meta">(${dur(Math.max(0, c.remaining_s))} left)</span>` : ""}`).join("<br>") : `<span class="badge b-warn">not running</span>`}</dd>
+  </dl>`;
+  el.className = ""; el.innerHTML = h;
 }
 
 function renderRunners(s) {
@@ -676,7 +705,7 @@ async function refresh() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const s = await r.json();
     window.STATUS = s;
-    renderBanner(s); renderTiles(s); renderTargets(s); renderRunners(s); renderBackground(s); renderInflight(s); renderPending(s);
+    renderBanner(s); renderTiles(s); renderTargets(s); renderRunners(s); renderBackground(s); renderLaptop(s); renderInflight(s); renderPending(s);
     renderChart(s); renderNetGates(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
     if (s.plan) $("plan").innerHTML = markdown(s.plan);
     const rm = s.roadmap || {};

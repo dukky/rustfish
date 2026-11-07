@@ -57,3 +57,31 @@ ssh dokku@dev.duk.im letsencrypt:enable rustfish-dash
 git push dokku-dash main            # or <branch>:main
 ssh dokku@dev.duk.im logs rustfish-dash -t
 ```
+
+## Laptop card
+`scripts/laptop_status.py` (stdlib, read-only) runs on the M3 laptop and POSTs a
+small snapshot (<8 KB) to `/api/laptop`: running trainers (net, epoch k/N, val,
+pos/s, ETA from the `~/rustfish-data/<net>.log`), the running `chain*.sh` and the
+last line of its log, local datagen (paused/running, current `local/L*.txt` size),
+the netloop auto loop, caffeinate, load and free disk. The server accepts it
+only with `Authorization: Bearer $LAPTOP_TOKEN` (constant-time compare; rejected
+when `LAPTOP_TOKEN` is unset; body capped at 16 KB) and keeps the latest in memory
+(also in `$DATA_DIR/laptop.json` if `DATA_DIR` is set). `/api/status` returns it
+as `laptop` with `age_s`; the card shows "stale" past 10 minutes.
+
+`python3 scripts/laptop_status.py --print` shows the payload without posting.
+Tests: `python3 deploy/dashboard/test_laptop.py`.
+
+One-time setup:
+```bash
+TOKEN=$(openssl rand -hex 24)
+ssh dokku@dev.duk.im config:set rustfish-dash LAPTOP_TOKEN=$TOKEN   # restarts the app
+mkdir -p ~/.config/rustfish && (umask 077; printf '%s\n' "$TOKEN" > ~/.config/rustfish/laptop-token)
+chmod 600 ~/.config/rustfish/laptop-token
+python3 scripts/laptop_status.py && echo posted                      # one manual post
+cp deploy/laptop/com.rustfish.laptop-status.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.rustfish.laptop-status.plist
+```
+The plist runs `/usr/bin/python3 ~/dev/stockfish-challenge/scripts/laptop_status.py`
+every 120 s (edit the path if the checkout lives elsewhere); errors go to
+`/tmp/rustfish-laptop-status.err`. Stop with `launchctl unload` on the same path.

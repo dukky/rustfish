@@ -8,6 +8,7 @@ and only refreshed when a page asks for data, so an idle dashboard makes no
 requests and a busy one stays well inside the 60 requests/hour API limit.
 """
 import datetime
+import hmac
 import json
 import os
 import re
@@ -613,6 +614,53 @@ def build_status():
     }
 
 
+# Laptop reporter (scripts/laptop_status.py) POSTs its latest snapshot here.
+# Kept in memory, and in $DATA_DIR/laptop.json when DATA_DIR is configured.
+LAPTOP_MAX_BODY = 16 * 1024
+LAPTOP_LOCK = threading.Lock()
+LAPTOP = {"payload": None, "received": None}
+DATA_DIR = os.environ.get("DATA_DIR")
+
+
+def laptop_load():
+    if not DATA_DIR:
+        return
+    try:
+        with open(os.path.join(DATA_DIR, "laptop.json")) as fh:
+            d = json.load(fh)
+        LAPTOP.update(payload=d["payload"], received=float(d["received"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+
+
+def laptop_store(payload):
+    with LAPTOP_LOCK:
+        LAPTOP.update(payload=payload, received=time.time())
+        if DATA_DIR:
+            try:
+                tmp = os.path.join(DATA_DIR, "laptop.json.tmp")
+                with open(tmp, "w") as fh:
+                    json.dump(LAPTOP, fh)
+                os.replace(tmp, os.path.join(DATA_DIR, "laptop.json"))
+            except OSError:
+                pass
+
+
+def laptop_status():
+    with LAPTOP_LOCK:
+        if LAPTOP["payload"] is None:
+            return None
+        return {"payload": LAPTOP["payload"], "received": iso(LAPTOP["received"]),
+                "age_s": int(time.time() - LAPTOP["received"])}
+
+
+def laptop_authorized(header):
+    expected = os.environ.get("LAPTOP_TOKEN", "")
+    if not expected or not header or not header.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(header[7:].strip().encode(), expected.encode())
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "rustfish-dash"
 
@@ -622,6 +670,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with BUILD_LOCK:
                     status = build_status()
+                status["laptop"] = laptop_status()
                 body = json.dumps(status).encode()
                 self._send(200, "application/json", body)
             except Exception as exc:
@@ -633,6 +682,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/plain", b"ok")
         else:
             self._send(404, "text/plain", b"not found")
+
+    def do_POST(self):
+        if self.path.split("?", 1)[0] != "/api/laptop":
+            return self._send(404, "text/plain", b"not found")
+        if not laptop_authorized(self.headers.get("Authorization")):
+            return self._send(401, "text/plain", b"unauthorized")
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._send(411, "text/plain", b"length required")
+        if n < 0 or n > LAPTOP_MAX_BODY:
+            return self._send(413, "text/plain", b"too large")
+        try:
+            payload = json.loads(self.rfile.read(n))
+        except ValueError:
+            return self._send(400, "text/plain", b"bad json")
+        if not isinstance(payload, dict):
+            return self._send(400, "text/plain", b"expected an object")
+        laptop_store(payload)
+        self._send(204, "text/plain", b"")
 
     def _send(self, code, ctype, body):
         self.send_response(code)
@@ -648,5 +717,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
+    laptop_load()
     print(f"rustfish dashboard on :{port}", flush=True)
     ThreadingHTTPServer(("", port), Handler).serve_forever()
