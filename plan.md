@@ -5,7 +5,7 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-07 08:15._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-07 09:30._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
@@ -89,6 +89,15 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   question, not rejected. After g4: 2-3 x 30 min fine-tunes of the champion
   varying one thing each (80% replay; lower lr / fewer steps), screened on
   best-scale loss on val.bin + val17x2; gate any that win both.
+- **Local datagen** (09:30): `~/rustfish-data/datagen-gate.sh` runs seed 1004
+  (main 7d1fc8a, net scale, 7 threads, ~1300 pos/s = ~4.7M/h) only while no
+  GPU training runs (SIGSTOP/SIGCONT); the auto loop ingests local/L1004.txt.
+- **King buckets next steps** (GPU idle slots, after plain generations):
+  exact factoriser warm start from g4 (factor = g4, buckets = 0, low lr, best
+  epoch), kb4, real wd > 0, 2-3 epochs. ~3-4B positions needed if the gap
+  only halves per doubling.
+- Queue (09:30): ltc-check, g4 net gate, ladder, then 7 feat + 4 simp tests,
+  ~15 h. Estimates: ladder ~3440-3445 at ~11:45; ~3450-3460 when drained.
 - Round 2: `simp2-*` (HCE-era margins) in progress (subagent).
   Queued: tm-ccrl-r2, simp-lmr-extra-r2, feat-lmr-cutnode (cut/PV node LMR,
   stc, expect 8), feat-se-negext (singular negative extension, stc, expect 5).
