@@ -16,6 +16,7 @@
     "LmpLimitD1":              {"value": 6,   "min": 2,   "max": 16,  "c_end": 1,   "r_end": 0.002},
     "LmrCutNode":              {"value": 2,   "min": 0,   "max": 4,   "c_end": 0.5, "r_end": 0.002},
     "LmrPvNode":               {"value": 1,   "min": 0,   "max": 3,   "c_end": 0.4, "r_end": 0.002},
+    "SeNegativeExtension":     {"value": 1,   "min": 0,   "max": 2,   "c_end": 0.3, "r_end": 0.002},
     "LmpLimitD2":              {"value": 10,  "min": 4,   "max": 24,  "c_end": 1.5, "r_end": 0.002},
     "LmpLimitD3":              {"value": 14,  "min": 6,   "max": 32,  "c_end": 2,   "r_end": 0.002},
     "LmrMinDepth":             {"value": 3,   "min": 1,   "max": 6,   "c_end": 0.4, "r_end": 0.002},

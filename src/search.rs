@@ -1446,6 +1446,10 @@ fn negamax(
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
                         return singular_beta;
+                    } else if tt_score >= beta {
+                        // Negative extension: not singular, and the TT score
+                        // already beats beta, so an alternative likely cuts too.
+                        extension = -params.se_negative_extension;
                     }
                 }
             }
