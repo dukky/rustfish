@@ -77,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       # 16 of the 20 runners; the background lane (datagen) keeps the other 4.
-      max-parallel: 16
+      max-parallel: 13
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: ${{ matrix.name }} / shard ${{ matrix.shard }}
     steps:

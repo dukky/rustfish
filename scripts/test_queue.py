@@ -354,7 +354,7 @@ class Guard(unittest.TestCase):
             q.validate_settings(json.load(fh))
 
     def test_too_many_shards_fails_loudly(self):
-        cfg = {"modes": {"stc": {"shards": 16}, "ltc-gainer": {"shards": 19}}}
+        cfg = {"modes": {"stc": {"shards": 13}, "ltc-gainer": {"shards": 19}}}
         with self.assertRaises(SystemExit) as ctx:
             q.validate_settings(cfg)
         self.assertIn("ltc-gainer (shards=19)", str(ctx.exception))
@@ -397,11 +397,11 @@ class BackgroundLane(unittest.TestCase):
             q.background_lane(state)
         self.assertEqual(state["next_seed"], 21)
         self.assertIn("seed=20", cmds[0])
-        self.assertIn("max_parallel=3", cmds[0])
+        self.assertIn("max_parallel=6", cmds[0])
 
 
 BURST_ON = {"enabled": True, "below_score": 0.04, "max_consecutive": 2, "when_idle": True,
-            "shards": 16, "max_parallel": 16, "games_per_shard": 15000, "nodes": 5000}
+            "shards": 13, "max_parallel": 13, "games_per_shard": 15000, "nodes": 5000}
 LOW = {"branch": "simp", "mode": "nonreg", "expect": 1.0}     # score ~0.01
 HIGH = {"branch": "feat", "mode": "stc", "expect": 20.0}      # score ~0.3
 
@@ -458,8 +458,8 @@ class Burst(unittest.TestCase):
         state = {"pending": [dict(LOW)], "current": None, "next_seed": 30}
         started, dispatched, logs = self.run_advance(state)
         self.assertEqual(started, [])
-        self.assertEqual(dispatched, [{"ref": "main", "shards": "16", "games_per_shard": "15000",
-                                       "nodes": "5000", "seed": "30", "max_parallel": "16"}])
+        self.assertEqual(dispatched, [{"ref": "main", "shards": "13", "games_per_shard": "15000",
+                                       "nodes": "5000", "seed": "30", "max_parallel": "13"}])
         self.assertEqual(state["current"]["mode"], "datagen-burst")
         self.assertEqual(state["current"]["seed"], 30)
         self.assertEqual(state["next_seed"], 31)
@@ -527,7 +527,7 @@ class Burst(unittest.TestCase):
     def test_seed_counter_shared_with_background_lane(self):
         state = {"pending": [dict(LOW)], "current": None, "next_seed": 40}
         _, dispatched, logs = self.run_advance(state, real_lane=True)
-        self.assertEqual([(d["seed"], d["max_parallel"]) for d in dispatched], [("40", "16"), ("41", "3")])
+        self.assertEqual([(d["seed"], d["max_parallel"]) for d in dispatched], [("40", "13"), ("41", "6")])
         self.assertEqual([r["mode"] for r in logs], ["datagen-burst", "datagen"])
         self.assertEqual(state["next_seed"], 42)
 
@@ -555,7 +555,7 @@ class Burst(unittest.TestCase):
         self.assertEqual(self.run_advance(state)[1], [])
 
     def test_settings_validation(self):
-        base = {"modes": {"stc": {"shards": 16}}}
+        base = {"modes": {"stc": {"shards": 13}}}
         q.validate_settings(dict(base, burst=BURST_ON))
         q.validate_settings(dict(base, burst=dict(BURST_ON, enabled=False, shards=5)))
         for bad in ({"shards": 20}, {"max_parallel": 17, "shards": 17}, {"max_parallel": 8, "shards": 12}):

@@ -49,9 +49,11 @@ STATE_BRANCH = "queue-state"
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue-settings.json")) as _fh:
     _CFG = json.load(_fh)
 
-# Foreground SPRTs get the 16 runners not held by the background lane (3) or
+# Foreground SPRTs get the 13 runners not held by the background lane (6) or
 # the queue's own job (1); a mode wider than that would starve both.
-MAX_FOREGROUND_SHARDS = 16
+MAX_FOREGROUND_SHARDS = 13
+# Background datagen lane: 18 shards = 3 rounds of 6 runners (~22M positions).
+BACKGROUND_PARALLEL, BACKGROUND_SHARDS = 6, 18
 
 
 def validate_settings(cfg):
@@ -612,7 +614,7 @@ def dispatch_datagen(seed, shards, games, nodes, max_parallel):
 
 
 def background_lane(state):
-    """Keep the 3 background runners busy (1 of 20 stays free for the queue's own job): when no datagen or SPSA run
+    """Keep the background runners (BACKGROUND_PARALLEL) busy (1 of 20 stays free for the queue's own job): when no datagen or SPSA run
     is queued or running, generate the next datagen seed from main (only
     merged nets generate data). A foreground burst's run (state["current"])
     uses the foreground runners, so it does not block this lane."""
@@ -628,7 +630,7 @@ def background_lane(state):
                and not (burst_re and burst_re.match(r.get("displayTitle") or "")) for r in runs):
             return
     seed = take_seed(state)
-    dispatch_datagen(seed, 16, 15000, 5000, 3)
+    dispatch_datagen(seed, BACKGROUND_SHARDS, 15000, 5000, BACKGROUND_PARALLEL)
     log({"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
          "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"})
 
