@@ -1109,7 +1109,7 @@ pub(crate) const NNUE_EVAL_DIV: i32 = 2;
 
 pub(crate) fn evaluate(board: &Board) -> i32 {
     if let Some(st) = board.nnue.as_ref() {
-        let s = st.evaluate(board.side_to_move, board.bb.occ_all().count_ones()) / NNUE_EVAL_DIV;
+        let s = st.evaluate_board(board) / NNUE_EVAL_DIV;
         return if board.side_to_move == Color::White { s } else { -s };
     }
     evaluate_impl(board, &mut NoTrace, None)
