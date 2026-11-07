@@ -1,16 +1,40 @@
 {
   "source": "CCRL Blitz rating list, single-CPU engines, best versions only",
   "url": "https://computerchess.org.uk/ccrl/404/cgi/compare_engines.cgi?class=Single-CPU+engines&print=Rating+list&cross_tables_for_best_versions_only=1",
-  "computed": "2026-10-31",
-  "fetched": "2026-11-06",
-  "engines_listed": 865,
+  "computed": "2026-11-07",
+  "fetched": "2026-11-07",
+  "engines_listed": 640,
   "targets": [
-    {"name": "3400 (short term)", "rating": 3400, "rank": 131, "note": "Pedantic 2.1.0 is 3400 at #131"},
-    {"name": "Top 100 (mid term)", "rating": 3504, "rank": 100, "note": "#99-100 Endspiel 2.0.0 / Schoenemann 0.5.0 at 3504; #101 is 3493"},
-    {"name": "Top 10 (long term)", "rating": 3751, "rank": 10, "note": "#10-11 Alexandria 9.1.0 / Integral 8 at 3751"}
+    {
+      "name": "3400 (short term)",
+      "rating": 3400,
+      "rank": 132,
+      "note": "reached 2026-11-06; on the 2026-11-07 list 3400 would rank ~#132"
+    },
+    {
+      "name": "Top 100 (mid term)",
+      "rating": 3506,
+      "rank": 100,
+      "note": "#99 Lambergar 1.5 3506, #100 Endspiel 2.0.0 3505, #101 Schoenemann 0.5.0 3502: ~3506 is needed to be inside the top 100"
+    },
+    {
+      "name": "Top 10 (long term)",
+      "rating": 3751,
+      "rank": 10,
+      "note": "#10-11 Alexandria 9.1.0 / Integral 8 at 3751; #9 pawnocchio 2.0 3755"
+    }
   ],
   "reference": [
-    {"rank": 1, "name": "Stockfish 19", "rating": 3792},
-    {"rank": 158, "name": "Colossus 2026c", "rating": 3328, "note": "where ~3330 would rank"}
+    {
+      "rank": 1,
+      "name": "Stockfish 19",
+      "rating": 3792
+    },
+    {
+      "rank": 112,
+      "name": "(rustfish at 3463)",
+      "rating": 3463,
+      "note": "where the last ladder would rank"
+    }
   ]
 }
