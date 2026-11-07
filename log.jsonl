@@ -242,3 +242,4 @@
 {"branch": "simp-lmr-extra", "logged_at": "2026-11-07T07:03:39Z", "mode": "nonreg", "outcome": "needs-human", "reason": "rebase conflict"}
 {"branch": "main", "logged_at": "2026-11-07T07:19:27Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 25, "sha": "a9ed1e4dab840c19f1d5d27beed2a6ee309a886a"}
 {"base_sha": "a9ed1e4dab840c19f1d5d27beed2a6ee309a886a", "branch": "tm-ccrl-r2", "logged_at": "2026-11-07T07:42:26Z", "mode": "nonreg", "outcome": "dispatched", "priority": {"considered": 1, "gain": 5.0, "gain_source": "expect", "p_accept": 0.536, "rule": "score", "runner_hours": 24.3, "samples": 4, "score": 0.1102}, "sha": "b1dae1c1e82c4e18e1ecd46be0bf7d1066e99b28", "test_id": "q-tm-ccrl-r2-1107-0742"}
+{"branch": "main", "logged_at": "2026-11-07T08:56:11Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 26, "sha": "f616b7e8e0ea478232e50c3af3a52efc70289519"}
