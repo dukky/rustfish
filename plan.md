@@ -18,7 +18,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
 
-## Status 2026-11-07 00:00
+## Status 2026-11-07 02:00
 
 - **Ladder 3429 CCRL Blitz (CI 3401-3459)** on main after g3: past the 3400
   short-term target (~#122). Next: top 100 = 3504.
@@ -31,9 +31,10 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 - **Data bug fixed:** after the eval halving, datagen wrote scores at half
   the net scale (seeds 14-18, all local data). Fixed in code; corrected copies
   in ~/rustfish-data/fix and auto/. `nnue-trainer scalecheck` catches it.
-- Testing: correction-history-r2 (stc), then g4w (warm start from g3f on new
-  data, best on the newest val sets) and g3f (g3 on corrected data, better on
-  all val sets).
+- correction-history-r2 rejected under NNUE: +0.1 [-3.4, 3.7] over 13.8k stc
+  games (was +4 under the HCE). Testing now: g4w (warm start from g3f on new
+  data, best on the newest val sets), then g3f (g3 on corrected data, better on
+  all val sets), then tm-ccrl nonreg.
 - **Laptop:** Metal GPU trainer (~3x CPU; king buckets ~1.3x one bucket) does
   all training. `scripts/netloop.py auto` runs unattended: ingests CI and local
   datagen, scale-checks, warm-starts a candidate per ~30M new positions, screens
@@ -42,11 +43,17 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 - **CI:** smarter queue (af32031): speedups merge without waiting; priority by
   expected Elo per runner-hour (`--expect`); datagen calls the queue back.
   Foreground 16 runners, background datagen 3.
-- **King buckets:** one kb8m run overfit (confounded: mirrored warm start,
-  scale bug, no factoriser). Not dropped: factoriser + active-row weight decay
-  in progress, then a from-scratch kb8m+factor run vs g3f (KB-PLAN.txt).
-- Next: SPSA of 22 search params (`spsa-nnue`) when the queue is quiet;
-  threat inputs after king buckets; simplification (nonreg) pass later.
+- **King buckets:** kb8m+factoriser from scratch with g3f's schedule loses to
+  g3f by ~6e-4 on val.bin, val16x2 and val17x2 (0.02678 vs 0.02617); val flat
+  from epoch 2 while train keeps falling (memorisation; note wd was 0). Not
+  promoted. Running the learning curve (chain7: 50% of games, plain vs kbf):
+  data-limited only if the gap is clearly larger at 50%. Also untried: wd > 0,
+  lambda 0.3, fewer epochs.
+- **Threat inputs** (branch `threat-inputs`, off by default, engine + both
+  trainers, verified): `ep` (en-prise block) -1.0% val loss at H128 but -22%
+  NPS; `ad` no gain, -41% NPS. Parked until the update path is cheaper.
+- Next: simplification (nonreg) pass in progress (subagent, `simp-*`
+  branches); SPSA of 22 search params (`spsa-nnue`) when the queue is quiet.
 
 ## Strategy (2026-11-06): train the net properly
 
