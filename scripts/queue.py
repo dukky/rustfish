@@ -49,11 +49,14 @@ STATE_BRANCH = "queue-state"
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue-settings.json")) as _fh:
     _CFG = json.load(_fh)
 
-# Foreground SPRTs get the 13 runners not held by the background lane (6) or
-# the queue's own job (1); a mode wider than that would starve both.
-MAX_FOREGROUND_SHARDS = 13
-# Background datagen lane: 18 shards = 3 rounds of 6 runners (~22M positions).
-BACKGROUND_PARALLEL, BACKGROUND_SHARDS = 6, 18
+# Runner split (queue-settings.json "lanes"): the background datagen lane
+# holds background_parallel runners, the queue's own job 1, and foreground
+# SPRTs get the rest of the 20; a mode wider than that would starve both.
+# background_shards should be a multiple of background_parallel.
+_LANES = _CFG.get("lanes", {})
+BACKGROUND_PARALLEL = _LANES.get("background_parallel", 6)
+BACKGROUND_SHARDS = _LANES.get("background_shards", 3 * BACKGROUND_PARALLEL)
+MAX_FOREGROUND_SHARDS = 19 - BACKGROUND_PARALLEL
 
 
 def validate_settings(cfg):
