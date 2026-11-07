@@ -27,9 +27,12 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   per runner-hour.
 - Data-heavy runner split (13/6) until gen 5 proves it: gen 5 from scratch
   at ~1.0B positions (~15:00), gated ~17:00. Revert to 6/13 if gen 5 < +8.
-- King buckets: kb4 exact warm start from g4 vs a plain fine-tune control
-  (chain9, ~11:40); next a mirrored copy of g4 then kb8m; real wd, kb4 from
-  scratch at each generation.
+- King buckets: exact factoriser warm starts from g4 beat the plain
+  fine-tune control: kb8m (via a mirrored copy g4m1) val.bin 0.025943 vs
+  0.026086, val17x2 0.025316 vs 0.025387; kb4 smaller. Both queued (stc,
+  kb8m expect 8). Factoriser/keep-best being ported to the fast CPU trainer
+  (`trainer-kbf-fast`). Lambda 0.3 rejected (-8.8, inconclusive).
+- feat-lmr-cutnode: +15.6 [6.4, 24.9] at stc.
 - Ladder after each 2-3 merges or a net merge.
 
 **Mid term (days): top 100 (3504).**
@@ -42,7 +45,10 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 - Search backlog: continuation history re-keyed to [piece][to][piece][to]
   then 2/4 ply, cuckoo upcoming-repetition, root LMR, quiet-check LMR,
   qsearch polish.
-- Second trainer: 9600X (CPU trainer, `trainer-x86-speed`) for experiments
+- Second trainer: 9600X. CPU trainer ~2x faster since dd12f29 (Zen 5
+  runner 1.69M pos/s on 4 vCPU; M3 1.6M at 8 threads when quiet ~ the Metal
+  trainer); projected ~4M pos/s on the 9600X (12 threads, unmeasured), so it
+  may take generations while the M3 GPU does experiments
   while the M3 GPU does generations; 1080 Ti (CUDA port) only as a last
   resort (power draw).
 
