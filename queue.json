@@ -2,10 +2,6 @@
   "pending": [
     {
       "branch": "main",
-      "mode": "ladder"
-    },
-    {
-      "branch": "main",
       "mode": "ladder",
       "front": true
     },

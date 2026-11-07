@@ -284,3 +284,5 @@
 {"branch": "feat-se-negext-r2", "elo": 8.86, "elo_ci95": [3.29, 14.43], "games": 5376, "llr": 3.941, "logged_at": "2026-11-07T22:07:56Z", "mode": "stc", "outcome": "merged", "sha": "4f4f24c60305cdd33fe89ad27fd731c464ae8d0b", "test_id": "q-feat-se-negext-r2-1107-1959", "verdict": "H1"}
 {"base_sha": "06ab097d1e3d0b8d879e412a4226054ba62e2700", "branch": "main", "logged_at": "2026-11-07T22:08:02Z", "mode": "ltc-check", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a", "test_id": "q-main-ltc-check-1107-2207"}
 {"branch": "main", "logged_at": "2026-11-07T22:18:34Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 43, "sha": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a"}
+{"branch": "main", "logged_at": "2026-11-07T22:59:29Z", "mode": "ladder", "outcome": "removed", "reason": "queue.py remove"}
+{"branch": "main", "logged_at": "2026-11-07T22:59:29Z", "mode": "ladder", "outcome": "removed", "reason": "queue.py remove"}
