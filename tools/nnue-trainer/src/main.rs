@@ -32,6 +32,9 @@
 //! `(sigmoid(o) - target)^2` with
 //! `target = lambda * wdl + (1 - lambda) * sigmoid(score_cp / SCALE)`.
 
+mod batch;
+mod simd;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -258,6 +261,7 @@ fn encode(line: &str) -> Option<Rec> {
 }
 
 /// Both perspectives' active features: index 0 = side to move.
+#[derive(Clone, Copy)]
 struct Sample {
     f: [[u16; 32]; 2],
     n: usize,
@@ -382,6 +386,9 @@ fn forward(p: &[f32], sh: Shape, s: &Sample, acc: &mut [f32]) -> f32 {
 }
 
 /// Forward + backward for one sample into gradient buffer `g`; returns loss.
+/// The reference for `batch.rs` (and the Metal trainer's gradcheck): the v2
+/// training loop ran exactly this per sample.
+#[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32], dacc: &mut [f32]) -> f32 {
     let h = sh.h;
@@ -534,34 +541,6 @@ struct Adam {
     m: Vec<f32>,
     v: Vec<f32>,
     step: u64,
-}
-
-/// Sum the per-thread gradients, then one AdamW step with clipping, in parallel.
-fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32, inv_batch: f32, threads: usize) {
-    opt.step += 1;
-    let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-    let c1 = 1.0 - b1.powi(opt.step.min(1 << 20) as i32);
-    let c2 = 1.0 - b2.powi(opt.step.min(1 << 20) as i32);
-    let chunk = p.len().div_ceil(threads);
-    std::thread::scope(|sc| {
-        for (k, ((pc, mc), vc)) in p.chunks_mut(chunk).zip(opt.m.chunks_mut(chunk)).zip(opt.v.chunks_mut(chunk)).enumerate() {
-            let base = k * chunk;
-            sc.spawn(move || {
-                for i in 0..pc.len() {
-                    let mut g = 0.0f32;
-                    for gr in grads {
-                        g += gr[base + i];
-                    }
-                    g *= inv_batch;
-                    mc[i] = b1 * mc[i] + (1.0 - b1) * g;
-                    vc[i] = b2 * vc[i] + (1.0 - b2) * g * g;
-                    let upd = (mc[i] / c1) / ((vc[i] / c2).sqrt() + eps);
-                    let x = pc[i] * (1.0 - lr * wd) - lr * upd;
-                    pc[i] = x.clamp(-CLIP, CLIP);
-                }
-            });
-        }
-    });
 }
 
 /// Header word 1 = output buckets | king layout id << 32 (0 for `none`, so
@@ -1177,6 +1156,7 @@ fn cmd_train(args: &[String]) {
     let (mut batch, mut lr, mut lr_end, mut wd, mut lambda) = (16384usize, 1e-3f32, 1e-5f32, 0.0f32, 0.5f32);
     let (mut threads, mut seed, mut mirror) = (threads_default(), 1u64, false);
     let (mut init, mut resume, mut ckpt) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
+    let (mut exact, mut sub_batch, mut max_batches) = (false, 0usize, u64::MAX);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -1200,6 +1180,9 @@ fn cmd_train(args: &[String]) {
             "--init" => init = Some(PathBuf::from(v())),
             "--resume" => resume = Some(PathBuf::from(v())),
             "--checkpoint" => ckpt = Some(PathBuf::from(v())),
+            "--exact" => exact = true,
+            "--sub-batch" => sub_batch = v().parse().unwrap(),
+            "--max-batches" => max_batches = v().parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
     }
@@ -1238,77 +1221,78 @@ fn cmd_train(args: &[String]) {
     let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
     println!("start val loss {vl:.6} mean|eval| {ve:.1}cp");
 
-    let mut feed = Feed::new(data, seed ^ 0xF00D ^ seen);
-    let mut grads: Vec<Vec<f32>> = (0..threads).map(|_| vec![0.0f32; sh.len()]).collect();
-    let mut recs: Vec<Rec> = Vec::with_capacity(batch);
+    let mut bt = batch::BatchTrainer::new(sh, sub_batch, exact);
+    println!(
+        "kernels {} sub-batch {}{}",
+        bt.isa.name(),
+        bt.sub_batch(),
+        if exact { " exact (v2 --threads 1 summation order)" } else { "" }
+    );
+    // Loader thread: feed + shuffle + the per-batch mirror flags (the same
+    // RNG streams as before: `seed_b` from `rng`, one RNG per 256-record
+    // chunk), a few batches ahead of the trainer.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<Rec>, Vec<bool>)>(4);
+    let loader = {
+        let mut feed = Feed::new(data, seed ^ 0xF00D ^ seen);
+        let mut rng = Rng(rng.0);
+        std::thread::spawn(move || loop {
+            let mut recs = Vec::with_capacity(batch);
+            feed.batch(&mut recs, batch);
+            let seed_b = rng.next_u64();
+            let mut flags = vec![false; recs.len()];
+            if mirror {
+                for (c, fl) in flags.chunks_mut(256).enumerate() {
+                    let mut mr = Rng::new(seed_b ^ c as u64);
+                    for x in fl {
+                        *x = mr.next_u64() & 1 == 1;
+                    }
+                }
+            }
+            if tx.send((recs, flags)).is_err() {
+                return;
+            }
+        })
+    };
     let started = Instant::now();
     let start_seen = seen;
     let mut epoch_loss = 0.0f64;
     let mut epoch_n = 0u64;
     let mut ep = seen / epoch_size;
-    while seen < total {
-        let t = seen as f64 / total as f64;
-        let cur_lr = lr_end + 0.5 * (lr - lr_end) * (1.0 + (std::f64::consts::PI * t).cos() as f32);
-        feed.batch(&mut recs, batch);
-        // Small chunks pulled from a shared counter: the M3's efficiency
-        // cores take fewer of them instead of holding up the whole batch.
-        let chunk = 256usize;
-        let n_chunks = recs.len().div_ceil(chunk);
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let seed_b = rng.next_u64();
-        let loss: f64 = std::thread::scope(|sc| {
-            let (p, recs, next) = (&p, &recs, &next);
-            let hs: Vec<_> = grads
-                .iter_mut()
-                .map(|g| {
-                    sc.spawn(move || {
-                        g.fill(0.0);
-                        let mut acc = vec![0.0f32; 2 * sh.h];
-                        let mut dacc = vec![0.0f32; 2 * sh.h];
-                        let mut l = 0.0f64;
-                        loop {
-                            let c = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if c >= n_chunks {
-                                break;
-                            }
-                            let mut mr = Rng::new(seed_b ^ c as u64);
-                            for r in &recs[c * chunk..((c + 1) * chunk).min(recs.len())] {
-                                let m = mirror && mr.next_u64() & 1 == 1;
-                                let s = decode(r, lambda, sh.buckets, m, kl);
-                                l += train_sample(p, sh, &s, g, &mut acc, &mut dacc) as f64;
-                            }
-                        }
-                        l
-                    })
-                })
-                .collect();
-            hs.into_iter().map(|h| h.join().unwrap()).sum()
-        });
-        let used = &grads[..];
-        adam_step(&mut p, &mut opt, used, cur_lr, wd, 1.0 / recs.len() as f32, threads);
-        seen += recs.len() as u64;
-        epoch_loss += loss;
-        epoch_n += recs.len() as u64;
+    let mut batches = 0u64;
+    batch::Pool::with(threads, |pool| {
+        while seen < total && batches < max_batches {
+            let t = seen as f64 / total as f64;
+            let cur_lr = lr_end + 0.5 * (lr - lr_end) * (1.0 + (std::f64::consts::PI * t).cos() as f32);
+            let (recs, flags) = rx.recv().unwrap();
+            let loss = bt.batch(pool, &p, &recs, &flags, lambda, kl);
+            bt.adam(pool, &mut p, &mut opt, cur_lr, wd, 1.0 / recs.len() as f32);
+            seen += recs.len() as u64;
+            batches += 1;
+            epoch_loss += loss;
+            epoch_n += recs.len() as u64;
 
-        if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total {
-            ep += 1;
-            let secs = started.elapsed().as_secs_f64();
-            let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
-            let q = quantize(&p, sh);
-            let (ql, _) = validate(&dequantize(&q, sh), sh, kl, &val, lambda, threads);
-            let path = out.with_extension(format!("e{ep}.bin"));
-            File::create(&path).unwrap().write_all(&q).unwrap();
-            save_ckpt(&ckpt, sh, kl, &p, &opt, seen);
-            println!(
-                "epoch {ep} lr {cur_lr:.2e} train {:.6} val {vl:.6} (quantized {ql:.6}) mean|eval| {ve:.1}cp {:.0} pos/s -> {}",
-                epoch_loss / epoch_n as f64,
-                (seen - start_seen) as f64 / secs,
-                path.display()
-            );
-            epoch_loss = 0.0;
-            epoch_n = 0;
+            if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total || batches == max_batches {
+                ep += 1;
+                let secs = started.elapsed().as_secs_f64();
+                let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
+                let q = quantize(&p, sh);
+                let (ql, _) = validate(&dequantize(&q, sh), sh, kl, &val, lambda, threads);
+                let path = out.with_extension(format!("e{ep}.bin"));
+                File::create(&path).unwrap().write_all(&q).unwrap();
+                save_ckpt(&ckpt, sh, kl, &p, &opt, seen);
+                println!(
+                    "epoch {ep} lr {cur_lr:.2e} train {:.6} val {vl:.6} (quantized {ql:.6}) mean|eval| {ve:.1}cp {:.0} pos/s -> {}",
+                    epoch_loss / epoch_n as f64,
+                    (seen - start_seen) as f64 / secs,
+                    path.display()
+                );
+                epoch_loss = 0.0;
+                epoch_n = 0;
+            }
         }
-    }
+    });
+    drop(rx);
+    loader.join().unwrap();
     let q = quantize(&p, sh);
     File::create(&out).unwrap().write_all(&q).unwrap();
     println!("wrote {} ({} bytes, H={} buckets={}{kb_note})", out.display(), q.len(), sh.h, sh.buckets);
@@ -1695,6 +1679,145 @@ mod tests {
             b[i] -= eps;
             let num = (loss(&a) - loss(&b)) / (2.0 * eps as f64);
             assert!((num - g[i] as f64).abs() < 1e-4 + 1e-2 * num.abs(), "param {i}: numeric {num} vs analytic {}", g[i]);
+        }
+    }
+
+    /// Every SIMD implementation this CPU can run.
+    fn isas() -> Vec<simd::Isa> {
+        let mut v = vec![simd::Isa::Portable];
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx2") {
+                v.push(simd::Isa::Avx2);
+            }
+            if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+                v.push(simd::Isa::Avx512);
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        v.push(simd::Isa::Neon);
+        v
+    }
+
+    /// `n` records cycling through a few positions with varied scores/results.
+    fn test_recs(n: usize) -> (Vec<Rec>, Vec<bool>) {
+        let mut fens = RESCALE_FENS.to_vec();
+        fens.push("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+        fens.push("8/8/8/4k3/8/8/2K5/8 w - - 0 1");
+        let mut rng = Rng::new(17);
+        let recs = (0..n)
+            .map(|i| {
+                let score = rng.uniform(900.0) as i32;
+                let result = ["0", "0.5", "1"][rng.below(3)];
+                encode(&format!("{} | {score} | {result}", fens[i % fens.len()])).unwrap()
+            })
+            .collect();
+        let mirror = (0..n).map(|_| rng.next_u64() & 1 == 1).collect();
+        (recs, mirror)
+    }
+
+    /// v2's per-sample loop (`train_sample` over the batch in order, one
+    /// thread) and its AdamW step: the reference for `batch.rs`.
+    fn reference_step(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], mirror: &[bool], opt: &mut Adam) -> (Vec<f32>, f64, Vec<f32>) {
+        let mut g = vec![0.0f32; sh.len()];
+        let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        let mut loss = 0.0f64;
+        for (r, &m) in recs.iter().zip(mirror) {
+            let s = decode(r, 0.5, sh.buckets, m, kl);
+            loss += train_sample(p, sh, &s, &mut g, &mut acc, &mut dacc) as f64;
+        }
+        let mut p = p.to_vec();
+        opt.step += 1;
+        let (b1, b2, eps, lr, wd, inv_batch) = (0.9f32, 0.999f32, 1e-8f32, 1e-3f32, 0.01f32, 1.0 / recs.len() as f32);
+        let c1 = 1.0 - b1.powi(opt.step.min(1 << 20) as i32);
+        let c2 = 1.0 - b2.powi(opt.step.min(1 << 20) as i32);
+        for i in 0..p.len() {
+            let mut gi = 0.0f32;
+            gi += g[i];
+            gi *= inv_batch;
+            opt.m[i] = b1 * opt.m[i] + (1.0 - b1) * gi;
+            opt.v[i] = b2 * opt.v[i] + (1.0 - b2) * gi * gi;
+            let upd = (opt.m[i] / c1) / ((opt.v[i] / c2).sqrt() + eps);
+            let x = p[i] * (1.0 - lr * wd) - lr * upd;
+            p[i] = x.clamp(-CLIP, CLIP);
+        }
+        (g, loss, p)
+    }
+
+    /// The batch trainer against v2's loop: bit-identical gradients, loss and
+    /// AdamW step with `exact`, ~1e-6 without; for every ISA, several thread
+    /// counts, H not a multiple of the 64-float forward tile, partial
+    /// sub-batches, king buckets and mirroring.
+    #[test]
+    fn batch_trainer_matches_reference() {
+        for (h, buckets, kl) in [(48, 8, NO_BUCKETS), (128, 1, KingLayout::by_name("kb4m")), (64, 8, KingLayout::by_name("kb8m"))] {
+            let sh = Shape { h, buckets, kb: kl.kb() };
+            let mut rng = Rng::new(5);
+            let mut p = init_params(sh, &mut rng);
+            for x in &mut p[sh.ft_b()..sh.out_w()] {
+                *x = 0.2; // keep accumulators inside (0, 1) often
+            }
+            let (recs, mirror) = test_recs(301);
+            let n = p.len();
+            let mut ropt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+            let (gref, lref, pref) = reference_step(&p, sh, kl, &recs, &mirror, &mut ropt);
+            for isa in isas() {
+                for (threads, exact) in [(1, true), (3, true), (4, false), (2, false)] {
+                    let mut bt = batch::BatchTrainer::new(sh, 64, exact);
+                    bt.isa = isa;
+                    let mut p2 = p.clone();
+                    let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+                    batch::Pool::with(threads, |pool| {
+                        let loss = bt.batch(pool, &p2, &recs, &mirror, 0.5, kl);
+                        let g = bt.gradient();
+                        let what = format!("H={h} {} {isa:?} threads={threads} exact={exact}", kl.name);
+                        if exact {
+                            assert_eq!(loss, lref, "{what}");
+                            assert!(g.iter().zip(&gref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: gradient differs");
+                        } else {
+                            assert!((loss - lref).abs() <= 1e-6 * lref, "{what}: loss {loss} vs {lref}");
+                            let scale = gref.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+                            for (i, (a, b)) in g.iter().zip(&gref).enumerate() {
+                                assert!((a - b).abs() <= 1e-5 * scale, "{what}: param {i}: {a} vs {b}");
+                            }
+                        }
+                        bt.adam(pool, &mut p2, &mut opt, 1e-3, 0.01, 1.0 / recs.len() as f32);
+                        assert!(bt.gradient().iter().all(|&x| x == 0.0), "{what}: gradient not cleared");
+                        if exact {
+                            assert!(p2.iter().zip(&pref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam step differs");
+                            assert!(opt.m.iter().zip(&ropt.m).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam m");
+                            // Second step: the trainer's FT copy must follow the update.
+                            let (g2, l2, _) = reference_step(&pref, sh, kl, &recs, &mirror, &mut Adam { m: ropt.m.clone(), v: ropt.v.clone(), step: 1 });
+                            assert_eq!(bt.batch(pool, &p2, &recs, &mirror, 0.5, kl), l2, "{what}: second step loss");
+                            assert!(bt.gradient().iter().zip(&g2).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: second step gradient");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Without `exact`, results do not depend on threads or ISA at all.
+    #[test]
+    fn batch_trainer_is_deterministic() {
+        let sh = Shape { h: 96, buckets: 8, kb: 1 };
+        let mut rng = Rng::new(9);
+        let p = init_params(sh, &mut rng);
+        let (recs, mirror) = test_recs(500);
+        let mut first: Option<(f64, Vec<f32>)> = None;
+        for isa in isas() {
+            for threads in [1, 2, 5] {
+                let mut bt = batch::BatchTrainer::new(sh, 0, false);
+                bt.isa = isa;
+                let got = batch::Pool::with(threads, |pool| (bt.batch(pool, &p, &recs, &mirror, 0.5, NO_BUCKETS), bt.gradient()));
+                match &first {
+                    None => first = Some(got),
+                    Some(f) => {
+                        assert_eq!(f.0, got.0, "{isa:?} threads={threads}");
+                        assert!(f.1.iter().zip(&got.1).all(|(a, b)| a.to_bits() == b.to_bits()), "{isa:?} threads={threads}");
+                    }
+                }
+            }
         }
     }
 }

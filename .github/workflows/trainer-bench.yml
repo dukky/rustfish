@@ -1,0 +1,118 @@
+name: Trainer bench
+
+# CPU NNUE trainer throughput on GitHub's mixed x86 runners (EPYC Zen 3/4/5,
+# Xeon): the trainer on main vs this branch, H=512 B=8, plus an exact-parity
+# check (branch `--exact` vs main `--threads 1`, bit-identical nets). Runs on
+# push to the trainer-x86-speed branch only, 3 jobs, a few minutes each.
+
+on:
+  push:
+    branches: [trainer-x86-speed]
+    paths:
+      - "tools/nnue-trainer/**"
+      - ".github/workflows/trainer-bench.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: trainer-bench
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        job: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: old
+      - name: CPU
+        run: |
+          lscpu | tee cpu.txt
+          model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+          echo "MODEL=$model" >> "$GITHUB_ENV"
+          echo "### job ${{ matrix.job }}: $model ($(nproc) vCPU)" >> "$GITHUB_STEP_SUMMARY"
+          grep -o 'avx512[a-z_]*' /proc/cpuinfo | sort -u | tr '\n' ' ' >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+      - name: Build
+        run: |
+          set -e
+          b() {  # src-dir target-cpu out-name
+            RUSTFLAGS="-C target-cpu=$2" cargo build --release --quiet --manifest-path "$1/tools/nnue-trainer/Cargo.toml" --target-dir "/tmp/t-$3"
+            cp "/tmp/t-$3/release/nnue-trainer" "bin-$3"
+          }
+          b old x86-64-v3 old-v3
+          b old native old-native
+          b . x86-64-v3 new-v3
+          b . x86-64-v4 new-v4 || echo "x86-64-v4 build failed"
+          b . native new-native
+          cargo test --release --quiet --manifest-path tools/nnue-trainer/Cargo.toml
+      - name: Data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow datagen.yml --status success -L 1 --json databaseId -q '.[0].databaseId')
+          echo "datagen run $run"
+          mkdir -p dl
+          for s in 0 1; do
+            gh run download "$run" -R "$GITHUB_REPOSITORY" -n "datagen-shard-$s" -D "dl/$s"
+          done
+          gunzip -c dl/0/*.gz dl/1/*.gz | ./bin-new-v3 convert - all.bin
+          head -c 3200000 all.bin > val.bin
+          tail -c +3200001 all.bin > train.bin
+          ls -la train.bin val.bin
+      - name: Bench
+        run: |
+          set -o pipefail
+          T=$(nproc)
+          echo "| binary | ISA | threads | args | pos/s |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          run() {  # name isa threads epoch-size extra...
+            local name=$1 isa=$2 t=$3 es=$4; shift 4
+            [ -x "bin-$name" ] || return 0
+            out=$(NNUE_ISA=$isa "./bin-$name" train --data train.bin --out "/tmp/b-$name.bin" --hidden 512 --buckets 8 \
+                  --epochs 1 --epoch-size "$es" --seed 5 --mirror --threads "$t" "$@" 2>&1) || { echo "$out"; echo "| $name | ${isa:-auto} | $t | $* | failed |" >> "$GITHUB_STEP_SUMMARY"; return 0; }
+            echo "$out"
+            ps=$(echo "$out" | grep -o '[0-9]* pos/s' | tail -1)
+            echo "| $name | ${isa:-auto} | $t | $* | $ps |" >> "$GITHUB_STEP_SUMMARY"
+          }
+          run old-v3 "" "$T" 2000000
+          run old-native "" "$T" 2000000
+          run new-v3 "" "$T" 3000000
+          run new-v3 avx2 "$T" 3000000
+          run new-v3 portable "$T" 2000000
+          run new-v4 "" "$T" 3000000
+          run new-native "" "$T" 3000000
+          run new-native "" "$((T / 2))" 2000000
+          run new-native "" 1 1000000
+          run old-native "" "$((T / 2))" 1000000
+          run old-native "" 1 400000
+          run new-native "" "$T" 3000000 --exact
+          run new-native "" "$T" 3000000 --sub-batch 256
+          run new-native "" "$T" 3000000 --sub-batch 1024
+          run new-native "" "$T" 3000000 --sub-batch 2048
+          run old-native "" "$T" 1000000 --king-buckets kb8m
+          run new-native "" "$T" 2000000 --king-buckets kb8m
+          run new-native "" "$T" 2000000 --hidden 1024
+      - name: Parity
+        run: |
+          set -e
+          A="--data train.bin --val val.bin --hidden 512 --buckets 8 --epochs 1 --epoch-size 200000 --seed 5 --mirror"
+          ./bin-old-v3 train $A --out /tmp/p-old.bin --threads 1 | tail -2
+          ./bin-new-v3 train $A --out /tmp/p-exact.bin --threads "$(nproc)" --exact | tail -2
+          ./bin-new-v3 train $A --out /tmp/p-fast.bin --threads "$(nproc)" | tail -2
+          if cmp /tmp/p-old.bin /tmp/p-exact.bin && cmp /tmp/p-old.ckpt /tmp/p-exact.ckpt; then
+            echo "parity: --exact bit-identical to main --threads 1" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "parity: --exact DIFFERS from main --threads 1" >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
