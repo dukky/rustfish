@@ -275,3 +275,4 @@
 {"branch": "main", "logged_at": "2026-11-07T18:33:25Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 38, "sha": "c4a4224d5836b549ca94c1ab72cb452c72c06232"}
 {"branch": "main", "logged_at": "2026-11-07T19:18:56Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 39, "sha": "5ad7347a3776489ecbbc48866878011aa21d9501"}
 {"branch": "feat-ttpv", "elo": -3.88, "elo_ci95": [-9.53, 1.78], "games": 5376, "llr": -3.831, "logged_at": "2026-11-07T19:39:50Z", "mode": "stc", "outcome": "rejected", "sha": "e39f27133897d595d79fd9d9eb54847b6a33cdb0", "test_id": "q-feat-ttpv-1107-1732", "verdict": "H0"}
+{"base_sha": "5ad7347a3776489ecbbc48866878011aa21d9501", "branch": "nnue-g5kb8m", "logged_at": "2026-11-07T19:40:25Z", "mode": "net-gate", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "50864a096187b729523872d36fc6e196c435d158", "test_id": "q-nnue-g5kb8m-1107-1940"}

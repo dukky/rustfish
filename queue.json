@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-g5kb8m",
-      "mode": "net-gate",
-      "expect": 8.0,
-      "front": true
-    },
-    {
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
@@ -59,7 +53,18 @@
       "expect": 5.0
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "nnue-g5kb8m",
+    "mode": "net-gate",
+    "expect": 8.0,
+    "front": true,
+    "test_id": "q-nnue-g5kb8m-1107-1940",
+    "sha": "50864a096187b729523872d36fc6e196c435d158",
+    "base_sha": "5ad7347a3776489ecbbc48866878011aa21d9501",
+    "started": "2026-11-07T19:40:25Z",
+    "bench": 639899,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
