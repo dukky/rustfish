@@ -1647,6 +1647,18 @@ fn negamax(
                     r += params.lmr_not_improving;
                 }
                 r.clamp(0, depth - 2)
+            } else if stage == Stage::BadCapture
+                && beta - alpha <= 1
+                && !in_check
+                && !gives_check
+                && depth >= params.lmr_min_depth
+                && idx >= params.lmr_min_move_index
+            {
+                // Late losing captures (SEE < 0) at non-PV nodes: a fraction of
+                // the quiet table reduction, since they still change material.
+                let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
+                let m = idx.min(LMR_MAX_MOVES - 1);
+                (engine.lmr_table[d][m] * params.lmr_capture_pct / 100).clamp(0, depth - 2)
             } else {
                 0
             };
