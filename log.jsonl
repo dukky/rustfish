@@ -272,3 +272,4 @@
 {"base_sha": "921bcebf0af4a62928d30cd10542b88ff3bc4675", "branch": "feat-ttpv", "logged_at": "2026-11-07T17:32:20Z", "mode": "stc", "outcome": "dispatched", "priority": {"considered": 10, "gain": 5.0, "gain_source": "expect", "p_accept": 0.289, "rule": "score", "runner_hours": 6.35, "samples": 55, "score": 0.2275}, "sha": "e39f27133897d595d79fd9d9eb54847b6a33cdb0", "test_id": "q-feat-ttpv-1107-1732"}
 {"branch": "main", "logged_at": "2026-11-07T17:49:02Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 37, "sha": "985c61bf96b645ee3209ff7ca9162f93a17b1908"}
 {"branch": "nnue-g4kb4", "logged_at": "2026-11-07T18:28:31Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
+{"branch": "main", "logged_at": "2026-11-07T18:33:25Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 38, "sha": "c4a4224d5836b549ca94c1ab72cb452c72c06232"}
