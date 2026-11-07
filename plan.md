@@ -18,7 +18,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
 
-## Status 2026-11-07 02:20 (updated 02:20)
+## Status 2026-11-07 08:00
 
 - **Ladder 3429 CCRL Blitz (CI 3401-3459)** on main after g3: past the 3400
   short-term target (~#122). Next: top 100 = 3504.
@@ -76,6 +76,17 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 - **Threat inputs** (branch `threat-inputs`, off by default, engine + both
   trainers, verified): `ep` (en-prise block) -1.0% val loss at H128 but -22%
   NPS; `ad` no gain, -41% NPS. Parked until the update path is cheaper.
+- **Overnight (02:30-07:40 lost to the session limit):** simp-nmp-margin
+  merged **+8.2 [1.1, 15.4]** (null move needs eval >= beta), simp-lmr-goodhist
+  merged (neutral); simp-castle-order rejected (-1.4). g4ws (g4w at g3 scale)
+  -22.7: g4w's loss was over-specialisation of the short warm start, not
+  scale. King-bucket learning curve: gap 0.0011 at 50% of games vs 0.0006 at
+  100%, overfits from epoch 1 -> data-limited; revisit at several times the
+  pool. **Gen 4 from scratch** on pool4 (677M: pool3f + s17x2, L1003, CI
+  s18-24) training (chain8), gate ~10:30. Short warm starts on new data
+  (auto loop, g4w) don't win; from-scratch generations do.
+- Round 2: `simp2-*` (HCE-era margins) and `feat-*` (modern search gaps)
+  branches in progress by subagents; tm-ccrl-r2 and simp-lmr-extra-r2 queued.
 - Simplification pass: four `simp-*` branches queued as nonreg (castle
   ordering bonus, LMR good-history double count, NMP eval margin, LMR extra
   reduction).
