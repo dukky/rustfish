@@ -37,7 +37,7 @@ pub const TB: usize = 16;
 /// Forward register tile (floats).
 const TF: usize = 64;
 /// Samples per forward unit.
-const FB: usize = 16;
+const FB: usize = 32;
 /// FT rows per AdamW unit.
 const AB: usize = 16;
 
@@ -209,6 +209,13 @@ pub struct BatchTrainer {
     pub exact: bool,
     /// FT weight gradient, `[tile][row][TB]`.
     gft: ABuf,
+    /// Forward tile width (64, or 16 if H is no multiple of 64) and a copy
+    /// of the FT weights in `[tile][row][tf]` order, so that a forward tile
+    /// pass reads one contiguous block (row-major rows 2 KB apart alias in
+    /// the caches). Kept in sync by `adam`.
+    tf: usize,
+    wt: ABuf,
+    wt_ok: bool,
     /// Gradient of params `ft_b()..len()` (FT bias, output weights, output
     /// bias), standard layout.
     grest: ABuf,
@@ -234,6 +241,9 @@ impl BatchTrainer {
             isa: Isa::detect(),
             exact,
             gft: ABuf::new(rows * sh.h),
+            tf: if sh.h % TF == 0 { TF } else { TB },
+            wt: ABuf::new(rows * sh.h),
+            wt_ok: false,
             grest: ABuf::new(sh.len() - sh.ft_b()),
             acc: [ABuf::new(sb * 2 * sh.h), ABuf::new(sb * 2 * sh.h)],
             samples: [vec![blank; sb], vec![blank; sb]],
@@ -255,7 +265,11 @@ impl BatchTrainer {
         assert_eq!(p.len(), self.sh.len());
         self.grad.resize(n, 0.0);
         self.loss.resize(n, 0.0);
-        let (sh, rows, tiles, sb, isa, exact) = (self.sh, self.rows, self.tiles, self.sb, self.isa, self.exact);
+        if !self.wt_ok {
+            self.sync_weights(p);
+        }
+        let (sh, rows, tiles, sb, isa, exact, tf) = (self.sh, self.rows, self.tiles, self.sb, self.isa, self.exact, self.tf);
+        let wt = self.wt.ptr();
         let gft = self.gft.ptr();
         let grest = self.grest.ptr();
         let accs = [self.acc[0].ptr(), self.acc[1].ptr()];
@@ -287,7 +301,10 @@ impl BatchTrainer {
                     }
                     let a = FwdArgs {
                         sh,
+                        rows,
+                        tf,
                         p,
+                        wt: wt.get(),
                         ss,
                         acc: accs[k % 2].get().add(s0 * 2 * sh.h),
                         grad: grad.get().add(base + s0),
@@ -298,6 +315,19 @@ impl BatchTrainer {
             });
         }
         self.loss.iter().map(|&l| l as f64).sum()
+    }
+
+    /// Rebuilds the tile-major FT copy from `p` (call after changing `p`
+    /// other than through `adam`).
+    pub fn sync_weights(&mut self, p: &[f32]) {
+        let (h, rows, tf) = (self.sh.h, self.rows, self.tf);
+        let wt = self.wt.ptr().get();
+        for f in 0..rows {
+            for t in 0..h / tf {
+                unsafe { std::ptr::copy_nonoverlapping(p.as_ptr().add(f * h + t * tf), wt.add((t * rows + f) * tf), tf) };
+            }
+        }
+        self.wt_ok = true;
     }
 
     /// One AdamW step (same maths and constants as v2) from the accumulated
@@ -314,6 +344,10 @@ impl BatchTrainer {
         };
         let (h, rows, tiles, ftb) = (self.sh.h, self.rows, self.tiles, self.sh.ft_b());
         let (pp, mp, vp) = (Ptr(p.as_mut_ptr()), Ptr(opt.m.as_mut_ptr()), Ptr(opt.v.as_mut_ptr()));
+        if !self.wt_ok {
+            self.sync_weights(p);
+        }
+        let (wt, tf) = (self.wt.ptr(), self.tf);
         let gft = self.gft.ptr();
         let grest = self.grest.ptr();
         let rest = p.len() - ftb;
@@ -321,10 +355,11 @@ impl BatchTrainer {
         let isa = self.isa;
         par_units(pool, ft_units + 1, &|u| unsafe {
             let a = if u < ft_units {
-                AdamArgs { p: pp.get(), m: mp.get(), v: vp.get(), g: gft.get(), h, rows, tiles, f0: u * AB, f1: ((u + 1) * AB).min(rows), flat: 0 }
+                let (f0, f1) = (u * AB, ((u + 1) * AB).min(rows));
+                AdamArgs { p: pp.get(), m: mp.get(), v: vp.get(), g: gft.get(), wt: wt.get(), tf, h, rows, tiles, f0, f1, flat: 0 }
             } else {
                 let (p, m, v) = (pp.get().add(ftb), mp.get().add(ftb), vp.get().add(ftb));
-                AdamArgs { p, m, v, g: grest.get(), h, rows, tiles, f0: 0, f1: 0, flat: rest }
+                AdamArgs { p, m, v, g: grest.get(), wt: wt.get(), tf, h, rows, tiles, f0: 0, f1: 0, flat: rest }
             };
             adam_dispatch(isa, &c, &a);
         });
@@ -350,7 +385,11 @@ impl BatchTrainer {
 
 struct FwdArgs<'a> {
     sh: Shape,
+    rows: usize,
+    tf: usize,
     p: &'a [f32],
+    /// Tile-major FT weights (`BatchTrainer::wt`).
+    wt: *const f32,
     ss: &'a [Sample],
     /// `ss.len() * 2h` accumulators out.
     acc: *mut f32,
@@ -371,16 +410,17 @@ struct BwdArgs<'a> {
     c: usize,
 }
 
-/// Bias + active rows for `TW` columns starting at `col`, in registers.
+/// Bias + active rows for one `TW`-column tile, in registers. `tile` is
+/// row 0 of the tile in the tile-major FT copy, `bias` the tile's bias.
 #[inline(always)]
-unsafe fn fwd_tile<V: Simd, const TW: usize>(fw: *const f32, fb: *const f32, h: usize, feats: &[u16], col: usize, out: *mut f32) {
+unsafe fn fwd_tile<V: Simd, const TW: usize>(tile: *const f32, bias: *const f32, feats: &[u16], out: *mut f32) {
     let n = TW / V::W;
     let mut r = [V::zero(); 16];
     for (k, x) in r[..n].iter_mut().enumerate() {
-        *x = V::load(fb.add(col + k * V::W));
+        *x = V::load(bias.add(k * V::W));
     }
     for &f in feats {
-        let row = fw.add(f as usize * h + col);
+        let row = tile.add(f as usize * TW);
         for (k, x) in r[..n].iter_mut().enumerate() {
             *x = x.add(V::load(row.add(k * V::W)));
         }
@@ -393,12 +433,38 @@ unsafe fn fwd_tile<V: Simd, const TW: usize>(fw: *const f32, fb: *const f32, h: 
 /// Adds `sum(clamp(a)^2 * w)` over `TW` floats into 16 interleaved lanes
 /// (`lanes[j]` sums the elements with index = j mod 16).
 #[inline(always)]
-unsafe fn dot_tile<V: Simd, const TW: usize>(a: *const f32, w: *const f32, lanes: &mut [V; 16]) {
+unsafe fn dot_tile<V: Simd, const TW: usize>(a: *const f32, w: *const f32, lanes: *mut f32) {
     let per16 = 16 / V::W;
+    let mut l = [V::zero(); 16];
+    for (k, x) in l[..per16].iter_mut().enumerate() {
+        *x = V::load(lanes.add(k * V::W));
+    }
     for k in 0..TW / V::W {
         let x = V::load(a.add(k * V::W)).clamp01();
-        let l = &mut lanes[k % per16];
+        let l = &mut l[k % per16];
         *l = l.add(x.mul(x).mul(V::load(w.add(k * V::W))));
+    }
+    for (k, x) in l[..per16].iter().enumerate() {
+        x.store(lanes.add(k * V::W));
+    }
+}
+
+/// One column tile of every sample in the block: the tile of the FT stays
+/// in L1/L2 while the block's samples reuse its rows.
+#[inline(always)]
+unsafe fn fwd_cols<V: Simd, const EXACT: bool, const TW: usize>(a: &FwdArgs, side: usize, col: usize, lanes: &mut [[f32; 16]; FB]) {
+    let sh = a.sh;
+    let h = sh.h;
+    let fw = a.p.as_ptr();
+    let bias = fw.add(sh.ft_b() + col);
+    let tile = a.wt.add(col / TW * a.rows * TW);
+    for (j, s) in a.ss.iter().enumerate() {
+        let out = a.acc.add(j * 2 * h + side * h + col);
+        fwd_tile::<V, TW>(tile, bias, &s.f[side][..s.n], out);
+        if !EXACT {
+            let ow = fw.add(sh.out_w() + s.bucket * 2 * h + side * h + col);
+            dot_tile::<V, TW>(out, ow, lanes[j].as_mut_ptr());
+        }
     }
 }
 
@@ -406,31 +472,20 @@ unsafe fn dot_tile<V: Simd, const TW: usize>(a: *const f32, w: *const f32, lanes
 unsafe fn fwd_impl<V: Simd, const EXACT: bool>(a: &FwdArgs) {
     let sh = a.sh;
     let h = sh.h;
-    let fw = a.p.as_ptr();
-    let fb = fw.add(sh.ft_b());
-    for (j, s) in a.ss.iter().enumerate() {
-        let acc = a.acc.add(j * 2 * h);
-        let ow = fw.add(sh.out_w() + s.bucket * 2 * h);
-        let mut lanes = [V::zero(); 16];
-        for side in 0..2 {
-            let feats = &s.f[side][..s.n];
-            let out = acc.add(side * h);
-            let mut col = 0;
-            while col + TF <= h {
-                fwd_tile::<V, TF>(fw, fb, h, feats, col, out.add(col));
-                if !EXACT {
-                    dot_tile::<V, TF>(out.add(col), ow.add(side * h + col), &mut lanes);
-                }
-                col += TF;
-            }
-            while col < h {
-                fwd_tile::<V, TB>(fw, fb, h, feats, col, out.add(col));
-                if !EXACT {
-                    dot_tile::<V, TB>(out.add(col), ow.add(side * h + col), &mut lanes);
-                }
-                col += TB;
+    debug_assert!(a.ss.len() <= FB);
+    let mut lanes = [[0.0f32; 16]; FB];
+    for side in 0..2 {
+        for col in (0..h).step_by(a.tf) {
+            if a.tf == TF {
+                fwd_cols::<V, EXACT, TF>(a, side, col, &mut lanes);
+            } else {
+                fwd_cols::<V, EXACT, TB>(a, side, col, &mut lanes);
             }
         }
+    }
+    for (j, s) in a.ss.iter().enumerate() {
+        let acc = a.acc.add(j * 2 * h);
+        let ow = a.p.as_ptr().add(sh.out_w() + s.bucket * 2 * h);
         let sum = if EXACT {
             // `forward`'s sequential sum.
             let mut sum = 0.0f32;
@@ -440,11 +495,7 @@ unsafe fn fwd_impl<V: Simd, const EXACT: bool>(a: &FwdArgs) {
             }
             sum
         } else {
-            let mut l = [0.0f32; 16];
-            let per16 = 16 / V::W;
-            for (k, v) in lanes[..per16].iter().enumerate() {
-                v.store(l.as_mut_ptr().add(k * V::W));
-            }
+            let l = &mut lanes[j];
             let mut w = 8;
             while w > 0 {
                 for i in 0..w {
@@ -519,6 +570,8 @@ struct AdamArgs {
     m: *mut f32,
     v: *mut f32,
     g: *mut f32,
+    wt: *mut f32,
+    tf: usize,
     h: usize,
     rows: usize,
     tiles: usize,
@@ -560,6 +613,8 @@ unsafe fn adam_impl(c: &AdamC, a: &AdamArgs) {
         for t in 0..a.tiles {
             let i = f * a.h + t * TB;
             adam_run(c, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + f) * TB), TB);
+            let j = t * TB;
+            std::ptr::copy_nonoverlapping(a.p.add(i), a.wt.add((j / a.tf * a.rows + f) * a.tf + j % a.tf), TB);
         }
     }
 }

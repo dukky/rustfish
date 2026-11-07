@@ -1782,11 +1782,15 @@ mod tests {
                             }
                         }
                         bt.adam(pool, &mut p2, &mut opt, 1e-3, 0.01, 1.0 / recs.len() as f32);
+                        assert!(bt.gradient().iter().all(|&x| x == 0.0), "{what}: gradient not cleared");
                         if exact {
                             assert!(p2.iter().zip(&pref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam step differs");
                             assert!(opt.m.iter().zip(&ropt.m).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam m");
+                            // Second step: the trainer's FT copy must follow the update.
+                            let (g2, l2, _) = reference_step(&pref, sh, kl, &recs, &mirror, &mut Adam { m: ropt.m.clone(), v: ropt.v.clone(), step: 1 });
+                            assert_eq!(bt.batch(pool, &p2, &recs, &mirror, 0.5, kl), l2, "{what}: second step loss");
+                            assert!(bt.gradient().iter().zip(&g2).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: second step gradient");
                         }
-                        assert!(bt.gradient().iter().all(|&x| x == 0.0), "{what}: gradient not cleared");
                     });
                 }
             }

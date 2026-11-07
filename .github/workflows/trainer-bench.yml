@@ -81,25 +81,29 @@ jobs:
             local name=$1 isa=$2 t=$3 es=$4; shift 4
             [ -x "bin-$name" ] || return 0
             out=$(NNUE_ISA=$isa "./bin-$name" train --data train.bin --out "/tmp/b-$name.bin" --hidden 512 --buckets 8 \
-                  --epochs 1 --epoch-size "$es" --seed 5 --mirror --threads "$t" "$@" 2>&1) || { echo "$out"; return 1; }
+                  --epochs 1 --epoch-size "$es" --seed 5 --mirror --threads "$t" "$@" 2>&1) || { echo "$out"; echo "| $name | ${isa:-auto} | $t | $* | failed |" >> "$GITHUB_STEP_SUMMARY"; return 0; }
             echo "$out"
             ps=$(echo "$out" | grep -o '[0-9]* pos/s' | tail -1)
             echo "| $name | ${isa:-auto} | $t | $* | $ps |" >> "$GITHUB_STEP_SUMMARY"
           }
-          run old-v3 "" "$T" 1000000
-          run old-native "" "$T" 1000000
+          run old-v3 "" "$T" 2000000
+          run old-native "" "$T" 2000000
           run new-v3 "" "$T" 3000000
           run new-v3 avx2 "$T" 3000000
+          run new-v3 portable "$T" 2000000
           run new-v4 "" "$T" 3000000
           run new-native "" "$T" 3000000
           run new-native "" "$((T / 2))" 2000000
           run new-native "" 1 1000000
-          run old-native "" 1 300000
+          run old-native "" "$((T / 2))" 1000000
+          run old-native "" 1 400000
           run new-native "" "$T" 3000000 --exact
           run new-native "" "$T" 3000000 --sub-batch 256
           run new-native "" "$T" 3000000 --sub-batch 1024
+          run new-native "" "$T" 3000000 --sub-batch 2048
           run old-native "" "$T" 1000000 --king-buckets kb8m
           run new-native "" "$T" 2000000 --king-buckets kb8m
+          run new-native "" "$T" 2000000 --hidden 1024
       - name: Parity
         run: |
           set -e
