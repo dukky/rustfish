@@ -1709,7 +1709,7 @@ fn quiescence(
 
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
-            return beta;
+            return stand_pat;
         }
         if stand_pat > alpha {
             alpha = stand_pat;
@@ -1776,12 +1776,12 @@ fn quiescence(
                 .store(
                     key,
                     0,
-                    score_to_tt(beta, ply),
+                    score_to_tt(score, ply),
                     raw_static_eval,
                     Bound::Lower,
                     Some(mv),
                 );
-            return beta;
+            return score;
         }
         if score > alpha {
             alpha = score;
