@@ -5,7 +5,7 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-07 09:50._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-07 10:45._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
@@ -97,6 +97,12 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   chain9: g4kb4 (kb4 exact factoriser warm start from g4, keep-best) vs
   g4ft (same fine-tune, no kb) ~11:40. kb8m can't start exactly from an
   unmirrored net (needs an m1 copy first).
+- **Runner split trial (10:45, f5379f8):** 13 datagen / 6 test runners
+  (`lanes` in queue-settings.json), ~58M positions/h. Gen 5 when the pool is
+  ~+35% (~1.0B, ~15:00). **Stop rule:** gen 5 < +8 at its gate -> back to
+  6/13 (background_parallel 6, mode shards 13, burst 13/13, ladder
+  max-parallel 13). Feature tests take ~2x longer meanwhile. AVX-512 NNUE
+  paths + runner CPU logging in progress (subagent, `nnue-avx512`).
 - **Local datagen** (09:30): `~/rustfish-data/datagen-gate.sh` runs seed 1004
   (main 7d1fc8a, net scale, 7 threads, ~1300 pos/s = ~4.7M/h) only while no
   GPU training runs (SIGSTOP/SIGCONT); the auto loop ingests local/L1004.txt.
