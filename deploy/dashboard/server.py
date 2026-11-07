@@ -334,6 +334,9 @@ def build_status():
                        "ci_width": round(r["ci"][1] - r["ci"][0], 1) if r.get("ci") else None,
 "when": parse_when(r.get("logged_at")), "rating": r["rating"],
                        "ci": r.get("ci"), "sha": (r.get("sha") or "")[:7], "note": r.get("note"),
+                       # Rows from 2026-11-07 on: ci is pentanomial + anchor CCRL error and
+                       # ci_binomial the old interval; older rows have only the binomial ci.
+                       "ci_method": r.get("ci_method") or "binomial", "ci_binomial": r.get("ci_binomial"),
                        "games": r.get("games"), "tc": r.get("tc"), "url": r.get("url"),
                        "anchors_file": r.get("anchors_file", "scripts/anchors.json"),
                        "rating_with_black_marlin": r.get("rating_with_black_marlin"),
@@ -556,7 +559,7 @@ def build_status():
     # merged after it. Estimated is never presented as an official CCRL rating.
     measured = None
     if latest:
-        measured = {k: latest[k] for k in ("rating", "ci", "when", "sha", "url", "games")}
+        measured = {k: latest[k] for k in ("rating", "ci", "ci_method", "when", "sha", "url", "games")}
     components = []
     if measured and measured.get("when"):
         for e in events:
@@ -590,7 +593,7 @@ def build_status():
         "background": background,
         "runner_usage": runner_usage,
         "roadmap": {"source": "plan.md", "ref": "main", "last_updated": plan_updated},
-        "current": latest and {k: latest[k] for k in ("rating", "ci", "sha", "when", "url", "games")},
+        "current": latest and {k: latest[k] for k in ("rating", "ci", "ci_method", "sha", "when", "url", "games")},
         "gap": latest and round(target["rating"] - latest["rating"], 1),
         "ladder": points,
         "queue": {"current": inflight, "pending": queue.get("pending", []), "paused": queue.get("paused")},

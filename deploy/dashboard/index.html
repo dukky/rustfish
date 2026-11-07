@@ -227,7 +227,7 @@ function renderTiles(s) {
   $("tiles").innerHTML = `
     <div class="tile"><div class="label">Measured strength</div>
       <div class="big">${fmt(c.rating)}</div>
-      <div class="sub">official ladder · 95% CI ${fmt(c.ci?.[0])}–${fmt(c.ci?.[1])} · main <a class="mono" href="${ghRepo()}/commit/${esc(c.sha)}">${esc(c.sha)}</a> · <a href="${esc(c.url)}">${ago(c.when)}</a></div></div>
+      <div class="sub">official ladder · 95% CI ${fmt(c.ci?.[0])}–${fmt(c.ci?.[1])}${c.ci_method && c.ci_method !== "binomial" ? ` <span title="pentanomial game noise plus the anchors' own CCRL errors; earlier ladders show the wider binomial CI">(pairs + anchor ±)</span>` : ""} · main <a class="mono" href="${ghRepo()}/commit/${esc(c.sha)}">${esc(c.sha)}</a> · <a href="${esc(c.url)}">${ago(c.when)}</a></div></div>
     <div class="tile est"><div class="label">Estimated strength</div>
       <div class="big">${est ? fmt(est.rating) : "–"}</div>
       <div class="sub">unofficial · ${est ? (est.components.length
