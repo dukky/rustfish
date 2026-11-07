@@ -12,10 +12,10 @@
     "nodes": 5000
   },
   "ladder": {
-    "games_per_anchor": "64",
+    "games_per_anchor": "52",
     "tc": "120+1",
     "anchors_file": "scripts/anchors-elite.json",
-    "anchors": "viridithas-4.0.0,stash-28.0,stash-30.0,stash-31.0,stash-33.0,weiss-2.0,stash-35.0,reckless-0.6.0,stash-37.0,koivisto-6.0,reckless-0.7.0"
+    "anchors": "weiss-2.0,stash-35.0,reckless-0.6.0,stash-37.0,koivisto-6.0,reckless-0.7.0,carp-3.0.1,berserk-8,altair-7.0.0,koivisto-8.0,koivisto-9.0"
   },
   "modes": {
     "stc": {

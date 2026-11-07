@@ -135,7 +135,10 @@ jobs:
           esac
           # Sleep before quit so threaded searchers answer; grep the captured
           # output rather than piping, so an early grep exit can't SIGPIPE the engine.
-          out=$( (printf 'uci\nisready\nucinewgame\nisready\nposition startpos\ngo depth 4\n'; sleep 2; printf 'quit\n') | "engines/$NAME" 2>&1 )
+          # A nonzero exit is tolerated if bestmove was printed: altair-7.0.0 aborts on
+          # 'quit' (joinable std::thread destroyed), which fastchess does not mind.
+          out=$( (printf 'uci\nisready\nucinewgame\nisready\nposition startpos\ngo depth 4\n'; sleep 2; printf 'quit\n') | "engines/$NAME" 2>&1 ) \
+            || echo "engine exited with status $? (accepted only if it printed bestmove)"
           grep bestmove <<<"$out" || { echo "no bestmove; engine said:"; echo "$out"; exit 1; }
 
       - name: Fetch fastchess and openings
