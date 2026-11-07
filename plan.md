@@ -18,7 +18,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
 
-## Status 2026-11-07 02:00
+## Status 2026-11-07 02:20
 
 - **Ladder 3429 CCRL Blitz (CI 3401-3459)** on main after g3: past the 3400
   short-term target (~#122). Next: top 100 = 3504.
@@ -35,6 +35,17 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   games (was +4 under the HCE). Testing now: g4w (warm start from g3f on new
   data, best on the newest val sets), then g3f (g3 on corrected data, better on
   all val sets), then tm-ccrl nonreg.
+- **g4w rejected at the net gate, -21.7 [-38, -5] (768 games).** Hypothesis
+  (not yet a verdict): eval scale. Corrected data has labels ~1.13x the net's
+  evals, so each net trained on it grows its output: mean|eval| on val17x2 is
+  g3 444, g3f 482 (+9%), g4w 513 (+16%), and a +25% scale was -22 earlier.
+  Validation loss rewards matching the labels' scale, so "better val" partly
+  measured scale: rescaled to g3's mean|eval|, g3fs is worse than g3 on
+  val17x2 (0.02666 vs 0.02649). Competing explanation for g4w: overfitting
+  to 44M recent positions (its val.bin got worse). Discriminating gates
+  queued: g3f (as is) vs g3fs (same net, output scaled x0.92), and g4ws
+  (x0.865). If the scaled nets win, fix the scale at embed time (normalise
+  output to a reference mean|eval|) and screen at a fixed scale.
 - **Laptop:** Metal GPU trainer (~3x CPU; king buckets ~1.3x one bucket) does
   all training. `scripts/netloop.py auto` runs unattended: ingests CI and local
   datagen, scale-checks, warm-starts a candidate per ~30M new positions, screens
@@ -52,8 +63,10 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 - **Threat inputs** (branch `threat-inputs`, off by default, engine + both
   trainers, verified): `ep` (en-prise block) -1.0% val loss at H128 but -22%
   NPS; `ad` no gain, -41% NPS. Parked until the update path is cheaper.
-- Next: simplification (nonreg) pass in progress (subagent, `simp-*`
-  branches); SPSA of 22 search params (`spsa-nnue`) when the queue is quiet.
+- Simplification pass: four `simp-*` branches queued as nonreg (castle
+  ordering bonus, LMR good-history double count, NMP eval margin, LMR extra
+  reduction).
+- Next: SPSA of 22 search params (`spsa-nnue`) when the queue is quiet.
 
 ## Strategy (2026-11-06): train the net properly
 
