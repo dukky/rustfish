@@ -130,7 +130,9 @@ against the current `main`, so a stale base can't happen.
   outcome: merged / rejected / needs-human / skipped).
 - Modes (bounds and wave sizes in `scripts/queue-settings.json`): `stc`
   (gainer `[0, 5]`), `nonreg` (`[-5, 0]`), `ltc-gainer` (`[0, 10]` at
-  60+0.6), `net-gate` (`[0, 10]` at 5+0.05, for nets), `speedup` (no SPRT; merges only if bench nodes equal
+  60+0.6), `ltc-check` (`[-5, 0]` at 60+0.6, queued by the queue itself),
+  `net-gate` (`[0, 10]` at 5+0.05, up to 5 waves, for same-shape nets;
+  new shapes or king layouts go `stc`), `ladder`, `speedup` (no SPRT; merges only if bench nodes equal
   `main`'s and the `evalhash` command gives the same hash as a `main` build:
   bench alone can't see an eval change that happens not to alter the bench
   tree). `evalhash` prints the HCE `Eval hash` and, when a net is active (the
@@ -144,7 +146,9 @@ against the current `main`, so a stale base can't happen.
   in-flight SPRT, which goes back to the queue right behind the new item and
   is retested from scratch: use it for net generations on the critical path,
   never for ladders or LTC checks, which it does not interrupt). Re-adding a
-  waiting branch moves it rather than queueing it twice. This drops a request file in
+  waiting branch moves it rather than queueing it twice;
+  `python3 scripts/queue.py remove <branch>[:<mode>]` drops a waiting item
+  (logged as `removed`). This drops a request file in
   `queue-state`'s `inbox/`, which the next queue run consumes. Don't pass work
   as workflow inputs or edit `queue.json` by hand: GitHub cancels all but one
   pending run per concurrency group, so inputs can silently vanish.
