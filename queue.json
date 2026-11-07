@@ -1,6 +1,12 @@
 {
   "pending": [
     {
+      "branch": "nnue-g5kb8m",
+      "mode": "net-gate",
+      "expect": 8.0,
+      "front": true
+    },
+    {
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
