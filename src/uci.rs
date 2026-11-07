@@ -175,7 +175,6 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "nullreductionbase" => engine.search_params.null_reduction_base = v.clamp(0, 6),
             "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
             "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),
-            "lmrextradepth" => engine.search_params.lmr_extra_depth = v.clamp(1, 16),
             _ => {}
         }
     }
@@ -186,7 +185,6 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "lmplimitd2" => engine.search_params.lmp_limit_d2 = v.clamp(0, 32),
             "lmplimitd3" => engine.search_params.lmp_limit_d3 = v.clamp(0, 40),
             "lmrminmoveindex" => engine.search_params.lmr_min_move_index = v.clamp(1, 24),
-            "lmrextramoveindex" => engine.search_params.lmr_extra_move_index = v.clamp(1, 32),
             _ => {}
         }
     }

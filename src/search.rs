@@ -1506,9 +1506,6 @@ fn negamax(
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
                 let m = idx.min(LMR_MAX_MOVES - 1);
                 let mut r = engine.lmr_table[d][m];
-                if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
-                    r += 1;
-                }
                 // Killers, counter-moves and positive-history quiets reduce one ply less.
                 if priority_quiet {
                     r -= 1;
