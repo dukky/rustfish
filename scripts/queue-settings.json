@@ -3,7 +3,7 @@
   "ladder_every": 5,
   "burst": {
     "enabled": true,
-    "below_score": 0.04,
+    "below_score": 0.1,
     "max_consecutive": 2,
     "when_idle": true,
     "shards": 12,
@@ -25,7 +25,7 @@
       "elo1": 5,
       "shards": 6,
       "rounds_per_shard": 16,
-      "max_rounds_per_shard": 64,
+      "max_rounds_per_shard": 160,
       "max_waves": 10
     },
     "nonreg": {
@@ -35,7 +35,7 @@
       "elo1": 0,
       "shards": 6,
       "rounds_per_shard": 16,
-      "max_rounds_per_shard": 64,
+      "max_rounds_per_shard": 160,
       "max_waves": 10
     },
     "ltc-gainer": {
@@ -45,7 +45,7 @@
       "elo1": 10,
       "shards": 6,
       "rounds_per_shard": 6,
-      "max_rounds_per_shard": 24,
+      "max_rounds_per_shard": 64,
       "max_waves": 8
     },
     "ltc-check": {
@@ -55,7 +55,7 @@
       "elo1": 0,
       "shards": 6,
       "rounds_per_shard": 6,
-      "max_rounds_per_shard": 24,
+      "max_rounds_per_shard": 64,
       "max_waves": 8
     },
     "net-gate": {
@@ -65,7 +65,7 @@
       "elo1": 10,
       "shards": 6,
       "rounds_per_shard": 8,
-      "max_rounds_per_shard": 16,
+      "max_rounds_per_shard": 40,
       "max_waves": 4
     }
   },

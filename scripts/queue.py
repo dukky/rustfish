@@ -566,7 +566,7 @@ def pick_next(pending, rates):
     A ladder or ltc-check keeps its place: nothing queued behind it can jump
     ahead, so measurement isn't starved. Among the items before it, the best
     score wins (ties: the earlier one), except that an item jumped over
-    MAX_PASSED_OVER times goes next (cheap stc items would otherwise starve a
+    max(MAX_PASSED_OVER, number of items waiting) times goes next (cheap stc items would otherwise starve a
     costly ltc-gainer forever)."""
     end = next((i for i, p in enumerate(pending) if p["mode"] in SCHEDULED), len(pending))
     for i, p in enumerate(pending[:end]):
@@ -574,8 +574,11 @@ def pick_next(pending, rates):
             return i, {"rule": "front"}
     if end == 0:
         return 0, {"rule": "scheduled"}
+    # The guard scales with the queue: with N items waiting, every pick passes
+    # over up to N-1 of them, so a fixed 3 turned priority into FIFO.
+    limit = max(MAX_PASSED_OVER, end)
     for i, p in enumerate(pending[:end]):
-        if p.get("passed_over", 0) >= MAX_PASSED_OVER:
+        if p.get("passed_over", 0) >= limit:
             return i, dict(priority_of(p, rates), rule="starvation-guard", passed_over=p["passed_over"])
     scored = [(priority_of(p, rates), i) for i, p in enumerate(pending[:end])]
     best, idx = max(scored, key=lambda s: (s[0]["score"], -s[1]))
