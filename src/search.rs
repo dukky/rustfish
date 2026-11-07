@@ -1279,13 +1279,9 @@ fn negamax(
     let params = engine.search_params;
 
     if let Some(se) = static_eval {
-        if beta - alpha <= 1 && depth <= 2 {
-            let margin = if depth == 1 {
-                params.futility_margin_d1
-            } else {
-                params.futility_margin_d2
-            };
-            if se + margin <= alpha {
+        // Depth-1 futility: hopelessly behind, so let qsearch settle the node.
+        if beta - alpha <= 1 && depth == 1 {
+            if se + params.futility_margin_d1 <= alpha {
                 return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check));
             }
         }
