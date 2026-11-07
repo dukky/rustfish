@@ -171,6 +171,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "nullreductionbase" => engine.search_params.null_reduction_base = v.clamp(0, 6),
             "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
             "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),
+            "lmrnotimproving" => engine.search_params.lmr_not_improving = v.clamp(0, 3),
             "lmrextradepth" => engine.search_params.lmr_extra_depth = v.clamp(1, 16),
             _ => {}
         }

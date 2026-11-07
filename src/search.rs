@@ -1516,6 +1516,10 @@ fn negamax(
                 if quiet_history < -LMR_HISTORY_THRESHOLD {
                     r += 1;
                 }
+                // Reduce more when our static eval is not improving.
+                if !improving {
+                    r += params.lmr_not_improving;
+                }
                 r.clamp(0, depth - 2)
             } else {
                 0
