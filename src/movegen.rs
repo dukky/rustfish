@@ -504,9 +504,108 @@ pub(crate) fn piece_attacks(sq: u8, piece: Piece, occ: u64) -> u64 {
     }
 }
 
+/// Squares attacked by one side, accumulated by attacker value: `pawn` holds
+/// pawn attacks, `minor` adds knights and bishops, `rook` adds rooks, `all`
+/// adds queens and the king.
+#[derive(Copy, Clone, Default)]
+pub(crate) struct ThreatMaps {
+    pub(crate) pawn: u64,
+    pub(crate) minor: u64,
+    pub(crate) rook: u64,
+    pub(crate) all: u64,
+}
+
+impl ThreatMaps {
+    /// Squares attacked by an enemy piece worth less than `kind` (empty for
+    /// pawns and the king).
+    #[inline(always)]
+    pub(crate) fn by_lesser(&self, kind: PieceType) -> u64 {
+        match kind {
+            PieceType::Knight | PieceType::Bishop => self.pawn,
+            PieceType::Rook => self.minor,
+            PieceType::Queen => self.rook,
+            PieceType::Pawn | PieceType::King => 0,
+        }
+    }
+}
+
+pub(crate) fn threat_maps(board: &Board, by: Color) -> ThreatMaps {
+    use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
+
+    const NOT_A_FILE: u64 = 0xfefe_fefe_fefe_fefe;
+    const NOT_H_FILE: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    let c = color_index(by);
+    let bb = &board.bb;
+    let occ = bb.occ_all();
+    let p = bb.pieces[c];
+
+    let pawn = if by == Color::White {
+        ((p[0] << 7) & NOT_H_FILE) | ((p[0] << 9) & NOT_A_FILE)
+    } else {
+        ((p[0] >> 9) & NOT_H_FILE) | ((p[0] >> 7) & NOT_A_FILE)
+    };
+
+    let mut minor = pawn;
+    let mut b = p[1];
+    while b != 0 {
+        minor |= KNIGHT_ATTACKS[b.trailing_zeros() as usize];
+        b &= b - 1;
+    }
+    let mut b = p[2];
+    while b != 0 {
+        minor |= bishop_attacks(b.trailing_zeros() as usize, occ);
+        b &= b - 1;
+    }
+
+    let mut rook = minor;
+    let mut b = p[3];
+    while b != 0 {
+        rook |= rook_attacks(b.trailing_zeros() as usize, occ);
+        b &= b - 1;
+    }
+
+    let mut all = rook;
+    let mut b = p[4];
+    while b != 0 {
+        let s = b.trailing_zeros() as usize;
+        all |= bishop_attacks(s, occ) | rook_attacks(s, occ);
+        b &= b - 1;
+    }
+    if p[5] != 0 {
+        all |= KING_ATTACKS[p[5].trailing_zeros() as usize];
+    }
+
+    ThreatMaps { pawn, minor, rook, all }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threat_maps_match_square_attacks() {
+        let mut board = Board::new();
+        for fen in [
+            "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ] {
+            board.set_fen(fen);
+            for by in [Color::White, Color::Black] {
+                let t = threat_maps(&board, by);
+                for sq in 0..64u8 {
+                    assert_eq!(
+                        t.all >> sq & 1 == 1,
+                        is_square_attacked(&board, sq, by),
+                        "{fen} sq {sq}"
+                    );
+                }
+                assert_eq!(t.pawn & !t.minor, 0);
+                assert_eq!(t.minor & !t.rook, 0);
+                assert_eq!(t.rook & !t.all, 0);
+            }
+        }
+    }
 
     #[test]
     fn castling_requires_rook_on_rook_square() {

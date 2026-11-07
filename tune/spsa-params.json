@@ -12,6 +12,7 @@
     "ReverseFutilityMarginD2": {"value": 180, "min": 60,  "max": 400, "c_end": 20,  "r_end": 0.002},
     "ReverseFutilityMarginD3": {"value": 300, "min": 100, "max": 600, "c_end": 30,  "r_end": 0.002},
     "NullReductionBase":       {"value": 2,   "min": 1,   "max": 5,   "c_end": 0.4, "r_end": 0.002},
+    "ThreatEscapeBonus":       {"value": 8000, "min": 0, "max": 20000, "c_end": 1500, "r_end": 0.002},
     "NullReductionDepthDiv":   {"value": 4,   "min": 2,   "max": 10,  "c_end": 0.6, "r_end": 0.002},
     "LmpLimitD1":              {"value": 6,   "min": 2,   "max": 16,  "c_end": 1,   "r_end": 0.002},
     "LmrCutNode":              {"value": 2,   "min": 0,   "max": 4,   "c_end": 0.5, "r_end": 0.002},
