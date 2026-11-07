@@ -1,4 +1,5 @@
 use super::*;
+use crate::movegen::{threat_maps, ThreatMaps};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
@@ -179,8 +180,64 @@ impl Search {
     }
 }
 
-fn history_score(history: &HistoryTable, side: Color, mv: Move) -> i32 {
-    history[color_index(side)][mv.from as usize][mv.to as usize]
+/// Threat bits of a move for history indexing: whether `threats` (the
+/// opponent's attacks, or 0 with ThreatHistory off) covers its from/to squares.
+#[inline(always)]
+fn threat_slot(threats: u64, mv: Move) -> (usize, usize) {
+    (((threats >> mv.from) & 1) as usize, ((threats >> mv.to) & 1) as usize)
+}
+
+fn history_score(history: &HistoryTable, side: Color, threats: u64, mv: Move) -> i32 {
+    let (tf, tt) = threat_slot(threats, mv);
+    history[color_index(side)][tf][tt][mv.from as usize][mv.to as usize]
+}
+
+/// Opponent threat maps at a node that orders quiets; all-zero (and free)
+/// when both threat features are off, which reproduces the threat-blind search.
+fn node_threat_maps(board: &Board, params: &SearchParams) -> ThreatMaps {
+    if params.threat_history || params.threat_escape_bonus != 0 {
+        threat_maps(board, board.side_to_move.opposite())
+    } else {
+        ThreatMaps::default()
+    }
+}
+
+/// The opponent attack mask history is indexed by (0 = threat-blind).
+#[inline(always)]
+fn history_threats(maps: &ThreatMaps, params: &SearchParams) -> u64 {
+    if params.threat_history {
+        maps.all
+    } else {
+        0
+    }
+}
+
+/// Side-to-move pieces attacked by a lesser enemy piece (0 when the escape
+/// bonus is off), so the per-move check is one bit test for most quiets.
+fn threatened_pieces(board: &Board, maps: &ThreatMaps, bonus: i32) -> u64 {
+    if bonus == 0 {
+        return 0;
+    }
+    let p = &board.bb.pieces[color_index(board.side_to_move)];
+    ((p[1] | p[2]) & maps.pawn) | (p[3] & maps.minor) | (p[4] & maps.rook)
+}
+
+/// Ordering bonus for a quiet that takes a piece attacked by a lesser enemy
+/// piece to a square no lesser enemy piece attacks.
+#[inline(always)]
+fn threat_escape_bonus(board: &Board, maps: &ThreatMaps, threatened: u64, mv: Move, bonus: i32) -> i32 {
+    if (threatened >> mv.from) & 1 == 0 {
+        return 0;
+    }
+    let Some(piece) = board.squares[mv.from as usize] else {
+        return 0;
+    };
+    let lesser = maps.by_lesser(piece.kind);
+    if (lesser >> mv.from) & 1 != 0 && (lesser >> mv.to) & 1 == 0 {
+        bonus
+    } else {
+        0
+    }
 }
 
 fn continuation_history_score(
@@ -220,8 +277,9 @@ fn apply_gravity(h: &mut i32, delta: i32) {
     *h += delta - *h * delta.abs() / HISTORY_MAX;
 }
 
-fn apply_history_delta(engine: &mut EngineState, side: Color, mv: Move, delta: i32) {
-    let h = &mut engine.history[color_index(side)][mv.from as usize][mv.to as usize];
+fn apply_history_delta(engine: &mut EngineState, side: Color, threats: u64, mv: Move, delta: i32) {
+    let (tf, tt) = threat_slot(threats, mv);
+    let h = &mut engine.history[color_index(side)][tf][tt][mv.from as usize][mv.to as usize];
     apply_gravity(h, delta);
 }
 
@@ -337,6 +395,8 @@ struct MovePicker {
     tt_yielded: bool,
     bufs: PickerBufs,
     total: usize,
+    /// Opponent attack mask the quiet history was read with (see `history_threats`).
+    threats: u64,
 }
 
 impl Drop for MovePicker {
@@ -370,15 +430,27 @@ impl MovePicker {
                 tt_yielded: true,
                 bufs,
                 total: 0,
+                threats: 0,
             };
         }
 
         let side = board.side_to_move;
+        let params = &engine.search_params;
+        // Only nodes that generated quiets need the threat maps.
+        let maps = if captures_only {
+            ThreatMaps::default()
+        } else {
+            node_threat_maps(board, params)
+        };
+        let threats = history_threats(&maps, params);
+        let escape = params.threat_escape_bonus;
+        let threatened = threatened_pieces(board, &maps, escape);
         let mut picker = Self {
             tt_move: None,
             tt_yielded: false,
             bufs,
             total: 0,
+            threats,
         };
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
@@ -404,7 +476,8 @@ impl MovePicker {
                 continue;
             }
 
-            let h = side_hist[mv.from as usize][mv.to as usize];
+            let (tf, tt) = threat_slot(threats, mv);
+            let h = side_hist[tf][tt][mv.from as usize][mv.to as usize];
             let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
@@ -425,10 +498,11 @@ impl MovePicker {
                 .map(piece_value)
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
+            let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
             if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
-                picker.bufs.priority_quiets.push((mv, score));
+                picker.bufs.priority_quiets.push((mv, score + esc));
             } else {
-                picker.bufs.quiets.push((mv, score.max(h)));
+                picker.bufs.quiets.push((mv, score.max(h) + esc));
             }
         }
 
@@ -1398,6 +1472,7 @@ fn negamax(
         return 0;
     }
 
+    let threats = picker.threats;
     let mut best = -INF;
     let mut best_move = None;
     let side = board.side_to_move;
@@ -1460,7 +1535,7 @@ fn negamax(
             Stage::PriorityQuiet | Stage::Quiet => true,
         };
         let quiet_history = if quiet {
-            history_score(&engine.history, side, mv)
+            history_score(&engine.history, side, threats, mv)
         } else {
             0
         };
@@ -1652,11 +1727,11 @@ fn negamax(
                     search.killers[ply][1] = search.killers[ply][0];
                     search.killers[ply][0] = Some(mv);
                 }
-                apply_history_delta(engine, side, mv, bonus);
+                apply_history_delta(engine, side, threats, mv, bonus);
                 apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
-                        apply_history_delta(engine, side, tried, -bonus);
+                        apply_history_delta(engine, side, threats, tried, -bonus);
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
                     }
                 }
@@ -1848,6 +1923,7 @@ fn order_moves(
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) {
+    let maps = node_threat_maps(board, &engine.search_params);
     moves.sort_by_cached_key(|m| {
         Reverse(move_order_score(
             board,
@@ -1858,6 +1934,7 @@ fn order_moves(
             prev_move,
             killers,
             history,
+            &maps,
         ))
     });
 }
@@ -2284,6 +2361,7 @@ fn move_order_score(
     prev_move: Option<Move>,
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
+    maps: &ThreatMaps,
 ) -> i32 {
     if Some(mv) == tt_move {
         return 2_000_000;
@@ -2311,7 +2389,11 @@ fn move_order_score(
         .saturating_sub(piece_value(PieceType::Pawn));
     let castle = if mv.is_castle { 10 } else { 0 };
     let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
-    history_score(history, board.side_to_move, mv) + continuation / 2 + promo + castle
+    let params = &engine.search_params;
+    let threats = history_threats(maps, params);
+    let bonus = params.threat_escape_bonus;
+    let escape = threat_escape_bonus(board, maps, threatened_pieces(board, maps, bonus), mv, bonus);
+    history_score(history, board.side_to_move, threats, mv) + continuation / 2 + promo + castle + escape
 }
 
 pub(crate) fn piece_value(kind: PieceType) -> i32 {

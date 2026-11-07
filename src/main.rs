@@ -922,7 +922,9 @@ impl Board {
     }
 }
 
-type HistoryTable = [[[i32; 64]; 64]; 2];
+/// Butterfly history, [side][from attacked][to attacked][from][to]: the two
+/// threat bits say whether the opponent attacks the from/to square.
+type HistoryTable = [[[[[i32; 64]; 64]; 2]; 2]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
 type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
 
@@ -934,6 +936,11 @@ struct SearchParams {
     reverse_futility_margin_d2: i32,
     reverse_futility_margin_d3: i32,
     null_reduction_base: i32,
+    // Index quiet history by whether the from/to squares are attacked.
+    threat_history: bool,
+    // Ordering bonus for a quiet that moves a piece attacked by a lesser
+    // piece to a square no lesser piece attacks (0 = off).
+    threat_escape_bonus: i32,
     null_reduction_depth_div: i32,
     lmp_limit_d1: usize,
     // LMR adjustments by node type (plies): + at expected cut nodes, - at PV nodes.
@@ -961,6 +968,8 @@ impl Default for SearchParams {
             reverse_futility_margin_d2: 180,
             reverse_futility_margin_d3: 300,
             null_reduction_base: 2,
+            threat_history: true,
+            threat_escape_bonus: 8_000,
             null_reduction_depth_div: 4,
             lmp_limit_d1: 6,
             lmr_cut_node: 2,
@@ -1017,7 +1026,7 @@ impl EngineState {
             zobrist,
             tt: TransTable::new(hash_mb),
             eval_cache: evalcache::EvalCache::new(),
-            history: [[[0; 64]; 64]; 2],
+            history: [[[[[0; 64]; 64]; 2]; 2]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
             search_params: SearchParams::default(),
@@ -1062,7 +1071,7 @@ impl EngineState {
     fn clear_for_new_game(&mut self) {
         self.tt.clear();
         self.eval_cache.clear();
-        self.history = [[[0; 64]; 64]; 2];
+        self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
         self.searches_since_decay = 0;
@@ -1092,7 +1101,7 @@ impl EngineState {
     // Halves every entry once; walked in memory order (the 2 MB
     // continuation table used to be strided, ~4% of a 5000-node search).
     fn decay_history(&mut self) {
-        let history = self.history.as_flattened_mut().as_flattened_mut();
+        let history = self.history.as_flattened_mut().as_flattened_mut().as_flattened_mut().as_flattened_mut();
         let cont = self.continuation_history.as_flattened_mut().as_flattened_mut().as_flattened_mut();
         for e in history.iter_mut() {
             *e /= 2;
@@ -1169,6 +1178,8 @@ fn main() {
             println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
             println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");
             println!("option name NullReductionBase type spin default 2 min 0 max 6");
+            println!("option name ThreatHistory type check default true");
+            println!("option name ThreatEscapeBonus type spin default 8000 min 0 max 30000");
             println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
             println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
             println!("option name LmrCutNode type spin default 2 min 0 max 4");

@@ -155,6 +155,12 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         return;
     }
 
+    if n == "threathistory" {
+        let v = value.trim().to_ascii_lowercase();
+        engine.search_params.threat_history = v == "true" || v == "1" || v == "on";
+        return;
+    }
+
     if let Ok(v) = value.trim().parse::<i32>() {
         match n.as_str() {
             "senegativeextension" => engine.search_params.se_negative_extension = v.clamp(0, 3),
@@ -172,6 +178,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
                 engine.search_params.reverse_futility_margin_d3 = v.clamp(0, 900)
             }
             "nullreductionbase" => engine.search_params.null_reduction_base = v.clamp(0, 6),
+            "threatescapebonus" => engine.search_params.threat_escape_bonus = v.clamp(0, 30_000),
             "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
             "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),
             "lmrextradepth" => engine.search_params.lmr_extra_depth = v.clamp(1, 16),
