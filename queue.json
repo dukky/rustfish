@@ -54,15 +54,7 @@
       "passed_over": 1
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "ltc-check",
-    "base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
-    "test_id": "q-main-ltc-check-1107-2207",
-    "sha": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
-    "base_sha": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
-    "started": "2026-11-07T22:08:02Z"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
