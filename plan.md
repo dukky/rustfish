@@ -89,8 +89,17 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   question, not rejected. After g4: 2-3 x 30 min fine-tunes of the champion
   varying one thing each (80% replay; lower lr / fewer steps), screened on
   best-scale loss on val.bin + val17x2; gate any that win both.
-- Round 2: `simp2-*` (HCE-era margins) and `feat-*` (modern search gaps)
-  branches in progress by subagents; tm-ccrl-r2 and simp-lmr-extra-r2 queued.
+- Round 2: `simp2-*` (HCE-era margins) in progress (subagent).
+  Queued: tm-ccrl-r2, simp-lmr-extra-r2, feat-lmr-cutnode (cut/PV node LMR,
+  stc, expect 8), feat-se-negext (singular negative extension, stc, expect 5).
+- Search gap backlog (audit 2026-11-07, Elo guesses at our level, next after
+  the two feat branches): threat-aware quiet history + escape bonus (+8-15);
+  ttPv flag in TT for LMR/pruning (+5-10); !improving in LMR (+3-6); LMR for
+  late/bad captures (+3-6); re-key continuation history to
+  [piece][to][piece][to] before retrying 2/4-ply (+3-8); LMR re-search depth
+  adjust (+2-5); cuckoo upcoming-repetition (+2-4); reduce (not skip) LMR on
+  quiet checks, root LMR, qsearch polish, improving ply-4 fallback (+1-3 each).
+  New options still to add to docs/ccrl-submission.md after merges.
 - Simplification pass: four `simp-*` branches queued as nonreg (castle
   ordering bonus, LMR good-history double count, NMP eval margin, LMR extra
   reduction).
