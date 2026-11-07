@@ -3,6 +3,36 @@
     {
       "branch": "tm-ccrl",
       "mode": "nonreg"
+    },
+    {
+      "branch": "nnue-g3fs",
+      "mode": "net-gate",
+      "expect": 8.0
+    },
+    {
+      "branch": "nnue-g4ws",
+      "mode": "net-gate",
+      "expect": 3.0
+    },
+    {
+      "branch": "simp-castle-order",
+      "mode": "nonreg",
+      "expect": 1.0
+    },
+    {
+      "branch": "simp-lmr-goodhist",
+      "mode": "nonreg",
+      "expect": 1.0
+    },
+    {
+      "branch": "simp-nmp-margin",
+      "mode": "nonreg",
+      "expect": 1.0
+    },
+    {
+      "branch": "simp-lmr-extra",
+      "mode": "nonreg",
+      "expect": 1.0
     }
   ],
   "current": {
