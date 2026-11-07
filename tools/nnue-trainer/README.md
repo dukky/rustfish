@@ -41,6 +41,15 @@ by the unit tests and by the `Trainer bench` workflow). `--sub-batch N`
 (default ~2 MB of accumulators, 512 at H = 512) and `--max-batches N`
 (benchmarking) are tuning knobs.
 
+The batch kernels also run `--factorise` (forward reads the merged rows
+`clamp(W + F)` from the tile-major copy; AdamW updates `F` from every
+bucket's gradient, then each bucket's `W`, then re-merges), `--wd-active-only`
+(rows flagged during decode) and `--keep-best`; with `--exact` these runs are
+bit-identical too (nets, epoch nets and checkpoints of kb8m `--factorise
+--init g4.bin --keep-best --wd 0.01`, kb4 `--factorise` from scratch and kb4m
+plain against the per-sample trainer at `--threads 1`). M3, 8 threads, kb8m
+`--factorise` H 512 B 8: 0.62M positions/s (per-sample trainer 0.16M).
+
 H = 512, B = 8, batch 16384, `--mirror`, positions/s (GitHub 4-vCPU runners,
 `trainer-bench.yml`; old = the previous trainer at 4 threads):
 
@@ -86,6 +95,73 @@ every bucket (start loss equals the one-bucket net's for unmirrored
 layouts). Checkpoints store the layout id in the high half of the buckets
 header word, so one-bucket checkpoints are unchanged. The `--mirror` data
 augmentation still applies (to the board, before buckets are chosen).
+
+### Factoriser (`--factorise`, KB > 1 only)
+
+Training also keeps a shared 768 x H block `F`; every bucket's effective
+row is `clamp(W[kb][f] + F[f], +-1.98)` and `F` gets the sum of all
+buckets' gradients for its feature, so rarely hit buckets start from (and
+keep learning) what every bucket shares. Every exported net (`<out>.eN.bin`
+and `<out>`) holds the merged rows: the file format and the engine are
+unchanged, and `eval` needs no flag. Checkpoints store `W` and `F` (header
+word 1 bit 40 = factorised; `--resume` needs the same flag).
+
+- From scratch: `W = 0`, `F` = the one-bucket init (the same RNG draws as a
+  KB=1 net with the same seed), so step 0 equals that KB=1 init.
+- `--init` from a one-bucket net: `F` = its rows, `W = 0`. From a net that
+  already has all KB buckets: `W` = the net, `F = 0`.
+
+Warm starts are exact for what the layout can express: an unmirrored
+layout (kb4) from a `none` net reproduces it exactly, and a mirrored
+layout (kb4m, kb8m) from an `m1` net reproduces it exactly. A mirrored
+layout cannot reproduce a `none` net: every mirrored bucket serves both a
+king on file x (unflipped) and on file 7-x (flipped), so one row would have
+to equal the source rows of square s and s ^ 7 at once. It starts as that
+net read with mirroring (`eval --king-buckets m1` gives its loss).
+
+### Warm start from a plain net (`--init`), and `--keep-best`
+
+`--init plain.bin` (a one-bucket net) starts a king-bucket run exactly at
+that net in both modes; they differ in what is trained afterwards:
+
+| | start | trained |
+|---|---|---|
+| no `--factorise` | its 768 rows copied into every bucket's `W` | each bucket's copy on its own |
+| `--factorise` | `F` = its 768 rows, every bucket `W = 0` | `F` (shared, gets every bucket's gradient) + `W` |
+
+The FT bias and the output layer are the net's in both. `--init` always
+starts AdamW fresh (`m = v = 0`, step 0; only `--resume` restores them);
+`--mirror` is a data augmentation and validation never mirrors, so neither
+changes the start. The trainer prints `start val loss F (quantized Q)`:
+`Q` is the plain net's `eval` loss, and the epoch-0 export of a kb4 run from
+g4 is g4's bytes in every bucket. `F` can differ from it in the 6th digit:
+weights the source net holds at the quantised limit (|FT| = 505/255, |out|
+= 127/64, g4: 408 + 19 of them) sit just above the +-1.98 training clip and
+start clipped, which rounds back to the same i16. A mirrored layout
+(kb4m, kb8m) is exact only from an `m1` net (see above; the trainer prints a
+note); from a `none` net it starts at `eval --king-buckets m1` of that net.
+
+Measured (first 100k of `val.bin`): g4 `eval` 0.026673, kb4 from g4 start
+0.026672 (quantized 0.026673) with and without `--factorise`, CPU and GPU;
+kb8m from g4 0.028718 = g4 read as m1. H 64 parity (plain H 64 net, kb4 and
+kb8m `--factorise`, 3 x 65536, lr 2e-4 -> 1e-5): CPU and GPU print the
+same start and epoch losses to 6 digits; an m1 net into kb8m starts at
+exactly its own loss (0.077995).
+
+`--keep-best` (needs `--val`): `<out>` is the epoch with the lowest
+quantised val loss, the start net (epoch 0) included, instead of the last
+epoch; every `<out>.eN.bin` and the checkpoint are still written. The log
+ends with `keep-best: epoch N (quantized val Q) is the output`. With
+`--resume`, epochs before the resume point are not considered.
+
+### Active-only weight decay (`--wd-active-only`, default on for KB > 1)
+
+AdamW's decay on the bucketed FT rows `W` is applied only to rows whose
+feature occurs in the batch, so buckets that are rarely hit are not shrunk
+toward zero between visits. `F`, the FT bias and the output layer decay as
+before; `--no-wd-active-only` restores plain decay. It only matters with
+`--wd > 0` (the default is 0). KB=1 nets keep plain decay and train
+bit-for-bit as before.
 
 ## Score-scale check
 

@@ -29,7 +29,7 @@
 
 use crate::simd::{Isa, Portable, Simd};
 use crate::{decode, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, INPUTS};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::Thread;
 
 /// Backward column tile (floats): one 64-byte cache line.
@@ -188,6 +188,17 @@ impl Ptr {
 }
 
 #[derive(Clone, Copy)]
+struct APtr(*const AtomicU8);
+unsafe impl Send for APtr {}
+unsafe impl Sync for APtr {}
+impl APtr {
+    #[inline(always)]
+    fn get(self) -> *const AtomicU8 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy)]
 struct SPtr(*mut Sample);
 unsafe impl Send for SPtr {}
 unsafe impl Sync for SPtr {}
@@ -223,11 +234,18 @@ pub struct BatchTrainer {
     samples: [Vec<Sample>; 2],
     grad: Vec<f32>,
     loss: Vec<f32>,
+    /// `--factorise`: length of the shared block `F` (768 x H) stored after
+    /// the net's params in the training vector, 0 without it. The forward
+    /// pass then reads the merged rows `clamp(W + F)` from `wt`.
+    fl: usize,
+    /// `--wd-active-only`: FT rows that occurred in the batch (empty if off).
+    active: Vec<AtomicU8>,
 }
 
 impl BatchTrainer {
     /// `sb` = sub-batch size (0 = automatic: ~2 MB of accumulators).
-    pub fn new(sh: Shape, sb: usize, exact: bool) -> Self {
+    pub fn new(sh: Shape, sb: usize, exact: bool, fl: usize, wd_active: bool) -> Self {
+        assert!(fl == 0 || (fl == INPUTS * sh.h && sh.kb > 1), "factoriser needs KB > 1");
         assert!(sh.h % TB == 0 && sh.h > 0, "--hidden must be a multiple of {TB}");
         let sb = if sb == 0 { ((2 << 20) / (8 * sh.h)).clamp(128, 2048) } else { sb };
         let sb = sb.div_ceil(FB) * FB;
@@ -249,6 +267,8 @@ impl BatchTrainer {
             samples: [vec![blank; sb], vec![blank; sb]],
             grad: Vec::new(),
             loss: Vec::new(),
+            fl,
+            active: if wd_active { (0..rows).map(|_| AtomicU8::new(0)).collect() } else { Vec::new() },
         }
     }
 
@@ -262,7 +282,7 @@ impl BatchTrainer {
     pub fn batch(&mut self, pool: &Pool, p: &[f32], recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout) -> f64 {
         let n = recs.len();
         assert_eq!(mirror.len(), n);
-        assert_eq!(p.len(), self.sh.len());
+        assert_eq!(p.len(), self.sh.len() + self.fl);
         self.grad.resize(n, 0.0);
         self.loss.resize(n, 0.0);
         if !self.wt_ok {
@@ -276,6 +296,7 @@ impl BatchTrainer {
         let samples = [SPtr(self.samples[0].as_mut_ptr()), SPtr(self.samples[1].as_mut_ptr())];
         let grad = Ptr(self.grad.as_mut_ptr());
         let loss = Ptr(self.loss.as_mut_ptr());
+        let active = &self.active[..];
         let nsb = n.div_ceil(sb);
         let sb_len = |k: usize| sb.min(n - k * sb);
         for k in 0..=nsb {
@@ -298,6 +319,13 @@ impl BatchTrainer {
                     for (i, s) in ss.iter_mut().enumerate() {
                         let r = base + s0 + i;
                         *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
+                        if !active.is_empty() {
+                            for side in 0..2 {
+                                for &f in &s.f[side][..s.n] {
+                                    active[f as usize].store(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
                     }
                     let a = FwdArgs {
                         sh,
@@ -317,14 +345,19 @@ impl BatchTrainer {
         self.loss.iter().map(|&l| l as f64).sum()
     }
 
-    /// Rebuilds the tile-major FT copy from `p` (call after changing `p`
-    /// other than through `adam`).
+    /// Rebuilds the tile-major FT copy (merged rows with the factoriser)
+    /// from the training vector `p` (call after changing `p` other than
+    /// through `adam`).
     pub fn sync_weights(&mut self, p: &[f32]) {
-        let (h, rows, tf) = (self.sh.h, self.rows, self.tf);
+        let (h, rows, tf, n) = (self.sh.h, self.rows, self.tf, self.sh.len());
         let wt = self.wt.ptr().get();
-        for f in 0..rows {
-            for t in 0..h / tf {
-                unsafe { std::ptr::copy_nonoverlapping(p.as_ptr().add(f * h + t * tf), wt.add((t * rows + f) * tf), tf) };
+        for r in 0..rows {
+            for j in 0..h {
+                let mut x = p[r * h + j];
+                if self.fl > 0 {
+                    x = (x + p[n + (r % INPUTS) * h + j]).clamp(-CLIP, CLIP);
+                }
+                unsafe { *wt.add((j / tf * rows + r) * tf + j % tf) = x };
             }
         }
         self.wt_ok = true;
@@ -350,16 +383,26 @@ impl BatchTrainer {
         let (wt, tf) = (self.wt.ptr(), self.tf);
         let gft = self.gft.ptr();
         let grest = self.grest.ptr();
-        let rest = p.len() - ftb;
-        let ft_units = rows.div_ceil(AB);
+        let n = self.sh.len();
+        assert_eq!(p.len(), n + self.fl);
+        let rest = n - ftb;
+        let (fl, kb) = (self.fl, self.sh.kb);
+        // With the factoriser a unit takes features (all buckets' rows of
+        // each, plus its F row); without it, plain FT rows.
+        let units_rows = if fl > 0 { INPUTS } else { rows };
+        let ft_units = units_rows.div_ceil(AB);
         let isa = self.isa;
+        let active = if self.active.is_empty() { std::ptr::null() } else { self.active.as_ptr() };
+        let active = APtr(active);
         par_units(pool, ft_units + 1, &|u| unsafe {
             let a = if u < ft_units {
-                let (f0, f1) = (u * AB, ((u + 1) * AB).min(rows));
-                AdamArgs { p: pp.get(), m: mp.get(), v: vp.get(), g: gft.get(), wt: wt.get(), tf, h, rows, tiles, f0, f1, flat: 0 }
+                let (f0, f1) = (u * AB, ((u + 1) * AB).min(units_rows));
+                let (p, m, v, g, wt, active) = (pp.get(), mp.get(), vp.get(), gft.get(), wt.get(), active.get());
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active }
             } else {
                 let (p, m, v) = (pp.get().add(ftb), mp.get().add(ftb), vp.get().add(ftb));
-                AdamArgs { p, m, v, g: grest.get(), wt: wt.get(), tf, h, rows, tiles, f0: 0, f1: 0, flat: rest }
+                let (g, wt, active) = (grest.get(), wt.get(), std::ptr::null());
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active }
             };
             adam_dispatch(isa, &c, &a);
         });
@@ -580,12 +623,19 @@ struct AdamArgs {
     f0: usize,
     f1: usize,
     flat: usize,
+    /// Net params (the factoriser block `F` starts here), `F`'s length (0 =
+    /// off; then `f0..f1` are features and every bucket's row is updated),
+    /// king buckets, and the `--wd-active-only` row flags (null = off).
+    n: usize,
+    fl: usize,
+    kb: usize,
+    active: *const AtomicU8,
 }
 
 /// v2's AdamW expression, element by element (vectorised by LLVM; lane-wise
 /// exact), then clears the gradient.
 #[inline(always)]
-unsafe fn adam_run(c: &AdamC, p: *mut f32, m: *mut f32, v: *mut f32, g: *mut f32, len: usize) {
+unsafe fn adam_run(c: &AdamC, decay: f32, p: *mut f32, m: *mut f32, v: *mut f32, g: *mut f32, len: usize) {
     let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
     let p = std::slice::from_raw_parts_mut(p, len);
     let m = std::slice::from_raw_parts_mut(m, len);
@@ -599,7 +649,7 @@ unsafe fn adam_run(c: &AdamC, p: *mut f32, m: *mut f32, v: *mut f32, g: *mut f32
         m[i] = b1 * m[i] + (1.0 - b1) * g;
         v[i] = b2 * v[i] + (1.0 - b2) * g * g;
         let upd = (m[i] / c.c1) / ((v[i] / c.c2).sqrt() + eps);
-        let x = p[i] * c.decay - c.lr * upd;
+        let x = p[i] * decay - c.lr * upd;
         p[i] = x.clamp(-CLIP, CLIP);
     }
 }
@@ -607,14 +657,54 @@ unsafe fn adam_run(c: &AdamC, p: *mut f32, m: *mut f32, v: *mut f32, g: *mut f32
 #[inline(always)]
 unsafe fn adam_impl(c: &AdamC, a: &AdamArgs) {
     if a.flat > 0 {
-        return adam_run(c, a.p, a.m, a.v, a.g, a.flat);
+        return adam_run(c, c.decay, a.p, a.m, a.v, a.g, a.flat);
+    }
+    // v2: rows that did not occur in the batch skip the decay (`* 1.0`).
+    let row_decay = |r: usize| {
+        if !a.active.is_null() && (*a.active.add(r)).swap(0, Ordering::Relaxed) == 0 {
+            1.0
+        } else {
+            c.decay
+        }
+    };
+    let wt_at = |r: usize, j: usize| a.wt.add((j / a.tf * a.rows + r) * a.tf + j % a.tf);
+    if a.fl == 0 {
+        for f in a.f0..a.f1 {
+            let decay = row_decay(f);
+            for t in 0..a.tiles {
+                let i = f * a.h + t * TB;
+                adam_run(c, decay, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + f) * TB), TB);
+                std::ptr::copy_nonoverlapping(a.p.add(i), wt_at(f, t * TB), TB);
+            }
+        }
+        return;
     }
     for f in a.f0..a.f1 {
+        let mut decay = [0.0f32; 8];
+        for (b, d) in decay[..a.kb].iter_mut().enumerate() {
+            *d = row_decay(b * INPUTS + f);
+        }
         for t in 0..a.tiles {
-            let i = f * a.h + t * TB;
-            adam_run(c, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + f) * TB), TB);
-            let j = t * TB;
-            std::ptr::copy_nonoverlapping(a.p.add(i), a.wt.add((j / a.tf * a.rows + f) * a.tf + j % a.tf), TB);
+            // F first, from every bucket's gradient (bucket order, as v2),
+            // before the W updates clear them.
+            let mut gf = [0.0f32; TB];
+            for b in 0..a.kb {
+                let g = a.g.add((t * a.rows + b * INPUTS + f) * TB);
+                for (k, x) in gf.iter_mut().enumerate() {
+                    *x += *g.add(k);
+                }
+            }
+            let fi = a.n + f * a.h + t * TB;
+            adam_run(c, c.decay, a.p.add(fi), a.m.add(fi), a.v.add(fi), gf.as_mut_ptr(), TB);
+            for (b, &d) in decay[..a.kb].iter().enumerate() {
+                let r = b * INPUTS + f;
+                let i = r * a.h + t * TB;
+                adam_run(c, d, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB), TB);
+                let w = wt_at(r, t * TB);
+                for k in 0..TB {
+                    *w.add(k) = (*a.p.add(i + k) + *a.p.add(fi + k)).clamp(-CLIP, CLIP);
+                }
+            }
         }
     }
 }
