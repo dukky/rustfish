@@ -281,3 +281,4 @@
 {"branch": "main", "logged_at": "2026-11-07T20:03:13Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 40, "sha": "50864a096187b729523872d36fc6e196c435d158"}
 {"branch": "main", "logged_at": "2026-11-07T20:47:41Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 41, "sha": "50864a096187b729523872d36fc6e196c435d158"}
 {"branch": "main", "logged_at": "2026-11-07T21:33:21Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 42, "sha": "8a7e22023fdfa12f68a5f38324ad662ea6470165"}
+{"branch": "feat-se-negext-r2", "elo": 8.86, "elo_ci95": [3.29, 14.43], "games": 5376, "llr": 3.941, "logged_at": "2026-11-07T22:07:56Z", "mode": "stc", "outcome": "merged", "sha": "4f4f24c60305cdd33fe89ad27fd731c464ae8d0b", "test_id": "q-feat-se-negext-r2-1107-1959", "verdict": "H1"}
