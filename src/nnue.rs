@@ -1545,7 +1545,7 @@ mod tests {
                 // SAFETY: as above.
                 let wide = unsafe { avx512::screlu_dot_wide(&acc, &w) };
                 assert_eq!(wide, scalar::screlu_dot_wide(&acc, &w));
-                if w[0].abs() <= 127 {
+                if (w[0] as i32).abs() <= 127 {
                     assert_eq!(unsafe { avx512::screlu_dot(&acc, &w) }, scalar::screlu_dot(&acc, &w));
                 }
             }
