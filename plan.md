@@ -102,7 +102,11 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   ~+35% (~1.0B, ~15:00). **Stop rule:** gen 5 < +8 at its gate -> back to
   6/13 (background_parallel 6, mode shards 13, burst 13/13, ladder
   max-parallel 13). Feature tests take ~2x longer meanwhile. AVX-512 NNUE
-  paths + runner CPU logging in progress (subagent, `nnue-avx512`).
+  paths (`nnue-avx512`, not merged): bit-identical everywhere, kernels +30-90%
+  but whole-engine NPS / datagen games/s within +-3% on Zen 4/5 and Xeon
+  runners (NNUE is not the bottleneck at H=512). Fleet: ~1/2-2/3 of runners
+  have AVX-512 (EPYC 7763 Zen 3 no; 9V74, 9V45, Xeon 6973P/8573C yes).
+  Revisit only for wider nets.
 - **Local datagen** (09:30): `~/rustfish-data/datagen-gate.sh` runs seed 1004
   (main 7d1fc8a, net scale, 7 threads, ~1300 pos/s = ~4.7M/h) only while no
   GPU training runs (SIGSTOP/SIGCONT); the auto loop ingests local/L1004.txt.
