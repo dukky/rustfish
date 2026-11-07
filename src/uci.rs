@@ -165,6 +165,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "reversefutilitymargind2" => {
                 engine.search_params.reverse_futility_margin_d2 = v.clamp(0, 700)
             }
+            "lmrcapturepct" => engine.search_params.lmr_capture_pct = v.clamp(0, 150),
             "reversefutilitymargind3" => {
                 engine.search_params.reverse_futility_margin_d3 = v.clamp(0, 900)
             }
