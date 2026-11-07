@@ -58,6 +58,11 @@
       "branch": "nnue-g4kb4",
       "mode": "stc",
       "expect": 4.0
+    },
+    {
+      "branch": "nnue-g4kb8m",
+      "mode": "stc",
+      "expect": 8.0
     }
   ],
   "current": {
