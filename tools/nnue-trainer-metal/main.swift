@@ -122,27 +122,156 @@ func layoutId(_ name: String) -> Int {
     return i
 }
 
+// ---------------------------------------------------------------- threat inputs (same definitions as src/nnue.rs)
+
+/// `--threats`: `blocks` blocks of 768 FT rows after the king buckets' rows.
+/// Index = threat id stored in checkpoints (same order as the CPU trainer).
+struct Threats { let name: String; let blocks: Int }
+let THREATS: [Threats] = [Threats(name: "none", blocks: 0), Threats(name: "ep", blocks: 1), Threats(name: "ad", blocks: 2)]
+
+func threatId(_ name: String) -> Int {
+    guard let i = THREATS.firstIndex(where: { $0.name == name }) else {
+        die("unknown --threats \(name) (one of \(THREATS.map { $0.name }.joined(separator: ", ")))")
+    }
+    return i
+}
+
+func leaper(_ d: [(Int, Int)]) -> [UInt64] {
+    (0..<64).map { sq in
+        d.reduce(UInt64(0)) { a, o in
+            let f = sq % 8 + o.0, r = sq / 8 + o.1
+            return (0..<8).contains(f) && (0..<8).contains(r) ? a | UInt64(1) << UInt64(r * 8 + f) : a
+        }
+    }
+}
+let KNIGHT_ATT = leaper([(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)])
+let KING_ATT = leaper([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)])
+/// Rays [dir * 64 + sq], dirs 0-3 increase the square index (N, NE, NW, E), 4-7 decrease it (S, SW, SE, W).
+let RAY_DIRS: [(Int, Int)] = [(0, 1), (1, 1), (-1, 1), (1, 0), (0, -1), (-1, -1), (1, -1), (-1, 0)]
+let RAYS: [UInt64] = RAY_DIRS.flatMap { d in
+    (0..<64).map { sq -> UInt64 in
+        var a: UInt64 = 0
+        var f = sq % 8 + d.0, r = sq / 8 + d.1
+        while (0..<8).contains(f) && (0..<8).contains(r) { a |= UInt64(1) << UInt64(r * 8 + f); f += d.0; r += d.1 }
+        return a
+    }
+}
+
+@inline(__always) func rayAtt(_ rays: UnsafePointer<UInt64>, _ dir: Int, _ sq: Int, _ occ: UInt64) -> UInt64 {
+    let ray = rays[dir * 64 + sq]
+    let b = ray & occ
+    if b == 0 { return ray }
+    let first = dir < 4 ? b.trailingZeroBitCount : 63 - b.leadingZeroBitCount
+    return ray ^ rays[dir * 64 + first]
+}
+
+/// Threat bits of one record: bit n of word t = the record's n-th piece
+/// (square order) is active in threat block t (as `threat_masks` in the CPU trainer).
+func threatMasks(_ r: UnsafePointer<UInt8>, _ th: Int, _ rays: UnsafePointer<UInt64>, _ kn: UnsafePointer<UInt64>, _ kg: UnsafePointer<UInt64>) -> (UInt32, UInt32) {
+    if THREATS[th].blocks == 0 { return (0, 0) }
+    var occ: UInt64 = 0
+    for i in 0..<8 { occ |= UInt64(r[i]) << (8 * UInt64(i)) }
+    var bb = (UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+    var sqs = [Int](repeating: 0, count: 32), nibs = [Int](repeating: 0, count: 32)
+    var att = [UInt64](repeating: 0, count: 12)   // [colour * 6 + kind]
+    var o = occ, n = 0
+    withUnsafeMutableBytes(of: &bb) { raw in
+        let p = raw.bindMemory(to: UInt64.self)
+        while o != 0 && n < 32 {
+            let sq = o.trailingZeroBitCount
+            o &= o - 1
+            let nib = Int(r[8 + n / 2] >> (4 * UInt8(n & 1)) & 0xF)
+            p[(nib >> 3) * 6 + (nib & 7)] |= UInt64(1) << UInt64(sq)
+            sqs[n] = sq; nibs[n] = nib
+            n += 1
+        }
+        let fileA: UInt64 = 0x0101_0101_0101_0101, fileH = fileA << 7
+        let wp = p[0], bp = p[6]
+        att[0] = ((wp & ~fileA) << 7) | ((wp & ~fileH) << 9)
+        att[6] = ((bp & ~fileA) >> 9) | ((bp & ~fileH) >> 7)
+        for c in 0..<2 {
+            for k in 1..<6 {
+                var x = p[c * 6 + k], a: UInt64 = 0
+                while x != 0 {
+                    let sq = x.trailingZeroBitCount
+                    x &= x - 1
+                    switch k {
+                    case 1: a |= kn[sq]
+                    case 2: a |= rayAtt(rays, 1, sq, occ) | rayAtt(rays, 2, sq, occ) | rayAtt(rays, 5, sq, occ) | rayAtt(rays, 6, sq, occ)
+                    case 3: a |= rayAtt(rays, 0, sq, occ) | rayAtt(rays, 3, sq, occ) | rayAtt(rays, 4, sq, occ) | rayAtt(rays, 7, sq, occ)
+                    case 4: for d in 0..<8 { a |= rayAtt(rays, d, sq, occ) }
+                    default: a |= kg[sq]
+                    }
+                }
+                att[c * 6 + k] = a
+            }
+        }
+    }
+    let any = [att[0] | att[1] | att[2] | att[3] | att[4] | att[5], att[6] | att[7] | att[8] | att[9] | att[10] | att[11]]
+    let ep = THREATS[th].name == "ep"
+    var m0: UInt32 = 0, m1: UInt32 = 0
+    for i in 0..<n {
+        let c = nibs[i] >> 3, k = nibs[i] & 7
+        if k == 5 { continue }
+        let b = UInt64(1) << UInt64(sqs[i])
+        let e = (1 - c) * 6
+        let by = any[1 - c], def = any[c]
+        if ep {
+            let minor = att[e]
+            let rook = minor | att[e + 1] | att[e + 2]
+            let lower: UInt64 = k == 0 ? 0 : (k <= 2 ? minor : (k == 3 ? rook : rook | att[e + 3]))
+            if b & (lower | (by & ~def)) != 0 { m0 |= UInt32(1) << UInt32(i) }
+        } else {
+            if b & by != 0 { m0 |= UInt32(1) << UInt32(i) }
+            if b & def != 0 { m1 |= UInt32(1) << UInt32(i) }
+        }
+    }
+    return (m0, m1)
+}
+
+/// Threat masks of `n` records at `recs` into `out` (2 words per record), in parallel chunks.
+func fillThreatMasks(_ recs: UnsafeRawPointer, _ out: UnsafeMutablePointer<UInt32>, _ n: Int, _ th: Int) {
+    if THREATS[th].blocks == 0 { return }
+    RAYS.withUnsafeBufferPointer { rays in KNIGHT_ATT.withUnsafeBufferPointer { kn in KING_ATT.withUnsafeBufferPointer { kg in
+        let r = recs.assumingMemoryBound(to: UInt8.self)
+        let parts = n >= 4096 ? 4 : 1
+        let per = (n + parts - 1) / parts
+        DispatchQueue.concurrentPerform(iterations: parts) { k in
+            for i in (k * per)..<min(n, (k + 1) * per) {
+                let (a, b) = threatMasks(r + i * REC, th, rays.baseAddress!, kn.baseAddress!, kg.baseAddress!)
+                out[2 * i] = a
+                out[2 * i + 1] = b
+            }
+        }
+    } } }
+}
+
 // ---------------------------------------------------------------- shape / net I/O
 
 struct Shape: Equatable {
     var h: Int
     var buckets: Int
-    /// King layout id (index into LAYOUTS); the FT has kb * 768 rows.
+    /// King layout id (index into LAYOUTS); the FT has kb * 768 bucketed rows,
     var layout: Int = 0
+    /// then THREATS[th].blocks * 768 threat rows.
+    var th: Int = 0
     var kl: KingLayout { LAYOUTS[layout] }
     var kb: Int { kl.kb }
-    var ftRows: Int { kb * INPUTS }
+    var tb: Int { THREATS[th].blocks }
+    var ftRows: Int { (kb + tb) * INPUTS }
+    /// End of the king-bucketed FT rows (start of the threat rows).
+    var ftKb: Int { kb * INPUTS * h }
     var ftB: Int { ftRows * h }
     var outW: Int { ftB + h }
     var outB: Int { outW + buckets * 2 * h }
     var len: Int { outB + buckets }
     var fileBytes: Int { len * 2 }
-    static func fromFileBytes(_ bytes: Int, _ buckets: Int, layout: Int = 0) -> Shape? {
+    static func fromFileBytes(_ bytes: Int, _ buckets: Int, layout: Int = 0, th: Int = 0) -> Shape? {
         let words = bytes / 2
         guard words >= buckets else { return nil }
-        let rows = LAYOUTS[layout].kb * INPUTS
+        let rows = (LAYOUTS[layout].kb + THREATS[th].blocks) * INPUTS
         let h = (words - buckets) / (rows + 1 + 2 * buckets)
-        let s = Shape(h: h, buckets: buckets, layout: layout)
+        let s = Shape(h: h, buckets: buckets, layout: layout, th: th)
         return s.fileBytes == bytes ? s : nil
     }
     func scale(_ i: Int) -> Float { i < outW ? QA : (i < outB ? QB : QA * QB) }
@@ -174,61 +303,83 @@ func writeFile(_ path: String, _ bytes: [UInt8]) {
     guard FileManager.default.createFile(atPath: path, contents: Data(bytes)) else { die("\(path): cannot write") }
 }
 
-func loadNet(_ path: String, _ buckets: Int, layout: Int = 0) -> ([Float], Shape) {
+func loadNet(_ path: String, _ buckets: Int, layout: Int = 0, th: Int = 0) -> ([Float], Shape) {
     let b = readFile(path)
-    guard let sh = Shape.fromFileBytes(b.count, buckets, layout: layout) else {
-        die("\(path): \(b.count) bytes is no (\(LAYOUTS[layout].kb)*768->H)x2->\(buckets) net")
+    guard let sh = Shape.fromFileBytes(b.count, buckets, layout: layout, th: th) else {
+        die("\(path): \(b.count) bytes is no ((\(LAYOUTS[layout].kb)+\(THREATS[th].blocks))*768->H)x2->\(buckets) net")
     }
     return (dequantize(b, sh), sh)
 }
 
-/// Warm start: a net for `layout`, or a one-bucket net whose 768 FT rows are
-/// copied into every king bucket (as the CPU trainer's `load_init`).
-func loadInit(_ path: String, _ buckets: Int, layout: Int) -> ([Float], Shape) {
-    let b = readFile(path)
-    if LAYOUTS[layout].kb == 1 || Shape.fromFileBytes(b.count, buckets, layout: layout) != nil {
-        return loadNet(path, buckets, layout: layout)
+/// Params of shape `from` -> shape `to` (as the CPU trainer's `convert_net`):
+/// a one-bucket FT is copied into every king bucket, missing threat rows start at 0.
+func convertNet(_ p: [Float], _ from: Shape, _ to: Shape) -> [Float] {
+    precondition(from.h == to.h && from.buckets == to.buckets)
+    precondition(from.kb == to.kb || from.kb == 1)
+    precondition(from.th == to.th || from.th == 0)
+    var v = [Float]()
+    v.reserveCapacity(to.len)
+    for _ in 0..<(from.kb == to.kb ? 1 : to.kb) { v += p[0..<from.ftKb] }
+    if from.th == to.th { v += p[from.ftKb..<from.ftB] } else { v += [Float](repeating: 0, count: to.tb * INPUTS * to.h) }
+    v += p[from.ftB...]
+    precondition(v.count == to.len)
+    return v
+}
+
+/// The net at `path` as one of the shapes `sh` converts from (itself,
+/// without threat rows, one-bucket, both), in that order (CPU `load_any`).
+func loadAny(_ path: String, _ sh: Shape) -> ([Float], Shape) {
+    let n = readFile(path).count
+    for (layout, th) in [(sh.layout, sh.th), (sh.layout, 0), (0, sh.th), (0, 0)] {
+        if let s = Shape.fromFileBytes(n, sh.buckets, layout: layout, th: th), s.h == sh.h {
+            return loadNet(path, sh.buckets, layout: layout, th: th)
+        }
     }
-    let (p1, s1) = loadNet(path, buckets)
-    out("init: \(path) is a one-bucket net; copying its FT rows into all \(LAYOUTS[layout].kb) king buckets")
-    var sh = s1
-    sh.layout = layout
-    var p = [Float]()
-    p.reserveCapacity(sh.len)
-    for _ in 0..<sh.kb { p += p1[0..<s1.ftB] }
-    p += p1[s1.ftB...]
-    return (p, sh)
+    die("\(path): \(n) bytes is no net of H=\(sh.h) buckets=\(sh.buckets) convertible to KB=\(sh.kb) threats=\(THREATS[sh.th].name)")
+}
+
+/// Warm start (as the CPU trainer's `load_init`): a net of shape `sh`, or a
+/// one-bucket net (rows copied into every bucket) and/or one without threat rows (zeros).
+func loadInit(_ path: String, _ sh: Shape) -> [Float] {
+    let (p, s) = loadAny(path, sh)
+    if s.kb != sh.kb { out("init: \(path) is a one-bucket net; copying its FT rows into all \(sh.kb) king buckets") }
+    if s.th != sh.th { out("init: \(path) has no threat rows; they start at 0") }
+    return convertNet(p, s, sh)
+}
+
+/// Training vector from one-bucket params `p1` (shape `s1`: KB 1, `sh`'s threats):
+/// F = its 768 FT rows, W = 0, the rest copied (CPU `factor_from_one`).
+func factorFromOne(_ p1: [Float], _ s1: Shape, _ sh: Shape) -> [Float] {
+    [Float](repeating: 0, count: sh.ftKb) + p1[s1.ftKb...] + p1[0..<s1.ftKb]
 }
 
 /// `--factorise --init` (as the CPU trainer's `load_init_factor`): a
 /// one-bucket net becomes F with W = 0; a full bucketed net becomes W with F = 0.
 /// Returns the training vector (net params + F).
 func loadInitFactor(_ path: String, _ sh: Shape) -> [Float] {
-    let b = readFile(path)
-    if Shape.fromFileBytes(b.count, sh.buckets, layout: sh.layout) != nil {
-        let (p, s) = loadNet(path, sh.buckets, layout: sh.layout)
-        if s != sh { die("init net shape differs from --hidden/--buckets/--king-buckets") }
+    let (p, s) = loadAny(path, sh)
+    if s.th != sh.th { out("init: \(path) has no threat rows; they start at 0") }
+    if s.kb == sh.kb {
         out("init: \(path) has all \(sh.kb) king buckets; factoriser starts at 0")
-        return p + [Float](repeating: 0, count: INPUTS * sh.h)
+        return convertNet(p, s, sh) + [Float](repeating: 0, count: INPUTS * sh.h)
     }
-    let (p1, s1) = loadNet(path, sh.buckets)
-    if s1.h != sh.h { die("init net shape differs from --hidden/--buckets") }
     out("init: \(path) is a one-bucket net; its FT rows become the factoriser, buckets start at 0")
-    return [Float](repeating: 0, count: sh.ftB) + p1[s1.ftB...] + p1[0..<s1.ftB]
+    var s1 = sh
+    s1.layout = 0
+    return factorFromOne(convertNet(p, s, s1), s1, sh)
 }
 
 /// `--factorise` from scratch: F = the one-bucket init (same RNG draws), W = 0.
 func initFactor(_ sh: Shape, _ rng: inout Rng) -> [Float] {
     var s1 = sh
     s1.layout = 0
-    let p1 = initParams(s1, &rng)
-    return [Float](repeating: 0, count: sh.ftB) + p1[s1.ftB...] + p1[0..<s1.ftB]
+    return factorFromOne(initParams(s1, &rng), s1, sh)
 }
 
 /// CPU twin of the `merge_factor` kernel: effective net params from a training vector.
 func mergeFactor(_ t: [Float], _ sh: Shape) -> [Float] {
     let fl = INPUTS * sh.h
-    return (0..<sh.len).map { i in i < sh.ftB ? min(max(t[i] + t[sh.len + i % fl], -CLIP), CLIP) : t[i] }
+    return (0..<sh.len).map { i in i < sh.ftKb ? min(max(t[i] + t[sh.len + i % fl], -CLIP), CLIP) : t[i] }
 }
 
 func initParams(_ sh: Shape, _ rng: inout Rng) -> [Float] {
@@ -255,7 +406,7 @@ func withExtension(_ path: String, _ ext: String) -> String {
 
 /// Word 1 = output buckets | king layout id << 32 | factoriser << 40 (as the CPU trainer).
 /// With the factoriser, p/m/v are the training vector (net params + F).
-func ckptWord1(_ sh: Shape, _ factor: Bool) -> UInt64 { UInt64(sh.buckets) | UInt64(sh.layout) << 32 | (factor ? 1 << 40 : 0) }
+func ckptWord1(_ sh: Shape, _ factor: Bool) -> UInt64 { UInt64(sh.buckets) | UInt64(sh.layout) << 32 | (factor ? 1 << 40 : 0) | UInt64(sh.th) << 48 }
 
 func saveCkpt(_ path: String, _ sh: Shape, factor: Bool, _ p: UnsafePointer<Float>, _ m: UnsafePointer<Float>, _ v: UnsafePointer<Float>, step: UInt64, seen: UInt64) {
     var d = Data(CKPT_MAGIC)
@@ -270,7 +421,7 @@ func loadCkpt(_ path: String, _ sh: Shape, factor: Bool) -> ([Float], [Float], [
     guard b.count >= 40, Array(b[0..<8]) == CKPT_MAGIC else { die("not a v2 checkpoint") }
     func word(_ i: Int) -> UInt64 { b[8 + 8 * i..<16 + 8 * i].reversed().reduce(0) { $0 << 8 | UInt64($1) } }
     guard Int(word(0)) == sh.h, word(1) == ckptWord1(sh, factor) else {
-        die("checkpoint shape (H, buckets, king layout, factorise) differs")
+        die("checkpoint shape (H, buckets, king layout, factorise, threats) differs")
     }
     let n = sh.len + (factor ? INPUTS * sh.h : 0)
     guard b.count == 40 + 12 * n else { die("checkpoint size mismatch") }
@@ -366,6 +517,8 @@ struct Cfg {
     var plen: UInt32 = 0
     var fl: UInt32 = 0          // factoriser floats (768 * H), 0 = off
     var wdact: UInt32 = 0
+    var nfb: UInt32 = 768       // king-bucketed FT rows (KB * 768); threat rows follow
+    var tb: UInt32 = 0          // threat blocks
     var ktab: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
                UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
@@ -374,6 +527,7 @@ struct Cfg {
     init(_ sh: Shape) {
         h = UInt32(sh.h); nb = UInt32(sh.buckets)
         nf = UInt32(sh.ftRows); kmirror = sh.kl.mirror ? 1 : 0
+        nfb = UInt32(sh.kb * INPUTS); tb = UInt32(sh.tb)
         plen = UInt32(sh.len)
         let t = sh.kl.packed
         ktab = (t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15])
@@ -414,18 +568,25 @@ func fwdThreads(_ h: Int) -> Int { min(256, max(32, h / 2)) }
 /// Decoded positions living on the GPU.
 final class Batch {
     let n: Int
-    let recs, feats, meta, target, loss, aux: MTLBuffer
-    init(_ g: Gpu, _ n: Int) {
+    /// tmask: threat masks (2 words per record, filled on the CPU);
+    /// tfeats: threat features [record][block][side][32]; tmeta: per-block counts (8 bits each).
+    let recs, feats, meta, target, loss, aux, tmask, tfeats, tmeta: MTLBuffer
+    init(_ g: Gpu, _ n: Int, threats: Bool = false) {
         self.n = n
         recs = g.buf(n * REC); feats = g.buf(n * 128); meta = g.buf(n * 4); target = g.buf(n * 4)
         loss = g.buf(n * 4); aux = g.buf(n * 4)
+        tmask = g.buf(threats ? n * 8 : 16); tfeats = g.buf(threats ? n * 256 : 16); tmeta = g.buf(threats ? n * 4 : 16)
+    }
+    /// Threat masks for the records now in `recs` (CPU).
+    func fillThreats(_ th: Int) {
+        fillThreatMasks(UnsafeRawPointer(recs.contents()), tmask.contents().assumingMemoryBound(to: UInt32.self), n, th)
     }
     func encodeDecode(_ g: Gpu, _ enc: MTLComputeCommandEncoder, _ cfg: Cfg) {
         var c = cfg
         c.count = UInt32(n)
         enc.setComputePipelineState(g.decode)
-        enc.setBuffers([recs, feats, meta, target], offsets: [0, 0, 0, 0], range: 0..<4)
-        enc.setBytes(&c, length: MemoryLayout<Cfg>.stride, index: 4)
+        enc.setBuffers([recs, feats, meta, target, tmask, tfeats, tmeta], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
+        enc.setBytes(&c, length: MemoryLayout<Cfg>.stride, index: 7)
         enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
     func sum(_ b: MTLBuffer) -> Double {
@@ -474,20 +635,22 @@ final class Trainer {
         if m0 == nil { memset(m.contents(), 0, tlen * 4); memset(v.contents(), 0, tlen * 4) }
         acc = g.buf(batch * 2 * sh.h * 4)
         gs = g.buf(batch * 4)
-        precondition(sh.kb <= MAXKB, "at most \(MAXKB) king buckets")
-        // Rows sorted by king bucket, cut into ranges of 2 * RS rows (each
-        // bucket's last one partial) and items of `per` ranges (see plan_rows).
-        let nr = (batch + RS - 1) / RS
-        let per = (nr + Int(cfg.rf) - 1) / Int(cfg.rf)
-        maxRanges = nr + sh.kb
-        maxItems = (maxRanges + sh.kb * (per - 1)) / per
+        precondition(sh.kb + sh.tb <= MAXKB, "at most \(MAXKB) king buckets + threat blocks")
+        // Rows sorted by king bucket (threat blocks are extra "buckets" of
+        // virtual rows), cut into ranges of 2 * RS rows (each bucket's last
+        // one partial) and items of `per` ranges (see plan_rows).
+        let nkbv = sh.kb + sh.tb
+        let nr1 = (batch + RS - 1) / RS
+        let per = (nr1 + Int(cfg.rf) - 1) / Int(cfg.rf)
+        maxRanges = nr1 * (1 + sh.tb) + nkbv
+        maxItems = (maxRanges + nkbv * (per - 1)) / per
         pft = g.buf(maxItems * (INPUTS + 1) * sh.h * 4)
         pow_ = g.buf(maxItems * sh.buckets * 2 * sh.h * 4)
         pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
         // Per range: a CSR over its bucket's 768 features.
         sorted = g.buf(maxRanges * RS * 64 * 2)
         ecount = g.buf(maxRanges * 769 * 4)
-        rows = g.buf(2 * batch * 4)
+        rows = g.buf(2 * batch * (1 + sh.tb) * 4)
         hdr = g.buf((3 + MAXKB) * 4)
         rng = g.buf(maxRanges * 16)
         items = g.buf(maxItems * 16)
@@ -508,6 +671,7 @@ final class Trainer {
         enc.setComputePipelineState(g.fwdTrain)
         enc.setBuffers([p, b.feats, b.meta, b.target, acc, gs, b.loss], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
         enc.setBytes(&c, length: cl, index: 7)
+        enc.setBuffers([b.tfeats, b.tmeta], offsets: [0, 0], range: 8..<10)
         enc.dispatchThreadgroups(MTLSize(width: b.n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: fwdThreads(sh.h), height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)
@@ -515,16 +679,18 @@ final class Trainer {
         enc.setComputePipelineState(g.plan)
         enc.setBuffers([b.meta, rows, hdr, rng, items], offsets: [0, 0, 0, 0, 0], range: 0..<5)
         enc.setBytes(&c, length: cl, index: 5)
+        enc.setBuffer(b.tmeta, offset: 0, index: 6)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(1024, g.plan.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
         enc.memoryBarrier(scope: .buffers)
         enc.setComputePipelineState(g.sortE)
         enc.setBuffers([b.feats, b.meta, sorted, ecount, rows, hdr, rng], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
         enc.setBytes(&c, length: cl, index: 7)
+        enc.setBuffers([b.tfeats, b.tmeta], offsets: [0, 0], range: 8..<10)
         enc.dispatchThreadgroups(MTLSize(width: maxRanges, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 3 {
-        enc.setComputePipelineState(sh.kb == 1 ? g.gradFused1 : g.gradFused)
+        enc.setComputePipelineState(sh.kb == 1 && sh.tb == 0 ? g.gradFused1 : g.gradFused)
         enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_, rows, hdr, rng, items], offsets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], range: 0..<12)
         enc.setBytes(&c, length: cl, index: 12)
         enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: maxItems, depth: 1), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
@@ -564,8 +730,9 @@ final class ValSet {
     init(_ g: Gpu, _ recs: [UInt8], lambda: Float, sh: Shape) {
         let n = recs.count / REC
         guard n > 0 else { b = nil; return }
-        let bb = Batch(g, n)
+        let bb = Batch(g, n, threats: sh.tb > 0)
         recs.withUnsafeBytes { bb.recs.contents().copyMemory(from: $0.baseAddress!, byteCount: n * REC) }
+        bb.fillThreats(sh.th)
         // Byte 28 = mirror flag: never mirror validation positions.
         let r = bb.recs.contents().assumingMemoryBound(to: UInt8.self)
         for i in 0..<n { r[i * REC + 28] = 0 }
@@ -589,6 +756,7 @@ final class ValSet {
         enc.setComputePipelineState(g.fwdVal)
         enc.setBuffers([p, b.feats, b.meta, b.target, b.loss, b.aux], offsets: [0, 0, 0, 0, 0, 0], range: 0..<6)
         enc.setBytes(&c, length: MemoryLayout<Cfg>.stride, index: 6)
+        enc.setBuffers([b.tfeats, b.tmeta], offsets: [0, 0], range: 7..<9)
         enc.dispatchThreadgroups(MTLSize(width: b.n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: fwdThreads(sh.h), height: 1, depth: 1))
         enc.endEncoding()
         cb.commit()
@@ -640,6 +808,7 @@ func cmdTrain(_ args: [String]) {
         case "--hidden": sh.h = parse(it.value(a), a)
         case "--buckets": sh.buckets = parse(it.value(a), a)
         case "--king-buckets": sh.layout = layoutId(it.value(a))
+        case "--threats": sh.th = threatId(it.value(a))
         case "--epochs": epochs = parse(it.value(a), a)
         case "--epoch-size": epochSize = parse(it.value(a), a)
         case "--batch": batch = parse(it.value(a), a)
@@ -679,9 +848,7 @@ func cmdTrain(_ args: [String]) {
         if factor {
             p0 = loadInitFactor(i, sh).map { min(max($0, -CLIP), CLIP) }
         } else {
-            let (p, s) = loadInit(i, sh.buckets, layout: sh.layout)
-            if s != sh { die("init net shape differs from --hidden/--buckets/--king-buckets") }
-            p0 = p.map { min(max($0, -CLIP), CLIP) }
+            p0 = loadInit(i, sh).map { min(max($0, -CLIP), CLIP) }
         }
     } else {
         p0 = factor ? initFactor(sh, &rng) : initParams(sh, &rng)
@@ -690,7 +857,7 @@ func cmdTrain(_ args: [String]) {
     let valRecs = valPath.map(readFile) ?? []
     let val = ValSet(g, valRecs, lambda: lambda, sh: sh)
     let tr = Trainer(g, sh, batch: batch, lambda: lambda, params: p0, m0: m0, v0: v0, factor: factor, wdActive: wdAct)
-    let kbNote = (sh.layout != 0 ? " king-buckets=\(sh.kl.name) (KB=\(sh.kb))" : "") + (factor ? " factorised" : "") + (wdAct ? " wd-active-only" : "")
+    let kbNote = (sh.layout != 0 ? " king-buckets=\(sh.kl.name) (KB=\(sh.kb))" : "") + (sh.th != 0 ? " threats=\(THREATS[sh.th].name)" : "") + (factor ? " factorised" : "") + (wdAct ? " wd-active-only" : "")
     out("train H=\(sh.h) buckets=\(sh.buckets)\(kbNote) params=\(sh.len) epochs=\(epochs) x \(epochSize) batch=\(batch) lr \(rustDisplay(lr))->\(rustDisplay(lrEnd)) wd=\(rustDisplay(wd)) lambda=\(rustDisplay(lambda)) mirror=\(mirror) threads=\(threads) val=\(valRecs.count / REC)")
     let (vl0, ve0) = val.validate(g, tr.p, sh)
     out("start val loss \(f6(vl0)) mean|eval| \(f1(ve0))cp")
@@ -698,7 +865,7 @@ func cmdTrain(_ args: [String]) {
     // Loader thread: fills ring slots with raw records (+ mirror flag in byte 28),
     // drawing seed_b from the main RNG exactly as the CPU trainer does per batch.
     let slots = 16
-    let ring = (0..<slots).map { _ in Batch(g, batch) }
+    let ring = (0..<slots).map { _ in Batch(g, batch, threats: sh.tb > 0) }
     let free = DispatchSemaphore(value: slots), filled = DispatchSemaphore(value: 0)
     let feed = Feed(data, seed: seed ^ 0xF00D ^ seen)
     var loaderRng = rng
@@ -718,6 +885,7 @@ func cmdTrain(_ args: [String]) {
                     r[i * REC + 28] = (mirror && mr.next() & 1 == 1) ? 1 : 0
                 }
             }
+            b.fillThreats(sh.th)
             filled.signal()
             k += 1
         }
@@ -785,7 +953,7 @@ func cmdTrain(_ args: [String]) {
 
 func cmdEval(_ args: [String]) {
     var net: String? = nil, valPath: String? = nil
-    var buckets = 1, layout = 0
+    var buckets = 1, layout = 0, th = 0
     var lambda: Float = 0.5
     let it = Args(args)
     while let a = it.next() {
@@ -794,24 +962,25 @@ func cmdEval(_ args: [String]) {
         case "--val": valPath = it.value(a)
         case "--buckets": buckets = parse(it.value(a), a)
         case "--king-buckets": layout = layoutId(it.value(a))
+        case "--threats": th = threatId(it.value(a))
         case "--lambda": lambda = parse(it.value(a), a)
         default: die("unknown option \(a)")
         }
     }
     guard let n = net, let vp = valPath else { die("--net and --val required") }
-    let (p, sh) = loadNet(n, buckets, layout: layout)
+    let (p, sh) = loadNet(n, buckets, layout: layout, th: th)
     let g = Gpu()
     let recs = readFile(vp)
     let val = ValSet(g, recs, lambda: lambda, sh: sh)
     let (l, e) = val.validate(g, g.buf(p), sh)
-    out("H=\(sh.h) buckets=\(sh.buckets) \(sh.layout != 0 ? "king-buckets=\(sh.kl.name) " : "")val positions \(recs.count / REC) loss \(f6(l)) mean|eval| \(f1(e))cp")
+    out("H=\(sh.h) buckets=\(sh.buckets) \(sh.layout != 0 ? "king-buckets=\(sh.kl.name) " : "")\(sh.th != 0 ? "threats=\(THREATS[sh.th].name) " : "")val positions \(recs.count / REC) loss \(f6(l)) mean|eval| \(f1(e))cp")
 }
 
 // ---------------------------------------------------------------- CPU reference (gradcheck)
 
 struct Sample { var f: [[Int]]; var bucket: Int; var target: Float }
 
-func cpuDecode(_ r: UnsafePointer<UInt8>, _ lambda: Float, _ buckets: Int, _ mirror: Bool, _ kl: KingLayout = LAYOUTS[0]) -> Sample {
+func cpuDecode(_ r: UnsafePointer<UInt8>, _ lambda: Float, _ buckets: Int, _ mirror: Bool, _ kl: KingLayout = LAYOUTS[0], th: Int = 0) -> Sample {
     var occ0: UInt64 = 0
     for i in 0..<8 { occ0 |= UInt64(r[i]) << (8 * UInt64(i)) }
     let score = Float(Int16(bitPattern: UInt16(r[24]) | UInt16(r[25]) << 8))
@@ -844,6 +1013,16 @@ func cpuDecode(_ r: UnsafePointer<UInt8>, _ lambda: Float, _ buckets: Int, _ mir
         n += 1
     }
     s.bucket = buckets == 1 ? 0 : min(max(n - 2, 0) * buckets / 32, buckets - 1)
+    if THREATS[th].blocks > 0 {
+        // Threat row of piece k = its piece row moved to threat block t (block order, piece order).
+        let m = RAYS.withUnsafeBufferPointer { rays in KNIGHT_ATT.withUnsafeBufferPointer { kn in KING_ATT.withUnsafeBufferPointer { kg in
+            threatMasks(r, th, rays.baseAddress!, kn.baseAddress!, kg.baseAddress!) } } }
+        for (t, mask) in [m.0, m.1].prefix(THREATS[th].blocks).enumerated() {
+            for k in 0..<n where mask >> UInt32(k) & 1 == 1 {
+                for i in 0..<2 { s.f[i].append(s.f[i][k] - ctx[i].0 + (kl.kb + t) * INPUTS) }
+            }
+        }
+    }
     var wdl = Float(r[26]) / 2.0
     var sc = score
     if stmBlack { wdl = 1.0 - wdl; sc = -sc }
@@ -907,6 +1086,7 @@ func cmdGradcheck(_ args: [String]) {
         case "--batch": n = parse(it.value(a), a)
         case "--mirror": mirror = true
         case "--king-buckets": sh.layout = layoutId(it.value(a))
+        case "--threats": sh.th = threatId(it.value(a))
         case "--factorise", "--factorize": factor = true
         case "--wd-active-only": wdActive = true
         case "--no-wd-active-only": wdActive = false
@@ -937,8 +1117,9 @@ func cmdGradcheck(_ args: [String]) {
 
     let g = Gpu()
     let tr = Trainer(g, sh, batch: n, lambda: lambda, params: t, m0: nil, v0: nil, factor: factor, wdActive: wdAct)
-    let b = Batch(g, n)
+    let b = Batch(g, n, threats: sh.tb > 0)
     raw.withUnsafeBytes { b.recs.contents().copyMemory(from: $0.baseAddress!, byteCount: n * REC) }
+    b.fillThreats(sh.th)
     var cb = g.q.makeCommandBuffer()!
     tr.encodeStep(cb, b, lr: 0, wd: 0, c1: 1, c2: 1, mode: 1)
     cb.commit(); cb.waitUntilCompleted(); if let e = cb.error { die("GPU error: \(e)") }
@@ -949,7 +1130,7 @@ func cmdGradcheck(_ args: [String]) {
     var lossRef = 0.0
     raw.withUnsafeBufferPointer { rp in
         for i in 0..<n {
-            let s = cpuDecode(rp.baseAddress! + i * REC, lambda, sh.buckets, raw[i * REC + 28] != 0, sh.kl)
+            let s = cpuDecode(rp.baseAddress! + i * REC, lambda, sh.buckets, raw[i * REC + 28] != 0, sh.kl, th: sh.th)
             samples.append(s)
             lossRef += cpuTrainSample(p, sh, s, &ref)
         }
@@ -963,7 +1144,7 @@ func cmdGradcheck(_ args: [String]) {
         if d > maxAbs { maxAbs = d; worst = i }
         maxRef = max(maxRef, abs(ref[i]))
     }
-    out("gradcheck H=\(sh.h) buckets=\(sh.buckets) king-buckets=\(sh.kl.name) batch=\(n) mirror=\(mirror) factorise=\(factor) wd-active-only=\(wdAct)")
+    out("gradcheck H=\(sh.h) buckets=\(sh.buckets) king-buckets=\(sh.kl.name) threats=\(THREATS[sh.th].name) batch=\(n) mirror=\(mirror) factorise=\(factor) wd-active-only=\(wdAct)")
     out("  loss sum: gpu \(lossGpu) cpu \(lossRef) rel \(abs(lossGpu - lossRef) / lossRef)")
     out("  grad: max|gpu-cpu| \(maxAbs) at \(worst) (max|grad| \(maxRef)), rel \(maxAbs / maxRef)")
 
@@ -971,7 +1152,7 @@ func cmdGradcheck(_ args: [String]) {
     // as a function of the training vector (merged through the factoriser).
     func lossAt(_ tq: [Double]) -> Double {
         let h = sh.h
-        let q = factor ? (0..<sh.len).map { i in i < sh.ftB ? min(max(tq[i] + tq[sh.len + i % fl], -Double(CLIP)), Double(CLIP)) : tq[i] } : tq
+        let q = factor ? (0..<sh.len).map { i in i < sh.ftKb ? min(max(tq[i] + tq[sh.len + i % fl], -Double(CLIP)), Double(CLIP)) : tq[i] } : tq
         var l = 0.0
         var acc = [Double](repeating: 0, count: 2 * h)
         for s in samples {
@@ -991,6 +1172,15 @@ func cmdGradcheck(_ args: [String]) {
     let f0 = samples[0].f[0][0] * sh.h, f1i = samples[0].f[1][3] * sh.h
     picks += [f0, f0 + 3, f1i + 1, sh.ftB + 1, sh.ftB + sh.h - 1]
     picks += [sh.outW + samples[0].bucket * 2 * sh.h + 5, sh.outW + samples[0].bucket * 2 * sh.h + sh.h + 2, sh.outB + samples[0].bucket]
+    if sh.tb > 0 {
+        // Threat rows (the last features of a sample, if it has any), both perspectives.
+        if let s = samples.first(where: { $0.f[0].last! >= sh.kb * INPUTS }) {
+            picks += [s.f[0].last! * sh.h + 1, s.f[1].last! * sh.h + sh.h - 1]
+        }
+        var tr = 0
+        for s in samples { for side in 0..<2 { for f in s.f[side] where f >= sh.kb * INPUTS { tr += 1 } } }
+        out("  threat rows in the batch: \(tr)")
+    }
     if factor {
         picks += [sh.len + (samples[0].f[0][0] % INPUTS) * sh.h, sh.len + (samples[0].f[1][3] % INPUTS) * sh.h + 1,
                   sh.len + (samples[n - 1].f[0][1] % INPUTS) * sh.h + sh.h - 1]
@@ -1063,6 +1253,7 @@ func cmdBench(_ args: [String]) {
         case "--batch": n = parse(it.value(a), a)
         case "--iters": iters = parse(it.value(a), a)
         case "--king-buckets": sh.layout = layoutId(it.value(a))
+        case "--threats": sh.th = threatId(it.value(a))
         case "--factorise", "--factorize": factor = true
         case "--wd-active-only": wdAct = true
         default: die("unknown option \(a)")
@@ -1073,12 +1264,15 @@ func cmdBench(_ args: [String]) {
     let p = factor ? initFactor(sh, &rng) : initParams(sh, &rng)
     let g = Gpu()
     let tr = Trainer(g, sh, batch: n, lambda: 0.5, params: p, m0: nil, v0: nil, factor: factor, wdActive: wdAct)
-    let b = Batch(g, n)
+    let b = Batch(g, n, threats: sh.tb > 0)
     let raw = Array(readFile(dp).prefix(n * REC))
     raw.withUnsafeBytes { b.recs.contents().copyMemory(from: $0.baseAddress!, byteCount: n * REC) }
+    let tm0 = Date()
+    b.fillThreats(sh.th)
+    let tmMs = Date().timeIntervalSince(tm0) * 1000
     let names = ["decode", "forward", "sort", "grad", "adam"]
     var tot = 0.0
-    var line = "bench H=\(sh.h) B=\(sh.buckets) KB=\(sh.kb)\(factor ? " factorised" : "")\(wdAct ? " wd-active-only" : "") batch=\(n):"
+    var line = "bench H=\(sh.h) B=\(sh.buckets) KB=\(sh.kb)\(sh.tb > 0 ? " threats=\(THREATS[sh.th].name) (cpu masks \(String(format: "%.1f", tmMs))ms)" : "")\(factor ? " factorised" : "")\(wdAct ? " wd-active-only" : "") batch=\(n):"
     for st in -1..<5 {
         // Sustained: iters command buffers back to back (warm clocks), GPU span / iters.
         var best = 1e9

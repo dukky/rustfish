@@ -140,3 +140,23 @@ unchanged); `--wd-active-only` (default on for KB > 1) restricts AdamW
 decay on bucketed FT rows to rows seen in the batch. Train factorised
 nets from scratch: a mirrored layout cannot start exactly from an
 unmirrored one-bucket net (see `tools/nnue-trainer/README.md`).
+
+### Threat inputs (branch `threat-inputs`, off on main)
+
+Both trainers take `--threats <none|ep|ad>` (see `tools/nnue-trainer/README.md`);
+the engine runs a threat net when `THREATS` in `src/nnue.rs` is set to the
+same mode (net format: `TB * 768` extra FT rows after the king buckets').
+
+Offline signal check (2026-11-07, Metal, shared GPU): first 30M positions of
+`pool3f.bin`, H 128, B 8, KB 1, 2 epochs, seed 5, default LR, full `val.bin`:
+
+| threats | val (float) | val (quantised) | vs none |
+|---|---|---|---|
+| none | 0.029241 | 0.029260 | - |
+| ep (en prise, 1 block) | 0.028941 | 0.028979 | -1.0% |
+| ad (attacked + defended, 2 blocks) | 0.029230 | 0.029265 | 0.0% |
+
+Engine cost (bench, same search tree via a zero-threat-row warm start of g3,
+interleaved x6, loaded M3): ep -22% NPS (617k -> 482k), ad -41% (365k). ep is the only
+candidate; whether -1% val loss pays for -22% NPS needs a full-size run and
+an `stc` SPRT.

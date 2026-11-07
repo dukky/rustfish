@@ -2,8 +2,16 @@ import Foundation
 // MSL source, compiled at runtime (no offline `metal` compiler needed).
 //
 // Parameter layout matches the CPU trainer / exported file:
-//   ft weights [KB*768][H] | ft bias [H] | out weights [B][2H] (stm half first) | out bias [B]
-// (NF = KB*768 FT rows; KB = king buckets, see `--king-buckets`).
+//   ft weights [(KB+TB)*768][H] | ft bias [H] | out weights [B][2H] (stm half first) | out bias [B]
+// (NF = (KB+TB)*768 FT rows; KB = king buckets, see `--king-buckets`; TB =
+// threat blocks, see `--threats`; NFB = KB*768 king-bucketed rows).
+//
+// Threat rows: every (position, perspective) row also appears once per
+// threat block as a virtual row (row id | block << 28) of a virtual king
+// bucket KB + block, whose features are its threat features. The sort and
+// backward kernels then treat the threat blocks exactly like king buckets;
+// only the FT bias / output-weight / factoriser gradients ignore the
+// virtual items (the real rows already carry them).
 //
 // Per batch: decode -> forward_train -> plan_rows -> sort_entries -> grad_fused + grad_ob
 // (+ row_active) -> adam (+ merge_factor).
@@ -47,6 +55,8 @@ struct Cfg {
     uint plen;       // net params (the exported layout)
     uint fl;         // factoriser floats after them (768 * H), 0 = off
     uint wdact;      // weight decay only on FT rows active in the batch
+    uint nfb;        // king-bucketed FT rows (KB * 768); threat rows follow
+    uint tb;         // threat blocks
     uint ktab[16];   // king bucket per perspective-relative square, 4 per word
 };
 
@@ -57,11 +67,17 @@ inline float sigm(float x) { return 1.0f / (1.0f + precise::exp(-x)); }
 // 32-byte record -> features of both perspectives (0 = side to move),
 // meta = n | bucket << 8 | king bucket (persp 0) << 16 | king bucket (persp 1) << 24, target. Byte 28 (padding) carries the mirror flag
 // chosen on the CPU so the mirror RNG stream matches the CPU trainer.
+// Threats: tmask[s * 2 + t] bit n = piece n is active in threat block t
+// (computed on the CPU); tfeats[s * 128 + (t * 2 + side) * 32 + k] gets the
+// threat features in piece order, tmeta[s] their count per block (8 bits each).
 kernel void decode(device const uint* recs [[buffer(0)]],
                    device ushort* feats [[buffer(1)]],
                    device uint* meta [[buffer(2)]],
                    device float* target [[buffer(3)]],
-                   constant Cfg& c [[buffer(4)]],
+                   device const uint* tmask [[buffer(4)]],
+                   device ushort* tfeats [[buffer(5)]],
+                   device uint* tmeta [[buffer(6)]],
+                   constant Cfg& c [[buffer(7)]],
                    uint s [[thread_position_in_grid]]) {
     if (s >= c.count) return;
     device const uint* r = recs + s * 8;
@@ -73,7 +89,7 @@ kernel void decode(device const uint* recs [[buffer(0)]],
     uint flip = (r[7] & 0xFF) != 0 ? 7 : 0;
     // King contexts (0 = side to move) from each perspective's own king.
     uint kbase[2] = {0, 0}, kflip[2] = {0, 0};
-    if (c.nf > 768 || c.kmirror != 0) {
+    if (c.nfb > 768 || c.kmirror != 0) {
         uint ksq[2] = {0, 0};
         uint n = 0;
         for (uint half_ = 0; half_ < 2; half_++) {
@@ -95,6 +111,8 @@ kernel void decode(device const uint* recs [[buffer(0)]],
         }
     }
     uint n = 0;
+    uint tm0 = c.tb > 0 ? tmask[s * 2] : 0, tm1 = c.tb > 1 ? tmask[s * 2 + 1] : 0;
+    uint tc0 = 0, tc1 = 0;
     for (uint half_ = 0; half_ < 2; half_++) {
         uint occ = half_ == 0 ? lo : hi;
         while (occ != 0 && n < 32) {
@@ -104,15 +122,22 @@ kernel void decode(device const uint* recs [[buffer(0)]],
             uint nib = (byte_ >> (4 * (n & 1))) & 0xF;
             bool black = (nib >> 3) == 1;
             uint kind = nib & 7;
+            bool t0 = ((tm0 >> n) & 1) != 0, t1 = ((tm1 >> n) & 1) != 0;
             for (uint i = 0; i < 2; i++) {
                 bool pb = i == 0 ? stm_black : !stm_black;
                 uint side = black == pb ? 0 : 384;
                 uint rel = pb ? (sq ^ 56) : sq;
-                feats[s * 64 + i * 32 + n] = ushort(kbase[i] + side + kind * 64 + (rel ^ kflip[i]));
+                uint local = side + kind * 64 + (rel ^ kflip[i]);
+                feats[s * 64 + i * 32 + n] = ushort(kbase[i] + local);
+                if (t0) tfeats[s * 128 + i * 32 + tc0] = ushort(c.nfb + local);
+                if (t1) tfeats[s * 128 + 64 + i * 32 + tc1] = ushort(c.nfb + 768 + local);
             }
+            tc0 += t0 ? 1 : 0;
+            tc1 += t1 ? 1 : 0;
             n++;
         }
     }
+    if (c.tb > 0) tmeta[s] = tc0 | (tc1 << 8);
     uint bucket = c.nb == 1 ? 0 : min((n < 2 ? 0 : n - 2) * c.nb / 32, c.nb - 1);
     meta[s] = n | (bucket << 8) | ((kbase[0] / 768) << 16) | ((kbase[1] / 768) << 24);
     float wdl = float(result) / 2.0f;
@@ -126,11 +151,13 @@ kernel void decode(device const uint* recs [[buffer(0)]],
 inline float forward_one(device const float* p, device const ushort* feats, device const uint* meta,
                          device float* acc, bool store, constant Cfg& c, uint s,
                          uint tid, uint tpg, uint sl, uint sg, uint nsg, threadgroup float* red,
-                         threadgroup ushort* fl) {
+                         threadgroup ushort* fl, device const ushort* tfeats, device const uint* tmeta) {
     uint h = c.h, h4 = c.h / 4;
     uint m = meta[s];
     uint n = m & 0xFF, b = (m >> 8) & 0xFF;
+    uint tm = c.tb > 0 ? tmeta[s] : 0;
     for (uint i = tid; i < 64; i += tpg) fl[i] = feats[s * 64 + i];
+    for (uint i = tid; i < c.tb * 64; i += tpg) fl[64 + i] = tfeats[s * 128 + i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     device const float4* w4 = (device const float4*)p;
     device const float4* fb4 = (device const float4*)(p + c.nf * h);
@@ -143,6 +170,11 @@ inline float forward_one(device const float* p, device const ushort* feats, devi
         threadgroup const ushort* f = fl + side * 32;
         float4 x = fb4[j4];
         for (uint k = 0; k < n; k++) x += w4[uint(f[k]) * h4 + j4];
+        for (uint t = 0; t < c.tb; t++) {
+            threadgroup const ushort* tf = fl + 64 + (t * 2 + side) * 32;
+            uint nt = (tm >> (8 * t)) & 0xFF;
+            for (uint k = 0; k < nt; k++) x += w4[uint(tf[k]) * h4 + j4];
+        }
         if (store) acc4[ch] = x;
         float4 a = clamp(x, 0.0f, 1.0f);
         float4 ow = ow4[ch];
@@ -167,6 +199,8 @@ kernel void forward_train(device const float* p [[buffer(0)]],
                           device float* gs [[buffer(5)]],
                           device float* loss [[buffer(6)]],
                           constant Cfg& c [[buffer(7)]],
+                          device const ushort* tfeats [[buffer(8)]],
+                          device const uint* tmeta [[buffer(9)]],
                           uint s [[threadgroup_position_in_grid]],
                           uint tid [[thread_position_in_threadgroup]],
                           uint tpg [[threads_per_threadgroup]],
@@ -174,8 +208,8 @@ kernel void forward_train(device const float* p [[buffer(0)]],
                           uint sg [[simdgroup_index_in_threadgroup]],
                           uint nsg [[simdgroups_per_threadgroup]]) {
     threadgroup float red[32];
-    threadgroup ushort fl[64];
-    float out = forward_one(p, feats, meta, acc, true, c, s, tid, tpg, sl, sg, nsg, red, fl);
+    threadgroup ushort fl[64 + 128];
+    float out = forward_one(p, feats, meta, acc, true, c, s, tid, tpg, sl, sg, nsg, red, fl, tfeats, tmeta);
     if (tid == 0) {
         float pred = sigm(out);
         float err = pred - target[s];
@@ -191,6 +225,8 @@ kernel void forward_val(device const float* p [[buffer(0)]],
                         device float* loss [[buffer(4)]],
                         device float* aeval [[buffer(5)]],
                         constant Cfg& c [[buffer(6)]],
+                        device const ushort* tfeats [[buffer(7)]],
+                        device const uint* tmeta [[buffer(8)]],
                         uint s [[threadgroup_position_in_grid]],
                         uint tid [[thread_position_in_threadgroup]],
                         uint tpg [[threads_per_threadgroup]],
@@ -198,8 +234,8 @@ kernel void forward_val(device const float* p [[buffer(0)]],
                         uint sg [[simdgroup_index_in_threadgroup]],
                         uint nsg [[simdgroups_per_threadgroup]]) {
     threadgroup float red[32];
-    threadgroup ushort fl[64];
-    float out = forward_one(p, feats, meta, (device float*)nullptr, false, c, s, tid, tpg, sl, sg, nsg, red, fl);
+    threadgroup ushort fl[64 + 128];
+    float out = forward_one(p, feats, meta, (device float*)nullptr, false, c, s, tid, tpg, sl, sg, nsg, red, fl, tfeats, tmeta);
     if (tid == 0) {
         float d = sigm(out) - target[s];
         loss[s] = d * d;
@@ -218,12 +254,23 @@ kernel void forward_val(device const float* p [[buffer(0)]],
 // super-ranges, so KB = 1 sums in the same order as before.
 // hdr = [nranges, nitems, first item per bucket (kb + 1 entries)],
 // rng[r] = (kb, first row slot, rows), item[i] = (kb, first range, end range).
+// Threat blocks: rows 2 * count * (1 + t) .. are the virtual rows of block
+// t (bucket KB + t, row id | (1 + t) << 28); a virtual row without threat
+// features is left out (it has no gradient to collect).
+inline uint row_bucket(device const uint* meta, device const uint* tmeta, constant Cfg& c, uint r, uint n2) {
+    uint blk = r / n2, rr = r - blk * n2;
+    if (blk == 0) return (meta[rr >> 1] >> (16 + 8 * (rr & 1))) & 0xFF;
+    uint cnt = (tmeta[rr >> 1] >> (8 * (blk - 1))) & 0xFF;
+    return cnt == 0 ? 0xFFu : c.nfb / 768 + blk - 1;
+}
+
 kernel void plan_rows(device const uint* meta [[buffer(0)]],
                       device uint* rows [[buffer(1)]],
                       device uint* hdr [[buffer(2)]],
                       device uint4* rng [[buffer(3)]],
                       device uint4* item [[buffer(4)]],
                       constant Cfg& c [[buffer(5)]],
+                      device const uint* tmeta [[buffer(6)]],
                       uint tid [[thread_position_in_threadgroup]],
                       uint tpg [[threads_per_threadgroup]],
                       uint sl [[thread_index_in_simdgroup]],
@@ -231,12 +278,16 @@ kernel void plan_rows(device const uint* meta [[buffer(0)]],
     threadgroup uint simd_tot[32];
     threadgroup uint tot[MAXKB];
     uint nkb = c.nf / 768;
-    uint nrows = 2 * c.count;
+    uint n2 = 2 * c.count;
+    uint nrows = n2 * (1 + c.tb);
     uint chunk = (nrows + tpg - 1) / tpg;
     uint r0 = min(nrows, tid * chunk), r1 = min(nrows, r0 + chunk);
     uint cnt[MAXKB];
     for (uint k = 0; k < MAXKB; k++) cnt[k] = 0;
-    for (uint r = r0; r < r1; r++) cnt[(meta[r >> 1] >> (16 + 8 * (r & 1))) & 0xFF]++;
+    for (uint r = r0; r < r1; r++) {
+        uint k = row_bucket(meta, tmeta, c, r, n2);
+        if (k != 0xFFu) cnt[k]++;
+    }
     // Per bucket: exclusive prefix of the thread counts (thread order = row order).
     for (uint k = 0; k < nkb; k++) {
         uint pre = simd_prefix_exclusive_sum(cnt[k]);
@@ -252,8 +303,10 @@ kernel void plan_rows(device const uint* meta [[buffer(0)]],
     uint t = 0;
     for (uint k = 0; k < nkb; k++) { gst[k] = t; t += tot[k]; }
     for (uint r = r0; r < r1; r++) {
-        uint k = (meta[r >> 1] >> (16 + 8 * (r & 1))) & 0xFF;
-        rows[gst[k] + cnt[k]++] = r;
+        uint k = row_bucket(meta, tmeta, c, r, n2);
+        if (k == 0xFFu) continue;
+        uint blk = r / n2;
+        rows[gst[k] + cnt[k]++] = (r - blk * n2) | (blk << 28);
     }
     if (tid != 0) return;
     uint nr1 = (c.count + RS - 1) / RS;
@@ -284,6 +337,8 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
                          device const uint* hdr [[buffer(5)]],
                          device const uint4* rng [[buffer(6)]],
                          constant Cfg& c [[buffer(7)]],
+                         device const ushort* tfeats [[buffer(8)]],
+                         device const uint* tmeta [[buffer(9)]],
                          uint tgp [[threadgroup_position_in_grid]],
                          uint tid [[thread_index_in_threadgroup]],
                          uint sl [[thread_index_in_simdgroup]],
@@ -300,9 +355,11 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
         uint row = tid;
         if (row < R.z) {
             uint rid = rows[R.y + row];
-            uint s = rid >> 1;
-            uint n = meta[s] & 0xFF;
-            device const ushort* f = feats + s * 64 + (rid & 1) * 32;
+            uint blk = rid >> 28, lo = rid & 0x0FFFFFFFu;
+            uint s = lo >> 1;
+            uint n = blk == 0 ? meta[s] & 0xFF : (tmeta[s] >> (8 * (blk - 1))) & 0xFF;
+            device const ushort* f = blk == 0 ? feats + s * 64 + (lo & 1) * 32
+                                              : tfeats + s * 128 + ((blk - 1) * 2 + (lo & 1)) * 32;
             for (uint k = 0; k < n; k++)
                 atomic_fetch_or_explicit(&mask[(uint(f[k]) - kb * 768) * 8 + row / 32], 1u << (row % 32), memory_order_relaxed);
         }
@@ -377,7 +434,7 @@ inline void grad_body(device const float* p, device const uint* meta, device con
         for (uint row = sg; row < 2 * RS; row += NSG) {
             float d = 0.0f;
             if (row < R.z && live) {     // uniform per simdgroup
-                uint rid = ONE ? R.y + row : rows[R.y + row];
+                uint rid = ONE ? R.y + row : (rows[R.y + row] & 0x0FFFFFFFu);   // drop the threat block
                 uint s = rid >> 1, side = ONE ? (sg & 1) : (rid & 1);
                 uint ms = meta[s];
                 float g = gs[s];
@@ -525,22 +582,25 @@ kernel void adam(device float* p [[buffer(0)]],
     uint ft = c.nf * h, out_w = ft + h, out_b = out_w + c.nb * 2 * h;
     if (i >= c.plen + c.fl) return;
     float g = 0.0f;
+    // Items of the king-bucketed rows; threat-block items follow and only
+    // contribute to their own FT rows.
+    uint nbi = hdr[2 + c.nfb / 768];
     if (i < ft) {
         uint kb = i / (768 * h), k = i - kb * 768 * h;
         uint i1 = hdr[3 + kb];
         for (uint r = hdr[2 + kb]; r < i1; r++) g += pft[r * 769 * h + k];
     } else if (i < out_w) {
-        uint k = i - ft, ni = hdr[1];
-        for (uint r = 0; r < ni; r++) g += pft[r * 769 * h + 768 * h + k];
+        uint k = i - ft;
+        for (uint r = 0; r < nbi; r++) g += pft[r * 769 * h + 768 * h + k];
     } else if (i < out_b) {
-        uint k = i - out_w, ni = hdr[1];
-        for (uint r = 0; r < ni; r++) g += pow_[r * c.nb * 2 * h + k];
+        uint k = i - out_w;
+        for (uint r = 0; r < nbi; r++) g += pow_[r * c.nb * 2 * h + k];
     } else if (i < c.plen) {
         uint k = i - out_b;
         for (uint r = 0; r < c.rf; r++) g += pob[r * c.nb + k];
     } else {
-        uint k = i - c.plen, ni = hdr[1];
-        for (uint r = 0; r < ni; r++) g += pft[r * 769 * h + k];
+        uint k = i - c.plen;
+        for (uint r = 0; r < nbi; r++) g += pft[r * 769 * h + k];
     }
     if (c.mode == 1) { m[i] = g; return; }
     g *= c.inv_batch;
@@ -562,6 +622,6 @@ kernel void merge_factor(device const float* t [[buffer(0)]],
                          constant Cfg& c [[buffer(2)]],
                          uint i [[thread_position_in_grid]]) {
     if (i >= c.plen) return;
-    p[i] = i < c.nf * c.h ? clamp(t[i] + t[c.plen + i % c.fl], -CLIP, CLIP) : t[i];
+    p[i] = i < c.nfb * c.h ? clamp(t[i] + t[c.plen + i % c.fl], -CLIP, CLIP) : t[i];
 }
 """

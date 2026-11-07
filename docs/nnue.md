@@ -158,3 +158,12 @@ that. Reading `.gz` directly is not supported (std only) — gunzip first.
 Training data for the first net comes from HCE self-play at 5000 nodes; after
 that, the usual bootstrap is to regenerate with the first net and retrain.
 Acceptance is an STC SPRT like every other engine change.
+
+### Threat inputs (optional)
+
+`--threats ep|ad` (both trainers) adds blocks of 768 "threat" rows after the
+king-bucket rows: a row is active when its piece is en prise (`ep`) or
+attacked / defended (`ad`). The engine supports them behind
+`THREATS` in `src/nnue.rs` (off on main); the threat rows are diffed per
+ply inside the normal lazy accumulator update. See `docs/nnue-experiments.md`
+for the signal check and NPS cost.

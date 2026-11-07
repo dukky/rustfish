@@ -27,7 +27,7 @@ $M gradcheck --data recs.bin --hidden 256 --buckets 8 --batch 2048
 $M bench --data recs.bin --hidden 1024 --buckets 8   # per-kernel GPU time for one batch
 ```
 
-Flags: `--data` (repeatable) `--val --out --hidden --buckets --king-buckets --epochs
+Flags: `--data` (repeatable) `--val --out --hidden --buckets --king-buckets --threats --epochs
 --epoch-size --batch --lr --lr-end --wd --lambda --seed --mirror --init
 --resume --checkpoint --factorise --wd-active-only --no-wd-active-only`.
 `--threads` is accepted and ignored. Writes
@@ -266,6 +266,51 @@ Validation (`pool3f.bin` head, `--val` = first 100k of `val.bin`):
 Cost: H 512, B 8, kb8m kernel step 14.0-14.7 ms plain vs 15.2-16.5 ms
 factorised (adam + merge 1.3 -> 2.1 ms), about 5%. `row_active` is within
 noise. End-to-end ~1.0M pos/s in both cases.
+
+## Threat inputs
+
+`--threats <none|ep|ad>` (train, eval, gradcheck, bench) works as in the CPU
+trainer (same definitions, feature indices, `--init` zero rows, checkpoint
+header). On the GPU:
+
+- The loader thread computes each record's threat masks on the CPU
+  (`threatMasks`, bitboard ray attacks; one bit per piece in record order and
+  block, in 4 parallel chunks, ~5 ms per 16384 batch) into a per-batch buffer.
+  Masks do not depend on the perspective or on `--mirror`. `decode` turns
+  them into threat feature indices next to the piece features.
+- `forward` adds the threat rows after the piece rows.
+- Backward: every (position, perspective) row also appears once per threat
+  block as a *virtual row* (row id | block << 28) of a virtual king bucket
+  `KB + block`, whose features are its threat features. `plan_rows`, the
+  CSR sort and `grad_fused` then handle threat blocks exactly like king
+  buckets (rows without threat features are left out). `adam` takes the FT
+  bias, output-weight and factoriser gradients from the real buckets' items
+  only, so nothing is counted twice; FT rows of a threat block sum their own
+  items. The factoriser covers the bucketed rows only (`merge_factor` copies
+  threat rows).
+
+Validation (`pool3f.bin` head):
+
+- `gradcheck.sh`: six threat cases (ep and ad; H 16 to 256; B 1 / 8; none,
+  m1, kb4m, kb8m; `--mirror`; `--factorise`) PASS with the same error sizes as
+  before (relative gradient error 1e-7 to 2e-7, finite differences on threat
+  rows of both perspectives agree to ~6 digits, untouched rows exact). All 16
+  older cases still PASS.
+- Parity, 2M records, H 64, B 8, `--mirror`, seed 5, 2 x 1M, `--val` = first
+  100k of `val.bin`: `--threats ep`: CPU and GPU both print start 0.081652,
+  epoch 1 0.080345 / 0.074203 (q 0.074235), epoch 2 0.073461 / 0.070801
+  (q 0.070815); `--threats ad --king-buckets kb8m --factorise`: both 0.082895,
+  0.076552 / 0.067709 (q 0.067693), 0.066173 / 0.064956 (q 0.065014). Each
+  evaluator gives the other trainer's final net exactly that quantised loss.
+- `--threats none` nets and checkpoints are byte-identical to the previous
+  build (none and kb8m --factorise, 2 x 500k at H 64).
+- Warm start of the embedded g3 net (H 512, B 8) into ep / ad at lr ~0
+  reproduces its val loss exactly (0.026808).
+
+Cost (`bench`, H 512, B 8, KB 1, shared GPU): step 18.4-19.4 ms plain,
+25.2-25.8 ms ep (grad 10 -> 16 ms: the threat ranges pay the full 768-feature
+scan each), 41-42 ms ad. A denser packing of threat ranges would cut most of
+that if threats get used for real.
 
 ## Known gaps
 

@@ -83,3 +83,28 @@ toward zero between visits. `F`, the FT bias and the output layer decay as
 before; `--no-wd-active-only` restores plain decay. It only matters with
 `--wd > 0` (the default is 0). KB=1 nets keep plain decay and train
 bit-for-bit as before.
+
+## Threat inputs (`--threats <none|ep|ad>`, default `none`)
+
+Extra input blocks of 768 rows after the king buckets' rows (so the FT has
+`(KB + TB) * 768` rows and the threat weights sit between the bucketed rows
+and the FT bias in the file). A threat row uses the base feature index of
+its piece (`side*384 + kind*64 + sq` in the perspective's orientation, with
+the perspective's mirror flip) but is not king-bucketed and not factorised.
+It is active when the piece has the mode's property (kings never):
+
+- `ep` (TB = 1, "en prise"): attacked by an enemy piece of lower value
+  (P < N = B < R < Q), or attacked and not defended. About 3.4 active rows
+  per position and 1.1 changed per ply on random game positions.
+- `ad` (TB = 2): block 0 = attacked by the enemy, block 1 = defended by its
+  own side. About 19 active rows, 3.5 changed per ply.
+
+Attacks are plain attack sets with full occupancy (no x-rays), computed
+from the 32-byte records with ray walks (`threat_masks`); the definitions are
+the engine's `ThreatMode` (`src/nnue.rs`), and both sides test the same
+hand-checked positions and agree with the same naive definition.
+`--init` from a net without threat rows (and/or one-bucket) starts the threat
+rows at 0, so the warm-started net evaluates exactly like its source.
+Checkpoint header word 1 carries the threat id at bit 48 (0 = none, so older
+checkpoints are unchanged). `eval` takes `--threats` too. The engine runs a
+threat net when `THREATS` in `src/nnue.rs` is set to the same mode.

@@ -160,12 +160,11 @@ pub(crate) const fn layout_buckets(l: &KingLayout) -> usize {
 ///
 /// The property of a piece does not depend on the perspective, so both
 /// perspectives activate the same pieces (in their own orientation).
-/// Threats change non-locally with every move, so they are not part of the
-/// incremental accumulator stack: `NnueState` keeps one separate threat
-/// accumulator per perspective plus the threat bitboards it was built from,
-/// and each eval recomputes the threat bitboards of the current position and
-/// applies only the difference (consecutive evals in search are a few plies
-/// apart, so this is a handful of rows).
+/// Threats change non-locally, but few of them per move (about 1 row per
+/// ply for `EnPrise`, 3.5 for `AttDef`), so they ride in the normal lazy
+/// accumulator stack: `push_move` saves the post-move piece bitboards, and
+/// materialising a ply computes its threat bitboards and adds the changed
+/// threat rows in the same fused update pass as the move's piece rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
 pub(crate) enum ThreatMode {
@@ -480,6 +479,7 @@ impl Accumulator {
         Self::refresh_with::<Active>(net, board)
     }
 
+    /// From scratch: piece rows, and threat rows when `L::TB > 0`.
     pub(crate) fn refresh_with<L: Layout>(net: &Network, board: &Board) -> Self {
         debug_assert_eq!(net.kb, L::KB + L::TB);
         let ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
@@ -492,6 +492,12 @@ impl Accumulator {
                         *a = a.wrapping_add(*w);
                     }
                 }
+            }
+        }
+        if L::TB > 0 {
+            let tb = threat_bbs(&board.bb.pieces, L::TH);
+            for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+                add_threat_rows::<L>(net, &mut acc.v[pi], persp, ctx[pi].flip, &tb);
             }
         }
         acc
@@ -549,19 +555,38 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
     *out = e.acc;
 }
 
-/// `acc += Σ rows(adds) - Σ rows(subs)`, four of each per pass.
-fn apply_rows(net: &Network, acc: &mut [i16; H], adds: &[usize], subs: &[usize]) {
-    let (na, ns) = (adds.len(), subs.len());
+/// `out = src + Σ rows(adds) - Σ rows(subs)`: up to two adds and two subs
+/// per pass through the SIMD `update` with fixed-length row lists (dynamic
+/// lists compile to a much slower inner loop); further passes run in place.
+fn update_rows(net: &Network, out: &mut [i16; H], src: &[i16; H], adds: &[u16], subs: &[u16]) {
     let (mut i, mut j) = (0, 0);
-    while i < na || j < ns {
-        let ka = (na - i).min(4);
-        let ks = (ns - j).min(4);
-        // Unused slots (beyond ka / ks) point at any valid row.
-        let pick = |v: &[usize], at: usize| if v.is_empty() { 0 } else { v[at.min(v.len() - 1)] };
-        let ar: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(pick(adds, i + x)));
-        let sr: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(pick(subs, j + x)));
-        let src = *acc;
-        update(acc, &src, &ar[..ka], &sr[..ks]);
+    let mut first = true;
+    loop {
+        let (ka, ks) = ((adds.len() - i).min(2), (subs.len() - j).min(2));
+        if !first && ka == 0 && ks == 0 {
+            return;
+        }
+        let a = |k: usize| net.row(adds[i + k] as usize);
+        let s = |k: usize| net.row(subs[j + k] as usize);
+        let tmp;
+        let from: &[i16; H] = if first {
+            src
+        } else {
+            tmp = *out;
+            &tmp
+        };
+        match (ka, ks) {
+            (0, 0) => *out = *from,
+            (1, 0) => update(out, from, &[a(0)], &[]),
+            (0, 1) => update(out, from, &[], &[s(0)]),
+            (1, 1) => update(out, from, &[a(0)], &[s(0)]),
+            (2, 0) => update(out, from, &[a(0), a(1)], &[]),
+            (0, 2) => update(out, from, &[], &[s(0), s(1)]),
+            (2, 1) => update(out, from, &[a(0), a(1)], &[s(0)]),
+            (1, 2) => update(out, from, &[a(0)], &[s(0), s(1)]),
+            _ => update(out, from, &[a(0), a(1)], &[s(0), s(1)]),
+        }
+        first = false;
         i += ka;
         j += ks;
     }
@@ -575,59 +600,43 @@ fn threat_feature<L: Layout>(persp: Color, t: usize, c: usize, kind: usize, sq: 
     (L::KB + t) * INPUTS + feature_ck(persp, c, kind, sq, KingCtx { base: 0, flip })
 }
 
-/// The threat accumulators (no bias: the main accumulator carries it) and
-/// the threat bitboards and mirror flips they were built for. Kept across
-/// positions: each eval applies the difference to the current position.
-#[derive(Clone)]
-struct ThreatCache {
-    acc: [[i16; H]; 2],
-    bbs: ThreatBBs,
-    flip: [u8; 2],
-    valid: bool,
-}
-
-impl ThreatCache {
-    const EMPTY: Self = Self { acc: [[0; H]; 2], bbs: [[[0; 6]; 2]; 2], flip: [0; 2], valid: false };
-}
-
-/// Bring `tc` to the threat features of `board` (exact: wrapping sums do
-/// not depend on the path). A perspective whose mirror flip changed is
-/// rebuilt from zero, the rest only gets the changed rows.
-fn update_threats<L: Layout>(net: &Network, tc: &mut ThreatCache, board: &Board) {
-    let new = threat_bbs(&board.bb.pieces, L::TH);
-    for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
-        let flip = board_ctx::<L>(board, persp).flip;
-        let full = !tc.valid || flip != tc.flip[pi];
-        let mut adds = [0usize; 64];
-        let mut subs = [0usize; 64];
-        let (mut na, mut ns) = (0, 0);
-        for t in 0..L::TB {
-            for c in 0..2 {
-                for k in 0..5 {
-                    let (n, o) = (new[t][c][k], if full { 0 } else { tc.bbs[t][c][k] });
-                    let (mut a, mut s) = (n & !o, o & !n);
-                    while a != 0 && na < 64 {
-                        adds[na] = threat_feature::<L>(persp, t, c, k, a.trailing_zeros() as u8, flip);
-                        na += 1;
-                        a &= a - 1;
-                    }
-                    while s != 0 && ns < 64 {
-                        subs[ns] = threat_feature::<L>(persp, t, c, k, s.trailing_zeros() as u8, tc.flip[pi]);
-                        ns += 1;
-                        s &= s - 1;
-                    }
-                    debug_assert!(a == 0 && s == 0, "more than 64 threat rows");
+/// Indices of the threat rows of perspective `persp` (square xor `flip`)
+/// that are set in `new` but not in `old` (into `adds`) and the reverse
+/// (into `subs`); returns the counts. Kings have no threat rows.
+#[inline(always)]
+fn threat_diff<L: Layout>(persp: Color, flip: u8, old: &ThreatBBs, new: &ThreatBBs, adds: &mut [u16], subs: &mut [u16]) -> (usize, usize) {
+    let (mut na, mut ns) = (0, 0);
+    for t in 0..L::TB {
+        for c in 0..2 {
+            for k in 0..5 {
+                let (n, o) = (new[t][c][k], old[t][c][k]);
+                if n == o {
+                    continue;
                 }
+                let (mut a, mut r) = (n & !o, o & !n);
+                while a != 0 && na < adds.len() {
+                    adds[na] = threat_feature::<L>(persp, t, c, k, a.trailing_zeros() as u8, flip) as u16;
+                    na += 1;
+                    a &= a - 1;
+                }
+                while r != 0 && ns < subs.len() {
+                    subs[ns] = threat_feature::<L>(persp, t, c, k, r.trailing_zeros() as u8, flip) as u16;
+                    ns += 1;
+                    r &= r - 1;
+                }
+                debug_assert!(a == 0 && r == 0, "too many threat rows");
             }
         }
-        if full {
-            tc.acc[pi] = [0; H];
-        }
-        apply_rows(net, &mut tc.acc[pi], &adds[..na], &subs[..ns]);
-        tc.flip[pi] = flip;
     }
-    tc.bbs = new;
-    tc.valid = true;
+    (na, ns)
+}
+
+/// `acc += ` every threat row of `tb` for perspective `persp`.
+fn add_threat_rows<L: Layout>(net: &Network, acc: &mut [i16; H], persp: Color, flip: u8, tb: &ThreatBBs) {
+    let mut adds = [0u16; 64];
+    let (na, _) = threat_diff::<L>(persp, flip, &[[[0; 6]; 2]; 2], tb, &mut adds, &mut []);
+    let src = *acc;
+    update_rows(net, acc, &src, &adds[..na], &[]);
 }
 
 /// Threat accumulators of `board` from scratch (tests).
@@ -766,8 +775,9 @@ pub(crate) struct NnueState<L: Layout = Active> {
     /// Finny table, `[perspective][bucket * 2 + mirrored]`; empty unless
     /// `L::REFRESH`.
     cache: RefCell<Vec<CacheEntry>>,
-    /// Threat accumulators (`L::TB > 0` only; see `ThreatMode`).
-    threats: RefCell<ThreatCache>,
+    /// Threat bitboards of `stack[..=computed]`'s positions (`L::TB > 0`
+    /// only, else empty; see `ThreatMode`).
+    tbbs: RefCell<Vec<ThreatBBs>>,
     _layout: PhantomData<L>,
 }
 
@@ -795,7 +805,7 @@ impl<L: Layout> NnueState<L> {
             computed: Cell::new(0),
             top: 0,
             cache: RefCell::new(cache),
-            threats: RefCell::new(ThreatCache::EMPTY),
+            tbbs: RefCell::new(if L::TB > 0 { Vec::with_capacity(256) } else { Vec::new() }),
             _layout: PhantomData,
         };
         s.refresh(board);
@@ -808,6 +818,11 @@ impl<L: Layout> NnueState<L> {
         self.computed.set(0);
         let stack = self.stack.get_mut();
         stack[0].acc = Accumulator::refresh_with::<L>(&self.net, board);
+        if L::TB > 0 {
+            let t = self.tbbs.get_mut();
+            t.clear();
+            t.push(threat_bbs(&board.bb.pieces, L::TH));
+        }
         if L::REFRESH {
             stack[0].ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
         }
@@ -831,6 +846,10 @@ impl<L: Layout> NnueState<L> {
         } else {
             stack[self.top].delta = delta;
         }
+        if L::TB > 0 {
+            // Materialising this ply needs its piece bitboards (threats).
+            stack[self.top].bb = bb_after(board, &delta);
+        }
         if L::REFRESH {
             let prev = stack[self.top - 1].ctx;
             let slot = &mut stack[self.top];
@@ -843,7 +862,9 @@ impl<L: Layout> NnueState<L> {
                 if k != prev[pi] {
                     slot.ctx[pi] = k;
                     slot.refresh[pi] = true;
-                    slot.bb = bb_after(board, &delta);
+                    if L::TB == 0 {
+                        slot.bb = bb_after(board, &delta);
+                    }
                 }
             }
         }
@@ -866,10 +887,19 @@ impl<L: Layout> NnueState<L> {
             return;
         }
         let mut stack = self.stack.borrow_mut();
+        let mut tbbs = self.tbbs.borrow_mut();
         let net = &*self.net;
         while k < self.top {
             let (lo, hi) = stack.split_at_mut(k + 1);
-            apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache);
+            if L::TB > 0 {
+                // tbbs[k] is ply k's; compute ply k + 1's.
+                tbbs.truncate(k + 1);
+                let next = threat_bbs(&hi[0].bb, L::TH);
+                apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache, (&tbbs[k], &next));
+                tbbs.push(next);
+            } else {
+                apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache, (&[[[0; 6]; 2]; 2], &[[[0; 6]; 2]; 2]));
+            }
             k += 1;
         }
         self.computed.set(k);
@@ -877,56 +907,21 @@ impl<L: Layout> NnueState<L> {
 
     /// Score from the side to move's point of view, in centipawns, for a
     /// position with `pieces` pieces on the board (selects the output bucket).
-    /// Without threat inputs only: `evaluate_board` is the general entry.
     #[inline]
     pub(crate) fn evaluate(&self, stm: Color, pieces: u32) -> i32 {
-        debug_assert_eq!(L::TB, 0, "threat inputs need the board: use evaluate_board");
         self.materialise();
         let stack = self.stack.borrow();
         evaluate_acc(&self.net, &stack[self.top].acc, stm, pieces)
-    }
-
-    /// Score of `board` (the position this state tracks) for the side to
-    /// move. With threat inputs, the threat accumulators are brought to this
-    /// position and added to the main ones; without, this is `evaluate`.
-    #[inline]
-    pub(crate) fn evaluate_board(&self, board: &Board) -> i32 {
-        let (stm, pieces) = (board.side_to_move, board.bb.occ_all().count_ones());
-        if L::TB == 0 {
-            return self.evaluate(stm, pieces);
-        }
-        self.materialise();
-        let stack = self.stack.borrow();
-        let mut tc = self.threats.borrow_mut();
-        update_threats::<L>(&self.net, &mut tc, board);
-        let main = &stack[self.top].acc;
-        let mut sum = Accumulator::ZERO;
-        for pi in 0..2 {
-            update(&mut sum.v[pi], &main.v[pi], &[&tc.acc[pi]], &[]);
-        }
-        evaluate_acc(&self.net, &sum, stm, pieces)
-    }
-
-    /// The full (main + threat) accumulator of `board` (tests).
-    #[cfg(test)]
-    pub(crate) fn current_full(&self, board: &Board) -> Accumulator {
-        let mut a = self.current();
-        if L::TB > 0 {
-            let mut tc = self.threats.borrow_mut();
-            update_threats::<L>(&self.net, &mut tc, board);
-            for pi in 0..2 {
-                let src = a.v[pi];
-                update(&mut a.v[pi], &src, &[&tc.acc[pi]], &[]);
-            }
-        }
-        a
     }
 }
 
 /// `dst.acc = src + dst.delta`, both perspectives in one copy-and-update
 /// pass; a perspective marked for refresh is rebuilt from the finny table.
+/// With threat inputs, `thr` = (threat bitboards of `src`'s position, of
+/// `dst`'s): the changed threat rows join the same pass (a refreshed
+/// perspective gets all of `dst`'s threat rows after the finny refresh).
 #[inline(always)]
-fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
+fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>, thr: (&ThreatBBs, &ThreatBBs)) {
     let d = dst.delta;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
         let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
@@ -934,6 +929,26 @@ fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cach
             let mut c = cache.borrow_mut();
             let bb = dst.bb;
             refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
+            if L::TB > 0 {
+                add_threat_rows::<L>(net, &mut dst.acc.v[pi], persp, k.flip, thr.1);
+            }
+            continue;
+        }
+        // Threat rows unchanged (about half the plies with `EnPrise`): the
+        // plain piece-row pass below.
+        if L::TB > 0 && thr.0[..L::TB] != thr.1[..L::TB] {
+            // Piece rows (at most 2 + 2), then the changed threat rows.
+            let mut adds = [0u16; 64 + 2];
+            let mut subs = [0u16; 64 + 2];
+            for x in 0..d.n_add {
+                adds[x] = feature(persp, d.add[x].1.unwrap(), d.add[x].0, k) as u16;
+            }
+            for x in 0..d.n_sub {
+                subs[x] = feature(persp, d.sub[x].1.unwrap(), d.sub[x].0, k) as u16;
+            }
+            let (ta, ts) = threat_diff::<L>(persp, k.flip, thr.0, thr.1, &mut adds[d.n_add..], &mut subs[d.n_sub..]);
+            let (na, ns) = (d.n_add + ta, d.n_sub + ts);
+            update_rows(net, &mut dst.acc.v[pi], &src.v[pi], &adds[..na], &subs[..ns]);
             continue;
         }
         let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
@@ -1512,11 +1527,19 @@ mod tests {
         let mut next = rng(seed * 31 + 5);
         let mut legal = Vec::new();
         let (mut king_moves, mut refreshes, mut flips) = (0, 0, 0);
-        // Main + threat accumulators of `board` from scratch.
+        // Piece + threat rows of `board`, independently of `refresh_with`.
         let scratch = |board: &Board| {
-            let mut a = Accumulator::refresh_with::<L>(&net, board);
+            let ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
+            let mut a = Accumulator { v: [net.ft_b; 2] };
             let t = threat_scratch::<L>(&net, board);
-            for pi in 0..2 {
+            for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+                for sq in 0..64u8 {
+                    if let Some(p) = board.squares[sq as usize] {
+                        for (x, w) in a.v[pi].iter_mut().zip(net.row(feature(persp, p, sq, ctx[pi])).iter()) {
+                            *x = x.wrapping_add(*w);
+                        }
+                    }
+                }
                 for (x, y) in a.v[pi].iter_mut().zip(t[pi].iter()) {
                     *x = x.wrapping_add(*y);
                 }
@@ -1563,14 +1586,18 @@ mod tests {
                 st.push_move(&board, mv);
                 let undo = board.make_move(mv);
                 history.push((mv, undo));
-                let full = Accumulator::refresh_with::<L>(&net, &board);
-                assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                // With threats, materialise only sometimes, so several
+                // plies (and their threat diffs) are applied in one go.
+                if L::TB == 0 || next() % 3 == 0 {
+                    let full = Accumulator::refresh_with::<L>(&net, &board);
+                    assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                }
                 if L::TB > 0 && next() % 3 == 0 {
-                    // Evaluate only sometimes, so threat diffs span several plies.
                     let want = scratch(&board);
-                    assert!(st.current_full(&board).v == want.v, "threats after {}", move_to_uci(mv));
+                    assert!(st.current().v == want.v, "threats after {}", move_to_uci(mv));
+                    assert!(Accumulator::refresh_with::<L>(&net, &board).v == want.v);
                     let n = board.bb.occ_all().count_ones();
-                    assert_eq!(st.evaluate_board(&board), evaluate_acc(&net, &want, board.side_to_move, n));
+                    assert_eq!(st.evaluate(board.side_to_move, n), evaluate_acc(&net, &want, board.side_to_move, n));
                     let tb = threat_bbs(&board.bb.pieces, L::TH);
                     threat_rows += tb[..L::TB].iter().flatten().flatten().map(|x| x.count_ones() as usize).sum::<usize>();
                 }
@@ -1578,14 +1605,16 @@ mod tests {
             while let Some((mv, undo)) = history.pop() {
                 board.undo_move(mv, undo);
                 st.pop();
-                assert!(st.current().v == Accumulator::refresh_with::<L>(&net, &board).v);
+                if L::TB == 0 || next() % 2 == 0 {
+                    assert!(st.current().v == Accumulator::refresh_with::<L>(&net, &board).v);
+                }
                 if L::TB > 0 && next() % 4 == 0 {
-                    assert!(st.current_full(&board).v == scratch(&board).v);
+                    assert!(st.current().v == scratch(&board).v);
                 }
             }
         }
         if L::TB > 0 {
-            assert!(threat_rows > 5_000, "{threat_rows}");
+            assert!(threat_rows > 2_000, "{threat_rows}");
         }
         assert!(king_moves > 1000, "{king_moves}");
         if L::REFRESH {
@@ -1800,6 +1829,105 @@ mod tests {
     fn rejects_wrong_size() {
         assert!(Network::from_bytes(&[0u8; 10]).is_err());
         assert!(Network::from_bytes(&vec![0u8; NET_BYTES]).is_ok());
+    }
+
+    /// End-to-end check against the trainers: evals of the FENs in
+    /// `$THREAT_FENS` (one per line) with the net `$THREAT_NET` trained with
+    /// `--threats $THREAT_MODE` (ep|ad, no king buckets), printed as
+    /// `|cp|<TAB>fen` for comparison with `nnue-trainer eval` on the same
+    /// positions. `cargo test --release threat_net_eval_dump -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn threat_net_eval_dump() {
+        fn dump<L: Layout>(bytes: &[u8], fens: &str) {
+            let net = Arc::new(Network::from_bytes_kb(bytes, L::KB + L::TB).unwrap());
+            for fen in fens.lines().filter(|l| !l.trim().is_empty()) {
+                let mut b = Board::new();
+                b.set_fen(fen);
+                let st = NnueState::<L>::new(net.clone(), &b);
+                println!("{}\t{fen}", st.evaluate(b.side_to_move, b.bb.occ_all().count_ones()).abs());
+            }
+        }
+        let net = std::fs::read(std::env::var("THREAT_NET").unwrap()).unwrap();
+        let fens = std::fs::read_to_string(std::env::var("THREAT_FENS").unwrap()).unwrap();
+        match std::env::var("THREAT_MODE").unwrap().as_str() {
+            "ep" => dump::<None1Ep>(&net, &fens),
+            "ad" => dump::<None1Ad>(&net, &fens),
+            m => panic!("unknown THREAT_MODE {m}"),
+        }
+    }
+
+    /// Threat-input cost: `cargo test --release threat_throughput -- --ignored --nocapture`.
+    /// Walks random games, evaluating each position (threat diff of one ply).
+    #[test]
+    #[ignore]
+    fn threat_throughput() {
+        use std::time::Instant;
+        fn run<L: Layout>(name: &str) {
+            let net = Arc::new(Network::random_kb(42, 64, 100, L::KB + L::TB));
+            let mut next = rng(5);
+            let mut legal = Vec::new();
+            // A fixed list of positions along random games.
+            let mut boards = Vec::new();
+            for g in 0..20 {
+                let mut b = Board::new();
+                b.set_fen(FENS[g % FENS.len()]);
+                for _ in 0..60 {
+                    b.generate_legal_moves(false, &mut legal);
+                    if legal.is_empty() {
+                        break;
+                    }
+                    b.make_move(legal[(next() as usize) % legal.len()]);
+                    boards.push(b.clone());
+                }
+            }
+            let reps = 2000;
+            let t = Instant::now();
+            let mut x = 0u64;
+            for _ in 0..reps {
+                for b in &boards {
+                    let bb = threat_bbs(&std::hint::black_box(b).bb.pieces, L::TH);
+                    x = x.wrapping_add(bb[0][0][1] ^ bb[1][1][3]);
+                }
+            }
+            let n = (reps * boards.len()) as f64;
+            let masks = t.elapsed().as_secs_f64() * 1e9 / n;
+            // One ply: push a move and materialise, vs the same layout's
+            // piece rows only (L::TB = 0 twin) for the plain cost.
+            let mut st = NnueState::<L>::new(net.clone(), &boards[0]);
+            let mut b0 = boards[0].clone();
+            b0.generate_legal_moves(false, &mut legal);
+            let t = Instant::now();
+            for i in 0..reps * boards.len() {
+                let mv = legal[i % legal.len()];
+                st.push_move(&b0, mv);
+                st.materialise();
+                st.pop();
+            }
+            let upd = t.elapsed().as_secs_f64() * 1e9 / n;
+            x = x.wrapping_add(st.current().v[0][1] as u64);
+            // Rows changed per step (per perspective) and active rows.
+            let (mut changed, mut active) = (0usize, 0usize);
+            for w in boards.windows(2) {
+                let (a, b) = (threat_bbs(&w[0].bb.pieces, L::TH), threat_bbs(&w[1].bb.pieces, L::TH));
+                for t in 0..L::TB {
+                    for c in 0..2 {
+                        for k in 0..6 {
+                            changed += (a[t][c][k] ^ b[t][c][k]).count_ones() as usize;
+                            active += b[t][c][k].count_ones() as usize;
+                        }
+                    }
+                }
+            }
+            let m = (boards.len() - 1) as f64;
+            println!(
+                "{name}: threat_bbs {masks:.0} ns, push+materialise (one ply) {upd:.0} ns; {:.1} rows changed, {:.1} active ({x})",
+                changed as f64 / m,
+                active as f64 / m
+            );
+        }
+        run::<None1Ep>("ep");
+        run::<None1Ad>("ad");
     }
 
     /// Throughput report: `cargo test --release nnue_throughput -- --ignored --nocapture`.

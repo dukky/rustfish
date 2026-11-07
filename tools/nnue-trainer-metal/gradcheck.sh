@@ -23,3 +23,10 @@ D="$1"
 ./nnue-trainer-metal gradcheck --data "$D" --hidden 64 --buckets 8 --batch 1000 --mirror --king-buckets kb8m --factorise
 ./nnue-trainer-metal gradcheck --data "$D" --hidden 256 --buckets 8 --batch 2048 --mirror --king-buckets kb8m --factorise
 ./nnue-trainer-metal gradcheck --data "$D" --hidden 32 --buckets 8 --batch 300 --king-buckets kb8m --factorise --no-wd-active-only
+# Threat inputs (virtual threat-block rows; not factorised, not bucketed).
+./nnue-trainer-metal gradcheck --data "$D" --hidden 32 --buckets 8 --batch 300 --threats ep
+./nnue-trainer-metal gradcheck --data "$D" --hidden 16 --buckets 1 --batch 64 --mirror --threats ad
+./nnue-trainer-metal gradcheck --data "$D" --hidden 256 --buckets 8 --batch 2048 --mirror --threats ep
+./nnue-trainer-metal gradcheck --data "$D" --hidden 32 --buckets 1 --batch 500 --king-buckets m1 --threats ad
+./nnue-trainer-metal gradcheck --data "$D" --hidden 64 --buckets 8 --batch 777 --mirror --king-buckets kb8m --threats ad --factorise
+./nnue-trainer-metal gradcheck --data "$D" --hidden 256 --buckets 8 --batch 2048 --mirror --king-buckets kb4m --threats ep --factorise
