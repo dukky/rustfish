@@ -15,8 +15,14 @@ on:
         description: "Number of runners to sample (each reports its CPU)"
         default: "4"
       bench_rounds:
-        description: "Interleaved bench runs per binary (median NPS)"
-        default: "11"
+        description: "Interleaved bench + datagen runs per binary (medians)"
+        default: "5"
+      bench_depth:
+        description: "Bench depth for the speed runs (default bench is 9, ~0.2 s)"
+        default: "13"
+      datagen_games:
+        description: "Single-thread datagen games per speed run"
+        default: "60"
   push:
     branches: [nnue-avx512]
 
@@ -93,13 +99,16 @@ jobs:
             echo "avx512: $(engines/tests --ignored --nocapture nnue_throughput 2>&1 | grep 'nnue:')"
           done | tee micro.txt
           { echo; echo '```'; cat micro.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - name: Compare evalhash, bench nodes and NPS
+      - name: Compare evalhash, bench nodes, datagen output and speed
         env:
-          ROUNDS: ${{ inputs.bench_rounds || '11' }}
+          ROUNDS: ${{ inputs.bench_rounds || '5' }}
+          DEPTH: ${{ inputs.bench_depth || '13' }}
+          GAMES: ${{ inputs.datagen_games || '60' }}
         run: |
           python3 - <<'EOF'
-          import os, re, statistics, subprocess, sys
+          import hashlib, os, re, statistics, subprocess, sys, time
           avx512 = os.environ["AVX512"] == "1"
+          rounds, depth, games = int(os.environ["ROUNDS"]), os.environ["DEPTH"], os.environ["GAMES"]
           variants = [("main-v3", "engines/main-v3", {}),
                       ("v3-avx2", "engines/v3", {"RUSTFISH_NO_AVX512": "1"}),
                       ("v3-auto", "engines/v3", {})]
@@ -117,20 +126,31 @@ jobs:
               out = run(path, env, "evalhash\nbench\nquit\n")
               info[name] = dict(hce=grab(r"Eval hash\s*:\s*(\S+)", out), nnue=grab(r"NNUE eval hash\s*:\s*(\S+)", out),
                                 nodes=grab(r"Nodes searched\s*:\s*(\d+)", out), simd=grab(r"NNUE SIMD\s*:\s*(\S+)", out),
-                                nps=[])
-          for _ in range(int(os.environ["ROUNDS"])):
+                                nps=[], dg=[], dgsha=None)
+          # Interleaved: deep single-thread bench, then a single-thread datagen
+          # run (5000 nodes/move, as the datagen workflow), timed by wall clock.
+          for _ in range(rounds):
               for name, path, env in variants:
-                  info[name]["nps"].append(int(grab(r"Nodes/second\s*:\s*(\d+)", run(path, env, "bench\nquit\n"))))
+                  out = run(path, env, f"bench {depth}\nquit\n")
+                  info[name]["nps"].append(int(grab(r"Nodes/second\s*:\s*(\d+)", out)))
+                  info[name]["deep_nodes"] = grab(r"Nodes searched\s*:\s*(\d+)", out)
+                  t = time.monotonic()
+                  run(path, env, f"datagen dg-{name}.txt {games} 5000 1 1 0\nquit\n")
+                  info[name]["dg"].append(int(games) / (time.monotonic() - t))
+                  info[name]["dgsha"] = hashlib.sha256(open(f"dg-{name}.txt", "rb").read()).hexdigest()[:16]
+          key = lambda v: (v["hce"], v["nnue"], v["nodes"], v["deep_nodes"], v["dgsha"])
           ref = info["main-v3"]
-          ok = all((v["hce"], v["nnue"], v["nodes"]) == (ref["hce"], ref["nnue"], ref["nodes"]) for v in info.values())
-          base = statistics.median(info["v3-avx2"]["nps"])
-          rows = ["| binary | kernels | bench nodes | NNUE eval hash | median NPS | vs v3-avx2 |", "|---|---|---|---|---|---|"]
+          ok = all(key(v) == key(ref) for v in info.values())
+          base, dbase = statistics.median(info["v3-avx2"]["nps"]), statistics.median(info["v3-avx2"]["dg"])
+          rows = [f"| binary | kernels | bench nodes | bench {depth} nodes | NNUE eval hash | datagen sha | bench {depth} NPS | vs v3-avx2 | datagen games/s | vs v3-avx2 |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
           for name, v in info.items():
-              med = statistics.median(v["nps"])
-              rows.append(f"| {name} | {v['simd']} | {v['nodes']} | {v['nnue']} | {med:.0f} | {100 * (med / base - 1):+.1f}% |")
-          text = "\n".join(rows) + f"\n\nidentical evalhash + bench: **{'yes' if ok else 'NO'}**\n\n"
+              med, dmed = statistics.median(v["nps"]), statistics.median(v["dg"])
+              rows.append(f"| {name} | {v['simd']} | {v['nodes']} | {v['deep_nodes']} | {v['nnue']} | {v['dgsha']} | "
+                          f"{med:.0f} | {100 * (med / base - 1):+.1f}% | {dmed:.2f} | {100 * (dmed / dbase - 1):+.1f}% |")
+          text = "\n".join(rows) + f"\n\nidentical evalhash + bench + datagen output: **{'yes' if ok else 'NO'}**\n\n"
           print(text)
-          print({k: v["nps"] for k, v in info.items()})
+          print({k: (v["nps"], [round(x, 2) for x in v["dg"]]) for k, v in info.items()})
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write(f"\n### runner ${{ matrix.runner }}\n\n" + text)
           sys.exit(0 if ok else 1)
