@@ -951,6 +951,8 @@ struct SearchParams {
     se_negative_extension: i32,
     lmp_limit_d3: usize,
     lmr_min_depth: i32,
+    // Extra LMR plies for quiets at nodes whose static eval is not improving.
+    lmr_not_improving: i32,
     lmr_min_move_index: usize,
     lmr_extra_depth: i32,
     lmr_extra_move_index: usize,
@@ -978,6 +980,7 @@ impl Default for SearchParams {
             lmp_limit_d2: 10,
             lmp_limit_d3: 14,
             lmr_min_depth: 3,
+            lmr_not_improving: 1,
             lmr_min_move_index: 3,
             lmr_extra_depth: 5,
             lmr_extra_move_index: 8,
@@ -1188,6 +1191,7 @@ fn main() {
             println!("option name LmpLimitD2 type spin default 10 min 0 max 32");
             println!("option name LmpLimitD3 type spin default 14 min 0 max 40");
             println!("option name LmrMinDepth type spin default 3 min 1 max 12");
+            println!("option name LmrNotImproving type spin default 1 min 0 max 3");
             println!("option name LmrMinMoveIndex type spin default 3 min 1 max 24");
             println!("option name LmrExtraDepth type spin default 5 min 1 max 16");
             println!("option name LmrExtraMoveIndex type spin default 8 min 1 max 32");
