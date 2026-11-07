@@ -1,16 +1,6 @@
 {
   "pending": [
     {
-      "branch": "tm-ccrl",
-      "mode": "nonreg",
-      "passed_over": 2
-    },
-    {
-      "branch": "simp-castle-order",
-      "mode": "nonreg",
-      "expect": 1.0
-    },
-    {
       "branch": "simp-lmr-goodhist",
       "mode": "nonreg",
       "expect": 1.0
@@ -27,14 +17,14 @@
     }
   ],
   "current": {
-    "branch": "nnue-g4ws",
-    "mode": "net-gate",
-    "expect": 3.0,
-    "test_id": "q-nnue-g4ws-1107-0217",
-    "sha": "48a693b46a6b0b27fe9177050f5122d254d6500e",
-    "base_sha": "4726decd523d5cf4732eb921adcf81cc757dd151",
-    "started": "2026-11-07T02:17:43Z",
-    "bench": 700188
+    "branch": "simp-castle-order",
+    "mode": "nonreg",
+    "expect": 1.0,
+    "test_id": "q-simp-castle-order-1107-0224",
+    "sha": "cc2fd20b84a713ef820cc10410a36d643e2dc5ab",
+    "base_sha": "dcb46240eae2b1fa41e63559f0f95c4bb4eeacb1",
+    "started": "2026-11-07T02:24:41Z",
+    "bench": 624192
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 2,
