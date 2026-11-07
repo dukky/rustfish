@@ -32,7 +32,10 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   ~+-20 at 40 games/anchor over 11 anchors 3318-3631).
 - Queue backlog: mark a needs-human row resolved when its `-r2` is queued
   (feat-se-negext still shows needs-human); a test for the `queue.py remove`
-  inbox path.
+  inbox path; a scheduled ladder should replace (not duplicate) a pending
+  manual one, and a scheduled ltc-check shouldn't jump a `--front` ladder
+  (2026-11-07 20:00: the front ladder arrived seconds after a dispatch, then
+  5 merges queued a second ladder and an ltc-check ahead of it).
 
 **Mid term (days): top 100 (3504).**
 - Net generations every ~1/3 more data (gen 6 next), each followed by the
