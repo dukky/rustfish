@@ -107,13 +107,19 @@ python3 scripts/netloop.py pool --out pool7.bin --seeds 4,5,6,8,9,10,11
 # 3. Train. Unknown flags (--lr, --lr-end, --batch, --threads, --checkpoint, ...)
 #    go straight to `nnue-trainer train`; output is <name>.bin + <name>.log.
 python3 scripts/netloop.py train --name E2 --pool pool7.bin --hidden 256 --buckets 1 --epochs 6
-# 4. Record the row (losses and epoch size are parsed from E2.log).
-python3 scripts/netloop.py record --name E2 --seeds 4,5,6,8,9,10,11 --notes "one variable: + seed 11"
-# 5. Only if val loss beats the incumbent: branch nnue-E2 off origin/main, copy
+# 4. Only if val loss beats the incumbent: branch nnue-E2 off origin/main, copy
 #    the net, set H/BUCKETS, build, perfttest + selftest 100, bench, commit
 #    with the Bench: trailer, push. Prints the queue command (net-gate for
 #    same-shape nets, stc when H or BUCKETS change); --queue also runs it.
-python3 scripts/netloop.py embed --name E2 --net ~/rustfish-data/E2.bin --hidden 256 --buckets 1
+#    Then it writes E2's net/experiments.jsonl row (shape, epochs, positions,
+#    final val loss + quantised, mean|eval|, parsed from E2.log) and pushes it
+#    to main as a data-only commit (fresh fetch, retry once on a race, never
+#    forced; same id = update in place). --no-record skips that; --best-scale
+#    also records `nnue-trainer eval --best-scale` (off by default).
+python3 scripts/netloop.py embed --name E2 --net ~/rustfish-data/E2.bin --hidden 256 --buckets 1 \
+    --baseline E1 --seeds 4,5,6,8,9,10,11 --notes "one variable: + seed 11"
+# 5. A local-only experiment (never branched) gets the same row, branch local-<id>:
+python3 scripts/netloop.py record-local --name g3kbf --baseline g3f --notes "kb8m + factoriser"
 # 6. When the queue reports, fill in the games.
 python3 scripts/netloop.py record --name E2 --sprt-elo 4.1 --sprt-ci 0.8,7.4 --sprt-games 6144 --verdict merged
 ```
@@ -121,7 +127,11 @@ python3 scripts/netloop.py record --name E2 --sprt-elo 4.1 --sprt-ci 0.8,7.4 --s
 `net/experiments.jsonl` is the machine-readable twin of the table above:
 one JSON object per experiment (`id, date, hidden, buckets, seeds, epochs,
 positions_per_epoch, val_loss, val_loss_quantized, baseline, branch, notes,
-sprt, verdict`). Bucketed nets (`--buckets > 1`) need a base with the
+sprt, verdict`, plus `king_buckets, mean_abs_eval, best_scale_val,
+best_scale_factor, output_scale, train_data, init` when known). `netloop
+auto` embeds through `embed`, so its winners are recorded too (baseline
+`main@<net blob>`; `auto --no-record` / `--best-scale` pass through).
+`record` still edits only the local file (use it for --sprt-*/--verdict). Bucketed nets (`--buckets > 1`) need a base with the
 `BUCKETS` constant (`--base origin/nnue-arch` until that lands); `embed`
 refuses otherwise.
 

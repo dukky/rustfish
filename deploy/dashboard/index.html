@@ -306,7 +306,7 @@ function renderNets(s) {
 const GATE_STATUS = {
   merged: ["merged", "b-good"], rejected: ["rejected", "b-bad"], "needs-human": ["needs human", "b-warn"],
   preempted: ["preempted", "b-warn"], testing: ["testing", "b-accent"], queued: ["queued", "b-accent"],
-  "not gated": ["not gated", "b-neutral"],
+  "not gated": ["not gated", "b-neutral"], "local only": ["local only", "b-neutral"],
 };
 const gateBadge = (k) => { const [t, c] = GATE_STATUS[k] || [k || "unknown", "b-neutral"]; return `<span class="badge ${c}">${esc(t)}</span>`; };
 const shortNum = (n) => n == null ? "–" : n >= 1e9 ? fmt(n / 1e9, 2) + "B" : n >= 1e6 ? fmt(n / 1e6, 0) + "M" : fmt(n);
@@ -322,24 +322,32 @@ function gateCells(g) {
 }
 function renderNetGates(s) {
   const ng = s.net_gates || {v2: [], v1: []};
-  const branchLink = (b) => `<a class="mono" href="${ghRepo()}/tree/${esc(b)}">${esc(b)}</a>`;
+  const branchLink = (b) => b.startsWith("local-")
+    ? `<span class="meta" title="Trained and scored on the laptop; never pushed as a branch">no branch (local)</span>`
+    : `<a class="mono" href="${ghRepo()}/tree/${esc(b)}">${esc(b)}</a>`;
+  const num = (x, d) => Number(x).toFixed(d);
   $("net-gates").innerHTML = ng.v2.length ? `<table><thead><tr><th>Experiment</th><th class="num">Shape H×B</th><th class="num">Data / positions</th><th class="num">Epochs</th><th class="num">Val loss</th><th>Gate mode</th><th class="num">Gate Elo ± CI</th><th class="num">Games</th><th>Status</th></tr></thead><tbody>` +
     ng.v2.map((g) => {
       const rec = g.training_record;
       const name = rec
-        ? `<b>${esc(g.id)}</b><div>${branchLink(g.branch)}</div>${g.baseline ? `<div class="meta">vs ${esc(g.baseline)}</div>` : ""}`
+        ? `<b>${esc(g.id)}</b><div>${branchLink(g.branch)}</div>${g.baseline ? `<div class="meta">vs ${esc(g.baseline)}</div>` : ""}` +
+          (g.notes ? `<div class="meta" style="max-width:320px">${esc(g.notes.length > 90 ? g.notes.slice(0, 88) + "…" : g.notes)}</div>` : "")
         : `<div>${branchLink(g.branch)}</div><span class="badge b-warn" title="No row for this branch in net/experiments.jsonl">no training record</span>`;
       const data = rec ? `${g.seeds ? `<div>seeds ${esc(g.seeds.join(", "))}</div>` : ""}<div class="meta">${shortNum(g.positions_per_epoch)} pos/epoch</div>` : "–";
       const loss = rec && g.val_loss != null
-        ? `${Number(g.val_loss).toFixed(5)}${g.val_loss_quantized != null ? `<div class="meta">q ${Number(g.val_loss_quantized).toFixed(5)}</div>` : ""}` : "–";
+        ? `${num(g.val_loss, 5)}${g.val_loss_quantized != null ? `<div class="meta">q ${num(g.val_loss_quantized, 5)}</div>` : ""}` +
+          (g.best_scale_val != null ? `<div class="meta" title="Loss at the loss-optimal output scale (nnue-trainer eval --best-scale)">best-scale ${num(g.best_scale_val, 5)}${g.best_scale_factor != null ? ` @×${num(g.best_scale_factor, 3)}` : ""}</div>` : "") +
+          (g.mean_abs_eval != null ? `<div class="meta" title="Mean |eval| on the validation set after the last epoch">|eval| ${num(g.mean_abs_eval, 0)}cp</div>` : "") +
+          (g.output_scale != null ? `<div class="meta" title="Output layer rescaled before embedding">out ×${num(g.output_scale, 3)}</div>` : "") : "–";
       return `<tr title="${esc(g.notes || "")}"><td>${name}</td>
-        <td class="num mono">${rec && g.hidden != null ? `${fmt(g.hidden)}×${fmt(g.buckets ?? 1)}` : "–"}</td>
+        <td class="num mono">${rec && g.hidden != null ? `${fmt(g.hidden)}×${fmt(g.buckets ?? 1)}` : "–"}${g.king_buckets ? `<div class="meta">${esc(g.king_buckets)}</div>` : ""}</td>
         <td class="num">${data}</td><td class="num">${rec ? fmt(g.epochs) : "–"}</td><td class="num">${loss}</td>${gateCells(g)}</tr>`;
     }).join("") + `</tbody></table>`
     : `<div class="empty">No v2 nets gated yet.</div>`;
   const missing = ng.v2.filter((g) => !g.training_record).length;
   $("net-gates-note").innerHTML = `Gate status from the merge-queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>), updated automatically; training data from <span class="mono">net/experiments.jsonl</span> on <span class="mono">${esc(ng.experiments_ref || "?")}</span>.` +
     (missing ? ` <b>${missing} gated net${missing === 1 ? " has" : "s have"} no training record</b> (run <span class="mono">scripts/netloop.py record</span>).` : "") +
+    (ng.v2.some((g) => g.status === "local only") ? ` <i>local only</i>: trained and scored on the laptop, never pushed or gated.` : "") +
     ` Gate Elo is the queue SPRT against the main of its day, not a CCRL rating.`;
   $("net-gates-v1").innerHTML = ng.v1.length ? `<div class="meta" style="margin-bottom:6px">All v1 net gates in the queue log</div><table><thead><tr><th>Branch</th><th>Gate mode</th><th class="num">Gate Elo ± CI</th><th class="num">Games</th><th>Status</th></tr></thead><tbody>` +
     ng.v1.map((g) => `<tr><td>${branchLink(g.branch)}</td>${gateCells(g)}</tr>`).join("") + `</tbody></table>` : "";

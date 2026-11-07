@@ -16,7 +16,8 @@ accepted changes, recent commits and `plan.md` (the maintained roadmap) rendered
   `netloop` branch) and the v1 `net/chain.json`. The NNUE panel lists every net
   branch's latest gate status straight from the queue log joined by branch
   name to its `netloop record` row; a gated net with no row is flagged
-  "no training record".
+  "no training record", and rows with branch `local-<id>` (laptop-only
+  experiments, `netloop record-local`) show as "local only".
 - `api.github.com` (unauthenticated, 60 req/h): recent Actions runs, the jobs
   of the in-flight foreground run (SPRT wave or ladder) and of the active
   datagen run, and recent `main` commits.
