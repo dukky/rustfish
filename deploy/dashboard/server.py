@@ -274,8 +274,10 @@ def build_status():
     if not (isinstance(ccrl, dict) and ccrl.get("targets")):
         ccrl = dict(CCRL_TARGETS_FALLBACK, fallback=True)
     short = min(ccrl["targets"], key=lambda t: t["rating"])
-    target = {"rating": short["rating"],
-              "label": "CCRL Blitz" + (f", #{short['rank']} on the single-CPU list" if short.get("rank") else "")}
+    def as_target(t, reached=()):
+        return {"rating": t["rating"], "name": t.get("name"), "reached": list(reached),
+                "label": "CCRL Blitz" + (f", #{t['rank']} on the single-CPU list" if t.get("rank") else "")}
+    target = as_target(short)
     rounds = {m: (s["rounds_per_shard"], s.get("max_rounds_per_shard", s["rounds_per_shard"]))
               for m, s in qcfg.get("modes", {}).items()} or ROUNDS
 
@@ -544,6 +546,12 @@ def build_status():
             g.update(games_est=inflight.get("games_est"), run_url=inflight.get("run_url"))
 
     latest = points[-1] if points else None
+    # The headline goal is the next CCRL target the last ladder has not reached.
+    if latest and latest.get("rating") is not None:
+        done = [t for t in ccrl["targets"] if t["rating"] <= latest["rating"]]
+        ahead = [t for t in ccrl["targets"] if t["rating"] > latest["rating"]]
+        nxt = min(ahead, key=lambda t: t["rating"]) if ahead else max(ccrl["targets"], key=lambda t: t["rating"])
+        target = as_target(nxt, [t.get("name") for t in done])
     # Measured strength is the last ladder run; estimated adds the queue SPRTs
     # merged after it. Estimated is never presented as an official CCRL rating.
     measured = None

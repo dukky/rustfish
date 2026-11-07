@@ -151,7 +151,7 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 
   <section class="card">
     <h2>Strength over time (CCRL Blitz, 120+1)</h2>
-    <div class="legend"><span>rating</span><span class="l-ci">95% CI</span><span class="l-partial">partial run (hollow, CI bar)</span><span class="l-target">3400 short-term goal</span><span class="l-change">change merged</span></div>
+    <div class="legend"><span>rating</span><span class="l-ci">95% CI</span><span class="l-partial">partial run (hollow, CI bar)</span><span class="l-target">CCRL goals</span><span class="l-change">change merged</span></div>
     <div class="chart-wrap" id="chart"></div>
     <details style="margin-top:10px"><summary>Ladder runs as a table</summary><div class="scroll" id="ladder-table"></div></details>
   </section>
@@ -233,8 +233,8 @@ function renderTiles(s) {
       <div class="sub">unofficial · ${est ? (est.components.length
         ? `${signed(est.delta)} Elo from ${est.components.length} queue merge${est.components.length === 1 ? "" : "s"} since the ladder`
         : "no queue merges since the ladder") : "no measured baseline"}</div></div>
-    <div class="tile"><div class="label">Short-term goal</div><div class="big">${fmt(target.rating)}</div><div class="sub">${esc(target.label)}</div></div>
-    <div class="tile"><div class="label">Gap to short-term goal</div><div class="big">${fmt(target.rating - c.rating)}</div>
+    <div class="tile"><div class="label">Next goal${target.name ? ": " + esc(target.name) : ""}</div><div class="big">${fmt(target.rating)}</div><div class="sub">${esc(target.label)}${target.reached && target.reached.length ? " · reached: " + target.reached.map(esc).join(", ") : ""}</div></div>
+    <div class="tile"><div class="label">Gap to next goal</div><div class="big">${fmt(target.rating - c.rating)}</div>
       <div class="sub">from measured${est && est.rating !== c.rating ? ` · ${fmt(target.rating - est.rating)} from estimated` : ""}${fromFirst != null ? ` · ${fmt(fromFirst)}% of the way from the first ladder (${fmt(s.ladder[0].rating)})` : ""}</div></div>`;
 }
 

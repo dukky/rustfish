@@ -5,18 +5,57 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-07 10:45._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-07 11:35._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **3429 CCRL Blitz** (95% CI 3401-3459) on g3 (512x8 NNUE, gen-3 data). Was 3168 on the morning of 2026-11-06. |
-| Goals | From the CCRL Blitz single-CPU list (best versions, 2026-10-31; `scripts/ccrl-targets.json`): **short term 3400** (#131), **mid term top 100 = 3504**, **long term top 10 = 3751**. ~3330 today would rank ~#158. Competing with Stockfish itself (3792) is out of scope. |
-| Eval | NNUE E1, (768 -> 256) x 2 -> 1 SCReLU, i16, output halved to the HCE scale the search margins were tuned on (+123); HCE is the fallback. |
-| Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
-| Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
+| Strength | **3463 CCRL Blitz** (95% CI 3434-3493) on `0aaf3b9` (g4), ladder 2026-11-07 11:23. Short-term goal (3400) passed on 2026-11-06 (3429). Was 3168 on the morning of 2026-11-06. |
+| Goals | CCRL Blitz single-CPU list (best versions, 2026-10-31; `scripts/ccrl-targets.json`): ~~short term 3400 (#131)~~ reached; **mid term top 100 = 3504** (41 to go); **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
+| Eval | NNUE g4: (768 -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. Trained from scratch on pool4 (730M positions) with the Metal GPU trainer. |
+| Search | PVS, aspiration, TT buckets, NMP (eval >= beta), RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension; node-fraction time management. |
+| Compute | M3 laptop: GPU training (~1.8M pos/s at 512x8), datagen when the GPU is idle. CI (20 runners): 13 datagen / 6 test (trial), queue job 1. |
+
+## Plan
+
+**Short term (next ~24 h): ship what is queued, prove data, next generation.**
+- Queue: g4l3 (lambda 0.3) net gate, then feature tests (cut-node LMR,
+  threat history, singular negative extension, ttPv, LMR improving, capture
+  LMR, qsearch fail-soft) and simplification nonregs, ordered by expected Elo
+  per runner-hour.
+- Data-heavy runner split (13/6) until gen 5 proves it: gen 5 from scratch
+  at ~1.0B positions (~15:00), gated ~17:00. Revert to 6/13 if gen 5 < +8.
+- King buckets: kb4 exact warm start from g4 vs a plain fine-tune control
+  (chain9, ~11:40); next a mirrored copy of g4 then kb8m; real wd, kb4 from
+  scratch at each generation.
+- Ladder after each 2-3 merges or a net merge.
+
+**Mid term (days): top 100 (3504).**
+- Net generations every ~1/3 more data (gen 6 tomorrow); drop the oldest,
+  weakest data once the pool is large; king buckets when the data supports
+  them (~3-4B positions if the gap only halves per doubling, sooner if the
+  warm start works).
+- SPSA of the ~30 search tunables after the feature batch lands (the new
+  LMR/singular/threat terms interact).
+- Search backlog: continuation history re-keyed to [piece][to][piece][to]
+  then 2/4 ply, cuckoo upcoming-repetition, root LMR, quiet-check LMR,
+  qsearch polish.
+- Second trainer: 9600X (CPU trainer, `trainer-x86-speed`) for experiments
+  while the M3 GPU does generations; 1080 Ti (CUDA port) only as a last
+  resort (power draw).
+
+**Long term: top 10 (3751).**
+- Bigger nets (768-1024 wide, king buckets, possibly a second hidden layer)
+  once data and trainer throughput allow; AVX-512 paths for them
+  (`nnue-avx512`).
+- Multi-billion-position pools with opening diversity; better data
+  (deeper/softnode search, filtering).
+- Novel ideas only offline and cheap until a clear wall: uncertainty head,
+  hard-example weighting, two-net disagreement.
+- CCRL submission (identity and docs ready; release and licence are the
+  owner's call), Lichess bot, Syzygy.
 
 ## Status 2026-11-07 08:00
 
@@ -133,63 +172,6 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   reduction).
 - Next: SPSA of 22 search params (`spsa-nnue`) when the queue is quiet.
 
-## Strategy (2026-11-06): train the net properly
-
-The net is the engine, and it has been held back for the wrong reason. The
-audit in `docs/nnue-experiments.md` found that net5-net13 (nine rejected nets)
-were confounded, undertrained (~2 epochs on ~80M positions on a 2-core VPS)
-and judged by small game samples with no validation loss. The conclusions
-drawn from them ("256 is saturated", "512 fails", "40M is below the data
-knee") are withdrawn.
-
-Every net step is judged by validation loss first, then an SPRT:
-
-1. **E0** score net4 on the fixed validation set (baseline).
-2. **E1** same shape (256, 1 bucket), trainer v2, whole valid pool (~350M
-   positions), ~10 epochs, cosine LR. No engine change: tests "the trainer
-   was the bottleneck".
-3. **E2** 512 wide (`nnue-arch` supports it exactly). `stc` SPRT, since it
-   costs ~15-20% NPS.
-4. **E3** 8 output buckets on the best width (cheap at inference).
-5. **Generation loop**: datagen from the merged net into the pool (keep every
-   valid generation), retrain on the whole pool, longer each time.
-6. Later: king/input buckets; a GPU trainer (bullet on the 1080 Ti desktop) if
-   CPU training becomes the bottleneck.
-
-Compute split: **training on the M3 laptop** (8 cores: ~1.1M positions/s at
-H=256, ~0.5M at 512; ~12x the VPS), **datagen and SPRTs on CI** (20 runners;
-they cannot overlap, so datagen runs when the queue is idle).
-
-## Next 24 hours (from 2026-11-06 10:00 UTC)
-
-Laptop (training, serial, one run at a time):
-
-| when | run | cost | gate |
-|---|---|---|---|
-| now | E0: net4 on val | 1 min | baseline |
-| now -> +1h | E1: 256x1, pool, 10 epochs | ~1h | val < net4, then net-gate |
-| +1h -> +3h | E2: 512x1, same data and recipe | ~2h | val < E1, then stc |
-| +3h -> +5h | E3: best width x 8 buckets | ~1-2h | val < best, then stc |
-| overnight | gen-2: best shape, pool + seed 11 + seed 12, 20-30 epochs | ~4-6h | net-gate/stc vs merged best |
-
-CI (one thing at a time, queue first):
-
-| when | job |
-|---|---|
-| now -> ~+2h | datagen seed 11 (net4, 1M games, 8000 nodes) |
-| as each net is ready | its SPRT (net gates take 10-40 min for real effects) |
-| after the first net merge | datagen seed 12 from the new main (bootstrap rule) |
-| idle gaps | rebased search fillers (`bigbang-structural`, `cont-hist-2ply`) |
-| after the day's merges | one CCRL ladder (with new 3200-3400 anchors) |
-
-Training efficiently:
-
-- Convert once to 32-byte binary records; never re-parse text.
-- Train on the whole pool every time; add new generations, don't replace.
-- Screen by validation loss (minutes) before spending CI games (hours).
-- One variable per run; record every run in `docs/nnue-experiments.md`.
-- Keep the laptop busy with the next run while CI gates the last one.
-
 ## CI efficiency (measured 2026-11-06)
 
 - STC waves: ~90% of wall time is games. Fine.
@@ -209,23 +191,16 @@ Training efficiently:
 
 ## Known problems
 
-- **Anchors near the top.** Only stash-30/31 sit at 3150-3210 now; add
-  3200-3400 anchors before the next ladder or the fit extrapolates, and check
-  each new anchor's score against its neighbours (how black-marlin was caught).
+- **Anchors near the top.** The elite set tops out at reckless-0.7.0 (~3491);
+  add 3500-3650 anchors before the ladder passes ~3480, or the fit
+  extrapolates. Check each new anchor against its neighbours.
 - **`evalhash` covers the HCE only** (no net attached), so for NNUE code the
   speedup gate relies on bench identity. Make it hash NNUE evals too.
 - **SPRT bounds:** `stc` is [0, 5]; `net-gate` (5+0.05, [0, 10], 4 waves) is
   for same-shape nets only.
 - **Bot merges skip `ci.yml`**; the queue runs the same checks itself.
-- **Time management** is only tested at 60+0.6; CCRL is 120+1 and 40/15.
+- **Time management** is tested at 60+0.6 and 10+0.1; CCRL also plays 40/15.
 - **Lazy SMP is untested for strength** (bot and 4-CPU lists).
-
-## Medium term (after the net plan)
-
-1. Search fillers (above), then **SPSA** of search parameters on the settled net.
-2. **CCRL submission** (`ccrl-identity`, `ccrl-docs` ready; release/licence is
-   the owner's decision).
-3. **Lichess bot** and **Syzygy**.
 
 ## Process
 
@@ -246,6 +221,9 @@ dashboard (later the bot); the LLM writes candidates and keeps this plan
 current, not polling and merging (the queue does that).
 
 ## History
+
+- 2026-11-07: removed the 2026-11-06 "train the net properly" strategy and
+  "next 24 hours" tables (done: E1-E3, generation loop, GPU trainer); see git history.
 
 - Jul 2026: pre-pipeline notes in `docs/archive/` (their rejections are void).
 - 2026-10-29: depth-8 cap fixed, SPRT pipeline and CCRL ladder: ~2081.
