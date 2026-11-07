@@ -73,6 +73,9 @@ NET_PIVOT = "2026-11-06T08:00:00Z"
 NET_V1_AUDIT = "docs/nnue-experiments.md#audit-of-the-v1-chain-2026-11-06"
 # Where net/experiments.jsonl lives: main once merged, else the netloop branch.
 EXPERIMENT_REFS = ("main", "netloop")
+# Optional experiments.jsonl fields passed through when a row has them.
+NET_EXTRA_FIELDS = ("king_buckets", "mean_abs_eval", "best_scale_val", "best_scale_factor",
+                    "output_scale", "init")
 
 
 class Cache:
@@ -216,10 +219,13 @@ def build_net_gates(qlog, queue, experiments, v1_branches):
         if not g.get("status"):
             # A dispatch with no final row yet is still being judged.
             g["status"] = "testing" if g.get("outcome") == "dispatched" else g.get("outcome")
-    # Trained nets nobody has queued yet still belong in the table.
+    # Trained nets nobody has queued yet still belong in the table; local-only
+    # experiments (branch "local-<id>", never pushed) are labelled as such.
     for b, r in by_branch.items():
         if b not in gates:
-            gates[b] = {"branch": b, "first_at": parse_when(r.get("date")), "status": "not gated"}
+            local = b.startswith("local-")
+            gates[b] = {"branch": b, "first_at": parse_when(r.get("date")),
+                        "status": "local only" if local else "not gated", "local": local}
     v1, v2 = [], []
     for g in gates.values():
         e = by_branch.get(g["branch"])
@@ -230,7 +236,8 @@ def build_net_gates(qlog, queue, experiments, v1_branches):
                      seeds=e.get("seeds"), epochs=e.get("epochs"),
                      positions_per_epoch=e.get("positions_per_epoch"), val_loss=e.get("val_loss"),
                      val_loss_quantized=e.get("val_loss_quantized"), baseline=e.get("baseline"),
-                     notes=e.get("notes"), tc=sprt.get("tc"))
+                     notes=e.get("notes"), tc=sprt.get("tc"),
+                     **{k: e[k] for k in NET_EXTRA_FIELDS if e.get(k) is not None})
             # A gate run outside the queue only exists in the training record.
             if g.get("elo") is None and sprt.get("elo") is not None:
                 g.update(elo=sprt.get("elo"), ci=sprt.get("ci"), games=sprt.get("games"),
