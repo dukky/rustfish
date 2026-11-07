@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "main",
+      "mode": "ladder",
+      "front": true
+    },
+    {
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
