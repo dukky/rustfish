@@ -936,6 +936,8 @@ struct SearchParams {
     null_reduction_base: i32,
     null_reduction_depth_div: i32,
     lmp_limit_d1: usize,
+    // Plies the TT move loses when not singular but its TT score is >= beta.
+    se_negative_extension: i32,
     lmp_limit_d2: usize,
     lmp_limit_d3: usize,
     lmr_min_depth: i32,
@@ -955,6 +957,7 @@ impl Default for SearchParams {
             null_reduction_base: 2,
             null_reduction_depth_div: 4,
             lmp_limit_d1: 6,
+            se_negative_extension: 1,
             lmp_limit_d2: 10,
             lmp_limit_d3: 14,
             lmr_min_depth: 3,
@@ -1158,6 +1161,7 @@ fn main() {
             println!("option name NullReductionBase type spin default 2 min 0 max 6");
             println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
             println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
+            println!("option name SeNegativeExtension type spin default 1 min 0 max 3");
             println!("option name LmpLimitD2 type spin default 10 min 0 max 32");
             println!("option name LmpLimitD3 type spin default 14 min 0 max 40");
             println!("option name LmrMinDepth type spin default 3 min 1 max 12");

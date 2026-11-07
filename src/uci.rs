@@ -159,6 +159,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         match n.as_str() {
             "futilitymargind1" => engine.search_params.futility_margin_d1 = v.clamp(0, 500),
             "futilitymargind2" => engine.search_params.futility_margin_d2 = v.clamp(0, 700),
+            "senegativeextension" => engine.search_params.se_negative_extension = v.clamp(0, 3),
             "reversefutilitymargind1" => {
                 engine.search_params.reverse_futility_margin_d1 = v.clamp(0, 500)
             }
