@@ -128,7 +128,7 @@ pub(crate) const LAYOUT_KB8M: KingLayout = KingLayout {
 
 /// The layout the engine runs. Switching it changes the net format (KB
 /// blocks of 768 feature rows): embed a net trained with the same layout.
-pub(crate) const KING_LAYOUT: KingLayout = LAYOUT_NONE;
+pub(crate) const KING_LAYOUT: KingLayout = LAYOUT_KB4;
 
 pub(crate) const fn layout_buckets(l: &KingLayout) -> usize {
     let mut m = 0;
