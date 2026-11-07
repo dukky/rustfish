@@ -34,6 +34,16 @@
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
       "expect": 1.0
+    },
+    {
+      "branch": "feat-threat-hist",
+      "mode": "stc",
+      "expect": 8.0
+    },
+    {
+      "branch": "feat-lmr-improving",
+      "mode": "stc",
+      "expect": 3.0
     }
   ],
   "current": {
