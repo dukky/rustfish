@@ -5,7 +5,7 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-07 09:30._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-07 09:50._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
@@ -89,6 +89,14 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   question, not rejected. After g4: 2-3 x 30 min fine-tunes of the champion
   varying one thing each (80% replay; lower lr / fewer steps), screened on
   best-scale loss on val.bin + val17x2; gate any that win both.
+- **g4 merged at the net gate: +26.7 [10.1, 43.5]** (from scratch on pool4,
+  730M, +35% data vs g3, same recipe). Data pays: background datagen lane
+  3 -> 6 runners (18 shards, ~25M/h), foreground 16 -> 13 shards (0fdb630);
+  datagen bursts (1685c16) fill low-value gaps. Ladder next in the queue.
+  Local datagen restarted on g4 (seed 1005). GPU: g4l3 (lambda 0.3), then
+  chain9: g4kb4 (kb4 exact factoriser warm start from g4, keep-best) vs
+  g4ft (same fine-tune, no kb) ~11:40. kb8m can't start exactly from an
+  unmirrored net (needs an m1 copy first).
 - **Local datagen** (09:30): `~/rustfish-data/datagen-gate.sh` runs seed 1004
   (main 7d1fc8a, net scale, 7 threads, ~1300 pos/s = ~4.7M/h) only while no
   GPU training runs (SIGSTOP/SIGCONT); the auto loop ingests local/L1004.txt.
