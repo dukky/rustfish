@@ -52,6 +52,8 @@ POSITIONS_PER_GAME = 79
 
 # GitHub's concurrent-job cap and the queue's two lanes (scripts/queue.py).
 RUNNER_CAP = 20
+# Defaults only; the live split comes from queue-settings.json "lanes"
+# (background datagen, 1 runner for the queue's own job, foreground = the rest).
 FOREGROUND_RUNNERS = 16
 BACKGROUND_RUNNERS = 4
 # Matrix max-parallel per workflow name, used to estimate the in-progress jobs
@@ -480,7 +482,10 @@ def build_status():
                    "shards_queued": queued, "games_per_shard": games, "nodes": nodes,
                    "estimated_positions": done * games * POSITIONS_PER_GAME if games else None}
 
-    # Background lane (4 runners): the queue dispatches datagen from main
+    lanes = qcfg.get("lanes") or {}
+    bg_runners = lanes.get("background_parallel", BACKGROUND_RUNNERS)
+    fg_runners = RUNNER_CAP - 1 - bg_runners if "background_parallel" in lanes else FOREGROUND_RUNNERS
+    # Background lane (lanes.background_parallel runners): the queue dispatches datagen from main
     # whenever no datagen/SPSA run is active ("dispatched" rows, mode datagen).
     dg_runs = {}
     for r in runs:
@@ -501,7 +506,7 @@ def build_status():
         if len(dispatches) >= 8:
             break
     background = {
-        "runners": BACKGROUND_RUNNERS, "current": datagen, "dispatches": dispatches,
+        "runners": bg_runners, "current": datagen, "dispatches": dispatches,
         "next_seed": queue.get("next_seed"),
         "other": [{"name": r.get("name"), "title": r.get("display_title"), "status": r.get("status"),
                    "url": r.get("html_url"), "started": r.get("run_started_at") or r.get("created_at")}
@@ -528,7 +533,7 @@ def build_status():
         usage_rows.append({"name": r.get("name"), "workflow": workflow_file(r), "title": r.get("display_title"), "jobs": n,
                            "exact": exact, "lane": lane, "url": r.get("html_url")})
     runner_usage = {
-        "cap": RUNNER_CAP, "foreground_cap": FOREGROUND_RUNNERS, "background_cap": BACKGROUND_RUNNERS,
+        "cap": RUNNER_CAP, "foreground_cap": fg_runners, "background_cap": bg_runners,
         "in_use": min(RUNNER_CAP, sum(u["jobs"] for u in usage_rows)),
         "foreground": sum(u["jobs"] for u in usage_rows if u["lane"] == "foreground"),
         "background": sum(u["jobs"] for u in usage_rows if u["lane"] == "background"),
