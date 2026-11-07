@@ -931,6 +931,8 @@ struct SearchParams {
     futility_margin_d1: i32,
     futility_margin_d2: i32,
     reverse_futility_margin_d1: i32,
+    // LMR plies removed at ttPv nodes (PV now or flagged PV in the TT).
+    lmr_tt_pv: i32,
     reverse_futility_margin_d2: i32,
     reverse_futility_margin_d3: i32,
     null_reduction_base: i32,
@@ -953,6 +955,7 @@ impl Default for SearchParams {
             futility_margin_d1: 120,
             futility_margin_d2: 220,
             reverse_futility_margin_d1: 90,
+            lmr_tt_pv: 1,
             reverse_futility_margin_d2: 180,
             reverse_futility_margin_d3: 300,
             null_reduction_base: 2,
@@ -1158,6 +1161,7 @@ fn main() {
             println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
+            println!("option name LmrTtPv type spin default 1 min 0 max 3");
             println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
             println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");
             println!("option name NullReductionBase type spin default 2 min 0 max 6");
