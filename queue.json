@@ -66,20 +66,10 @@
       "expect": 4.0
     }
   ],
-  "current": {
-    "branch": "nnue-g4kb8m",
-    "mode": "stc",
-    "expect": 8.0,
-    "test_id": "q-nnue-g4kb8m-1107-1523",
-    "sha": "921bcebf0af4a62928d30cd10542b88ff3bc4675",
-    "base_sha": "2861dd27265517a08f70ea42b1a32e51f45491a9",
-    "started": "2026-11-07T15:23:44Z",
-    "bench": 612780,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 37,
   "consecutive_bursts": 0
 }
