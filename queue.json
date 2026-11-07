@@ -1,28 +1,23 @@
 {
   "pending": [
     {
-      "branch": "simp-nmp-margin",
-      "mode": "nonreg",
-      "expect": 1.0
-    },
-    {
       "branch": "simp-lmr-extra",
       "mode": "nonreg",
       "expect": 1.0
     }
   ],
   "current": {
-    "branch": "simp-lmr-goodhist",
+    "branch": "simp-nmp-margin",
     "mode": "nonreg",
     "expect": 1.0,
-    "test_id": "q-simp-lmr-goodhist-1107-0513",
-    "sha": "25c3a20806cbc6c84fd832c43bddc8f7e7155a44",
-    "base_sha": "dcb46240eae2b1fa41e63559f0f95c4bb4eeacb1",
-    "started": "2026-11-07T05:13:57Z",
-    "bench": 624185
+    "test_id": "q-simp-nmp-margin-1107-0627",
+    "sha": "a9ed1e4dab840c19f1d5d27beed2a6ee309a886a",
+    "base_sha": "25c3a20806cbc6c84fd832c43bddc8f7e7155a44",
+    "started": "2026-11-07T06:27:59Z",
+    "bench": 656312
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 25
 }
