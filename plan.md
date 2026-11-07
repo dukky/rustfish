@@ -126,6 +126,18 @@ Dated log, newest last; superseded detail is in the commit history and
 
 ## Known problems
 
+- **Disk (pick up before gen 7, ~3-4 days):** data grows ~1B positions/day
+  (~32 GB/day) and we keep sources + a shuffled pool copy (+ a third copy
+  while shuffling): ~64 GB/day against 88 GB free on a 460 GB disk. Fixes in
+  order: (1) trainers read many source files with an on-the-fly shuffle
+  buffer, no pool copy (~halves disk; subagent job); (2) recent-data window
+  (drop seeds 4-13 from much weaker engines; test as a CI sweep, one
+  variable) -> caps ~100-130 GB; (3) move data + generations to the 9600X if
+  its disk is larger; (4) binpack-style compression (~2-3 B/position) only if
+  needed. CI datagen artifacts (90-day retention) are a re-downloadable cold
+  copy. Manual cleanup the owner can run: raw seed .gz dirs
+  ~/rustfish-data/s{4,5,6,8,9,11} (~5 GB) and finished worktrees.
+
 - **Anchors near the top.** The elite set now reaches 3631 (11 anchors,
   3318-3631); add stronger anchors before the ladder passes ~3600. Check
   each new anchor against its neighbours.
