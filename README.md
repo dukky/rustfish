@@ -8,7 +8,7 @@ now places on the CCRL Blitz list (single-CPU engines, best versions; list of
 | Target | CCRL Blitz | Rank today |
 |---|---|---|
 | Short term | 3400 | ~#131 of 865 (reached 2026-11-06) |
-| Mid term: top 100 | 3504 | #100 |
+| Mid term: top 100 | 3506 | #100 (list of 2026-11-07) |
 | Long term: top 10 | 3751 | #10 |
 
 rustfish measured **3463** (CCRL ladder, 2026-11-07, net g4). Merges
