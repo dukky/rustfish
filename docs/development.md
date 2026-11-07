@@ -217,7 +217,7 @@ monthly, whichever comes first:
 
 ## Tuning search parameters (SPSA)
 
-The search margins and limits (`FutilityMarginD1`, `ReverseFutilityMarginD*`,
+The search margins and limits (`FutilityMarginD1`, `ReverseFutilityMargin`,
 `NullReduction*`, `LmpLimitD*`, `Lmr*`) are UCI spin options, so
 they can be tuned by SPSA on GitHub without rebuilding per point. The state
 (theta, bounds, `c_end`, `r_end`, iteration counter, schedule length) lives in

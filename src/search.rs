@@ -17,10 +17,9 @@ const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
 const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
-// Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
-// margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
+// Reverse futility pruning applies up to this depth with a margin of
+// ReverseFutilityMargin per ply, shrunk by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
-const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
 
@@ -1185,11 +1184,7 @@ fn negamax(
             && depth <= RFP_MAX_DEPTH
             && beta.abs() < MATE_SCORE - 1000
         {
-            let mut margin = match depth {
-                1 => params.reverse_futility_margin_d1,
-                2 => params.reverse_futility_margin_d2,
-                d => params.reverse_futility_margin_d3 + (d - 3) * RFP_DEEP_STEP,
-            };
+            let mut margin = params.reverse_futility_margin * depth;
             if improving {
                 margin -= margin / 4;
             }
