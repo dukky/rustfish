@@ -932,9 +932,7 @@ type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
 struct SearchParams {
     futility_margin_d1: i32,
     futility_margin_d2: i32,
-    reverse_futility_margin_d1: i32,
-    reverse_futility_margin_d2: i32,
-    reverse_futility_margin_d3: i32,
+    reverse_futility_margin: i32,
     null_reduction_base: i32,
     // Index quiet history by whether the from/to squares are attacked.
     threat_history: bool,
@@ -966,9 +964,7 @@ impl Default for SearchParams {
         Self {
             futility_margin_d1: 120,
             futility_margin_d2: 220,
-            reverse_futility_margin_d1: 90,
-            reverse_futility_margin_d2: 180,
-            reverse_futility_margin_d3: 300,
+            reverse_futility_margin: 100,
             null_reduction_base: 2,
             threat_history: true,
             threat_escape_bonus: 8_000,
@@ -1177,9 +1173,7 @@ fn main() {
             println!("option name UseNNUE type check default true");
             println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
-            println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
-            println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
-            println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");
+            println!("option name ReverseFutilityMargin type spin default 100 min 0 max 300");
             println!("option name NullReductionBase type spin default 2 min 0 max 6");
             println!("option name ThreatHistory type check default true");
             println!("option name ThreatEscapeBonus type spin default 8000 min 0 max 30000");

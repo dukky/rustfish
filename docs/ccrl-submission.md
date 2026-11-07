@@ -50,7 +50,7 @@ binaries; few build from source. A submission should point them at one page:
 | `OwnBook` | check | **true** | built-in opening book; see open items |
 | `BookStyle` | combo `normal`/`grinder`/`chaos` | normal | only matters with OwnBook on |
 | `BookFile` | string | empty | external book path |
-| `FutilityMarginD1`, `FutilityMarginD2`, `ReverseFutilityMarginD1..D3`, `NullReductionBase`, `NullReductionDepthDiv`, `LmpLimitD1..D3`, `LmrMinDepth`, `LmrMinMoveIndex`, `LmrExtraDepth`, `LmrExtraMoveIndex` | spin | tuned | search tuning; testers should leave these alone |
+| `FutilityMarginD1`, `FutilityMarginD2`, `ReverseFutilityMargin`, `NullReductionBase`, `NullReductionDepthDiv`, `LmpLimitD1..D3`, `LmrMinDepth`, `LmrMinMoveIndex`, `LmrExtraDepth`, `LmrExtraMoveIndex` | spin | tuned | search tuning; testers should leave these alone |
 
 **OwnBook is on by default.** CCRL plays from its own opening books and
 expects engine books to be off. Tell testers to set `OwnBook=false`, or ship

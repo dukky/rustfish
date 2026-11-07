@@ -168,15 +168,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "futilitymargind2" => engine.search_params.futility_margin_d2 = v.clamp(0, 700),
             "lmrcutnode" => engine.search_params.lmr_cut_node = v.clamp(0, 4),
             "lmrpvnode" => engine.search_params.lmr_pv_node = v.clamp(0, 4),
-            "reversefutilitymargind1" => {
-                engine.search_params.reverse_futility_margin_d1 = v.clamp(0, 500)
-            }
-            "reversefutilitymargind2" => {
-                engine.search_params.reverse_futility_margin_d2 = v.clamp(0, 700)
-            }
-            "reversefutilitymargind3" => {
-                engine.search_params.reverse_futility_margin_d3 = v.clamp(0, 900)
-            }
+            "reversefutilitymargin" => engine.search_params.reverse_futility_margin = v.clamp(0, 300),
             "nullreductionbase" => engine.search_params.null_reduction_base = v.clamp(0, 6),
             "threatescapebonus" => engine.search_params.threat_escape_bonus = v.clamp(0, 30_000),
             "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
