@@ -1,12 +1,17 @@
 name: Train sweep
 
-# Independent NNUE training runs in parallel, one variant per runner, all
-# scored on the same held-out validation set (the last 1M positions of the
-# seed-9 datagen run, as on the laptop). For ablations (LR, lambda, epochs,
-# width, buckets, warm start): runners cannot share one training run, but 16
-# variants side by side take as long as one. Uses the same runners as the
-# SPRT queue, so run it overnight or when the queue is idle. See
-# docs/nnue-experiments.md.
+# One-variable NNUE experiments in parallel: one shared, shuffled pool built
+# once (prep), one variant per runner (train), one table (report). Every
+# variant is scored on the laptop's two validation sets: val.bin (last 1M of
+# seed 9) and val17x2 (last 1M of seed 17, x2), both cut from training.
+# Helpers and details: scripts/train_sweep.py; usage: docs/nnue-experiments.md
+# ("CI training sweeps").
+#
+# Runners: sweeps use the same 20 runners as the queue. With the lanes in
+# scripts/queue-settings.json (13 background datagen + 6 foreground + 1
+# queue job) a sweep at max_parallel 6 takes the whole foreground lane, so
+# SPRTs wait behind it. Dispatch when the queue is light, or lower
+# lanes.background_parallel for the duration.
 
 run-name: "Train sweep ${{ inputs.name }}"
 
@@ -14,23 +19,35 @@ on:
   workflow_dispatch:
     inputs:
       name:
-        description: "Sweep name (used in the run title and artifacts)"
+        description: "Sweep name (run title, artifact names)"
         required: true
+      seeds:
+        description: 'Training seeds: JSON list of seeds / "A-B" ranges / "all" (newest successful datagen run each; seed 7 quarantined), or JSON {seed: run id}. E.g. ["8-29"]'
+        required: true
+      variants:
+        description: 'JSON list of {"name", "args", "init": true}; --data/--val/--out/--threads/--checkpoint/--keep-best (and --init when init_net is set and init is true) are added'
+        required: true
+      positions:
+        description: "Pool size cap in positions (evenly spaced blocks of every seed, then shuffled); 0 = all. Default 300M = 9.6 GB artifact"
+        default: "300000000"
+      init_net:
+        description: 'Warm-start net: <ref>:<path> (e.g. main:net/nnue.bin), https URL, or run:<run id>:<artifact>:<file>; empty = none'
+        default: ""
+      init_args:
+        description: "Eval args for the init net's reference row (its shape)"
+        default: "--buckets 8"
+      max_parallel:
+        description: "Variant jobs at once (6 = the whole foreground lane)"
+        default: "6"
+      train_minutes:
+        description: "Training wall-clock limit per variant (job limit 6 h; the best finished epoch is kept)"
+        default: "320"
       ref:
         description: "Repo ref for the trainer source"
         default: "main"
-      runs:
-        description: 'JSON {seed: datagen run id} for the training data, e.g. {"8":"41864886814","9":"41894096137"}'
-        required: true
-      val_run:
-        description: "Datagen run id of seed 9 (its last 1M positions are the validation set and are removed from training)"
-        default: "41894096137"
-      positions:
-        description: "Training positions per variant (a shuffled subset of the pool)"
-        default: "100000000"
-      variants:
-        description: 'JSON list of {"name": ..., "args": "<nnue-trainer train args>"}; --data/--val/--out are added'
-        required: true
+      x2_seeds:
+        description: "Half-scale seeds whose scores are doubled"
+        default: "14-18"
 
 permissions:
   contents: read
@@ -39,128 +56,128 @@ permissions:
 jobs:
   prep:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     outputs:
       variants: ${{ steps.plan.outputs.variants }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          path: trainer-src
       - id: plan
         env:
           VARIANTS: ${{ inputs.variants }}
-        run: |
-          python3 -c "import json,os,sys; v=json.loads(os.environ['VARIANTS']); assert all('name' in x and 'args' in x for x in v); print('variants='+json.dumps(v))" >> "$GITHUB_OUTPUT"
+        run: echo "variants=$(python3 scripts/train_sweep.py plan --variants "$VARIANTS")" >> "$GITHUB_OUTPUT"
       - name: Build trainer
-        env:
-          RUSTFLAGS: -C target-cpu=x86-64-v3
         run: |
-          cargo build --release --manifest-path tools/nnue-trainer/Cargo.toml
-          cargo test --release --manifest-path tools/nnue-trainer/Cargo.toml
-      - name: Fetch, convert and shuffle the pool
+          # Kernels dispatch AVX-512/AVX2 at runtime; v3 baseline runs on every runner.
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --manifest-path trainer-src/tools/nnue-trainer/Cargo.toml
+          cargo test --release --manifest-path trainer-src/tools/nnue-trainer/Cargo.toml
+      - name: Build the pool and validation sets
         env:
           GH_TOKEN: ${{ github.token }}
-          RUNS: ${{ inputs.runs }}
-          VAL_RUN: ${{ inputs.val_run }}
+          SEEDS: ${{ inputs.seeds }}
           POSITIONS: ${{ inputs.positions }}
+          X2: ${{ inputs.x2_seeds }}
         run: |
           # /mnt has ~70 GB on hosted runners; the root disk does not.
-          sudo mkdir -p /mnt/w && sudo chown "$USER" /mnt/w
-          T="$PWD/tools/nnue-trainer/target/release/nnue-trainer"
-          fetch() {  # seed run_id -> /mnt/w/s<seed>.bin
-            name=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$2/artifacts?per_page=100" \
-              --jq '.artifacts[].name' | grep -E "^datagen-s$1-n[0-9]+$" | head -1)
-            [ -n "$name" ] || { echo "no merged datagen artifact for seed $1 in run $2"; exit 1; }
-            gh run download "$2" -R "$GITHUB_REPOSITORY" -n "$name" -D "/mnt/w/dl-$1"
-            gunzip -c /mnt/w/dl-$1/*.gz | "$T" convert - "/mnt/w/s$1.bin"
-            rm -rf "/mnt/w/dl-$1"
-          }
-          seeds=$(python3 -c "import json,os; print(' '.join(f'{k}:{v}' for k,v in json.loads(os.environ['RUNS']).items()))")
-          for sr in $seeds; do
-            [ "${sr%%:*}" = 7 ] && { echo "seed 7 is quarantined"; exit 1; }
-            fetch "${sr%%:*}" "${sr#*:}"
-          done
-          [ -f /mnt/w/s9.bin ] || fetch 9 "$VAL_RUN"
-          size=$(stat -c %s /mnt/w/s9.bin)
-          tail -c 32000000 /mnt/w/s9.bin > /mnt/w/val.bin
-          truncate -s $((size - 32000000)) /mnt/w/s9.bin
-          inputs=""
-          for sr in $seeds; do inputs="$inputs /mnt/w/s${sr%%:*}.bin"; done
-          "$T" shuffle --out /mnt/w/pool.bin $inputs
-          rm -f /mnt/w/s*.bin
-          total=$(( $(stat -c %s /mnt/w/pool.bin) / 32 ))
-          keep=$(( POSITIONS < total ? POSITIONS : total ))
-          truncate -s $((keep * 32)) /mnt/w/pool.bin
-          echo "pool: $keep of $total positions; val: 1000000" | tee -a "$GITHUB_STEP_SUMMARY"
-          mkdir -p sweep && mv /mnt/w/pool.bin /mnt/w/val.bin sweep/ && cp "$T" sweep/
+          sudo mkdir -p /mnt/w /mnt/sweep && sudo chown "$USER" /mnt/w /mnt/sweep
+          cp trainer-src/tools/nnue-trainer/target/release/nnue-trainer /mnt/sweep/
+          df -h /mnt
+          python3 scripts/train_sweep.py pool --seeds "$SEEDS" --positions "$POSITIONS" --x2-seeds "$X2" \
+            --trainer /mnt/sweep/nnue-trainer --work /mnt/w --dest /mnt/sweep | tee /mnt/w/manifest.out
+          { echo '### Pool'; echo '```json'; cat /mnt/sweep/manifest.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch the warm-start net
+        if: inputs.init_net != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INIT: ${{ inputs.init_net }}
+          INIT_ARGS: ${{ inputs.init_args }}
+        run: |
+          python3 scripts/train_sweep.py init --spec "$INIT" --out /mnt/sweep/init.bin | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/train_sweep.py evalnet --name "init: $INIT" --net /mnt/sweep/init.bin --args "$INIT_ARGS" \
+            --trainer /mnt/sweep/nnue-trainer --val /mnt/sweep/val.bin --val17 /mnt/sweep/val17x2.bin \
+            --json /mnt/sweep/init.json
       - uses: actions/upload-artifact@v4
         with:
           name: sweep-data-${{ inputs.name }}
-          path: sweep
+          path: /mnt/sweep
           retention-days: 2
           compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ inputs.name }}-_prep
+          path: |
+            /mnt/sweep/manifest.json
+            /mnt/sweep/init.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   train:
     needs: prep
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 355
     strategy:
       fail-fast: false
-      # At most 16 of the 20 runners: long jobs must never block the merge queue.
-      max-parallel: 16
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix:
         variant: ${{ fromJSON(needs.prep.outputs.variants) }}
     name: train ${{ matrix.variant.name }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - name: Prepare /mnt
+        run: sudo mkdir -p /mnt/sweep /mnt/out && sudo chown "$USER" /mnt/sweep /mnt/out
       - uses: actions/download-artifact@v4
         with:
           name: sweep-data-${{ inputs.name }}
-          path: sweep
+          path: /mnt/sweep
       - name: Train
         env:
           NAME: ${{ matrix.variant.name }}
           ARGS: ${{ matrix.variant.args }}
+          USE_INIT: ${{ matrix.variant.init && inputs.init_net != '' }}
+          MINUTES: ${{ inputs.train_minutes }}
         run: |
-          chmod +x sweep/nnue-trainer
-          mkdir -p out
-          # Stop inside the 6 h job limit; the last finished epoch's net is kept.
-          timeout 19800 sweep/nnue-trainer train --data sweep/pool.bin --val sweep/val.bin \
-            --out "out/$NAME.bin" --threads "$(nproc)" $ARGS 2>&1 | tee "out/$NAME.log" || true
-          rm -f out/*.ckpt
+          chmod +x /mnt/sweep/nnue-trainer
+          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | cut -c1-200
+          INIT=""
+          [ "$USE_INIT" = true ] && INIT="--init /mnt/sweep/init.bin"
+          O=/mnt/out
+          set +e
+          # SIGINT at the limit; the epoch nets and the checkpoint (for --resume)
+          # of every finished epoch are kept and uploaded.
+          timeout --signal=INT --kill-after=60 $((MINUTES * 60)) /mnt/sweep/nnue-trainer train \
+            --data /mnt/sweep/pool.bin --val /mnt/sweep/val.bin --out "$O/$NAME.bin" \
+            --checkpoint "$O/$NAME.ckpt" --threads "$(nproc)" --keep-best $INIT $ARGS 2>&1 | tee "$O/$NAME.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "trainer exit $rc"
+          python3 scripts/train_sweep.py finish --name "$NAME" --args "$ARGS" $( [ -n "$INIT" ] && echo --init ) \
+            --rc "$rc" --log "$O/$NAME.log" --net "$O/$NAME.bin" --trainer /mnt/sweep/nnue-trainer \
+            --val /mnt/sweep/val.bin --val17 /mnt/sweep/val17x2.bin --json "$O/$NAME.json"
+          # 124 = stopped at train_minutes (best finished epoch kept); anything else failed.
+          [ "$rc" = 0 ] || [ "$rc" = 124 ] || exit "$rc"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: sweep-${{ inputs.name }}-${{ matrix.variant.name }}
-          path: out
+          path: /mnt/out
           retention-days: 14
 
   report:
-    needs: train
-    if: always()
+    needs: [prep, train]
+    if: always() && needs.prep.result == 'success'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
           pattern: sweep-${{ inputs.name }}-*
           path: results
-          merge-multiple: true
-      - name: Summarise validation losses
-        run: |
-          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
-          import glob, os, re
-          rows = []
-          for log in sorted(glob.glob("results/*.log")):
-              text = open(log).read()
-              epochs = re.findall(r"^epoch (\d+) .*? val ([0-9.]+) \(quantized ([0-9.]+)\).*?([0-9]+) pos/s", text, re.M)
-              head = re.search(r"^train (.*)$", text, re.M)
-              name = os.path.basename(log)[:-4]
-              if epochs:
-                  e, v, q, pps = epochs[-1]
-                  best = min(epochs, key=lambda x: float(x[1]))
-                  rows.append((float(v), name, e, v, q, best[0], best[1], pps, head.group(1) if head else ""))
-              else:
-                  rows.append((9.0, name, "-", "-", "-", "-", "-", "-", "no epochs finished"))
-          print("| variant | epochs | final val | quantised | best epoch | best val | pos/s | config |")
-          print("|---|---|---|---|---|---|---|---|")
-          for r in sorted(rows):
-              print("| " + " | ".join(str(x) for x in r[1:]) + " |")
-          EOF
+      - name: Summarise
+        run: python3 scripts/train_sweep.py report --dir results | tee -a "$GITHUB_STEP_SUMMARY"

@@ -188,3 +188,71 @@ Fixed-scale screening (off by default): `auto --screen-scale match
 (`nnue-trainer rescale --match`, slope normaliser) before screening and
 embeds the scaled net. `embed --match-scale <ref.bin|base>` does the same
 for a hand-embedded net. Tests: `python3 scripts/test_netloop.py`.
+
+## CI training sweeps (`train-sweep.yml`)
+
+Parallel one-variable experiments on the GitHub runners: `prep` builds one
+pool and both validation sets and uploads them as one artifact; every
+variant job downloads it and trains with `--threads $(nproc) --keep-best`;
+`report` puts every variant in one table in the run summary. Helpers:
+`scripts/train_sweep.py`.
+
+- **Pool.** `seeds`: JSON list of seeds, `"A-B"` ranges or `"all"` (the
+  newest successful `datagen.yml` run of each seed; ranges skip seeds with no
+  run), or `{seed: run id}`. Seed 7 is quarantined (an error if named,
+  skipped in ranges). Seeds 14-18 (`x2_seeds`) get every score doubled,
+  saturating, as `fix/x2.py`; seeds >= 19 are net scale. `positions`
+  (default 300M) caps the pool: every seed contributes the same fraction, as
+  evenly spaced 64k-record blocks, then the trainer's `shuffle` mixes them.
+  The manifest (runs, positions per seed, x2) is in the run summary.
+- **Validation.** `val.bin` = the last 1M positions of seed 9 and `val17x2`
+  = the last 1M of seed 17 with x2: the laptop's `val.bin` and
+  `fix/val17x2.bin` (sha256 checked, `matches_laptop` in the manifest). Both
+  are cut from their seeds before sampling, so they are never trained on
+  (seeds 9 and 17 are always fetched for them). `--val` (so `--keep-best`)
+  is `val.bin`.
+- **Size limit.** The pool is 32 bytes/position: 300M = 9.6 GB, which every
+  variant job downloads (test run: 640 MB in 11-47 s, so ~3-12 min for
+  300M). Hosted runners have ~70 GB on
+  `/mnt`; `prep` needs the gzip artifacts (~12.5 B/position over every
+  fetched seed) + ~2x the pool, so ~1B positions (32 GB) is the most one
+  runner can build, and it would cost every variant ~10+ min of transfer.
+  Keep sweeps at <= 300M: rank variants there, train the winner on the full
+  pool locally.
+- **Warm start.** `init_net`: `<ref>:<path>` (e.g. `main:net/nnue.bin`), an
+  https URL, or `run:<run id>:<artifact>:<file>` (a previous sweep's net).
+  It is passed as `--init` to every variant unless the variant has
+  `"init": false`; `init_args` (default `--buckets 8`) is its shape, for the
+  reference row. King-bucket variants add e.g. `--king-buckets kb4
+  --factorise`. Mirrored layouts (kb4m, kb8m) start exactly only from an
+  `m1` net; from main's `none` net they start at `eval --king-buckets m1`
+  of it (trainer README).
+- **Time.** `train_minutes` (default 320) stops the trainer inside the 6 h
+  job limit; the best finished epoch is the output and the checkpoint is
+  uploaded (`--resume` it locally). Set `--epoch-size` so epochs end often
+  enough to lose little at the limit. 320 min at 0.8M pos/s is ~15B
+  position-samples.
+- **Table.** Sorted by best-scale loss on val.bin + val17x2 (`eval
+  --best-scale`, scale profiled out) of the output net; when `--keep-best`
+  kept an earlier epoch (or the start net, e0), the last epoch's best-scale
+  losses are shown too. Also final and best epoch val (float/quantised),
+  the start loss, pos/s and the runner CPU (`lscpu`). The init net is a
+  reference row. The CPU only changes speed: the trainer is bit-identical
+  across ISAs and thread counts.
+- **Runners.** A sweep shares the 20 runners with the queue. With the
+  `lanes` in `scripts/queue-settings.json` (13 background datagen + 6
+  foreground + 1 queue job) `max_parallel` 6 (default) takes the whole
+  foreground lane, so SPRTs wait behind it. Dispatch when the queue is
+  light, or lower `lanes.background_parallel` for the duration; never set
+  `max_parallel` above the foreground lane.
+
+```bash
+gh workflow run train-sweep.yml -f name=kb-warm -f seeds='["8-29"]' -f positions=300000000 \
+  -f init_net=main:net/nnue.bin -f variants='[
+  {"name":"plain","args":"--hidden 512 --buckets 8 --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"},
+  {"name":"kb4","args":"--hidden 512 --buckets 8 --king-buckets kb4 --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"},
+  {"name":"kb4f","args":"--hidden 512 --buckets 8 --king-buckets kb4 --factorise --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"},
+  {"name":"kb4mf","args":"--hidden 512 --buckets 8 --king-buckets kb4m --factorise --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"},
+  {"name":"kb8mf","args":"--hidden 512 --buckets 8 --king-buckets kb8m --factorise --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"},
+  {"name":"kb8mf-wd","args":"--hidden 512 --buckets 8 --king-buckets kb8m --factorise --wd 0.01 --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"}]'
+```
