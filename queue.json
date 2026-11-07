@@ -59,6 +59,11 @@
       "mode": "stc",
       "expect": 4.0,
       "passed_over": 1
+    },
+    {
+      "branch": "feat-threat-hist",
+      "mode": "stc",
+      "expect": 4.0
     }
   ],
   "current": {
