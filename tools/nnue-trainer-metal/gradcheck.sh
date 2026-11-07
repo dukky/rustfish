@@ -14,3 +14,4 @@ D="$1"
 ./nnue-trainer-metal gradcheck --data "$D" --hidden 64 --buckets 1 --batch 1000 --mirror --king-buckets kb4
 ./nnue-trainer-metal gradcheck --data "$D" --hidden 32 --buckets 1 --batch 500 --king-buckets m1
 ./nnue-trainer-metal gradcheck --data "$D" --hidden 256 --buckets 8 --batch 2048 --king-buckets kb8m
+./nnue-trainer-metal gradcheck --data "$D" --hidden 64 --buckets 8 --batch 777 --mirror --king-buckets kb8m
