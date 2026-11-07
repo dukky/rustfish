@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Posts laptop status to the dashboard every 2 minutes. Install: see deploy/dashboard/README.md. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.rustfish.laptop-status</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/andreasholley/dev/stockfish-challenge/scripts/laptop_status.py</string>
+  </array>
+  <key>StartInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>/tmp/rustfish-laptop-status.err</string>
+</dict>
+</plist>
