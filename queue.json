@@ -1,5 +1,11 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "simp-lmr-extra-r2",
+      "mode": "nonreg",
+      "expect": 1.0
+    }
+  ],
   "current": {
     "branch": "tm-ccrl-r2",
     "mode": "nonreg",
