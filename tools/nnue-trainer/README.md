@@ -25,7 +25,42 @@ Rules that the v1 history taught us (see `docs/nnue-experiments.md`):
 - Every weight is clipped to +-1.98 while training, so output weights export
   to |w| <= 127 (the engine's fast path) with no post-hoc clipping.
 
-Throughput: ~1.1M positions/s at H = 256 on the 8-core M3 (8 threads).
+## Speed (batch kernels, `src/batch.rs`)
+
+The forward pass runs by samples over 64-float column tiles of a tile-major
+FT copy; the backward pass runs by 16-float column tiles over one tile-major
+gradient (no per-thread gradients, no reduction); AdamW is vectorised and
+clears the gradient. AVX-512 / AVX2 are picked at runtime (one binary runs on
+any x86-64; `NNUE_ISA=portable|avx2|avx512` overrides), NEON on aarch64.
+
+Results do not depend on `--threads`, scheduling or ISA (bit-identical nets).
+The only change from the old trainer is the order of the output dot product
+(16 interleaved partial sums); `--exact` restores the old sequential sum and
+is then **bit-identical to the old trainer run with `--threads 1`** (checked
+by the unit tests and by the `Trainer bench` workflow). `--sub-batch N`
+(default ~2 MB of accumulators, 512 at H = 512) and `--max-batches N`
+(benchmarking) are tuning knobs.
+
+H = 512, B = 8, batch 16384, `--mirror`, positions/s (GitHub 4-vCPU runners,
+`trainer-bench.yml`; old = the previous trainer at 4 threads):
+
+| CPU | old | new | new 1 thread | new `--exact` |
+|---|---|---|---|---|
+| AMD EPYC 9V45 (Zen 5) | 0.71-0.82M | 1.69M | 0.65M | 1.43M |
+| AMD EPYC 9V74 (Zen 4) | 0.46M | 0.82M | 0.39M | 0.70M |
+| Intel Xeon 8573C | 0.43M | 0.90M | 0.40M | 0.77M |
+| AMD EPYC 7763 (Zen 3, AVX2) | 0.41M | 0.69M | | |
+
+M3 (8 threads, quiet): ~1.6M (was ~0.5M). The kernels synchronise a few
+dozen times per batch, so they lose more than the old loop when the cores are
+oversubscribed (e.g. next to datagen): use fewer threads then.
+
+Build for a dedicated x86 box (runtime dispatch already uses AVX-512; native
+only helps the decode/validation code):
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
 
 ## King buckets (input buckets)
 
