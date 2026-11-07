@@ -1,6 +1,10 @@
 {
   "pending": [
     {
+      "branch": "main",
+      "mode": "ladder"
+    },
+    {
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0
@@ -47,17 +51,16 @@
     }
   ],
   "current": {
-    "branch": "tm-ccrl-r2",
-    "mode": "nonreg",
-    "expect": 5.0,
-    "test_id": "q-tm-ccrl-r2-1107-0742",
-    "sha": "b1dae1c1e82c4e18e1ecd46be0bf7d1066e99b28",
-    "base_sha": "a9ed1e4dab840c19f1d5d27beed2a6ee309a886a",
-    "started": "2026-11-07T07:42:26Z",
-    "bench": 656312
+    "branch": "main",
+    "mode": "ltc-check",
+    "base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
+    "test_id": "q-main-ltc-check-1107-0856",
+    "sha": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
+    "base_sha": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
+    "started": "2026-11-07T08:56:30Z"
   },
-  "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-  "merges_since_check": 4,
-  "merges_since_ladder": 4,
+  "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
+  "merges_since_check": 0,
+  "merges_since_ladder": 0,
   "next_seed": 27
 }
