@@ -54,6 +54,11 @@
       "branch": "feat-lmr-captures",
       "mode": "stc",
       "expect": 3.0
+    },
+    {
+      "branch": "nnue-g4l3",
+      "mode": "net-gate",
+      "expect": 5.0
     }
   ],
   "current": {
