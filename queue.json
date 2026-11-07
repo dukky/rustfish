@@ -1,23 +1,8 @@
 {
-  "pending": [
-    {
-      "branch": "simp-lmr-extra",
-      "mode": "nonreg",
-      "expect": 1.0
-    }
-  ],
-  "current": {
-    "branch": "simp-nmp-margin",
-    "mode": "nonreg",
-    "expect": 1.0,
-    "test_id": "q-simp-nmp-margin-1107-0627",
-    "sha": "a9ed1e4dab840c19f1d5d27beed2a6ee309a886a",
-    "base_sha": "25c3a20806cbc6c84fd832c43bddc8f7e7155a44",
-    "started": "2026-11-07T06:27:59Z",
-    "bench": 656312
-  },
+  "pending": [],
+  "current": null,
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
-  "merges_since_check": 3,
-  "merges_since_ladder": 3,
+  "merges_since_check": 4,
+  "merges_since_ladder": 4,
   "next_seed": 25
 }
