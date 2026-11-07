@@ -29,7 +29,9 @@ $M bench --data recs.bin --hidden 1024 --buckets 8   # per-kernel GPU time for o
 
 Flags: `--data` (repeatable) `--val --out --hidden --buckets --king-buckets --epochs
 --epoch-size --batch --lr --lr-end --wd --lambda --seed --mirror --init
---resume --checkpoint --factorise --wd-active-only --no-wd-active-only`.
+--resume --checkpoint --factorise --wd-active-only --no-wd-active-only
+--keep-best` (as the CPU trainer: `<out>` = the best quantised-val epoch,
+start included).
 `--threads` is accepted and ignored. Writes
 `<out>.eN.bin` per epoch, `<out>.ckpt`, and `<out>`. At exit it prints one
 line on stderr: time spent waiting for the loader, waiting for the GPU,
@@ -260,6 +262,13 @@ Validation (`pool3f.bin` head, `--val` = first 100k of `val.bin`):
   as m1 (0.028761, see the CPU README for why a mirrored layout cannot equal a
   `none` net); an m1 net into kb8m gives exactly its own loss (0.078022). The
   CPU and GPU export byte-identical nets.
+- `--init` from g4 (H 512, B 8, first 100k of `val.bin`): kb4 with and
+  without `--factorise` starts at 0.026672 (quantized 0.026673 = g4's
+  `eval`), kb8m at 0.028718 (g4 read as m1), identical to the CPU trainer;
+  both trainers' epoch-0 exports hold g4's bytes in every bucket. H 64
+  plain -> kb4 / kb8m `--factorise`, 3 x 65536: CPU and GPU start and epoch
+  losses agree to 6 digits; `--keep-best` picks the same epoch and writes
+  byte-identical outputs when the start wins.
 - Without `--factorise` (and, for KB > 1, with `--no-wd-active-only`) nets
   and checkpoints are byte-identical to the previous build (none, m1, kb8m).
 

@@ -19,7 +19,11 @@
 //! gradients for feature `f`. Exported nets (per epoch and final) hold the
 //! merged rows, so the file format and the engine are unchanged. From
 //! scratch `W = 0` and `F` = the one-bucket init (same RNG draws as a KB=1
-//! net); `--init` from a one-bucket net sets `F` = its rows, `W = 0`.
+//! net); `--init` from a one-bucket net sets `F` = its rows, `W = 0`, so
+//! the start is exactly that net (mirrored layouts: only for an m1 net).
+//!
+//! `--keep-best` (needs `--val`): `<out>` is the epoch with the lowest
+//! quantised val loss, the start net included, instead of the last one.
 //!
 //! `--wd-active-only` (default on when KB > 1, `--no-wd-active-only` turns
 //! it off): AdamW weight decay on the bucketed FT rows (`W`) only for rows
@@ -589,6 +593,24 @@ fn load_init_factor(path: &Path, sh: Shape) -> Vec<f32> {
     let mut p = vec![0.0f32; sh.ft_b()];
     p.extend_from_slice(&p1[s1.ft_b()..]);
     factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
+}
+
+/// A one-bucket `--init` net into a mirrored layout is exact only if that
+/// net was trained mirrored (`m1`): a `none` net cannot be expressed (each
+/// mirrored bucket serves kings on files x and 7-x with one row per feature),
+/// so training starts from its mirrored reading instead.
+fn warn_mirrored_init(path: &Path, sh: Shape, kl: &KingLayout) {
+    let bytes = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+    let one_bucket = Shape::from_file_bytes(bytes, sh.buckets, 1).is_some();
+    let full = sh.kb > 1 && Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some();
+    if kl.mirror && one_bucket && !full {
+        println!(
+            "init: note: {} is read with mirroring ({}); the start equals it exactly only if it is an m1 net, \
+             otherwise the start val loss is its `eval --king-buckets m1` loss",
+            path.display(),
+            kl.name
+        );
+    }
 }
 
 /// Mean validation loss, plus the mean |eval| in cp as a scale check.
@@ -1305,7 +1327,7 @@ fn cmd_train(args: &[String]) {
     let (mut batch, mut lr, mut lr_end, mut wd, mut lambda) = (16384usize, 1e-3f32, 1e-5f32, 0.0f32, 0.5f32);
     let (mut threads, mut seed, mut mirror) = (threads_default(), 1u64, false);
     let (mut init, mut resume, mut ckpt) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
-    let (mut factorise, mut wd_active) = (false, None::<bool>);
+    let (mut factorise, mut wd_active, mut keep_best) = (false, None::<bool>, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -1332,6 +1354,7 @@ fn cmd_train(args: &[String]) {
             "--factorise" | "--factorize" => factorise = true,
             "--wd-active-only" => wd_active = Some(true),
             "--no-wd-active-only" => wd_active = Some(false),
+            "--keep-best" => keep_best = true,
             other => panic!("unknown option {other}"),
         }
     }
@@ -1347,6 +1370,9 @@ fn cmd_train(args: &[String]) {
     let ckpt = ckpt.unwrap_or_else(|| out.with_extension("ckpt"));
 
     let mut rng = Rng::new(seed);
+    if let (None, Some(i)) = (&resume, &init) {
+        warn_mirrored_init(i, sh, kl);
+    }
     let (mut p, mut opt, mut seen) = match (&resume, &init) {
         (Some(r), _) => load_ckpt(r, sh, kl, fac),
         (None, Some(i)) => {
@@ -1372,6 +1398,7 @@ fn cmd_train(args: &[String]) {
         merge_factor(&p, sh, fac, &mut merged);
     }
     let val = val_path.as_deref().map(read_recs).unwrap_or_default();
+    assert!(!keep_best || !val.is_empty(), "--keep-best needs --val");
     let mut kb_note = if kl.id() != 0 { format!(" king-buckets={} (KB={})", kl.name, sh.kb) } else { String::new() };
     if fac.on() {
         kb_note += " factorised";
@@ -1386,8 +1413,14 @@ fn cmd_train(args: &[String]) {
         sh.len(),
         val.len()
     );
-    let (vl, ve) = validate(if fac.on() { &merged } else { &p }, sh, kl, &val, lambda, threads);
-    println!("start val loss {vl:.6} mean|eval| {ve:.1}cp");
+    let pm0 = if fac.on() { &merged[..] } else { &p[..] };
+    let (vl, ve) = validate(pm0, sh, kl, &val, lambda, threads);
+    let q0 = quantize(pm0, sh);
+    let (ql0, _) = validate(&dequantize(&q0, sh), sh, kl, &val, lambda, threads);
+    println!("start val loss {vl:.6} (quantized {ql0:.6}) mean|eval| {ve:.1}cp");
+    // --keep-best: (quantized val loss, epoch, net bytes) of the best net so
+    // far; the start net (epoch 0: the --init / --resume net) competes too.
+    let mut best = keep_best.then(|| (ql0, seen / epoch_size, q0));
 
     let mut feed = Feed::new(data, seed ^ 0xF00D ^ seen);
     let mut grads: Vec<Vec<f32>> = (0..threads).map(|_| vec![0.0f32; sh.len()]).collect();
@@ -1475,6 +1508,9 @@ fn cmd_train(args: &[String]) {
             let (ql, _) = validate(&dequantize(&q, sh), sh, kl, &val, lambda, threads);
             let path = out.with_extension(format!("e{ep}.bin"));
             File::create(&path).unwrap().write_all(&q).unwrap();
+            if let Some(b) = best.as_mut().filter(|b| ql < b.0) {
+                *b = (ql, ep, q.clone());
+            }
             save_ckpt(&ckpt, sh, kl, fac, &p, &opt, seen);
             println!(
                 "epoch {ep} lr {cur_lr:.2e} train {:.6} val {vl:.6} (quantized {ql:.6}) mean|eval| {ve:.1}cp {:.0} pos/s -> {}",
@@ -1486,7 +1522,11 @@ fn cmd_train(args: &[String]) {
             epoch_n = 0;
         }
     }
-    let q = quantize(if fac.on() { &merged } else { &p }, sh);
+    let mut q = quantize(if fac.on() { &merged } else { &p }, sh);
+    if let Some((bl, be, bq)) = best {
+        println!("keep-best: epoch {be} (quantized val {bl:.6}) is the output");
+        q = bq;
+    }
     File::create(&out).unwrap().write_all(&q).unwrap();
     println!("wrote {} ({} bytes, H={} buckets={}{kb_note})", out.display(), q.len(), sh.h, sh.buckets);
 }
@@ -1717,6 +1757,16 @@ mod tests {
         save_ckpt(&path, sh, kl, fac, &pf, &opt, 1234);
         let (p2, o2, seen) = load_ckpt(&path, sh, kl, fac);
         assert_eq!((p2, o2.step, seen), (pf, 9, 1234));
+
+        // `--init` from a one-bucket net file: merged net == that net (dequantized)
+        // in every bucket, so the start is exactly the plain net.
+        let init = dir.join("plain.bin");
+        File::create(&init).unwrap().write_all(&quantize(&p1, s1)).unwrap();
+        let q1 = dequantize(&quantize(&p1, s1), s1);
+        let pi = load_init_factor(&init, sh);
+        merge_factor(&pi, sh, fac, &mut m);
+        assert_eq!(m, expand_buckets(&q1, s1, sh.kb));
+        assert_eq!(&pi[sh.len()..], &q1[..s1.ft_b()]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -200,6 +200,17 @@ func loadInit(_ path: String, _ buckets: Int, layout: Int) -> ([Float], Shape) {
     return (p, sh)
 }
 
+/// As the CPU trainer's `warn_mirrored_init`: a one-bucket init net read
+/// through a mirrored layout reproduces it exactly only if it is an m1 net.
+func warnMirroredInit(_ path: String, _ sh: Shape) {
+    let n = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int) ?? 0
+    let oneBucket = Shape.fromFileBytes(n, sh.buckets) != nil
+    let full = sh.kb > 1 && Shape.fromFileBytes(n, sh.buckets, layout: sh.layout) != nil
+    if sh.kl.mirror && oneBucket && !full {
+        out("init: note: \(path) is read with mirroring (\(sh.kl.name)); the start equals it exactly only if it is an m1 net, otherwise the start val loss is its `eval --king-buckets m1` loss")
+    }
+}
+
 /// `--factorise --init` (as the CPU trainer's `load_init_factor`): a
 /// one-bucket net becomes F with W = 0; a full bucketed net becomes W with F = 0.
 /// Returns the training vector (net params + F).
@@ -626,12 +637,13 @@ func cmdTrain(_ args: [String]) {
     var seed: UInt64 = 1
     var mirror = false
     var initPath: String? = nil, resume: String? = nil, ckptPath: String? = nil
-    var factor = false
+    var factor = false, keepBest = false
     var wdActive: Bool? = nil
     let it = Args(args)
     while let a = it.next() {
         switch a {
         case "--factorise", "--factorize": factor = true
+        case "--keep-best": keepBest = true
         case "--wd-active-only": wdActive = true
         case "--no-wd-active-only": wdActive = false
         case "--data": data.append(it.value(a))
@@ -676,6 +688,7 @@ func cmdTrain(_ args: [String]) {
         let (p, m, v, st, se) = loadCkpt(r, sh, factor: factor)
         p0 = p; m0 = m; v0 = v; step = st; seen = se
     } else if let i = initPath {
+        warnMirroredInit(i, sh)
         if factor {
             p0 = loadInitFactor(i, sh).map { min(max($0, -CLIP), CLIP) }
         } else {
@@ -692,8 +705,14 @@ func cmdTrain(_ args: [String]) {
     let tr = Trainer(g, sh, batch: batch, lambda: lambda, params: p0, m0: m0, v0: v0, factor: factor, wdActive: wdAct)
     let kbNote = (sh.layout != 0 ? " king-buckets=\(sh.kl.name) (KB=\(sh.kb))" : "") + (factor ? " factorised" : "") + (wdAct ? " wd-active-only" : "")
     out("train H=\(sh.h) buckets=\(sh.buckets)\(kbNote) params=\(sh.len) epochs=\(epochs) x \(epochSize) batch=\(batch) lr \(rustDisplay(lr))->\(rustDisplay(lrEnd)) wd=\(rustDisplay(wd)) lambda=\(rustDisplay(lambda)) mirror=\(mirror) threads=\(threads) val=\(valRecs.count / REC)")
+    if keepBest && valRecs.isEmpty { die("--keep-best needs --val") }
     let (vl0, ve0) = val.validate(g, tr.p, sh)
-    out("start val loss \(f6(vl0)) mean|eval| \(f1(ve0))cp")
+    let q0 = quantize(tr.p.contents().assumingMemoryBound(to: Float.self), sh)
+    let (ql0, _) = val.validate(g, g.buf(dequantize(q0, sh)), sh)
+    out("start val loss \(f6(vl0)) (quantized \(f6(ql0))) mean|eval| \(f1(ve0))cp")
+    // --keep-best: (quantized val loss, epoch, net bytes) of the best net so
+    // far; the start net (epoch 0: the --init / --resume net) competes too.
+    var best: (Double, UInt64, [UInt8])? = keepBest ? (ql0, seen / epochSize, q0) : nil
 
     // Loader thread: fills ring slots with raw records (+ mirror flag in byte 28),
     // drawing seed_b from the main RNG exactly as the CPU trainer does per batch.
@@ -769,6 +788,7 @@ func cmdTrain(_ args: [String]) {
             let (ql, _) = val.validate(g, qb, sh)
             let path = withExtension(outPath, "e\(ep).bin")
             writeFile(path, q)
+            if let b = best, ql < b.0 { best = (ql, ep, q) }
             saveCkpt(ckpt, sh, factor: factor, tr.t.contents().assumingMemoryBound(to: Float.self), tr.m.contents().assumingMemoryBound(to: Float.self), tr.v.contents().assumingMemoryBound(to: Float.self), step: step, seen: seen)
             out("epoch \(ep) lr \(e2(curLr)) train \(f6(epochLoss / Double(epochN))) val \(f6(vl)) (quantized \(f6(ql))) mean|eval| \(f1(ve))cp \(String(format: "%.0f", Double(seen - startSeen) / secs)) pos/s -> \(path)")
             epochLoss = 0
@@ -776,7 +796,11 @@ func cmdTrain(_ args: [String]) {
         }
     }
     while !pending.isEmpty { retire() }
-    let q = quantize(pP, sh)
+    var q = quantize(pP, sh)
+    if let (bl, be, bq) = best {
+        out("keep-best: epoch \(be) (quantized val \(f6(bl))) is the output")
+        q = bq
+    }
     writeFile(outPath, q)
     out("wrote \(outPath) (\(q.count) bytes, H=\(sh.h) buckets=\(sh.buckets)\(kbNote))")
     FileHandle.standardError.write(String(format: "waits: loader %.1fs gpu %.1fs gpu-busy %.1fs total %.1fs\n", loaderWait, gpuWait, gpuBusy, Date().timeIntervalSince(started)).data(using: .utf8)!)
