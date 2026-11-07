@@ -84,7 +84,11 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   100%, overfits from epoch 1 -> data-limited; revisit at several times the
   pool. **Gen 4 from scratch** on pool4 (677M: pool3f + s17x2, L1003, CI
   s18-24) training (chain8), gate ~10:30. Short warm starts on new data
-  (auto loop, g4w) don't win; from-scratch generations do.
+  (auto loop, g4w) don't win *with that recipe* (half new / half replay,
+  lr 2e-4, 3 epochs, from a non-champion base, raw-loss screen): open
+  question, not rejected. After g4: 2-3 x 30 min fine-tunes of the champion
+  varying one thing each (80% replay; lower lr / fewer steps), screened on
+  best-scale loss on val.bin + val17x2; gate any that win both.
 - Round 2: `simp2-*` (HCE-era margins) and `feat-*` (modern search gaps)
   branches in progress by subagents; tm-ccrl-r2 and simp-lmr-extra-r2 queued.
 - Simplification pass: four `simp-*` branches queued as nonreg (castle
