@@ -1517,10 +1517,6 @@ fn negamax(
                 if quiet_history < -LMR_HISTORY_THRESHOLD {
                     r += 1;
                 }
-                // Reduce less for moves with good history
-                if quiet_history > LMR_HISTORY_THRESHOLD {
-                    r -= 1;
-                }
                 r.clamp(0, depth - 2)
             } else {
                 0
