@@ -2,12 +2,8 @@
   "pending": [
     {
       "branch": "tm-ccrl",
-      "mode": "nonreg"
-    },
-    {
-      "branch": "nnue-g3fs",
-      "mode": "net-gate",
-      "expect": 8.0
+      "mode": "nonreg",
+      "passed_over": 1
     },
     {
       "branch": "nnue-g4ws",
@@ -36,14 +32,14 @@
     }
   ],
   "current": {
-    "branch": "nnue-g3f",
+    "branch": "nnue-g3fs",
     "mode": "net-gate",
     "expect": 8.0,
-    "test_id": "q-nnue-g3f-1107-0150",
-    "sha": "2f502aaf38dbeddccc2ed8440ad7f208ea632bb4",
-    "base_sha": "b9df4372470a021f784b69fcade3c4b63ec41919",
-    "started": "2026-11-07T01:50:12Z",
-    "bench": 640732
+    "test_id": "q-nnue-g3fs-1107-0204",
+    "sha": "d3fe48d3b5c611079bb4d26a47333611513aeeeb",
+    "base_sha": "4726decd523d5cf4732eb921adcf81cc757dd151",
+    "started": "2026-11-07T02:04:18Z",
+    "bench": 790667
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 2,
