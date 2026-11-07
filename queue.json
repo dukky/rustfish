@@ -54,6 +54,16 @@
       "branch": "feat-lmr-improving",
       "mode": "stc",
       "expect": 3.0
+    },
+    {
+      "branch": "feat-ttpv",
+      "mode": "stc",
+      "expect": 5.0
+    },
+    {
+      "branch": "feat-lmr-captures",
+      "mode": "stc",
+      "expect": 3.0
     }
   ],
   "current": {
