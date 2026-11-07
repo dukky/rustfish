@@ -133,3 +133,30 @@ rows into every bucket. To embed a bucketed net, pass the same layout to
 `netloop.py embed --king-buckets <layout>` (it sets `KING_LAYOUT` in
 `src/nnue.rs` and treats it as a shape change, so it gates at `stc`). First
 measurement: about -14% bench NPS for kb8m at H = 256.
+
+## Overnight loop: `netloop.py auto`
+
+`python3 scripts/netloop.py auto` repeats every `--interval` s (1200):
+
+1. **Ingest.** Completed `datagen.yml` runs (generator ref `main` only) not in
+   `~/rustfish-data/ledger.json` are downloaded and converted into
+   `~/rustfish-data/auto/`; growth of `local/L*.txt` (complete lines only,
+   byte offsets in the ledger) is converted in >= 64 MB chunks. Each file is
+   `scalecheck`ed against origin/main's net: slope in [0.40, 0.65] -> an x2
+   copy is trained on (raw deleted), [0.80, 1.25] -> used as is, anything else
+   -> quarantined and logged. The first run records every existing CI run and
+   the hand-converted part of each `L*.txt` (records in `<stem>[a-z].bin`) as
+   pre-existing; `--adopt <file>` counts an existing net-scale file as new.
+2. **Train** once >= `--threshold` (30M) new positions arrived since the last
+   attempt and no other `nnue-trainer* train` runs: the data since the last
+   embedded net (newest first, <= 120M) + an equal slice of `--replay-pool`
+   (pool3f.bin, rotating offset), shuffled; GPU warm start from main's net,
+   same H/B/king layout, 3 epochs, lr 2e-4 -> 1e-5.
+3. **Screen** with `nnue-trainer eval` on `val.bin` and `fix/val16x2.bin`.
+   Better than main on both -> `netloop.py embed` (branch `nnue-auto-<n>`,
+   pushed) and `queue.py add nnue-auto-<n>:net-gate` (`--expect` = 10 x the
+   smaller relative improvement in %, 2..10, if queue.py supports it).
+
+Logs: `~/rustfish-data/netloop-auto.log` and `netloop-auto.jsonl`. It never
+commits to main and writes nothing outside `auto/`, the ledger and its logs.
+`--dry-run` does step 1 for real and prints what 2 and 3 would do.

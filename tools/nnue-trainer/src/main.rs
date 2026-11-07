@@ -720,6 +720,7 @@ fn cmd_shuffle(args: &[String]) {
 fn cmd_eval(args: &[String]) {
     let (mut net, mut val, mut buckets, mut lambda) = (None, None, 1usize, 0.5f32);
     let mut kl = NO_BUCKETS;
+    let mut threads = threads_default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -728,17 +729,106 @@ fn cmd_eval(args: &[String]) {
             "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
             "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
             "--lambda" => lambda = it.next().unwrap().parse().unwrap(),
+            "--threads" => threads = it.next().unwrap().parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
     }
     let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
     let val = read_recs(&val.expect("--val"));
-    let (l, e) = validate(&p, sh, kl, &val, lambda, threads_default());
+    let (l, e) = validate(&p, sh, kl, &val, lambda, threads);
     print!("H={} buckets={} ", sh.h, sh.buckets);
     if kl.id() != 0 {
         print!("king-buckets={} ", kl.name);
     }
     println!("val positions {} loss {:.6} mean|eval| {:.1}cp", val.len(), l, e);
+}
+
+/// Least-squares slope of `score` on `eval` through the origin
+/// (`sum(s*e) / sum(e^2)`), Pearson r, and mean |score|.
+fn scale_stats(pairs: &[(f64, f64)]) -> (f64, f64, f64) {
+    let n = pairs.len() as f64;
+    let (mut ss, mut se, mut sss, mut see, mut sse, mut sa) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for &(s, e) in pairs {
+        ss += s;
+        se += e;
+        sss += s * s;
+        see += e * e;
+        sse += s * e;
+        sa += s.abs();
+    }
+    let slope = sse / see;
+    let cov = sse / n - ss / n * (se / n);
+    let r = cov / ((sss / n - (ss / n).powi(2)).sqrt() * (see / n - (se / n).powi(2)).sqrt());
+    (slope, r, sa / n)
+}
+
+/// (record score, net eval) in cp, both White POV, for each record.
+fn score_eval_pairs(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], threads: usize) -> Vec<(f64, f64)> {
+    if recs.is_empty() {
+        return Vec::new();
+    }
+    let chunk = recs.len().div_ceil(threads.max(1));
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = recs
+            .chunks(chunk)
+            .map(|part| {
+                sc.spawn(move || {
+                    let mut acc = vec![0.0f32; 2 * sh.h];
+                    part.iter()
+                        .map(|r| {
+                            let s = decode(r, 0.0, sh.buckets, false, kl);
+                            let o = (forward(p, sh, &s, &mut acc) * SCALE) as f64; // side to move POV
+                            let e = if r[27] == 1 { -o } else { o };
+                            (i16::from_le_bytes([r[24], r[25]]) as f64, e)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// `scalecheck`: is the data's score scale the same as the net's? Prints
+/// `slope` = least-squares slope of record score on net eval (cp, White POV).
+/// ~1.0 = net-scale data; ~0.5 = data written at the engine's halved scale.
+/// Records with |score| >= --max-score (mates, default 10000) are skipped.
+fn cmd_scalecheck(args: &[String]) {
+    let (mut net, mut data, mut buckets, mut kl) = (None, None, 1usize, NO_BUCKETS);
+    let (mut n, mut threads, mut max_score) = (200_000usize, 2usize, 10_000.0f64);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut v = || it.next().unwrap_or_else(|| panic!("{a} needs a value")).clone();
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(v())),
+            "--data" => data = Some(PathBuf::from(v())),
+            "--buckets" => buckets = v().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(&v()),
+            "--n" => n = v().parse().unwrap(),
+            "--threads" => threads = v().parse().unwrap(),
+            "--max-score" => max_score = v().parse().unwrap(),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let data = data.expect("--data");
+    let mut bytes = Vec::new();
+    File::open(&data)
+        .unwrap_or_else(|e| panic!("{}: {e}", data.display()))
+        .take((n * REC) as u64)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    let recs: Vec<Rec> = bytes.chunks_exact(REC).map(|c| c.try_into().unwrap()).collect();
+    let all = score_eval_pairs(&p, sh, kl, &recs, threads);
+    let pairs: Vec<_> = all.iter().copied().filter(|(s, _)| s.abs() < max_score).collect();
+    let (slope, r, mean_abs) = scale_stats(&pairs);
+    let mean_eval = pairs.iter().map(|x| x.1.abs()).sum::<f64>() / pairs.len() as f64;
+    println!(
+        "scalecheck {} positions {} (skipped {} with |score| >= {max_score}) slope {slope:.4} r {r:.4} mean|score| {mean_abs:.1}cp mean|eval| {mean_eval:.1}cp",
+        data.display(),
+        pairs.len(),
+        all.len() - pairs.len(),
+    );
 }
 
 fn cmd_train(args: &[String]) {
@@ -890,13 +980,14 @@ fn cmd_train(args: &[String]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
         "shuffle" => cmd_shuffle(rest),
         "train" => cmd_train(rest),
         "eval" => cmd_eval(rest),
+        "scalecheck" => cmd_scalecheck(rest),
         _ => panic!("{usage}"),
     }
 }
@@ -1070,6 +1161,46 @@ mod tests {
             assert!((p[i] - d[i]).abs() <= tol + 1e-6);
         }
         assert_eq!(Shape::from_file_bytes(394_753 * 2, 1, 1), Some(Shape { h: 512, buckets: 1, kb: 1 }));
+    }
+
+    #[test]
+    fn scalecheck_slope_detects_halved_scores() {
+        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let mut rng = Rng::new(11);
+        let mut p = init_params(sh, &mut rng);
+        for x in &mut p[sh.out_w()..] {
+            *x *= 8.0; // spread the evals so whole-cp rounding is small
+        }
+        let p = dequantize(&quantize(&p, sh), sh);
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+            "4k3/8/8/8/8/8/8/4K2R b - - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R b KQ - 1 8",
+            "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 b - - 0 10",
+            "8/8/4k3/8/2Q5/8/4K3/8 b - - 0 1",
+        ];
+        // Net evals (White POV), then records scored at k times the net's scale.
+        let evals: Vec<f64> = fens
+            .iter()
+            .map(|f| score_eval_pairs(&p, sh, NO_BUCKETS, &[encode(&format!("{f} | 0 | 0.5")).unwrap()], 1)[0].1)
+            .collect();
+        assert!(evals.iter().any(|e| e.abs() > 50.0), "test net too flat: {evals:?}");
+        for k in [0.5, 1.0, 2.0] {
+            let recs: Vec<Rec> = fens
+                .iter()
+                .zip(&evals)
+                .map(|(f, e)| encode(&format!("{f} | {} | 0.5", e * k)).unwrap())
+                .collect();
+            // Scores are stored as whole cp, so the slope is close, not exact.
+            let (slope, r, _) = scale_stats(&score_eval_pairs(&p, sh, NO_BUCKETS, &recs, 2));
+            assert!((slope - k).abs() < 0.03 * k, "k {k}: slope {slope} evals {evals:?}");
+            assert!(r > 0.99, "k {k}: r {r}");
+        }
+        let (slope, r, mean) = scale_stats(&[(2.0, 1.0), (-4.0, -2.0), (6.0, 3.0)]);
+        assert!((slope - 2.0).abs() < 1e-12 && (r - 1.0).abs() < 1e-12 && (mean - 4.0).abs() < 1e-12);
     }
 
     #[test]
