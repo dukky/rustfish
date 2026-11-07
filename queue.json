@@ -4,56 +4,62 @@
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 6
+      "passed_over": 7
     },
     {
       "branch": "simp2-qs-delta",
       "mode": "nonreg",
       "expect": 3.0,
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "simp2-qs-failsoft",
       "mode": "stc",
       "expect": 2.0,
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "feat-lmr-improving",
       "mode": "stc",
       "expect": 3.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "feat-lmr-captures",
       "mode": "stc",
       "expect": 3.0,
-      "passed_over": 2
+      "passed_over": 3
     },
     {
       "branch": "feat-threat-hist",
       "mode": "stc",
-      "expect": 4.0
-    },
-    {
-      "branch": "feat-se-negext-r2",
-      "mode": "stc",
-      "expect": 5.0
+      "expect": 4.0,
+      "passed_over": 1
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-se-negext-r2",
+    "mode": "stc",
+    "expect": 5.0,
+    "test_id": "q-feat-se-negext-r2-1107-1959",
+    "sha": "4f4f24c60305cdd33fe89ad27fd731c464ae8d0b",
+    "base_sha": "50864a096187b729523872d36fc6e196c435d158",
+    "started": "2026-11-07T19:59:48Z",
+    "bench": 594709,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
