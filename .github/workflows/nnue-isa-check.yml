@@ -16,7 +16,7 @@ on:
         default: "4"
       bench_rounds:
         description: "Interleaved bench runs per binary (median NPS)"
-        default: "5"
+        default: "11"
   push:
     branches: [nnue-avx512]
 
@@ -85,9 +85,17 @@ jobs:
         run: |
           engines/tests --nocapture avx512_matches_scalar
           engines/tests --test-threads 2
+      - name: NNUE micro-benchmark (default-flag test binary, AVX2 vs auto)
+        if: env.AVX512 == '1'
+        run: |
+          for i in 1 2 3; do
+            echo "avx2:   $(RUSTFISH_NO_AVX512=1 engines/tests --ignored --nocapture nnue_throughput 2>&1 | grep 'nnue:')"
+            echo "avx512: $(engines/tests --ignored --nocapture nnue_throughput 2>&1 | grep 'nnue:')"
+          done | tee micro.txt
+          { echo; echo '```'; cat micro.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Compare evalhash, bench nodes and NPS
         env:
-          ROUNDS: ${{ inputs.bench_rounds || '5' }}
+          ROUNDS: ${{ inputs.bench_rounds || '11' }}
         run: |
           python3 - <<'EOF'
           import os, re, statistics, subprocess, sys
