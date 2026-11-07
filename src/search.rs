@@ -18,11 +18,9 @@ const SCORE_DROP_MARGIN: i32 = 40;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
-// margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
+// margins it grows by RFP_DEEP_STEP per ply.
 const RFP_MAX_DEPTH: i32 = 7;
 const RFP_DEEP_STEP: i32 = 100;
-// Static-eval stack sentinel for nodes searched in check.
-const NO_EVAL: i32 = i32::MIN;
 
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
@@ -122,8 +120,6 @@ pub(crate) struct Search {
     deadline: Option<Instant>,
     pub(crate) stop: bool,
     pub(crate) killers: [[Option<Move>; 2]; MAX_PLY],
-    // Static eval per ply (NO_EVAL when in check), for the improving heuristic.
-    static_evals: [i32; MAX_PLY],
     /// Move skipped by a singular-extension verification search at this ply.
     excluded: [Option<Move>; MAX_PLY],
     move_buf: Vec<Move>,
@@ -137,7 +133,6 @@ impl Search {
             deadline,
             stop: false,
             killers: [[None; 2]; MAX_PLY],
-            static_evals: [NO_EVAL; MAX_PLY],
             excluded: [None; MAX_PLY],
             move_buf: Vec::with_capacity(256),
         }
@@ -1157,14 +1152,6 @@ fn negamax(
         )
     };
     let static_eval = raw_static_eval;
-    search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
-    // Improving: our static eval beats the one from our previous move (two plies up).
-    let improving = match static_eval {
-        Some(se) if ply >= 2 && search.static_evals[ply - 2] != NO_EVAL => {
-            se > search.static_evals[ply - 2]
-        }
-        _ => false,
-    };
 
     let params = engine.search_params;
 
@@ -1185,14 +1172,11 @@ fn negamax(
             && depth <= RFP_MAX_DEPTH
             && beta.abs() < MATE_SCORE - 1000
         {
-            let mut margin = match depth {
+            let margin = match depth {
                 1 => params.reverse_futility_margin_d1,
                 2 => params.reverse_futility_margin_d2,
                 d => params.reverse_futility_margin_d3 + (d - 3) * RFP_DEEP_STEP,
             };
-            if improving {
-                margin -= margin / 4;
-            }
             if se - margin >= beta {
                 return se;
             }
