@@ -18,7 +18,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension. |
 | Speed | ~1.3M nps single thread with NNUE (AVX2/NEON kernels). |
 
-## Status 2026-11-07 02:20
+## Status 2026-11-07 02:20 (updated 02:20)
 
 - **Ladder 3429 CCRL Blitz (CI 3401-3459)** on main after g3: past the 3400
   short-term target (~#122). Next: top 100 = 3504.
@@ -44,8 +44,12 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   val17x2 (0.02666 vs 0.02649). Competing explanation for g4w: overfitting
   to 44M recent positions (its val.bin got worse). Discriminating gates
   queued: g3f (as is) vs g3fs (same net, output scaled x0.92), and g4ws
-  (x0.865). If the scaled nets win, fix the scale at embed time (normalise
-  output to a reference mean|eval|) and screen at a fixed scale.
+  (x0.865). **Result:** g3f +1.4 [-9.4, 12.2], g3fs -8.9 [-20.1, 2.2]
+  (1792 games each). Shrinking the scale did not help: the scale hypothesis
+  is not supported at +9% (weak evidence, overlapping CIs). Leading
+  explanation for g4w is now overfitting of the short warm start; g4ws still
+  queued. Validation loss (even at fixed scale) has not predicted gate Elo
+  for g3f: games remain the gate.
 - **Laptop:** Metal GPU trainer (~3x CPU; king buckets ~1.3x one bucket) does
   all training. `scripts/netloop.py auto` runs unattended: ingests CI and local
   datagen, scale-checks, warm-starts a candidate per ~30M new positions, screens
