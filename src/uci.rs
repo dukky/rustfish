@@ -168,10 +168,6 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "reversefutilitymargind3" => {
                 engine.search_params.reverse_futility_margin_d3 = v.clamp(0, 900)
             }
-            "nullmarginbase" => engine.search_params.null_margin_base = v.clamp(0, 300),
-            "nullmargindepthscale" => {
-                engine.search_params.null_margin_depth_scale = v.clamp(0, 80)
-            }
             "nullreductionbase" => engine.search_params.null_reduction_base = v.clamp(0, 6),
             "nullreductiondepthdiv" => engine.search_params.null_reduction_depth_div = v.clamp(1, 12),
             "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),

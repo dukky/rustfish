@@ -1209,11 +1209,10 @@ fn negamax(
     }
 
     if allow_null && excluded.is_none() && depth >= 3 && !in_check && beta - alpha <= 1 {
-        let null_margin = params.null_margin_base + depth * params.null_margin_depth_scale;
         let side_c = color_index(board.side_to_move);
         let side_pcs = &board.bb.pieces[side_c];
         let has_non_pawn = (side_pcs[1] | side_pcs[2] | side_pcs[3] | side_pcs[4]) != 0;
-        if has_non_pawn && static_eval.map(|se| se >= beta - null_margin).unwrap_or(false) {
+        if has_non_pawn && static_eval.is_some_and(|se| se >= beta) {
             let old_ep = board.en_passant;
             let old_halfmove = board.halfmove_clock;
             let old_fullmove = board.fullmove_number;

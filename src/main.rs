@@ -933,8 +933,6 @@ struct SearchParams {
     reverse_futility_margin_d1: i32,
     reverse_futility_margin_d2: i32,
     reverse_futility_margin_d3: i32,
-    null_margin_base: i32,
-    null_margin_depth_scale: i32,
     null_reduction_base: i32,
     null_reduction_depth_div: i32,
     lmp_limit_d1: usize,
@@ -954,8 +952,6 @@ impl Default for SearchParams {
             reverse_futility_margin_d1: 90,
             reverse_futility_margin_d2: 180,
             reverse_futility_margin_d3: 300,
-            null_margin_base: 90,
-            null_margin_depth_scale: 20,
             null_reduction_base: 2,
             null_reduction_depth_div: 4,
             lmp_limit_d1: 6,
@@ -1159,8 +1155,6 @@ fn main() {
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
             println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
             println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");
-            println!("option name NullMarginBase type spin default 90 min 0 max 300");
-            println!("option name NullMarginDepthScale type spin default 20 min 0 max 80");
             println!("option name NullReductionBase type spin default 2 min 0 max 6");
             println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
             println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
