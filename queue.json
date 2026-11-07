@@ -1,6 +1,15 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "tm-ccrl-r2",
+    "mode": "nonreg",
+    "expect": 5.0,
+    "test_id": "q-tm-ccrl-r2-1107-0742",
+    "sha": "b1dae1c1e82c4e18e1ecd46be0bf7d1066e99b28",
+    "base_sha": "a9ed1e4dab840c19f1d5d27beed2a6ee309a886a",
+    "started": "2026-11-07T07:42:26Z",
+    "bench": 656312
+  },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
