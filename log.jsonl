@@ -268,3 +268,4 @@
 {"branch": "main", "logged_at": "2026-11-07T16:27:35Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 35, "sha": "2861dd27265517a08f70ea42b1a32e51f45491a9"}
 {"branch": "main", "logged_at": "2026-11-07T17:08:44Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 36, "sha": "2861dd27265517a08f70ea42b1a32e51f45491a9"}
 {"branch": "nnue-g4kb8m", "elo": 10.99, "elo_ci95": [4.86, 17.12], "games": 5376, "llr": 4.347, "logged_at": "2026-11-07T17:31:42Z", "mode": "stc", "outcome": "merged", "sha": "921bcebf0af4a62928d30cd10542b88ff3bc4675", "test_id": "q-nnue-g4kb8m-1107-1523", "verdict": "H1"}
+{"branch": "feat-se-negext", "logged_at": "2026-11-07T17:31:44Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}

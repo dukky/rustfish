@@ -4,13 +4,7 @@
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 4
-    },
-    {
-      "branch": "feat-se-negext",
-      "mode": "stc",
-      "expect": 5.0,
-      "passed_over": 3
+      "passed_over": 5
     },
     {
       "branch": "simp2-qs-delta",
