@@ -721,6 +721,7 @@ fn cmd_eval(args: &[String]) {
     let (mut net, mut val, mut buckets, mut lambda) = (None, None, 1usize, 0.5f32);
     let mut kl = NO_BUCKETS;
     let mut threads = threads_default();
+    let mut best_scale = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -730,6 +731,7 @@ fn cmd_eval(args: &[String]) {
             "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
             "--lambda" => lambda = it.next().unwrap().parse().unwrap(),
             "--threads" => threads = it.next().unwrap().parse().unwrap(),
+            "--best-scale" => best_scale = true,
             other => panic!("unknown option {other}"),
         }
     }
@@ -741,6 +743,55 @@ fn cmd_eval(args: &[String]) {
         print!("king-buckets={} ", kl.name);
     }
     println!("val positions {} loss {:.6} mean|eval| {:.1}cp", val.len(), l, e);
+    if best_scale {
+        let (f, lf) = best_scale_loss(&p, sh, kl, &val, lambda, threads);
+        println!("best scale x{f:.4}: loss {lf:.6} mean|eval| {:.1}cp", e * f);
+    }
+}
+
+/// The output scale `f` minimising validation loss (evals multiplied by `f`,
+/// as `rescale --factor f` does up to rounding), and that loss. Comparing
+/// nets at their own best scale measures quality with scale profiled out.
+fn best_scale_loss(p: &[f32], sh: Shape, kl: &KingLayout, val: &[Rec], lambda: f32, threads: usize) -> (f64, f64) {
+    let chunk = val.len().div_ceil(threads.max(1));
+    let ot: Vec<(f32, f32)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = val
+            .chunks(chunk)
+            .map(|part| {
+                sc.spawn(move || {
+                    let mut acc = vec![0.0f32; 2 * sh.h];
+                    part.iter()
+                        .map(|r| {
+                            let s = decode(r, lambda, sh.buckets, false, kl);
+                            (forward(p, sh, &s, &mut acc), s.target)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    let loss = |f: f64| {
+        ot.iter().map(|&(o, t)| (sigmoid((o as f64 * f) as f32) - t) as f64).map(|d| d * d).sum::<f64>() / ot.len() as f64
+    };
+    // Golden-section search on [0.5, 2]; the loss is unimodal in f in practice.
+    let (mut a, mut b) = (0.5f64, 2.0f64);
+    let g = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut x1, mut x2) = (b - g * (b - a), a + g * (b - a));
+    let (mut f1, mut f2) = (loss(x1), loss(x2));
+    while b - a > 1e-4 {
+        if f1 < f2 {
+            (b, x2, f2) = (x2, x1, f1);
+            x1 = b - g * (b - a);
+            f1 = loss(x1);
+        } else {
+            (a, x1, f1) = (x1, x2, f2);
+            x2 = a + g * (b - a);
+            f2 = loss(x2);
+        }
+    }
+    let f = (a + b) / 2.0;
+    (f, loss(f))
 }
 
 /// Least-squares slope of `score` on `eval` through the origin
@@ -829,6 +880,291 @@ fn cmd_scalecheck(args: &[String]) {
         pairs.len(),
         all.len() - pairs.len(),
     );
+}
+
+// ---------------------------------------------------------------- rescale
+
+/// Largest |output weight| the engine's fast i32 output kernel accepts
+/// (`Network::small_out` in `src/nnue.rs`); larger weights fall back to the
+/// slow i64 path, so `rescale` clips to it.
+const OUT_W_FAST: i32 = 127;
+
+/// How `rescale --match` turns (reference, candidate) evals into a factor.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Norm {
+    /// `1 / k` with `k` the least-squares slope through 0 of candidate on
+    /// reference eval: `k = sum(c*r) / sum(r*r)`. The default; see the README.
+    Slope,
+    /// `mean|r| / mean|c|`.
+    MeanAbs,
+}
+
+/// Scale factor that brings the candidate to the reference's scale, from
+/// `(reference, candidate)` eval pairs (cp, any common POV). Pairs with
+/// |reference| > `max_eval` are left out (selecting on the regressor keeps
+/// the slope unbiased); `max_eval <= 0` keeps all.
+fn match_factor(pairs: &[(f64, f64)], max_eval: f64, norm: Norm) -> f64 {
+    let keep = |r: f64| max_eval <= 0.0 || r.abs() <= max_eval;
+    let (mut cr, mut rr, mut ar, mut ac) = (0.0, 0.0, 0.0, 0.0);
+    for &(r, c) in pairs.iter().filter(|p| keep(p.0)) {
+        cr += c * r;
+        rr += r * r;
+        ar += r.abs();
+        ac += c.abs();
+    }
+    let f = match norm {
+        Norm::Slope => rr / cr,
+        Norm::MeanAbs => ar / ac,
+    };
+    assert!(f.is_finite() && f > 0.0, "cannot match scales (factor {f}): nets uncorrelated or val set empty?");
+    f
+}
+
+/// Multiplies the output weights and biases of the i16 net in `bytes` by
+/// `f` in place. Weights clip to +-`OUT_W_FAST`, biases to i16. Returns the
+/// number of clipped (weights, biases).
+fn rescale_output(bytes: &mut [u8], sh: Shape, f: f64) -> (usize, usize) {
+    let (mut cw, mut cb) = (0, 0);
+    for i in sh.out_w()..sh.len() {
+        let q = i16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]) as f64;
+        let lim = if i < sh.out_b() { OUT_W_FAST as f64 } else { i16::MAX as f64 };
+        let x = (q * f).round();
+        let y = x.clamp(-lim, lim);
+        if y != x {
+            if i < sh.out_b() {
+                cw += 1;
+            } else {
+                cb += 1;
+            }
+        }
+        bytes[2 * i..2 * i + 2].copy_from_slice(&(y as i16).to_le_bytes());
+    }
+    (cw, cb)
+}
+
+/// Sensitivities of the least-squares fit "new eval vs this net's eval" to
+/// each i16 output parameter. With `c` the net's eval (cp, side to move) and
+/// `c'` the eval after replacing the output layer by `q'`,
+/// `sum(c' * c) = sum_j gain[j] * q'[j]` exactly (the output is linear in
+/// its parameters), so `achieved factor = sum(gain*q') / sum(gain*q)` over
+/// the positions used. Index `j` = parameter `out_w() + j`. Positions with
+/// |c| > `max_eval` (when > 0) are left out.
+fn output_gains(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], max_eval: f64, threads: usize) -> Vec<f64> {
+    let n_out = sh.len() - sh.out_w();
+    if recs.is_empty() {
+        return vec![0.0; n_out];
+    }
+    let chunk = recs.len().div_ceil(threads.max(1));
+    let parts: Vec<Vec<f64>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = recs
+            .chunks(chunk)
+            .map(|part| {
+                sc.spawn(move || {
+                    let h2 = 2 * sh.h;
+                    let mut g = vec![0.0f64; n_out];
+                    let mut acc = vec![0.0f32; h2];
+                    for r in part {
+                        let s = decode(r, 0.0, sh.buckets, false, kl);
+                        let c = (forward(p, sh, &s, &mut acc) * SCALE) as f64;
+                        if max_eval > 0.0 && c.abs() > max_eval {
+                            continue;
+                        }
+                        let gw = &mut g[s.bucket * h2..(s.bucket + 1) * h2];
+                        for (x, a) in gw.iter_mut().zip(&acc) {
+                            let a = a.clamp(0.0, 1.0) as f64;
+                            *x += a * a * c;
+                        }
+                        g[sh.buckets * h2 + s.bucket] += c;
+                    }
+                    g
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut g = vec![0.0f64; n_out];
+    for part in parts {
+        for (x, y) in g.iter_mut().zip(part) {
+            *x += y;
+        }
+    }
+    let nw = sh.out_b() - sh.out_w();
+    for (j, x) in g.iter_mut().enumerate() {
+        *x *= SCALE as f64 / if j < nw { QB as f64 } else { (QA * QB) as f64 };
+    }
+    g
+}
+
+/// Output layer of `bytes` as i16.
+fn out_params(bytes: &[u8], sh: Shape) -> Vec<i16> {
+    bytes[2 * sh.out_w()..2 * sh.len()].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
+}
+
+/// Rounds `f * q` (the original output layer `q`) to integers so that the
+/// net's evals come out at exactly `f` times the original in the
+/// least-squares sense of `output_gains`, instead of what plain rounding
+/// gives. Plain rounding is biased because output weights are small (g3f:
+/// mean |w| 11.5, mode 6; 6 * 0.92 rounds back to 6), so x0.92 by plain
+/// rounding gave g3f an effective x0.935. Starting from plain rounding, the
+/// cheapest moves (the parameters whose `f*q` lies closest to the rounding
+/// midpoint, per unit of gain) are rounded the other way until the
+/// achieved factor is as close to `f` as it gets; no parameter ends up more
+/// than one unit from `f*q`. Returns (new layer, plain-rounding factor,
+/// achieved factor, parameters re-rounded).
+fn round_to_factor(q: &[i16], gains: &[f64], f: f64, n_weights: usize) -> (Vec<i16>, f64, f64, usize) {
+    let lim = |j: usize| if j < n_weights { OUT_W_FAST as f64 } else { i16::MAX as f64 };
+    let t: Vec<f64> = q.iter().map(|&x| x as f64 * f).collect();
+    let mut out: Vec<f64> = t.iter().enumerate().map(|(j, x)| x.round().clamp(-lim(j), lim(j))).collect();
+    let dot = |v: &[f64]| v.iter().zip(gains).map(|(a, b)| a * b).sum::<f64>();
+    let base = q.iter().zip(gains).map(|(&a, b)| a as f64 * b).sum::<f64>();
+    let plain = dot(&out) / base;
+    let mut d = f * base - dot(&out);
+    // (cost per unit gain, index, step)
+    let mut moves: Vec<(f64, usize, f64)> = (0..q.len())
+        .filter_map(|j| {
+            let e = t[j] - out[j];
+            let step = if e > 0.0 { 1.0 } else { -1.0 };
+            let ok = e != 0.0 && (step * gains[j]).signum() == d.signum() && (out[j] + step).abs() <= lim(j);
+            ok.then(|| ((1.0 - 2.0 * e.abs()) / gains[j].abs(), j, step))
+        })
+        .collect();
+    moves.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut flips = 0;
+    for (_, j, step) in moves {
+        let nd = d - step * gains[j];
+        if nd.abs() < d.abs() {
+            out[j] += step;
+            d = nd;
+            flips += 1;
+        }
+    }
+    let achieved = dot(&out) / base;
+    (out.into_iter().map(|x| x as i16).collect(), plain, achieved, flips)
+}
+
+/// `rescale`: multiply a net's output layer (weights + bias) by `--factor`,
+/// or by the factor that matches `--match ref.bin`'s scale on `--val`.
+/// Scaling the output layer scales every eval by the same factor (SCReLU
+/// feeds the output linearly), up to i16 rounding.
+fn cmd_rescale(args: &[String]) {
+    let (mut net, mut out, mut buckets, mut kl) = (None::<PathBuf>, None::<PathBuf>, 1usize, NO_BUCKETS);
+    let (mut factor, mut reference, mut val) = (None::<f64>, None::<PathBuf>, None::<PathBuf>);
+    let (mut ref_buckets, mut ref_kl) = (None::<usize>, None::<&KingLayout>);
+    let (mut norm, mut max_eval, mut n, mut threads, mut lambda) = (Norm::Slope, 1500.0f64, 0usize, 2usize, 0.5f32);
+    let mut plain = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut v = || it.next().unwrap_or_else(|| panic!("{a} needs a value")).clone();
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(v())),
+            "--out" => out = Some(PathBuf::from(v())),
+            "--buckets" => buckets = v().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(&v()),
+            "--factor" => factor = Some(v().parse().unwrap()),
+            "--match" => reference = Some(PathBuf::from(v())),
+            "--val" => val = Some(PathBuf::from(v())),
+            "--ref-buckets" => ref_buckets = Some(v().parse().unwrap()),
+            "--ref-king-buckets" => ref_kl = Some(KingLayout::by_name(&v())),
+            "--norm" => {
+                norm = match v().as_str() {
+                    "slope" => Norm::Slope,
+                    "mean-abs" => Norm::MeanAbs,
+                    o => panic!("--norm {o}: one of slope, mean-abs"),
+                }
+            }
+            "--max-eval" => max_eval = v().parse().unwrap(),
+            "--n" => n = v().parse().unwrap(),
+            "--threads" => threads = v().parse().unwrap(),
+            "--lambda" => lambda = v().parse().unwrap(),
+            "--plain" => plain = true,
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let net = net.expect("--net");
+    let out = out.expect("--out");
+    assert!(factor.is_some() != reference.is_some(), "pass exactly one of --factor F, --match ref.bin");
+    let mut bytes = std::fs::read(&net).unwrap_or_else(|e| panic!("{}: {e}", net.display()));
+    let sh = Shape::from_file_bytes(bytes.len(), buckets, kl.kb())
+        .unwrap_or_else(|| panic!("{}: {} bytes is no ({}*768->H)x2->{buckets} net", net.display(), bytes.len(), kl.kb()));
+    let val = val.map(|path| {
+        let mut recs = read_recs(&path);
+        if n > 0 {
+            recs.truncate(n);
+        }
+        (path, recs)
+    });
+    let p = dequantize(&bytes, sh);
+    let mut ref_eval = None;
+    let f = match (factor, &reference) {
+        (Some(f), _) => f,
+        (None, Some(rp)) => {
+            let (path, recs) = val.as_ref().expect("--match needs --val");
+            let rkl = ref_kl.unwrap_or(kl);
+            let (rp_, rsh) = load_net(rp, ref_buckets.unwrap_or(buckets), rkl.kb());
+            let r = score_eval_pairs(&rp_, rsh, rkl, recs, threads);
+            let c = score_eval_pairs(&p, sh, kl, recs, threads);
+            let pairs: Vec<(f64, f64)> = r.iter().zip(&c).map(|(r, c)| (r.1, c.1)).collect();
+            let (fs, fm) = (match_factor(&pairs, max_eval, Norm::Slope), match_factor(&pairs, max_eval, Norm::MeanAbs));
+            let (_, corr, _) = scale_stats(&pairs);
+            let kept = pairs.iter().filter(|p| max_eval <= 0.0 || p.0.abs() <= max_eval).count();
+            println!(
+                "match {} on {} ({kept} of {} positions with |ref| <= {max_eval}cp): r {corr:.4}, slope factor {fs:.4}, mean-abs factor {fm:.4}",
+                rp.display(),
+                path.display(),
+                pairs.len(),
+            );
+            ref_eval = Some(r);
+            if norm == Norm::Slope {
+                fs
+            } else {
+                fm
+            }
+        }
+        _ => unreachable!(),
+    };
+    let q0 = out_params(&bytes, sh);
+    let nw = sh.out_b() - sh.out_w();
+    let (cw, cb) = rescale_output(&mut bytes, sh, f);
+    match &val {
+        Some((path, recs)) if !plain => {
+            let gains = output_gains(&p, sh, kl, recs, max_eval, threads);
+            let (q1, fp, fa, flips) = round_to_factor(&q0, &gains, f, nw);
+            for (j, x) in q1.iter().enumerate() {
+                let i = sh.out_w() + j;
+                bytes[2 * i..2 * i + 2].copy_from_slice(&x.to_le_bytes());
+            }
+            println!(
+                "rounding on {}: plain rounding gives x{fp:.4}, {flips} parameters re-rounded -> x{fa:.4}",
+                path.display()
+            );
+        }
+        _ => println!("plain rounding (no --val, or --plain): the achieved factor can be off by ~1-2%"),
+    }
+    let maxw = out_params(&bytes, sh)[..nw].iter().map(|w| (*w as i32).abs()).max().unwrap_or(0);
+    File::create(&out).unwrap().write_all(&bytes).unwrap();
+    println!(
+        "wrote {} factor {f:.4}: clipped {cw} of {nw} output weights to +-{OUT_W_FAST} (max |w| now {maxw}), {cb} biases",
+        out.display(),
+    );
+    if cw > 0 {
+        println!("warning: {cw} output weights clipped; the achieved scale is below {f:.4}");
+    }
+    if let Some((path, recs)) = &val {
+        let q = dequantize(&bytes, sh);
+        let (l0, e0) = validate(&p, sh, kl, recs, lambda, threads);
+        let (l1, e1) = validate(&q, sh, kl, recs, lambda, threads);
+        print!("{}: loss {l0:.6} -> {l1:.6}, mean|eval| {e0:.1} -> {e1:.1}cp", path.display());
+        if let Some(r) = &ref_eval {
+            let c = score_eval_pairs(&q, sh, kl, recs, threads);
+            let pairs: Vec<(f64, f64)> = r.iter().zip(&c).map(|(r, c)| (r.1, c.1)).collect();
+            let er = r.iter().map(|x| x.1.abs()).sum::<f64>() / r.len() as f64;
+            // Residual factor after rescaling: 1.0 = scales matched.
+            let rs = match_factor(&pairs, max_eval, Norm::Slope);
+            let rm = match_factor(&pairs, max_eval, Norm::MeanAbs);
+            print!(" (reference {er:.1}cp); residual factor slope {rs:.4} mean-abs {rm:.4}");
+        }
+        println!();
+    }
 }
 
 fn cmd_train(args: &[String]) {
@@ -980,7 +1316,7 @@ fn cmd_train(args: &[String]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck|rescale> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
@@ -988,6 +1324,7 @@ fn main() {
         "train" => cmd_train(rest),
         "eval" => cmd_eval(rest),
         "scalecheck" => cmd_scalecheck(rest),
+        "rescale" => cmd_rescale(rest),
         _ => panic!("{usage}"),
     }
 }
@@ -1201,6 +1538,134 @@ mod tests {
         }
         let (slope, r, mean) = scale_stats(&[(2.0, 1.0), (-4.0, -2.0), (6.0, 3.0)]);
         assert!((slope - 2.0).abs() < 1e-12 && (r - 1.0).abs() < 1e-12 && (mean - 4.0).abs() < 1e-12);
+    }
+
+    const RESCALE_FENS: [&str; 8] = [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+        "4k3/8/8/8/8/8/8/4K2R b - - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R b KQ - 1 8",
+        "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 b - - 0 10",
+        "8/8/4k3/8/2Q5/8/4K3/8 b - - 0 1",
+    ];
+
+    /// A quantised test net with spread-out evals (`out` scales the output layer).
+    fn rescale_test_net(sh: Shape, out: f32) -> Vec<u8> {
+        let mut rng = Rng::new(11);
+        let mut p = init_params(sh, &mut rng);
+        for x in &mut p[sh.out_w()..] {
+            *x *= 8.0 * out;
+        }
+        quantize(&p, sh)
+    }
+
+    fn evals(bytes: &[u8], sh: Shape) -> Vec<f64> {
+        let recs: Vec<Rec> = RESCALE_FENS.iter().map(|f| encode(&format!("{f} | 0 | 0.5")).unwrap()).collect();
+        score_eval_pairs(&dequantize(bytes, sh), sh, NO_BUCKETS, &recs, 1).iter().map(|x| x.1).collect()
+    }
+
+    #[test]
+    fn rescale_scales_evals_and_leaves_ft_alone() {
+        let sh = Shape { h: 32, buckets: 2, kb: 1 };
+        let net = rescale_test_net(sh, 1.0);
+        let mut out = net.clone();
+        let (cw, cb) = rescale_output(&mut out, sh, 0.9);
+        assert_eq!((cw, cb), (0, 0));
+        assert_eq!(&out[..2 * sh.out_w()], &net[..2 * sh.out_w()], "FT untouched");
+        let (e0, e1) = (evals(&net, sh), evals(&out, sh));
+        assert!(e0.iter().any(|e| e.abs() > 50.0), "test net too flat: {e0:?}");
+        for (a, b) in e0.iter().zip(&e1) {
+            // i16 rounding of each output weight: a few cp at most.
+            assert!((b - 0.9 * a).abs() < 0.01 * a.abs() + 3.0, "{a} -> {b}");
+        }
+    }
+
+    #[test]
+    fn rescale_match_recovers_the_scale() {
+        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let reference = rescale_test_net(sh, 1.0);
+        let wide = rescale_test_net(sh, 1.25);
+        let pairs: Vec<(f64, f64)> = evals(&reference, sh).into_iter().zip(evals(&wide, sh)).collect();
+        for norm in [Norm::Slope, Norm::MeanAbs] {
+            let f = match_factor(&pairs, 0.0, norm);
+            assert!((f - 0.8).abs() < 0.01, "{norm:?}: {f}");
+        }
+        let mut out = wide.clone();
+        rescale_output(&mut out, sh, match_factor(&pairs, 0.0, Norm::Slope));
+        let pairs: Vec<(f64, f64)> = evals(&reference, sh).into_iter().zip(evals(&out, sh)).collect();
+        let r = match_factor(&pairs, 0.0, Norm::Slope);
+        assert!((r - 1.0).abs() < 0.02, "residual {r} (i16 rounding of a tiny net)");
+    }
+
+    /// The reason `slope` is the default: a candidate that knows more than
+    /// the reference (`c = k*r + u`, `u` uncorrelated with `r`) is measured
+    /// as `k` by the slope, but as wider than `k` by mean|eval|, so
+    /// mean-abs matching would shrink the extra signal too.
+    #[test]
+    fn slope_ignores_signal_the_reference_lacks() {
+        let mut rng = Rng::new(3);
+        let k = 1.1;
+        let pairs: Vec<(f64, f64)> = (0..20000)
+            .map(|i| {
+                let r = rng.uniform(600.0) as f64;
+                let u = if i % 2 == 0 { 150.0 } else { -150.0 }; // independent of r
+                (r, k * r + u)
+            })
+            .collect();
+        let fs = match_factor(&pairs, 0.0, Norm::Slope);
+        let fm = match_factor(&pairs, 0.0, Norm::MeanAbs);
+        assert!((fs - 1.0 / k).abs() < 0.01, "slope {fs}");
+        assert!(fm < 1.0 / k - 0.03, "mean-abs {fm} over-shrinks");
+        // Filtering on |reference| (the regressor) keeps the slope unbiased.
+        assert!((match_factor(&pairs, 300.0, Norm::Slope) - 1.0 / k).abs() < 0.02);
+    }
+
+    /// Small weights defeat plain rounding (6 * 0.92 = 5.52 -> 6); re-rounding
+    /// hits the factor with every parameter within one unit of `f*q`.
+    #[test]
+    fn round_to_factor_fixes_plain_rounding_bias() {
+        let q: Vec<i16> = (0..1000).map(|i| [-6, 6, 5, -5][i % 4]).collect();
+        let mut rng = Rng::new(9);
+        let gains: Vec<f64> = q.iter().map(|&w| w as f64 * (1.0 + rng.uniform(0.5) as f64)).collect();
+        let (out, plain, achieved, flips) = round_to_factor(&q, &gains, 0.92, q.len());
+        assert!((plain - 0.92).abs() > 0.02, "plain {plain}");
+        assert!((achieved - 0.92).abs() < 1e-3, "achieved {achieved}");
+        assert!(flips > 0);
+        for (a, b) in q.iter().zip(&out) {
+            assert!((*a as f64 * 0.92 - *b as f64).abs() < 1.0);
+        }
+        // Exact on a real net's evals: achieved factor == slope of new evals on old ones.
+        let sh = Shape { h: 32, buckets: 2, kb: 1 };
+        let net = rescale_test_net(sh, 1.0);
+        let p = dequantize(&net, sh);
+        let recs: Vec<Rec> = RESCALE_FENS.iter().map(|f| encode(&format!("{f} | 0 | 0.5")).unwrap()).collect();
+        let gains = output_gains(&p, sh, NO_BUCKETS, &recs, 0.0, 1);
+        let (q1, _, achieved, _) = round_to_factor(&out_params(&net, sh), &gains, 0.8, sh.out_b() - sh.out_w());
+        let mut net1 = net.clone();
+        for (j, x) in q1.iter().enumerate() {
+            let i = sh.out_w() + j;
+            net1[2 * i..2 * i + 2].copy_from_slice(&x.to_le_bytes());
+        }
+        let pairs: Vec<(f64, f64)> = evals(&net, sh).into_iter().zip(evals(&net1, sh)).collect();
+        let slope = pairs.iter().map(|(a, b)| a * b).sum::<f64>() / pairs.iter().map(|(a, _)| a * a).sum::<f64>();
+        assert!((slope - achieved).abs() < 1e-4, "slope {slope} vs achieved {achieved}");
+        assert!((achieved - 0.8).abs() < 0.01, "achieved {achieved}");
+    }
+
+    #[test]
+    fn rescale_clips_output_weights_to_the_fast_path() {
+        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let mut net = rescale_test_net(sh, 1.0);
+        net[2 * sh.out_w()..2 * sh.out_w() + 2].copy_from_slice(&120i16.to_le_bytes());
+        net[2 * sh.out_w() + 2..2 * sh.out_w() + 4].copy_from_slice(&(-100i16).to_le_bytes());
+        let (cw, _) = rescale_output(&mut net, sh, 1.2);
+        assert!(cw >= 1);
+        let w: Vec<i16> =
+            net[2 * sh.out_w()..2 * sh.out_b()].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!((w[0], w[1]), (127, -120));
+        assert!(w.iter().all(|w| w.abs() <= 127));
     }
 
     #[test]

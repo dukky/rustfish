@@ -256,6 +256,30 @@ def set_const(src, name, value):
                   src, count=1, flags=re.MULTILINE)
 
 
+RESCALE_RE = re.compile(r"factor (\S+): clipped (\d+) of")
+ACHIEVED_RE = re.compile(r"re-rounded -> x(\S+)")
+
+
+def rescale_to(trainer_bin, net, out, *, buckets, layout, ref, ref_buckets, ref_layout, val,
+               norm="slope", threads=2, nice=False):
+    """`nnue-trainer rescale --match`: write `out` = `net` with its output layer
+    scaled to `ref`'s eval scale on `val`. Returns {factor, achieved, clipped, text}."""
+    cmd = (["nice"] if nice else []) + [
+        trainer_bin, "rescale", "--net", net, "--out", out, "--buckets", buckets, "--king-buckets", layout,
+        "--match", ref, "--ref-buckets", ref_buckets, "--ref-king-buckets", ref_layout, "--val", val,
+        "--norm", norm, "--threads", threads]
+    cmd = [str(c) for c in cmd]
+    print("+", " ".join(cmd), flush=True)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rescale failed ({r.returncode}): {(r.stderr or r.stdout)[-2000:]}")
+    m, a = RESCALE_RE.search(r.stdout), ACHIEVED_RE.search(r.stdout)
+    if not m:
+        raise RuntimeError(f"cannot parse rescale output {r.stdout!r}")
+    return {"factor": float(m.group(1)), "clipped": int(m.group(2)),
+            "achieved": float(a.group(1)) if a else None, "text": r.stdout.strip()}
+
+
 def cmd_embed(args):
     d = Path(args.data_dir).expanduser()
     net = Path(args.net).expanduser()
@@ -296,7 +320,33 @@ def cmd_embed(args):
         if base_b is not None and base_b != args.buckets:
             src = set_const(src, "BUCKETS", args.buckets)
         nnue_rs.write_text(src)
-        shutil.copyfile(net, wt / "net/nnue.bin")
+        scale_note = ""
+        if args.match_scale:
+            if args.match_scale == "base":
+                ref = wt / "net/base-ref.bin"
+                shutil.copyfile(wt / "net/nnue.bin", ref)
+                ref_b = base_b or 1
+                ref_layout = base_layout[len("LAYOUT_"):].lower()
+            else:
+                ref = Path(args.match_scale).expanduser()
+                ref_b = args.match_ref_buckets or args.buckets
+                ref_layout = args.match_ref_king_buckets or args.king_buckets
+            val = Path(args.match_val).expanduser() if args.match_val else d / "val.bin"
+            scaled = wt / "net/scaled.bin"
+            res = rescale_to(trainer(args), net, scaled, buckets=args.buckets, layout=args.king_buckets,
+                             ref=ref, ref_buckets=ref_b, ref_layout=ref_layout, val=val, norm=args.match_norm)
+            print(res["text"])
+            if res["clipped"]:
+                print(f"warning: {res['clipped']} output weights clipped to +-127")
+            achieved = res["achieved"] if res["achieved"] is not None else res["factor"]
+            scale_note = (f"Output layer scaled x{achieved:.4f} ({args.match_norm} match to "
+                          f"{args.match_scale} on {val.name}; {res['clipped']} weights clipped).\n")
+            shutil.copyfile(scaled, wt / "net/nnue.bin")
+            scaled.unlink()
+            if args.match_scale == "base":
+                ref.unlink()
+        else:
+            shutil.copyfile(net, wt / "net/nnue.bin")
 
         run(["cargo", "build", "--release", "--quiet"], cwd=wt)
         engine = wt / "target/release/rustfish"
@@ -317,6 +367,7 @@ def cmd_embed(args):
         msg = (f"NNUE: {args.name} net\n\n"
                f"Net {args.name} on {args.base}; {shape}.\n"
                + (f"{args.notes}\n" if args.notes else "")
+               + scale_note
                + f"\n{exp}\n\nBench: {nodes}\n\n"
                "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n")
         run(["git", "add", "net/nnue.bin", "src/nnue.rs"], cwd=wt)
@@ -505,6 +556,10 @@ class Auto:
         r = subprocess.run([str(self.trainer), "scalecheck", "--bogus"], capture_output=True, text=True)
         if "unknown option" not in r.stderr:
             die(f"{self.trainer} has no `scalecheck`; rebuild it from this branch")
+        if self.a.screen_scale == "match":
+            r = subprocess.run([str(self.trainer), "rescale", "--bogus"], capture_output=True, text=True)
+            if "unknown option" not in r.stderr:
+                die(f"{self.trainer} has no `rescale` (needed by --screen-scale match); rebuild it from this branch")
 
     # ---------------------------------------------------------- main net
     def main_net(self):
@@ -800,6 +855,9 @@ class Auto:
         if self.dry:
             for v in vals:
                 self.log(f"[dry-run] c: would eval {net} and main {main['path']} on {v}")
+            if self.a.screen_scale == "match":
+                self.log(f"[dry-run] c: would first rescale {net} to main's scale on {self.scale_val()} "
+                         f"(nnue-trainer rescale --match {main['path']}) and screen + embed the scaled net")
             base = {v.name: self.eval_loss(main["path"], v, main) for v in vals}
             self.log(f"[dry-run] c: main net losses {base}; the candidate must beat both")
             self.log(f"[dry-run] c: then: netloop.py embed --name {name} --net {net} --hidden {main['hidden']} "
@@ -808,8 +866,22 @@ class Auto:
             self.row(step="plan", **plan, main_loss=base)
             return
         res = {}
+        if self.a.screen_scale == "match":
+            # Screen (and ship) the candidate at main's eval scale, so val loss compares
+            # quality, not how far each net's output has drifted towards the labels' scale.
+            raw = net
+            net = self.new_path(f"{name}-s.bin")
+            sc = rescale_to(self.trainer, raw, net, buckets=main["buckets"], layout=main["layout"],
+                            ref=main["path"], ref_buckets=main["buckets"], ref_layout=main["layout"],
+                            val=self.scale_val(), threads=2, nice=True)
+            self.log(f"c: {name} rescaled to main's scale: {sc['text']}")
+            plan["rescale"] = {k: sc[k] for k in ("factor", "achieved", "clipped")}
+            plan["raw_net"] = str(raw)
+            for v in vals:
+                res[v.name] = {"raw": self.eval_loss(raw, v, main)}
         for v in vals:
-            res[v.name] = {"candidate": self.eval_loss(net, v, main), "main": self.eval_loss(main["path"], v, main)}
+            res.setdefault(v.name, {}).update(candidate=self.eval_loss(net, v, main),
+                                              main=self.eval_loss(main["path"], v, main))
         better = all(x["candidate"] < x["main"] for x in res.values())
         rel = min((x["main"] - x["candidate"]) / x["main"] * 100 for x in res.values())
         self.log(f"c: {name} screen {res} -> {'PASS' if better else 'fail'} (min improvement {rel:.3f}%)")
@@ -820,7 +892,9 @@ class Auto:
             return
         notes = (f"netloop auto: warm start from main ({main['blob'][:12]}), {plan['new_positions']} new + "
                  f"{plan['replay_positions']} replay positions, {self.a.epochs} epochs lr {self.a.lr}->{self.a.lr_end}; "
-                 + "; ".join(f"{k} {v['candidate']:.6f} vs main {v['main']:.6f}" for k, v in res.items()))
+                 + "; ".join(f"{k} {v['candidate']:.6f} vs main {v['main']:.6f}" for k, v in res.items())
+                 + (f"; output scaled x{plan['rescale']['achieved'] or plan['rescale']['factor']:.4f} to main's "
+                    f"scale on {self.scale_val().name} before screening" if "rescale" in plan else ""))
         if main["layout"] != "none":
             self.log(f"c: {name} passed but main has king layout {main['layout']}, which this embed cannot set; "
                      f"embed by hand")
@@ -844,6 +918,10 @@ class Auto:
         self.log(f"c: {name} embedded as nnue-{name} and {'not ' if self.a.no_queue else ''}queued net-gate "
                  f"(expect {expect})")
         self.row(**row, embedded=True, branch=f"nnue-{name}", expect=expect, queued=not self.a.no_queue)
+
+    def scale_val(self):
+        v = Path(self.a.scale_val).expanduser()
+        return v if v.is_absolute() else self.d / v
 
     def expect(self, rel_pct):
         # Conservative: ~1% lower val loss on both sets -> +10, capped there.
@@ -1004,7 +1082,7 @@ def main():
     p.add_argument("--init", help="start from an existing i16 net")
     p.add_argument("--force", action="store_true", help="overwrite an existing <name>.bin")
 
-    p = common(sub.add_parser("embed", help="commit a net on branch nnue-<name>, bench, push"), False)
+    p = common(sub.add_parser("embed", help="commit a net on branch nnue-<name>, bench, push"))
     p.add_argument("--name", required=True)
     p.add_argument("--net", required=True)
     p.add_argument("--base", default="origin/main")
@@ -1016,6 +1094,16 @@ def main():
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--keep-worktree", action="store_true", help="keep the temp worktree on failure")
     p.add_argument("--queue", action="store_true", help="also run the queue.py add command")
+    p.add_argument("--match-scale", metavar="REF",
+                   help="rescale the net's output layer to REF's eval scale before embedding "
+                        "(`nnue-trainer rescale --match`); REF = a net file, or `base` for --base's net. "
+                        "Default off")
+    p.add_argument("--match-val", help="positions for --match-scale (default <data-dir>/val.bin)")
+    p.add_argument("--match-norm", default="slope", choices=["slope", "mean-abs"],
+                   help="--match-scale normaliser (default slope; see tools/nnue-trainer/README.md)")
+    p.add_argument("--match-ref-buckets", type=int, help="REF's output buckets (default --buckets)")
+    p.add_argument("--match-ref-king-buckets", choices=sorted(KING_LAYOUTS),
+                   help="REF's king layout (default --king-buckets)")
 
     p = common(sub.add_parser("record", help="add or update a row in net/experiments.jsonl"), False)
     p.add_argument("--name", required=True)
@@ -1059,6 +1147,12 @@ def main():
                    help="datagen generator refs to accept (default: main); repeatable")
     p.add_argument("--adopt", action="append", default=[],
                    help="count an existing net-scale record file as new data (once); repeatable")
+    p.add_argument("--screen-scale", default="off", choices=["off", "match"],
+                   help="match: rescale each candidate's output layer to main's eval scale "
+                        "(nnue-trainer rescale --match, slope) before screening, and embed the scaled net, "
+                        "so val loss compares quality at a fixed scale (default off)")
+    p.add_argument("--scale-val", default="val.bin",
+                   help="positions for --screen-scale match (relative to --data-dir; default val.bin)")
     p.add_argument("--expect-cap", type=int, default=10)
     p.add_argument("--queue-front", action="store_true", help="queue winners with --front")
     p.add_argument("--no-queue", action="store_true", help="embed + push winners but do not queue them")

@@ -68,3 +68,44 @@ much older, weaker nets reads lower (s4: 0.65, s9/s11: 0.81). Pass
 `--king-buckets` for a king-bucketed reference net (a one-bucket reference
 net measures scale just as well). `scripts/netloop.py auto` uses it to
 triage new data.
+
+## Output-scale rescale
+
+```bash
+$T rescale --net g4w.bin --out g4ws.bin --buckets 8 --factor 0.865 [--val val.bin]
+$T rescale --net g4w.bin --out g4ws.bin --buckets 8 --match g3.bin --val val.bin \
+   [--norm slope|mean-abs] [--max-eval 1500] [--ref-buckets B] [--ref-king-buckets L] [--plain]
+$T eval --net g4w.bin --val val.bin --buckets 8 --best-scale   # loss at the loss-optimal scale
+```
+
+Multiplies the output layer (weights and bias) by a factor; the FT is
+untouched, so every eval scales by that factor. `--match` picks the factor
+that brings the net to the reference net's scale on `--val`. Output weights
+are clipped to +-127 (the engine's fast output path); the count is printed.
+
+**Normaliser.** `slope` (default): `1/k`, `k` the least-squares slope through
+0 of candidate eval on reference eval, over positions with |reference| <=
+`--max-eval`. `mean-abs`: `mean|ref| / mean|cand|`. Slope is the better
+choice: if the candidate is the reference at a different scale plus signal
+the reference lacks (`c = k*r + u`, `u` uncorrelated with `r`, which is what
+a better net looks like), the slope recovers `k` exactly, while mean|eval|
+also counts `u` and shrinks the new signal along with the scale (unit test
+`slope_ignores_signal_the_reference_lacks`). Filtering on |reference| (the
+regressor) leaves the slope unbiased. On g3f vs g3 the two differ by ~1%
+(0.916 vs 0.926 on fix/val17x2, 0.954 vs 0.953 on val.bin); the factor also
+depends on the position set (0.916 on val17x2 vs 0.954 on val.bin), so name
+the val set when quoting a factor.
+
+**Rounding.** Output weights are small (g3f: mean |w| 11.5, mode 6), so plain
+rounding of `f*w` is biased: `6 * 0.92 = 5.52` rounds back to 6. Plain x0.92
+(`~/rustfish-data/rescale.py`, i.e. g3fs) gives g3f an effective **x0.934**
+on val17x2. With `--val`, `rescale` therefore re-rounds the cheapest
+parameters (those closest to the rounding midpoint, per unit of effect) the
+other way until the least-squares factor of new vs old evals equals `f`
+(exact: the output is linear in its parameters); no parameter moves more
+than one unit from `f*w`. `--plain` disables this.
+
+**Caveat for screening.** Val loss is very sensitive to scale (about 1e-4
+per 1% on val17x2, the size of typical candidate gains), so a fixed-scale
+comparison is only as good as the normaliser. `eval --best-scale` profiles
+the scale out instead (loss at the loss-optimal factor).

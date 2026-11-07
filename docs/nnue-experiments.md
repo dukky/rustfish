@@ -160,3 +160,9 @@ measurement: about -14% bench NPS for kb8m at H = 256.
 Logs: `~/rustfish-data/netloop-auto.log` and `netloop-auto.jsonl`. It never
 commits to main and writes nothing outside `auto/`, the ledger and its logs.
 `--dry-run` does step 1 for real and prints what 2 and 3 would do.
+
+Fixed-scale screening (off by default): `auto --screen-scale match
+[--scale-val val.bin]` rescales each candidate to main's eval scale
+(`nnue-trainer rescale --match`, slope normaliser) before screening and
+embeds the scaled net. `embed --match-scale <ref.bin|base>` does the same
+for a hand-embedded net. Tests: `python3 scripts/test_netloop.py`.
