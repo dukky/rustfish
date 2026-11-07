@@ -1,6 +1,12 @@
 {
   "pending": [
     {
+      "branch": "nnue-g4",
+      "mode": "net-gate",
+      "expect": 15.0,
+      "front": true
+    },
+    {
       "branch": "main",
       "mode": "ladder"
     },
