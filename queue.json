@@ -4,6 +4,36 @@
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0
+    },
+    {
+      "branch": "feat-lmr-cutnode",
+      "mode": "stc",
+      "expect": 8.0
+    },
+    {
+      "branch": "feat-se-negext",
+      "mode": "stc",
+      "expect": 5.0
+    },
+    {
+      "branch": "simp2-qs-delta",
+      "mode": "nonreg",
+      "expect": 3.0
+    },
+    {
+      "branch": "simp2-qs-failsoft",
+      "mode": "stc",
+      "expect": 2.0
+    },
+    {
+      "branch": "simp2-razor-d1",
+      "mode": "nonreg",
+      "expect": 1.0
+    },
+    {
+      "branch": "simp2-rfp-linear",
+      "mode": "nonreg",
+      "expect": 1.0
     }
   ],
   "current": {
