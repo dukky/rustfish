@@ -157,6 +157,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
 
     if let Ok(v) = value.trim().parse::<i32>() {
         match n.as_str() {
+            "senegativeextension" => engine.search_params.se_negative_extension = v.clamp(0, 3),
             "futilitymargind1" => engine.search_params.futility_margin_d1 = v.clamp(0, 500),
             "futilitymargind2" => engine.search_params.futility_margin_d2 = v.clamp(0, 700),
             "lmrcutnode" => engine.search_params.lmr_cut_node = v.clamp(0, 4),
