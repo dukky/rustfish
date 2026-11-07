@@ -159,6 +159,8 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         match n.as_str() {
             "futilitymargind1" => engine.search_params.futility_margin_d1 = v.clamp(0, 500),
             "futilitymargind2" => engine.search_params.futility_margin_d2 = v.clamp(0, 700),
+            "lmrcutnode" => engine.search_params.lmr_cut_node = v.clamp(0, 4),
+            "lmrpvnode" => engine.search_params.lmr_pv_node = v.clamp(0, 4),
             "reversefutilitymargind1" => {
                 engine.search_params.reverse_futility_margin_d1 = v.clamp(0, 500)
             }

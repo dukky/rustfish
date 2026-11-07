@@ -1005,6 +1005,7 @@ fn search_root(
                 Some(mv),
                 true,
                 None,
+                false,
             );
         } else {
             score = -negamax(
@@ -1020,6 +1021,7 @@ fn search_root(
                 Some(mv),
                 true,
                 None,
+                true,
             );
             if score > alpha && score < beta {
                 score = -negamax(
@@ -1035,6 +1037,7 @@ fn search_root(
                     Some(mv),
                     true,
                     None,
+                    false,
                 );
             }
         }
@@ -1115,6 +1118,9 @@ fn negamax(
     allow_null: bool,
     // Whether the side to move is in check, when the caller already knows.
     known_in_check: Option<bool>,
+    // Expected cut node: a null-window node whose parent expects it to fail
+    // high (alternates on null-window chains; never true at PV nodes).
+    cut_node: bool,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1157,6 +1163,7 @@ fn negamax(
     }
 
     let alpha_orig = alpha;
+    let pv_node = beta - alpha > 1;
     // Singular verification search: same node, minus this move. The TT entry
     // describes the full node, so it must not cut off or be overwritten here.
     let excluded = search.excluded[ply];
@@ -1270,6 +1277,7 @@ fn negamax(
                 None,
                 false,
                 None,
+                !cut_node,
             );
             rep_stack.pop();
 
@@ -1347,6 +1355,7 @@ fn negamax(
                         Some(mv),
                         true,
                         None,
+                        !cut_node,
                     );
                 }
                 rep_stack.pop();
@@ -1425,6 +1434,7 @@ fn negamax(
                         prev_move,
                         false,
                         Some(in_check),
+                        cut_node,
                     );
                     search.excluded[ply] = None;
                     if search.stop {
@@ -1523,6 +1533,7 @@ fn negamax(
                 Some(mv),
                 true,
                 Some(gives_check),
+                !pv_node && !cut_node,
             );
         } else {
             let reduction = if quiet
@@ -1540,6 +1551,13 @@ fn negamax(
                 // Killers, counter-moves and positive-history quiets reduce one ply less.
                 if priority_quiet {
                     r -= 1;
+                }
+                // Node type: expected cut nodes reduce more, PV nodes less.
+                if cut_node {
+                    r += params.lmr_cut_node;
+                }
+                if pv_node {
+                    r -= params.lmr_pv_node;
                 }
                 // Reduce more for moves with bad history
                 if quiet_history < -LMR_HISTORY_THRESHOLD {
@@ -1565,6 +1583,7 @@ fn negamax(
                 Some(mv),
                 true,
                 Some(gives_check),
+                reduced || !cut_node,
             );
 
             if reduced && score > alpha {
@@ -1581,6 +1600,7 @@ fn negamax(
                     Some(mv),
                     true,
                     Some(gives_check),
+                    !cut_node,
                 );
             }
 
@@ -1598,6 +1618,7 @@ fn negamax(
                     Some(mv),
                     true,
                     Some(gives_check),
+                    false,
                 );
             }
         }
