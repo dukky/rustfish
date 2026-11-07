@@ -21,8 +21,12 @@ Each `advance`:
      the Bench: trailer), push the rebased branch, and dispatch an SPRT whose
      final report calls back here. Conflicts and failed checks are logged as
      needs-human and skipped.
+     Datagen bursts: when the best pending item scores below the "burst"
+     settings' below_score (or nothing is pending), the 16 foreground runners
+     generate one datagen seed instead (~15-20 min, see burst_reason); the
+     item keeps its place and the queue re-picks when the burst ends.
   4. Keep the background lane (datagen) busy; datagen.yml calls back here
-     when a run ends, so the next seed starts at once.
+     when a run ends, so the next seed starts at once (and a burst ends).
 
 Item modes: the SPRT modes in queue-settings.json (stc, nonreg, ltc-gainer,
 net-gate; ltc-check is queued automatically), speedup (no SPRT; bench and
@@ -58,10 +62,21 @@ def validate_settings(cfg):
         raise SystemExit(f"queue-settings.json: foreground modes must use 1..{MAX_FOREGROUND_SHARDS} "
                          f"shards (the rest of the 20 runners are the background lane and the "
                          f"queue's own job); fix: {', '.join(bad)}")
+    burst = cfg.get("burst")
+    if burst and burst.get("enabled"):
+        par, shards = burst.get("max_parallel"), burst.get("shards")
+        if not isinstance(par, int) or not 1 <= par <= MAX_FOREGROUND_SHARDS:
+            raise SystemExit(f"queue-settings.json: burst.max_parallel must be 1..{MAX_FOREGROUND_SHARDS} "
+                             f"(the foreground runners), got {par!r}")
+        if not isinstance(shards, int) or shards < 1 or shards % par:
+            raise SystemExit(f"queue-settings.json: burst.shards ({shards!r}) must be a positive "
+                             f"multiple of burst.max_parallel ({par}), or the remainder runs as a "
+                             f"second, mostly idle round (datagen.yml)")
 
 
 validate_settings(_CFG)
 SETTINGS = _CFG["modes"]
+BURST = _CFG.get("burst", {})
 CHECK_EVERY = _CFG["check_every"]
 # A CCRL ladder on main every LADDER_EVERY merges (ccrl-ladder.yml logs it).
 LADDER_EVERY = _CFG["ladder_every"]
@@ -127,7 +142,7 @@ def preempt(state, after):
     interrupted. Its runs are cancelled, so a late callback for it is ignored
     as "not the current item"."""
     cur = state.get("current")
-    if not cur or cur.get("mode") in ("ladder", "ltc-check"):
+    if not cur or cur.get("mode") in ("ladder", "ltc-check", BURST_MODE):  # bursts are short
         return
     runs = json.loads(sh("gh", "run", "list", "-w", "sprt.yml", "-L", "50",
                          "--json", "databaseId,displayTitle,status").stdout or "[]")
@@ -473,6 +488,7 @@ def parse_adds(spec, expect=None):
 PRIOR_P, PRIOR_GAIN, PSEUDO, GAIN_CAP = 0.25, 5.0, 3, 30.0
 PRIOR_HOURS = {"stc": 1.0, "nonreg": 1.5, "ltc-gainer": 3.0, "net-gate": 0.3}
 SCHEDULED = ("ladder", "ltc-check")  # measurement: never reordered
+BURST_MODE = "datagen-burst"
 MAX_PASSED_OVER = 3
 IDENTICAL_KEEP = 500
 
@@ -577,25 +593,107 @@ def read_log():
     return entries
 
 
+def take_seed(state):
+    """The next datagen seed, shared by the background lane and bursts (never reused)."""
+    seed = state.get("next_seed", 14)
+    state["next_seed"] = seed + 1
+    return seed
+
+
+def datagen_title_re(seed):
+    """datagen.yml's run-name: "Datagen <ref> seed <seed> (...)"."""
+    return re.compile(rf"Datagen \S+ seed {int(seed)} \(")
+
+
+def dispatch_datagen(seed, shards, games, nodes, max_parallel):
+    sh("gh", "workflow", "run", "datagen.yml", "--ref", "main", "-f", "ref=main",
+       "-f", f"shards={shards}", "-f", f"games_per_shard={games}", "-f", f"nodes={nodes}",
+       "-f", f"seed={seed}", "-f", f"max_parallel={max_parallel}")
+
+
 def background_lane(state):
     """Keep the 3 background runners busy (1 of 20 stays free for the queue's own job): when no datagen or SPSA run
     is queued or running, generate the next datagen seed from main (only
-    merged nets generate data)."""
+    merged nets generate data). A foreground burst's run (state["current"])
+    uses the foreground runners, so it does not block this lane."""
     # datagen.yml's final job dispatches the queue with its own run id
     # (FINISHED_RUN): that run is still in progress while it calls back.
     finished = os.environ.get("FINISHED_RUN", "").strip()
+    cur = state.get("current") or {}
+    burst_re = datagen_title_re(cur["seed"]) if cur.get("mode") == BURST_MODE else None
     for wf in ("datagen.yml", "spsa.yml"):
         runs = json.loads(out("gh", "run", "list", "--workflow", wf, "--limit", "10",
-                              "--json", "databaseId,status"))
-        if any(r["status"] != "completed" and str(r.get("databaseId")) != finished for r in runs):
+                              "--json", "databaseId,status,displayTitle"))
+        if any(r["status"] != "completed" and str(r.get("databaseId")) != finished
+               and not (burst_re and burst_re.match(r.get("displayTitle") or "")) for r in runs):
             return
-    seed = state.get("next_seed", 14)
-    sh("gh", "workflow", "run", "datagen.yml", "--ref", "main", "-f", "ref=main",
-       "-f", "shards=16", "-f", "games_per_shard=15000", "-f", "nodes=5000",
-       "-f", f"seed={seed}", "-f", "max_parallel=3")
-    state["next_seed"] = seed + 1
+    seed = take_seed(state)
+    dispatch_datagen(seed, 16, 15000, 5000, 3)
     log({"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
          "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"})
+
+
+def burst_reason(state, pending, rates):
+    """Why the foreground should run a datagen burst now instead of the next
+    item, or None. A burst runs when nothing is pending (burst.when_idle), or
+    when the item pick_next would start scores below burst.below_score, at
+    most burst.max_consecutive times in a row while items wait. Front and
+    scheduled (ladder/ltc-check) items never wait for a burst; a
+    starvation-guard pick can, within the cap."""
+    if not BURST.get("enabled"):
+        return None
+    if not pending:
+        return "foreground idle" if BURST.get("when_idle", True) else None
+    if state.get("consecutive_bursts", 0) >= BURST.get("max_consecutive", 2):
+        return None
+    # Peek on a copy: a burst passes nobody over, so the starvation guard's
+    # passed_over counts only move when an item really runs.
+    idx, pri = pick_next(json.loads(json.dumps(pending)), rates)
+    item = pending[idx]
+    if pri.get("rule") not in ("score", "starvation-guard"):
+        return None
+    threshold = BURST.get("below_score", 0.0)
+    if pri["score"] < threshold:
+        return f"best item {item['branch']}:{item['mode']} scores {pri['score']} < {threshold}"
+    return None
+
+
+def start_burst(state, reason, pending):
+    """Dispatch one datagen seed on the foreground runners; returns its in-flight record."""
+    seed = take_seed(state)
+    dispatch_datagen(seed, BURST["shards"], BURST.get("games_per_shard", 15000),
+                     BURST.get("nodes", 5000), BURST["max_parallel"])
+    # Only bursts taken while items wait count towards the cap.
+    state["consecutive_bursts"] = state.get("consecutive_bursts", 0) + 1 if pending else 0
+    main_sha = out("git", "rev-parse", "origin/main")
+    test_id = f"q-burst-s{seed}"
+    log({"branch": "main", "mode": BURST_MODE, "outcome": "dispatched", "test_id": test_id,
+         "seed": seed, "sha": main_sha, "reason": reason,
+         "consecutive": state["consecutive_bursts"]})
+    return {"branch": "main", "mode": BURST_MODE, "test_id": test_id, "seed": seed,
+            "sha": main_sha, "base_sha": main_sha, "started": now()}
+
+
+BURST_LOST_HOURS = 2.0
+
+
+def burst_done(cur):
+    """True once the burst's datagen run has ended: completed, or it is the run
+    calling back right now (FINISHED_RUN, still in progress while it does).
+    A run that never shows up within BURST_LOST_HOURS counts as ended too, so
+    a lost dispatch cannot wedge the foreground."""
+    finished = os.environ.get("FINISHED_RUN", "").strip()
+    runs = json.loads(out("gh", "run", "list", "--workflow", "datagen.yml", "--limit", "20",
+                          "--json", "databaseId,status,displayTitle"))
+    pat = datagen_title_re(cur["seed"])
+    mine = [r for r in runs if pat.match(r.get("displayTitle") or "")]
+    if not mine:
+        try:
+            age = datetime.datetime.utcnow() - _parse_time(cur["started"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
+        return age.total_seconds() > BURST_LOST_HOURS * 3600
+    return all(r["status"] == "completed" or str(r.get("databaseId")) == finished for r in mine)
 
 
 def requeue_item(cur):
@@ -666,7 +764,15 @@ def advance():
     state = load_state()
     raw = os.environ.get("RESULT", "").strip()
     cur = state.get("current")
-    if not raw and cur:
+    if cur and cur.get("mode") == BURST_MODE:
+        if burst_done(cur):
+            log({"branch": "main", "mode": BURST_MODE, "outcome": "burst-done",
+                 "test_id": cur["test_id"], "seed": cur["seed"], "sha": cur.get("sha")})
+            state["current"] = cur = None
+        if raw:
+            print("ignoring result: no SPRT in flight (datagen burst)")
+            raw = ""
+    elif not raw and cur:
         found = find_result(cur["test_id"])
         if found:
             print(f"recovered final result for {cur['test_id']}")
@@ -685,10 +791,20 @@ def advance():
     if state.get("current"):
         print(f"{state['current']['test_id']} still in flight")
     rates = None
-    while state["pending"] and not state.get("current") and not state.get("paused"):
+    while not state.get("current") and not state.get("paused"):
         rates = rates or base_rates(read_log())
+        reason = burst_reason(state, state["pending"], rates)
+        if reason:
+            try:
+                state["current"] = start_burst(state, reason, state["pending"])
+            except Exception as exc:  # fall back to the item rather than stall
+                print(f"datagen burst: {exc}")
+        if state.get("current") or not state["pending"]:
+            break
         idx, priority = pick_next(state["pending"], rates)
         state["current"] = run_item(state, state["pending"].pop(idx), priority)
+        if state.get("current"):
+            state["consecutive_bursts"] = 0
     try:
         background_lane(state)
     except Exception as exc:  # never let the background lane stall the queue
@@ -736,6 +852,13 @@ def show_rates():
               f"h_acc={r['hours_accept']:.2f} h_rej={r['hours_reject']:.2f}")
     print(f"speedups, merged at once: {[p['branch'] for p in state['pending'] if p['mode'] == 'speedup']}")
     pending = [p for p in state["pending"] if p["mode"] != "speedup"]
+    cur = state.get("current") or {}
+    if cur.get("mode") == BURST_MODE:
+        print(f"in flight: datagen burst seed {cur.get('seed')}")
+    reason = burst_reason(state, pending, rates)
+    print(f"burst: {'yes, ' + reason if reason else 'no'} (enabled={bool(BURST.get('enabled'))}, "
+          f"below_score={BURST.get('below_score')}, "
+          f"consecutive={state.get('consecutive_bursts', 0)}/{BURST.get('max_consecutive', 2)})")
     while pending:
         idx, pri = pick_next(pending, rates)
         item = pending.pop(idx)

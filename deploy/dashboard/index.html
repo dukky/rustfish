@@ -205,12 +205,12 @@ const OUTCOME = {
   skipped: ["skipped", "b-neutral"], superseded: ["superseded", "b-neutral"], abandoned: ["abandoned", "b-neutral"],
   preempted: ["preempted", "b-warn"], "ladder-logged": ["ladder logged", "b-accent"],
   dispatched: ["started", "b-accent"], "datagen-dispatched": ["datagen started", "b-accent"],
-  ladder: ["ladder", "b-accent"], invalid: ["invalid", "b-neutral"],
+  ladder: ["ladder", "b-accent"], invalid: ["invalid", "b-neutral"], "burst-done": ["burst done", "b-accent"],
 };
 const badge = (k) => { const [t, c] = OUTCOME[k] || [k || "unknown", "b-neutral"]; return `<span class="badge ${c}">${esc(t)}</span>`; };
 const MODE = {stc: "STC gainer (10+0.1)", nonreg: "non-regression (10+0.1)", "ltc-gainer": "LTC gainer (60+0.6)",
   "ltc-check": "LTC check (60+0.6)", speedup: "speedup (bench identical)", "net-gate": "net gate (5+0.05)",
-  ladder: "CCRL ladder (120+1)", datagen: "datagen (background lane)"};
+  ladder: "CCRL ladder (120+1)", datagen: "datagen (background lane)", "datagen-burst": "datagen burst (foreground)"};
 const modeName = (m) => MODE[m] || m || "–";
 
 function renderTiles(s) {
