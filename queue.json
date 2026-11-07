@@ -3,71 +3,79 @@
     {
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
-      "expect": 1.0
+      "expect": 1.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-lmr-cutnode",
       "mode": "stc",
-      "expect": 8.0
+      "expect": 8.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-se-negext",
       "mode": "stc",
-      "expect": 5.0
+      "expect": 5.0,
+      "passed_over": 1
     },
     {
       "branch": "simp2-qs-delta",
       "mode": "nonreg",
-      "expect": 3.0
+      "expect": 3.0,
+      "passed_over": 1
     },
     {
       "branch": "simp2-qs-failsoft",
       "mode": "stc",
-      "expect": 2.0
+      "expect": 2.0,
+      "passed_over": 1
     },
     {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
-      "expect": 1.0
+      "expect": 1.0,
+      "passed_over": 1
     },
     {
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
-      "expect": 1.0
+      "expect": 1.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-threat-hist",
       "mode": "stc",
-      "expect": 8.0
+      "expect": 8.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-lmr-improving",
       "mode": "stc",
-      "expect": 3.0
+      "expect": 3.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-ttpv",
       "mode": "stc",
-      "expect": 5.0
+      "expect": 5.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-lmr-captures",
       "mode": "stc",
-      "expect": 3.0
-    },
-    {
-      "branch": "nnue-g4l3",
-      "mode": "net-gate",
-      "expect": 5.0
+      "expect": 3.0,
+      "passed_over": 1
     }
   ],
   "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "test_id": "q-ladder-1107-0944",
-    "sha": "0aaf3b98c791792f5985313a738210e2fca58e47",
-    "base_sha": "0aaf3b98c791792f5985313a738210e2fca58e47",
-    "started": "2026-11-07T09:44:03Z"
+    "branch": "nnue-g4l3",
+    "mode": "net-gate",
+    "expect": 5.0,
+    "test_id": "q-nnue-g4l3-1107-1123",
+    "sha": "4c825f77c4b90cb623e5563e38b3d5fda89285e4",
+    "base_sha": "caf535e840e5a3fe0c828ce7594fcbe9ed53bf06",
+    "started": "2026-11-07T11:23:55Z",
+    "bench": 685931
   },
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
   "merges_since_check": 1,
