@@ -8,9 +8,9 @@
   status          show recent SPRT / ladder runs
 
 Examples:
-  python3 scripts/ci.py sprt tm-soft-limit                  # STC gainer [0, 5]
+  python3 scripts/ci.py sprt tm-soft-limit                  # STC gainer [0, 10]
   python3 scripts/ci.py sprt tm-soft-limit --ltc            # LTC non-regression [-5, 0]
-  python3 scripts/ci.py sprt tm-soft-limit --ltc --gainer   # LTC gainer [0, 5] (time management)
+  python3 scripts/ci.py sprt tm-soft-limit --ltc --gainer   # LTC gainer [0, 10] (time management)
   python3 scripts/ci.py sprt refactor-movegen --nonreg      # must not lose [-5, 0]
   python3 scripts/ci.py sprt my-branch --no-wait            # dispatch and exit
   python3 scripts/ci.py sprt --resume <test_id>             # re-attach to a test
@@ -28,10 +28,25 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, "tests")
 
+with open(os.path.join(ROOT, "scripts", "queue-settings.json")) as _fh:
+    _QCFG = json.load(_fh)
+# The merge queue's foreground width (queue-settings.json lanes): 20 runners
+# minus the background lane minus the queue's own job. A hand SPRT uses no
+# more, so it fits beside the background lane; wave sizes follow the queue's
+# stc / ltc-gainer modes, so the game caps match too.
+FOREGROUND = 19 - int(_QCFG.get("lanes", {}).get("background_parallel", 6))
+
+
+def _profile(mode):
+    m = _QCFG["modes"][mode]
+    return {"tc": m["tc"], "hash": m["hash"], "shards": FOREGROUND, "rounds_per_shard": m["rounds_per_shard"],
+            "max_rounds_per_shard": m.get("max_rounds_per_shard", m["rounds_per_shard"])}
+
+
 PROFILES = {
     # rounds_per_shard is the first wave; each later wave doubles up to the max.
-    "stc": {"tc": "10+0.1", "hash": 16, "shards": 19, "rounds_per_shard": 16, "max_rounds_per_shard": 64},
-    "ltc": {"tc": "60+0.6", "hash": 64, "shards": 20, "rounds_per_shard": 6, "max_rounds_per_shard": 24},
+    "stc": _profile("stc"),
+    "ltc": _profile("ltc-gainer"),
 }
 
 
@@ -161,7 +176,8 @@ def cmd_sprt(args):
 def cmd_ladder(args):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     gh("workflow", "run", "ccrl-ladder.yml", "--ref", args.ref,
-       "-f", f"games_per_anchor={args.games}", "-f", f"tc={args.tc}", capture=False)
+       "-f", f"games_per_anchor={args.games}", "-f", f"tc={args.tc}",
+       "-f", f"max_parallel={FOREGROUND}", capture=False)
     time.sleep(10)
     run = json.loads(gh("run", "list", "--workflow", "ccrl-ladder.yml", "--limit", "1",
                         "--json", "databaseId,url,headSha"))[0]

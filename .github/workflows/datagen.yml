@@ -4,8 +4,10 @@ name: Datagen
 # [s * games_per_shard, (s + 1) * games_per_shard) of one seed, so the merged
 # file is exactly what a single `datagen` run over all games would write, and a
 # rerun with the same inputs and ref reproduces it byte for byte. Dispatched by
-# the merge queue's background lane (3 runners) or by hand; it competes with the
-# SPRT queue for runners, so cap max_parallel when the queue is busy. When a run
+# the merge queue's background lane (lanes.background_parallel runners in
+# scripts/queue-settings.json), by a queue datagen burst on the foreground
+# runners, or by hand; it competes with the SPRT queue for runners, so cap
+# max_parallel when the queue is busy. When a run
 # ends it calls the queue back (see `callback`). See docs/nnue.md ("Data generation").
 
 run-name: "Datagen ${{ inputs.ref }} seed ${{ inputs.seed }} (${{ inputs.shards }}x${{ inputs.games_per_shard }} games, ${{ inputs.nodes }} nodes)"
@@ -29,7 +31,7 @@ on:
         description: "RNG seed; use a new one for every run you want to add to the pool"
         default: "1"
       max_parallel:
-        description: "Max shards running at once (background lane: 3; SPRTs use 16, 1 is kept for the queue's own runs)"
+        description: "Max shards running at once (the queue passes lanes.background_parallel, or the foreground width for a burst; 1 runner is kept for the queue's own runs)"
         default: "3"
 
 permissions:

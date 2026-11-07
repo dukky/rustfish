@@ -365,6 +365,10 @@ def cmd_embed(args):
             shutil.copyfile(net, wt / "net/nnue.bin")
 
         run(["cargo", "build", "--release", "--quiet"], cwd=wt)
+        # The queue runs `cargo test --release` too (start()); failing here is
+        # cheaper than a branch that ends needs-human there.
+        if subprocess.run(["cargo", "test", "--release", "--quiet"], cwd=wt).returncode != 0:
+            die("cargo test --release failed on the embedded branch")
         engine = wt / "target/release/rustfish"
         t = subprocess.run([str(engine)], input="perfttest\nselftest 100\nquit\n",
                            capture_output=True, text=True, check=True).stdout

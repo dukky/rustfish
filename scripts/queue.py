@@ -18,15 +18,22 @@ Each `advance`:
      picked by pick_next (front items, then scheduled ladders/ltc-checks in
      place, else the best expected Elo per runner-hour from log.jsonl base
      rates): rebase onto main, build, test, perft, selftest, bench (refreshing
-     the Bench: trailer), push the rebased branch, and dispatch an SPRT whose
-     final report calls back here. Conflicts and failed checks are logged as
+     the Bench: trailer), push the rebased branch (with a lease), pin the
+     tested sha under refs/queue/<test_id>, and dispatch an SPRT whose final
+     report calls back here. Conflicts and failed checks are logged as
      needs-human and skipped.
      Datagen bursts: when the best pending item scores below the "burst"
-     settings' below_score (or nothing is pending), the 16 foreground runners
-     generate one datagen seed instead (~15-20 min, see burst_reason); the
-     item keeps its place and the queue re-picks when the burst ends.
-  4. Keep the background lane (datagen) busy; datagen.yml calls back here
-     when a run ends, so the next seed starts at once (and a burst ends).
+     settings' below_score (or nothing is pending), the foreground runners
+     (MAX_FOREGROUND_SHARDS, from the "lanes" settings) generate one datagen
+     seed instead (see burst_reason); the item keeps its place and the queue
+     re-picks when the burst ends.
+  4. Keep the background lane (datagen) busy, within the runner budget left
+     by other workflows (ladders, SPSA, sweeps, hand-started SPRTs);
+     datagen.yml calls back here when a run ends, so the next seed starts at
+     once (and a burst ends).
+
+State is saved after every merge and dispatch, not only at the end, so a run
+killed by the job timeout loses at most the step it was in.
 
 Item modes: the SPRT modes in queue-settings.json (stc, nonreg, ltc-gainer,
 net-gate; ltc-check is queued automatically), speedup (no SPRT; bench and
@@ -50,33 +57,56 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue-settin
     _CFG = json.load(_fh)
 
 # Runner split (queue-settings.json "lanes"): the background datagen lane
-# holds background_parallel runners, the queue's own job 1, and foreground
-# SPRTs get the rest of the 20; a mode wider than that would starve both.
-# background_shards should be a multiple of background_parallel.
+# holds background_parallel runners, the queue's own job 1, and the foreground
+# (SPRTs, ladders, bursts) gets the rest of the 20; anything wider would
+# starve both. background_shards must be a multiple of background_parallel.
+RUNNERS = 20
 _LANES = _CFG.get("lanes", {})
 BACKGROUND_PARALLEL = _LANES.get("background_parallel", 6)
 BACKGROUND_SHARDS = _LANES.get("background_shards", 3 * BACKGROUND_PARALLEL)
-MAX_FOREGROUND_SHARDS = 19 - BACKGROUND_PARALLEL
+MAX_FOREGROUND_SHARDS = RUNNERS - 1 - BACKGROUND_PARALLEL
 
 
 def validate_settings(cfg):
     """Fail loudly at load time on settings that would oversubscribe runners."""
+    lanes = cfg.get("lanes", {})
+    bpar = lanes.get("background_parallel", BACKGROUND_PARALLEL)
+    bshards = lanes.get("background_shards", 3 * bpar if isinstance(bpar, int) else None)
+    if not isinstance(bpar, int) or not 1 <= bpar <= RUNNERS - 2:
+        raise SystemExit(f"queue-settings.json: lanes.background_parallel must be 1..{RUNNERS - 2}, "
+                         f"got {bpar!r}")
+    if not isinstance(bshards, int) or bshards < 1 or bshards % bpar:
+        raise SystemExit(f"queue-settings.json: lanes.background_shards ({bshards!r}) must be a "
+                         f"positive multiple of lanes.background_parallel ({bpar}), or the remainder "
+                         f"runs as a second, mostly idle round (datagen.yml)")
+    max_fg = RUNNERS - 1 - bpar
     bad = [f"{mode} (shards={s.get('shards')!r})" for mode, s in cfg["modes"].items()
-           if not isinstance(s.get("shards"), int) or not 1 <= s["shards"] <= MAX_FOREGROUND_SHARDS]
+           if not isinstance(s.get("shards"), int) or not 1 <= s["shards"] <= max_fg]
     if bad:
-        raise SystemExit(f"queue-settings.json: foreground modes must use 1..{MAX_FOREGROUND_SHARDS} "
-                         f"shards (the rest of the 20 runners are the background lane and the "
+        raise SystemExit(f"queue-settings.json: foreground modes must use 1..{max_fg} "
+                         f"shards (the rest of the {RUNNERS} runners are the background lane and the "
                          f"queue's own job); fix: {', '.join(bad)}")
     burst = cfg.get("burst")
     if burst and burst.get("enabled"):
         par, shards = burst.get("max_parallel"), burst.get("shards")
-        if not isinstance(par, int) or not 1 <= par <= MAX_FOREGROUND_SHARDS:
-            raise SystemExit(f"queue-settings.json: burst.max_parallel must be 1..{MAX_FOREGROUND_SHARDS} "
+        if not isinstance(par, int) or not 1 <= par <= max_fg:
+            raise SystemExit(f"queue-settings.json: burst.max_parallel must be 1..{max_fg} "
                              f"(the foreground runners), got {par!r}")
         if not isinstance(shards, int) or shards < 1 or shards % par:
             raise SystemExit(f"queue-settings.json: burst.shards ({shards!r}) must be a positive "
                              f"multiple of burst.max_parallel ({par}), or the remainder runs as a "
                              f"second, mostly idle round (datagen.yml)")
+    # The ladder runs on the foreground too; start() passes max_parallel =
+    # MAX_FOREGROUND_SHARDS unless the ladder settings set a smaller one.
+    lpar = cfg.get("ladder", {}).get("max_parallel")
+    if lpar is not None:
+        try:
+            ok = 1 <= int(lpar) <= max_fg
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise SystemExit(f"queue-settings.json: ladder.max_parallel must be 1..{max_fg} "
+                             f"(the foreground runners), got {lpar!r}")
 
 
 validate_settings(_CFG)
@@ -149,16 +179,55 @@ def preempt(state, after):
     cur = state.get("current")
     if not cur or cur.get("mode") in ("ladder", "ltc-check", BURST_MODE):  # bursts are short
         return
-    runs = json.loads(sh("gh", "run", "list", "-w", "sprt.yml", "-L", "50",
-                         "--json", "databaseId,displayTitle,status").stdout or "[]")
-    for run in runs:
-        if run["displayTitle"].startswith(f"SPRT {cur['test_id']} ") and run["status"] != "completed":
-            sh("gh", "run", "cancel", str(run["databaseId"]), check=False)
+    # A wave dispatched moments ago (or the next wave its report is starting
+    # right now) may not be listed yet: remember the title and keep
+    # cancelling it on later runs too (sweep_cancelled).
+    until = (datetime.datetime.utcnow() + datetime.timedelta(hours=CANCEL_SWEEP_HOURS)
+             ).isoformat(timespec="seconds") + "Z"
+    state.setdefault("cancel_sweep", []).append({"prefix": f"SPRT {cur['test_id']} ", "until": until})
+    sweep_cancelled(state)
     item = dict(requeue_item(cur), front=True)
     state["pending"].insert(after, item)
     state["current"] = None
+    drop_tested_ref(cur["test_id"])
     log({"branch": cur["branch"], "mode": cur["mode"], "test_id": cur["test_id"],
          "outcome": "preempted", "reason": "a front item with --preempt was added"})
+
+
+CANCEL_SWEEP_HOURS = 12
+
+
+def sweep_cancelled(state):
+    """Cancel any live sprt.yml run whose title matches a preempted test
+    (state["cancel_sweep"]); entries expire after CANCEL_SWEEP_HOURS."""
+    sweep = [s for s in state.get("cancel_sweep", [])
+             if _parse_time(s["until"]) > datetime.datetime.utcnow()]
+    if sweep:
+        state["cancel_sweep"] = sweep
+    else:
+        state.pop("cancel_sweep", None)
+        return
+    res = sh("gh", "run", "list", "-w", "sprt.yml", "-L", "50",
+             "--json", "databaseId,displayTitle,status", check=False)
+    try:
+        runs = json.loads(res.stdout or "[]")
+    except ValueError:
+        runs = []
+    for run in runs:
+        title = run.get("displayTitle") or ""
+        if run.get("status") != "completed" and any(title.startswith(s["prefix"]) for s in sweep):
+            print(f"cancelling preempted run {run['databaseId']}: {title}")
+            sh("gh", "run", "cancel", str(run["databaseId"]), check=False)
+
+
+def tested_ref(test_id):
+    """Private ref that pins an SPRT's tested sha while it runs: the branch can
+    be force-pushed (by a human or a replay) without losing the commit."""
+    return f"refs/queue/{test_id}"
+
+
+def drop_tested_ref(test_id):
+    sh("git", "push", "-q", "origin", f":{tested_ref(test_id)}", check=False)
 
 
 def push_state():
@@ -226,10 +295,27 @@ def main_bench():
     except (OSError, ValueError, KeyError):
         pass
     for body in out("git", "log", "-z", "--format=%B", "origin/main").split("\0"):
-        m = re.findall(r"^Bench:\s*(\d+)\s*$", body, re.M)
+        m = BENCH_RE.findall(body)
         if m:
             return int(m[-1])
     return None
+
+
+# Same trailer pattern as scripts/check_bench.py (what CI enforces).
+BENCH_RE = re.compile(r"^Bench:\s*(\d+)\s*$", re.M)
+# For rewriting: one line only (BENCH_RE's \s* can run across newlines).
+_BENCH_LINE_RE = re.compile(r"^Bench:[ \t]*\d+[ \t]*$", re.M)
+
+
+def with_bench_trailer(msg, nodes):
+    """msg with every Bench: trailer set to nodes, or one added: before the
+    first Co-Authored-By: line if there is one, else at the end."""
+    if _BENCH_LINE_RE.search(msg):
+        return _BENCH_LINE_RE.sub(f"Bench: {nodes}", msg)
+    m = re.search(r"^Co-Authored-By:", msg, re.M | re.I)
+    if m:
+        return f"{msg[:m.start()]}Bench: {nodes}\n\n{msg[m.start():]}"
+    return f"{msg.rstrip()}\n\nBench: {nodes}\n"
 
 
 def run_engine(cmds):
@@ -261,8 +347,12 @@ def engine_moves(base_sha, main_sha, identical):
 
 
 def checked_bench():
-    """Build the checkout and run the start() checks; bench nodes, or None if anything failed."""
+    """Build the checkout and run the start() checks (cargo test, perft,
+    selftest); bench nodes, or None if anything failed. The replay path
+    compares the evalhash separately (fast_forward_main)."""
     if sh("cargo", "build", "--release", "-q", check=False).returncode != 0:
+        return None
+    if sh("cargo", "test", "--release", "-q", check=False).returncode != 0:
         return None
     checks = run_engine("perfttest\nselftest 300\nquit\n")
     if not re.search(r"perfttest summary (\d+)/\1 passed", checks) or "selftest ok" not in checks:
@@ -271,7 +361,11 @@ def checked_bench():
     return int(m.group(1)) if m else None
 
 
-def fast_forward_main(sha, base_sha=None, branch=None, bench=None, identical=()):
+MAIN_PUSH_ATTEMPTS = 3
+
+
+def fast_forward_main(sha, base_sha=None, branch=None, bench=None, identical=(), test_id=None,
+                      evalhash=None):
     """Move main to the tested sha. Returns None on success, else why not.
 
     If main moved since base_sha, replay the candidate on top of main instead
@@ -280,35 +374,65 @@ def fast_forward_main(sha, base_sha=None, branch=None, bench=None, identical=())
     tree is then byte-identical), or also by merges recorded in `identical`
     (speedups: bench and evalhash equal to main's). In the second case the
     replayed tree differs, so it is rebuilt, checked, and must give exactly
-    the tested candidate's `bench` before main moves."""
-    sh("git", "fetch", "-q", "origin", "main")
-    if branch:  # make sure the tested sha is present in this checkout
+    the tested candidate's `bench` (and `evalhash`, when recorded) before
+    main moves.
+
+    The push to main is not forced, so it loses to anyone pushing main at the
+    same moment (netloop rows, ladder logs, hand-pushed plan commits): then
+    main is re-fetched and the same decision is made again (replay or refuse),
+    MAIN_PUSH_ATTEMPTS times. The branch is updated to the replayed commit
+    only after main moved, under a lease on the tested sha."""
+    if test_id:  # the pinned tested sha (dispatch), even if the branch was force-pushed
+        sh("git", "fetch", "-q", "origin", f"+{tested_ref(test_id)}:{tested_ref(test_id)}", check=False)
+    if branch:
         sh("git", "fetch", "-q", "origin", branch, check=False)
-    main_sha = out("git", "rev-parse", "origin/main")
-    if sh("git", "merge-base", "--is-ancestor", main_sha, sha, check=False).returncode != 0:
-        if not base_sha:
-            return "main moved"
-        moved = engine_moves(base_sha, main_sha, identical)
-        if moved is None:
-            return "main moved during test (engine change)"
-        sh("git", "checkout", "-q", "-B", "replay", sha)
-        if sh("git", "rebase", "-q", main_sha, check=False).returncode != 0:
-            sh("git", "rebase", "--abort", check=False)
-            return "main moved during test (replay conflict)"
-        if sh("git", "diff", "--quiet", sha, "replay", "--", *ENGINE_PATHS,
+    if sh("git", "cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode != 0:
+        return f"tested sha {sha[:7]} is on no ref (branch force-pushed during the test?)"
+    verified = None  # replay commit whose engine tree passed checked_bench
+    for attempt in range(MAIN_PUSH_ATTEMPTS):
+        sh("git", "fetch", "-q", "origin", "main")
+        main_sha = out("git", "rev-parse", "origin/main")
+        target = sha
+        if sh("git", "merge-base", "--is-ancestor", main_sha, sha, check=False).returncode != 0:
+            if not base_sha:
+                return "main moved"
+            moved = engine_moves(base_sha, main_sha, identical)
+            if moved is None:
+                return "main moved during test (engine change)"
+            sh("git", "checkout", "-q", "-B", "replay", sha)
+            if sh("git", "rebase", "-q", main_sha, check=False).returncode != 0:
+                sh("git", "rebase", "--abort", check=False)
+                return "main moved during test (replay conflict)"
+            if sh("git", "diff", "--quiet", sha, "replay", "--", *ENGINE_PATHS,
+                  check=False).returncode != 0 and not (
+                    verified and sh("git", "diff", "--quiet", verified, "replay", "--", *ENGINE_PATHS,
+                                    check=False).returncode == 0):
+                if not moved or bench is None:
+                    return "main moved during test (replayed engine differs)"
+                got = checked_bench()
+                if got != bench:
+                    return f"main moved during test (replayed bench {got} != tested {bench})"
+                if evalhash:
+                    ehash = eval_hash(os.path.join(REPO, "target", "release", "rustfish"))
+                    if ehash != evalhash:
+                        return f"main moved during test (replayed evalhash {ehash} != tested {evalhash})"
+                verified = out("git", "rev-parse", "replay")
+            target = out("git", "rev-parse", "replay")
+        if sh("git", "push", "-q", "origin", f"{target}:refs/heads/main", check=False).returncode == 0:
+            break
+        print(f"push to main refused (attempt {attempt + 1}/{MAIN_PUSH_ATTEMPTS}): main moved; re-fetching")
+    else:
+        return f"main kept moving: push refused {MAIN_PUSH_ATTEMPTS} times"
+    if target != sha and branch:
+        lease = f"--force-with-lease=refs/heads/{branch}:{sha}"
+        if sh("git", "push", "-q", lease, "origin", f"{target}:refs/heads/{branch}",
               check=False).returncode != 0:
-            if not moved or bench is None:
-                return "main moved during test (replayed engine differs)"
-            got = checked_bench()
-            if got != bench:
-                return f"main moved during test (replayed bench {got} != tested {bench})"
-        sha = out("git", "rev-parse", "replay")
-        if branch:
-            sh("git", "push", "-q", "--force", "origin", f"replay:{branch}")
-    sh("git", "push", "-q", "origin", f"{sha}:refs/heads/main")
+            log({"branch": branch, "outcome": "needs-human", "sha": target,
+                 "reason": f"merged (replayed as {target[:7]}), but {branch} changed during the "
+                           f"test, so it was left as is: commits added after {sha[:7]} were not merged"})
     if bench:
         with open(os.path.join(STATE, "main-bench.json"), "w") as fh:
-            json.dump({"sha": sha, "nodes": bench}, fh)
+            json.dump({"sha": target, "nodes": bench}, fh)
             fh.write("\n")
     return None
 
@@ -323,14 +447,16 @@ def start(item, state=None, priority=None):
     if mode == "ladder":
         main_sha = out("git", "rev-parse", "origin/main")
         test_id = f"q-ladder-{datetime.datetime.utcnow().strftime('%m%d-%H%M')}"
+        ladder = dict({"max_parallel": MAX_FOREGROUND_SHARDS}, **LADDER)
         sh("gh", "workflow", "run", "ccrl-ladder.yml", "--ref", "main", "-f", f"test_id={test_id}",
-           *[a for k, v in LADDER.items() for a in ("-f", f"{k}={v}")])
-        # Foreground on 16 runners: on the 4-runner background lane a 120+1
-        # ladder would take ~12 h. Datagen keeps the other 4 busy meanwhile.
+           *[a for k, v in ladder.items() for a in ("-f", f"{k}={v}")])
+        # On the foreground runners (max_parallel = MAX_FOREGROUND_SHARDS);
+        # the background lane keeps generating data meanwhile.
         log(dict(base, outcome="dispatched", test_id=test_id, sha=main_sha,
                  **({"priority": priority} if priority else {})))
         return dict(base, test_id=test_id, sha=main_sha, base_sha=main_sha, started=now())
     sh("git", "fetch", "-q", "origin", "main", branch)
+    pushed = out("git", "rev-parse", f"origin/{branch}")  # lease for the push below
     sh("git", "checkout", "-q", "-B", "candidate", f"origin/{branch}")
     if sh("git", "rebase", "-q", "origin/main", check=False).returncode != 0:
         sh("git", "rebase", "--abort", check=False)
@@ -355,15 +481,22 @@ def start(item, state=None, priority=None):
     mnodes = main_bench()
 
     msg = out("git", "log", "-1", "--format=%B")
-    stale = [int(b) for b in re.findall(r"^Bench: (\d+)$", msg, re.M) if int(b) != nodes]
+    stale = [int(b) for b in BENCH_RE.findall(msg) if int(b) != nodes]
     if nodes != mnodes or stale:
-        if re.search(r"^Bench: \d+$", msg, re.M):
-            msg = re.sub(r"^Bench: \d+$", f"Bench: {nodes}", msg, flags=re.M)
-        else:
-            msg = msg.replace("Co-Authored-By:", f"Bench: {nodes}\n\nCo-Authored-By:", 1)
-        sh("git", "commit", "-q", "--amend", "-m", msg)
+        new_msg = with_bench_trailer(msg, nodes)
+        if new_msg != msg:
+            sh("git", "commit", "-q", "--amend", "-m", new_msg)
     sha = out("git", "rev-parse", "candidate")
-    sh("git", "push", "-q", "--force", "origin", f"candidate:{branch}")
+    # Leased, not forced: if someone pushed to the branch while it was being
+    # prepared, keep their commits and try again with them.
+    if sh("git", "push", "-q", f"--force-with-lease=refs/heads/{branch}:{pushed}", "origin",
+          f"candidate:refs/heads/{branch}", check=False).returncode != 0:
+        reason = f"{branch} changed while it was being prepared (push lease on {pushed[:7]} failed)"
+        if state is not None and retry(state, item, item):
+            log(dict(base, outcome="retrying", reason=reason))
+        else:
+            log(dict(base, outcome="needs-human", reason=reason))
+        return None
 
     if mode == "speedup":
         mismatch = None if nodes != mnodes else eval_mismatch()
@@ -375,7 +508,12 @@ def start(item, state=None, priority=None):
         else:
             commits = out("git", "rev-list", "origin/main..candidate").split()
             refused = fast_forward_main(sha, bench=nodes)
-            if refused:
+            if refused and refused.startswith("main ") and state is not None:
+                # main moved while it was being built: nothing wrong with the
+                # speedup, so rebase and check it again first thing.
+                state["pending"].insert(0, dict(item, front=True))
+                log(dict(base, outcome="requeued", reason=f"speedup merge refused: {refused}"))
+            elif refused:
                 log(dict(base, outcome="needs-human", reason=f"speedup merge refused: {refused}"))
             else:
                 if state is not None:
@@ -386,12 +524,17 @@ def start(item, state=None, priority=None):
                 log(dict(base, outcome="merged", sha=sha, reason="speedup, bench identical"))
         return None
 
+    # The tested binary's evalhash, so a replay over speedups can be held to it.
+    ehash = eval_hash(os.path.join(REPO, "target", "release", "rustfish"))
     return dict(dispatch(base, sha, out("git", "rev-parse", "origin/main"), branch, priority),
-                bench=nodes)
+                bench=nodes, **({"evalhash": ehash} if ehash else {}))
 
 
 def eval_hash(binary):
-    res = subprocess.run([binary], input="evalhash\nquit\n", capture_output=True, text=True)
+    try:
+        res = subprocess.run([binary], input="evalhash\nquit\n", capture_output=True, text=True)
+    except OSError:
+        return None
     m = re.search(r"Eval hash\s*:\s*([0-9a-f]+)", res.stdout)
     return m.group(1) if m else None
 
@@ -422,6 +565,12 @@ def dispatch(base, sha, base_sha, name, priority=None):
     settings = dict(SETTINGS[base["mode"]], candidate_name=name, base_name=base_sha[:7],
                     callback="queue")
     test_id = f"q-{name}-{datetime.datetime.utcnow().strftime('%m%d-%H%M')}"
+    # Pin the tested sha: a force-push to the branch during the test must not
+    # leave the commit fast_forward_main needs on no ref. Best effort: the
+    # branch still holds it unless someone rewrites it.
+    if sh("git", "push", "-q", "--force", "origin", f"{sha}:{tested_ref(test_id)}",
+          check=False).returncode != 0:
+        print(f"warning: could not pin {sha[:7]} as {tested_ref(test_id)}")
     sh("gh", "workflow", "run", "sprt.yml", "--ref", "main",
        "-f", f"test_id={test_id}", "-f", f"candidate={sha}", "-f", f"base={base_sha}",
        "-f", f"settings={json.dumps(settings)}")
@@ -619,26 +768,68 @@ def dispatch_datagen(seed, shards, games, nodes, max_parallel):
        "-f", f"seed={seed}", "-f", f"max_parallel={max_parallel}")
 
 
+# Runners other workflows take while they run, charged against the
+# background lane (the foreground and the queue's own job are already
+# reserved). Their max-parallel: spsa.yml and train-sweep.yml 16, a
+# hand-started ladder or ci.py SPRT the foreground width. Conservative: a run
+# in its last (report) job still counts in full until it completes.
+OTHER_WORKFLOWS = {"spsa.yml": 16, "train-sweep.yml": 16,
+                   "ccrl-ladder.yml": MAX_FOREGROUND_SHARDS, "sprt.yml": MAX_FOREGROUND_SHARDS}
+
+
+# The queue's own SPRTs and ladders (test ids q-...) are the foreground.
+QUEUE_TITLES = ("SPRT q-", "CCRL ladder q-")
+
+
+def other_runners():
+    """Runners held by live runs of OTHER_WORKFLOWS that the queue did not
+    start (its own SPRT waves and ladders are the foreground, whose runners
+    are reserved; a just-finished wave still uploading must not count), and
+    their titles."""
+    used, who = 0, []
+    for wf, width in OTHER_WORKFLOWS.items():
+        runs = json.loads(out("gh", "run", "list", "--workflow", wf, "--limit", "20",
+                              "--json", "databaseId,status,displayTitle"))
+        for r in runs:
+            title = r.get("displayTitle") or ""
+            if r["status"] == "completed" or title.startswith(QUEUE_TITLES):
+                continue
+            used += width
+            who.append(title or wf)
+    return used, who
+
+
 def background_lane(state):
-    """Keep the background runners (BACKGROUND_PARALLEL) busy (1 of 20 stays free for the queue's own job): when no datagen or SPSA run
-    is queued or running, generate the next datagen seed from main (only
-    merged nets generate data). A foreground burst's run (state["current"])
-    uses the foreground runners, so it does not block this lane."""
+    """Keep the background runners (BACKGROUND_PARALLEL) busy: when no other
+    datagen run is queued or running, generate the next datagen seed from main
+    (only merged nets generate data). A foreground burst's run
+    (state["current"]) uses the foreground runners, so it does not block this
+    lane. Runners held by other workflows (other_runners) shrink the run to
+    what is left of the lane, keeping its rounds, or skip it."""
     # datagen.yml's final job dispatches the queue with its own run id
     # (FINISHED_RUN): that run is still in progress while it calls back.
     finished = os.environ.get("FINISHED_RUN", "").strip()
     cur = state.get("current") or {}
     burst_re = datagen_title_re(cur["seed"]) if cur.get("mode") == BURST_MODE else None
-    for wf in ("datagen.yml", "spsa.yml"):
-        runs = json.loads(out("gh", "run", "list", "--workflow", wf, "--limit", "10",
-                              "--json", "databaseId,status,displayTitle"))
-        if any(r["status"] != "completed" and str(r.get("databaseId")) != finished
-               and not (burst_re and burst_re.match(r.get("displayTitle") or "")) for r in runs):
-            return
+    runs = json.loads(out("gh", "run", "list", "--workflow", "datagen.yml", "--limit", "10",
+                          "--json", "databaseId,status,displayTitle"))
+    if any(r["status"] != "completed" and str(r.get("databaseId")) != finished
+           and not (burst_re and burst_re.match(r.get("displayTitle") or "")) for r in runs):
+        return
+    used, who = other_runners()
+    par = min(BACKGROUND_PARALLEL, BACKGROUND_PARALLEL - used)
+    if par < 1:
+        print(f"background lane: skipped, other runs hold {used} runners: {who}")
+        return
+    shards = BACKGROUND_SHARDS // BACKGROUND_PARALLEL * par
     seed = take_seed(state)
-    dispatch_datagen(seed, BACKGROUND_SHARDS, 15000, 5000, BACKGROUND_PARALLEL)
-    log({"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
-         "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"})
+    dispatch_datagen(seed, shards, 15000, 5000, par)
+    row = {"branch": "main", "mode": "datagen", "outcome": "dispatched", "seed": seed,
+           "sha": out("git", "rev-parse", "origin/main"), "reason": "background lane idle"}
+    if par < BACKGROUND_PARALLEL:
+        row.update(shards=shards, max_parallel=par,
+                   reason=f"background lane idle; shrunk, other runs hold {used} runners: {who}")
+    log(row)
 
 
 def burst_reason(state, pending, rates):
@@ -732,7 +923,8 @@ def finish(state, cur, res):
             log(dict(record, outcome="check-passed" if verdict == "H1" else "check-inconclusive"))
     elif verdict == "H1":
         refused = fast_forward_main(cur["sha"], cur.get("base_sha"), cur["branch"], cur.get("bench"),
-                                    state.get("identical_merges", []))
+                                    state.get("identical_merges", []), test_id=cur.get("test_id"),
+                                    evalhash=cur.get("evalhash"))
         if not refused:
             log(dict(record, outcome="merged"))
             schedule_check(state, cur["base_sha"])
@@ -759,17 +951,53 @@ def run_item(state, item, priority=None):
         return None
 
 
+def finish_safely(state, cur, res):
+    """finish(), but an exception (a git or gh failure mid-merge) requeues or
+    logs the item instead of killing the run before state is saved, which
+    would leave the same result to fail on every later run."""
+    try:
+        finish(state, cur, res)
+    except Exception as exc:
+        sh("git", "rebase", "--abort", check=False)
+        reason = f"queue error while finishing: {exc}"[:500]
+        row = {k: cur.get(k) for k in ("branch", "mode", "test_id", "sha")}
+        row["verdict"] = res.get("status")
+        if res.get("status") in ("H1", "broken") and cur.get("mode") != "ladder" \
+                and retry(state, requeue_item(cur), cur):
+            log(dict(row, outcome="retrying", reason=reason))
+        else:
+            log(dict(row, outcome="needs-human", reason=reason))
+    drop_tested_ref(cur["test_id"])
+
+
+# Speedups merged per run: each builds the candidate and main (evalhash), so
+# a long list must not run into the job timeout; the rest wait for the next run.
+MAX_SPEEDUPS_PER_RUN = 2
+
+
 def process_speedups(state):
-    """Merge every pending speedup now, whatever is in flight (no runners needed)."""
+    """Merge pending speedups now, whatever is in flight (no runners needed),
+    up to MAX_SPEEDUPS_PER_RUN; state is saved after each one. Returns how
+    many are left for the next run."""
     if state.get("paused"):
-        return
-    for item in [p for p in state["pending"] if p["mode"] == "speedup"]:
+        return 0
+    todo = [p for p in state["pending"] if p["mode"] == "speedup"]
+    for item in todo[:MAX_SPEEDUPS_PER_RUN]:
         state["pending"].remove(item)
         run_item(state, item, {"rule": "speedup"})
+        save_state(state, f"queue: speedup {item['branch']}")
+    left = max(0, len(todo) - MAX_SPEEDUPS_PER_RUN)
+    if left:
+        print(f"{left} speedups left for the next run")
+    return left
 
 
 def advance():
     state = load_state()
+    try:
+        sweep_cancelled(state)
+    except Exception as exc:  # never let the sweep stall the queue
+        print(f"cancel sweep: {exc}")
     raw = os.environ.get("RESULT", "").strip()
     cur = state.get("current")
     if cur and cur.get("mode") == BURST_MODE:
@@ -790,12 +1018,13 @@ def advance():
         if not cur or res.get("test_id") != cur["test_id"]:
             print(f"ignoring result for {res.get('test_id')}: not the current item")
         else:
-            finish(state, cur, res)
+            finish_safely(state, cur, res)
             state["current"] = None
+            save_state(state, f"queue: finished {cur['test_id']}")
 
     if state.get("paused"):
         print(f"paused: {state['paused']} (resume with: python3 scripts/queue.py unpause)")
-    process_speedups(state)
+    speedups_left = process_speedups(state)
     if state.get("current"):
         print(f"{state['current']['test_id']} still in flight")
     rates = None
@@ -807,17 +1036,25 @@ def advance():
                 state["current"] = start_burst(state, reason, state["pending"])
             except Exception as exc:  # fall back to the item rather than stall
                 print(f"datagen burst: {exc}")
+            else:
+                save_state(state, f"queue: {state['current']['test_id']}")
         if state.get("current") or not state["pending"]:
             break
         idx, priority = pick_next(state["pending"], rates)
-        state["current"] = run_item(state, state["pending"].pop(idx), priority)
+        item = state["pending"].pop(idx)
+        state["current"] = run_item(state, item, priority)
         if state.get("current"):
             state["consecutive_bursts"] = 0
+        # Saved at once: a run killed later (job timeout) must not forget a
+        # dispatched test (and dispatch it again) or a skipped item.
+        save_state(state, f"queue: {state['current']['test_id'] if state.get('current') else 'skipped ' + item['branch']}")
     try:
         background_lane(state)
     except Exception as exc:  # never let the background lane stall the queue
         print(f"background lane: {exc}")
     save_state(state, f"queue: {state['current']['test_id'] if state.get('current') else 'idle'}")
+    if speedups_left:  # the rest of the speedups go on the next run, now
+        sh("gh", "workflow", "run", "queue.yml", "--ref", "main", check=False)
 
 
 def retry(state, item, prev, back=False):
