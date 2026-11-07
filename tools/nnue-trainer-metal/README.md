@@ -29,7 +29,8 @@ $M bench --data recs.bin --hidden 1024 --buckets 8   # per-kernel GPU time for o
 
 Flags: `--data` (repeatable) `--val --out --hidden --buckets --king-buckets --epochs
 --epoch-size --batch --lr --lr-end --wd --lambda --seed --mirror --init
---resume --checkpoint`. `--threads` is accepted and ignored. Writes
+--resume --checkpoint --factorise --wd-active-only --no-wd-active-only`.
+`--threads` is accepted and ignored. Writes
 `<out>.eN.bin` per epoch, `<out>.ckpt`, and `<out>`. At exit it prints one
 line on stderr: time spent waiting for the loader, waiting for the GPU,
 and GPU busy time.
@@ -221,6 +222,50 @@ row-id indirection and two output-gradient register sets in `grad_fused`
 (~10%), dense AdamW over 8x the FT parameters, and a forward that gathers
 from an 8x larger table. Tried without gain: equal-sized items, and
 prefetching row id/meta/gradient per lane with simd shuffles.
+
+## Factoriser and active-only weight decay
+
+`--factorise` and `--wd-active-only` / `--no-wd-active-only` (train,
+gradcheck; bench takes the first two) work as in the CPU trainer (see its
+README: same init, same `--init` mapping, same checkpoint layout and header
+bit, merged rows in every exported net). On the GPU:
+
+- `Trainer.t` is the training vector (net params, then F); `Trainer.p` is
+  the merged net that forward, grad, validation and export read. Without
+  the factoriser they are the same buffer and nothing else changes.
+- `adam` runs over `t`; F's gradient is the sum over every work item of
+  its 768 local feature rows (each item belongs to one king bucket), in item
+  order. `merge_factor` then writes `p = clamp(W + F)` (other params copied).
+- `row_active` marks each FT row that has an entry in one of its bucket's
+  ranges; `adam` skips the decay of unmarked bucketed rows.
+
+Validation (`pool3f.bin` head, `--val` = first 100k of `val.bin`):
+
+- `gradcheck.sh`: the factoriser cases (kb4, kb4m --mirror, kb8m at H 32 /
+  64 --mirror / 256 --mirror, and kb8m with `--no-wd-active-only`) check
+  W and F gradients against the CPU reference (rel. error 1e-7 to 4e-7),
+  finite differences that perturb W or F through the merge, an AdamW step
+  in which every FT row absent from the batch is exact (unchanged with
+  active-only decay, plainly decayed without), and the merged net after the
+  step. All 16 cases PASS.
+- Parity, 2M records: H 64, B 8, kb8m, --factorise, --mirror, --wd 0.01,
+  seed 5, 2 x 1M: CPU and GPU both print start 0.081513, epoch 1 0.077781 /
+  0.069376 (q 0.069442), epoch 2 0.067674 / 0.065755 (q 0.065794 CPU,
+  0.065793 GPU); H 128, B 1, kb4, --factorise, 1 x 1M: both 0.074950 /
+  0.068991 (q 0.069007). Each evaluator gives the other trainer's nets that
+  trainer's quantised loss, and checkpoints resume across trainers to the
+  same epoch-3 numbers.
+- Warm start at lr 0: `--factorise --init g3f.bin` (KB 1, H 512, B 8) into
+  kb4 gives g3f's quantised loss (0.026746) and into kb8m the loss of g3f read
+  as m1 (0.028761, see the CPU README for why a mirrored layout cannot equal a
+  `none` net); an m1 net into kb8m gives exactly its own loss (0.078022). The
+  CPU and GPU export byte-identical nets.
+- Without `--factorise` (and, for KB > 1, with `--no-wd-active-only`) nets
+  and checkpoints are byte-identical to the previous build (none, m1, kb8m).
+
+Cost: H 512, B 8, kb8m kernel step 14.0-14.7 ms plain vs 15.2-16.5 ms
+factorised (adam + merge 1.3 -> 2.1 ms), about 5%. `row_active` is within
+noise. End-to-end ~1.0M pos/s in both cases.
 
 ## Known gaps
 

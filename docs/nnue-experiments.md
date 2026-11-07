@@ -133,3 +133,10 @@ rows into every bucket. To embed a bucketed net, pass the same layout to
 `netloop.py embed --king-buckets <layout>` (it sets `KING_LAYOUT` in
 `src/nnue.rs` and treats it as a shape change, so it gates at `stc`). First
 measurement: about -14% bench NPS for kb8m at H = 256.
+
+`--factorise` (both trainers, KB > 1) trains a shared 768-row block added
+to every bucket and merges it into the exported net (format and engine
+unchanged); `--wd-active-only` (default on for KB > 1) restricts AdamW
+decay on bucketed FT rows to rows seen in the batch. Train factorised
+nets from scratch: a mirrored layout cannot start exactly from an
+unmirrored one-bucket net (see `tools/nnue-trainer/README.md`).

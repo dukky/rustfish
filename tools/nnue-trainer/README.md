@@ -51,3 +51,35 @@ every bucket (start loss equals the one-bucket net's for unmirrored
 layouts). Checkpoints store the layout id in the high half of the buckets
 header word, so one-bucket checkpoints are unchanged. The `--mirror` data
 augmentation still applies (to the board, before buckets are chosen).
+
+### Factoriser (`--factorise`, KB > 1 only)
+
+Training also keeps a shared 768 x H block `F`; every bucket's effective
+row is `clamp(W[kb][f] + F[f], +-1.98)` and `F` gets the sum of all
+buckets' gradients for its feature, so rarely hit buckets start from (and
+keep learning) what every bucket shares. Every exported net (`<out>.eN.bin`
+and `<out>`) holds the merged rows: the file format and the engine are
+unchanged, and `eval` needs no flag. Checkpoints store `W` and `F` (header
+word 1 bit 40 = factorised; `--resume` needs the same flag).
+
+- From scratch: `W = 0`, `F` = the one-bucket init (the same RNG draws as a
+  KB=1 net with the same seed), so step 0 equals that KB=1 init.
+- `--init` from a one-bucket net: `F` = its rows, `W = 0`. From a net that
+  already has all KB buckets: `W` = the net, `F = 0`.
+
+Warm starts are exact for what the layout can express: an unmirrored
+layout (kb4) from a `none` net reproduces it exactly, and a mirrored
+layout (kb4m, kb8m) from an `m1` net reproduces it exactly. A mirrored
+layout cannot reproduce a `none` net: every mirrored bucket serves both a
+king on file x (unflipped) and on file 7-x (flipped), so one row would have
+to equal the source rows of square s and s ^ 7 at once. It starts as that
+net read with mirroring (`eval --king-buckets m1` gives its loss).
+
+### Active-only weight decay (`--wd-active-only`, default on for KB > 1)
+
+AdamW's decay on the bucketed FT rows `W` is applied only to rows whose
+feature occurs in the batch, so buckets that are rarely hit are not shrunk
+toward zero between visits. `F`, the FT bias and the output layer decay as
+before; `--no-wd-active-only` restores plain decay. It only matters with
+`--wd > 0` (the default is 0). KB=1 nets keep plain decay and train
+bit-for-bit as before.

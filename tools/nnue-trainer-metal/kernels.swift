@@ -5,7 +5,8 @@ import Foundation
 //   ft weights [KB*768][H] | ft bias [H] | out weights [B][2H] (stm half first) | out bias [B]
 // (NF = KB*768 FT rows; KB = king buckets, see `--king-buckets`).
 //
-// Per batch: decode -> forward_train -> plan_rows -> sort_entries -> grad_fused + grad_ob -> adam.
+// Per batch: decode -> forward_train -> plan_rows -> sort_entries -> grad_fused + grad_ob
+// (+ row_active) -> adam (+ merge_factor).
 // Gradients are written as per-work-item partials and summed in a fixed
 // order by `adam`; every reduction has a fixed order, so training is
 // deterministic run to run (it differs from the CPU trainer only in float
@@ -43,6 +44,9 @@ struct Cfg {
     uint mode;       // adam: 0 = AdamW step, 1 = write summed gradient to m (gradcheck)
     uint nf;         // FT rows = KB * 768
     uint kmirror;    // king layout mirrors (king on files e-h -> flip files)
+    uint plen;       // net params (the exported layout)
+    uint fl;         // factoriser floats after them (768 * H), 0 = off
+    uint wdact;      // weight decay only on FT rows active in the batch
     uint ktab[16];   // king bucket per perspective-relative square, 4 per word
 };
 
@@ -483,9 +487,30 @@ kernel void grad_ob(device const float* gs [[buffer(0)]],
     pob[r * c.nb + b] = t;
 }
 
+// --wd-active-only: act[row] = 1 if FT row `row` (king bucket row / 768,
+// feature row % 768) has an entry in any of that bucket's ranges.
+kernel void row_active(device const uint* offs [[buffer(0)]],
+                       device const uint4* rng [[buffer(1)]],
+                       device const uint* hdr [[buffer(2)]],
+                       device uint* act [[buffer(3)]],
+                       constant Cfg& c [[buffer(4)]],
+                       uint row [[thread_position_in_grid]]) {
+    if (row >= c.nf) return;
+    uint kb = row / 768, f = row % 768, nr = hdr[0];
+    uint a = 0;
+    for (uint rg = 0; rg < nr && a == 0; rg++) {
+        if (rng[rg].x != kb) continue;
+        device const uint* off = offs + rg * 769;
+        a = off[f + 1] > off[f] ? 1 : 0;
+    }
+    act[row] = a;
+}
+
 // Sum partials in fixed order (FT rows: the items of the row's king bucket;
-// FT bias, output weights: every item; output bias: every super-range),
-// then AdamW + clipping (same formula as the CPU trainer).
+// FT bias, output weights: every item; output bias: every super-range;
+// factoriser F: every item's 768 local feature rows, i.e. the sum over king
+// buckets), then AdamW + clipping (same formula as the CPU trainer). `p` is
+// the training vector: the net's params, then (factoriser) F.
 kernel void adam(device float* p [[buffer(0)]],
                  device float* m [[buffer(1)]],
                  device float* v [[buffer(2)]],
@@ -494,10 +519,11 @@ kernel void adam(device float* p [[buffer(0)]],
                  device const float* pob [[buffer(5)]],
                  device const uint* hdr [[buffer(6)]],
                  constant Cfg& c [[buffer(7)]],
+                 device const uint* act [[buffer(8)]],
                  uint i [[thread_position_in_grid]]) {
     uint h = c.h;
     uint ft = c.nf * h, out_w = ft + h, out_b = out_w + c.nb * 2 * h;
-    if (i >= out_b + c.nb) return;
+    if (i >= c.plen + c.fl) return;
     float g = 0.0f;
     if (i < ft) {
         uint kb = i / (768 * h), k = i - kb * 768 * h;
@@ -509,9 +535,12 @@ kernel void adam(device float* p [[buffer(0)]],
     } else if (i < out_b) {
         uint k = i - out_w, ni = hdr[1];
         for (uint r = 0; r < ni; r++) g += pow_[r * c.nb * 2 * h + k];
-    } else {
+    } else if (i < c.plen) {
         uint k = i - out_b;
         for (uint r = 0; r < c.rf; r++) g += pob[r * c.nb + k];
+    } else {
+        uint k = i - c.plen, ni = hdr[1];
+        for (uint r = 0; r < ni; r++) g += pft[r * 769 * h + k];
     }
     if (c.mode == 1) { m[i] = g; return; }
     g *= c.inv_batch;
@@ -521,7 +550,18 @@ kernel void adam(device float* p [[buffer(0)]],
     m[i] = mi;
     v[i] = vi;
     float upd = (mi / c.c1) / (sqrt(vi / c.c2) + eps);
-    float x = p[i] * c.decay - c.lr * upd;
+    float decay = (c.wdact != 0 && i < ft && act[i / h] == 0) ? 1.0f : c.decay;
+    float x = p[i] * decay - c.lr * upd;
     p[i] = clamp(x, -CLIP, CLIP);
+}
+
+// Factoriser: effective net params from the training vector `t`
+// (FT row element = clamp(W + F), the rest copied).
+kernel void merge_factor(device const float* t [[buffer(0)]],
+                         device float* p [[buffer(1)]],
+                         constant Cfg& c [[buffer(2)]],
+                         uint i [[thread_position_in_grid]]) {
+    if (i >= c.plen) return;
+    p[i] = i < c.nf * c.h ? clamp(t[i] + t[c.plen + i % c.fl], -CLIP, CLIP) : t[i];
 }
 """
