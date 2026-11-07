@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-g4w",
-      "mode": "net-gate",
-      "expect": 15.0
-    },
-    {
       "branch": "nnue-g3f",
       "mode": "net-gate",
       "expect": 8.0
@@ -16,13 +11,14 @@
     }
   ],
   "current": {
-    "branch": "correction-history-r2",
-    "mode": "stc",
-    "test_id": "q-correction-history-r2-1106-2332",
-    "sha": "d8fdc485335c196a3fed405448bf3bb408042f72",
-    "base_sha": "3ce5522bcf182a79102751179615bf435e714e70",
-    "started": "2026-11-06T23:32:43Z",
-    "bench": 605590
+    "branch": "nnue-g4w",
+    "mode": "net-gate",
+    "expect": 15.0,
+    "test_id": "q-nnue-g4w-1107-0142",
+    "sha": "d6b07165d99c01e44a8bae8216048ca8e23e3660",
+    "base_sha": "e854616b0660339faf124bb81c8fc7156f1e10d7",
+    "started": "2026-11-07T01:42:50Z",
+    "bench": 586012
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 2,
