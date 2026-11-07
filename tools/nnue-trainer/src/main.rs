@@ -12,6 +12,24 @@
 //! their names match `KingLayout` in `src/nnue.rs`. `--init` from a
 //! one-bucket net copies its 768 rows into every bucket.
 //!
+//! Factoriser (`--factorise`, bucketed layouts only): training also keeps a
+//! shared 768 x H block `F`, stored after the net's params in the training
+//! vector (and checkpoints). Every bucket's effective row is
+//! `clamp(W[kb][f] + F[f], +-1.98)`; `F` gets the sum of all buckets'
+//! gradients for feature `f`. Exported nets (per epoch and final) hold the
+//! merged rows, so the file format and the engine are unchanged. From
+//! scratch `W = 0` and `F` = the one-bucket init (same RNG draws as a KB=1
+//! net); `--init` from a one-bucket net sets `F` = its rows, `W = 0`, so
+//! the start is exactly that net (mirrored layouts: only for an m1 net).
+//!
+//! `--keep-best` (needs `--val`): `<out>` is the epoch with the lowest
+//! quantised val loss, the start net included, instead of the last one.
+//!
+//! `--wd-active-only` (default on when KB > 1, `--no-wd-active-only` turns
+//! it off): AdamW weight decay on the bucketed FT rows (`W`) only for rows
+//! whose feature occurs in the batch, so rarely hit buckets are not shrunk
+//! toward zero. `F`, the biases and output weights decay as before.
+//!
 //! Pipeline:
 //!
 //! ```text
@@ -358,6 +376,56 @@ impl Shape {
     }
 }
 
+/// Factoriser bookkeeping: the training vector is the net's `sh.len()`
+/// params followed by `fl` floats of `F` (`fl = 0` without `--factorise`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Fac {
+    fl: usize,
+}
+
+impl Fac {
+    fn new(sh: Shape, on: bool) -> Self {
+        Fac { fl: if on { INPUTS * sh.h } else { 0 } }
+    }
+    fn on(&self) -> bool {
+        self.fl > 0
+    }
+}
+
+/// Effective net params from the training vector: FT row `f` of bucket `kb`
+/// = `clamp(W[kb][f] + F[f % 768])`, everything else copied.
+fn merge_factor(p: &[f32], sh: Shape, fac: Fac, out: &mut [f32]) {
+    let n = sh.len();
+    let (w, f) = (&p[..sh.ft_b()], &p[n..n + fac.fl]);
+    std::thread::scope(|sc| {
+        let (ow, rest) = out.split_at_mut(sh.ft_b());
+        rest.copy_from_slice(&p[sh.ft_b()..n]);
+        for (wb, ob) in w.chunks(fac.fl).zip(ow.chunks_mut(fac.fl)) {
+            sc.spawn(move || {
+                for ((o, &a), &b) in ob.iter_mut().zip(wb).zip(f) {
+                    *o = (a + b).clamp(-CLIP, CLIP);
+                }
+            });
+        }
+    });
+}
+
+/// Training vector for `--factorise` from a net's params: `F` = `rows`
+/// (768 x H), and `W = 0` (or the net's own bucket rows when `rows` is None
+/// and `F = 0`).
+fn factor_vector(p: Vec<f32>, sh: Shape, rows: Option<&[f32]>) -> Vec<f32> {
+    let fl = INPUTS * sh.h;
+    let mut v = p;
+    match rows {
+        Some(r) => {
+            v[..sh.ft_b()].fill(0.0);
+            v.extend_from_slice(r);
+        }
+        None => v.resize(sh.len() + fl, 0.0),
+    }
+    v
+}
+
 /// Forward pass. `acc` (len 2h) receives the pre-activation accumulators.
 #[inline]
 fn forward(p: &[f32], sh: Shape, s: &Sample, acc: &mut [f32]) -> f32 {
@@ -505,6 +573,53 @@ fn expand_buckets(p1: &[f32], s1: Shape, kb: usize) -> Vec<f32> {
     p
 }
 
+/// `--factorise` from scratch: `F` = the one-bucket init (the same RNG draws
+/// as a KB=1 net of this shape), `W = 0`.
+fn init_factor(sh: Shape, rng: &mut Rng) -> Vec<f32> {
+    let s1 = Shape { kb: 1, ..sh };
+    let p1 = init_params(s1, rng);
+    let mut p = vec![0.0f32; sh.ft_b()];
+    p.extend_from_slice(&p1[s1.ft_b()..]);
+    factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
+}
+
+/// `--factorise --init`: a one-bucket net goes into `F` (`W = 0`, so every
+/// bucket starts as that net's rows); a net of the full bucketed shape goes
+/// into `W` with `F = 0`.
+fn load_init_factor(path: &Path, sh: Shape) -> Vec<f32> {
+    let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
+    if Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some() {
+        let (p, s) = load_net(path, sh.buckets, sh.kb);
+        assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+        println!("init: {} has all {} king buckets; factoriser starts at 0", path.display(), sh.kb);
+        return factor_vector(p, sh, None);
+    }
+    let (p1, s1) = load_net(path, sh.buckets, 1);
+    assert_eq!(Shape { kb: sh.kb, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    println!("init: {} is a one-bucket net; its FT rows become the factoriser, buckets start at 0", path.display());
+    let mut p = vec![0.0f32; sh.ft_b()];
+    p.extend_from_slice(&p1[s1.ft_b()..]);
+    factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
+}
+
+/// A one-bucket `--init` net into a mirrored layout is exact only if that
+/// net was trained mirrored (`m1`): a `none` net cannot be expressed (each
+/// mirrored bucket serves kings on files x and 7-x with one row per feature),
+/// so training starts from its mirrored reading instead.
+fn warn_mirrored_init(path: &Path, sh: Shape, kl: &KingLayout) {
+    let bytes = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+    let one_bucket = Shape::from_file_bytes(bytes, sh.buckets, 1).is_some();
+    let full = sh.kb > 1 && Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some();
+    if kl.mirror && one_bucket && !full {
+        println!(
+            "init: note: {} is read with mirroring ({}); the start equals it exactly only if it is an m1 net, \
+             otherwise the start val loss is its `eval --king-buckets m1` loss",
+            path.display(),
+            kl.name
+        );
+    }
+}
+
 /// Mean validation loss, plus the mean |eval| in cp as a scale check.
 fn validate(p: &[f32], sh: Shape, kl: &KingLayout, val: &[Rec], lambda: f32, threads: usize) -> (f64, f64) {
     if val.is_empty() {
@@ -543,12 +658,73 @@ struct Adam {
     step: u64,
 }
 
-/// Header word 1 = output buckets | king layout id << 32 (0 for `none`, so
-/// one-bucket checkpoints are unchanged).
-fn save_ckpt(path: &Path, sh: Shape, kl: &KingLayout, p: &[f32], opt: &Adam, seen: u64) {
+/// What `adam_step` needs beyond the plain net: the factoriser block (its
+/// gradient is the sum of every bucket's FT-row gradient) and, for
+/// `--wd-active-only`, which FT rows occurred in the batch.
+struct StepCtx<'a> {
+    sh: Shape,
+    fac: Fac,
+    active: Option<&'a [u8]>,
+}
+
+/// Sum the per-thread gradients, then one AdamW step with clipping, in parallel.
+/// The v2 step, kept as the reference for `batch.rs` (tests).
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32, inv_batch: f32, threads: usize, cx: &StepCtx) {
+    opt.step += 1;
+    let (n, fl, h, kb, ft_b, active) = (cx.sh.len(), cx.fac.fl, cx.sh.h, cx.sh.kb, cx.sh.ft_b(), cx.active);
+    let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
+    let c1 = 1.0 - b1.powi(opt.step.min(1 << 20) as i32);
+    let c2 = 1.0 - b2.powi(opt.step.min(1 << 20) as i32);
+    let chunk = p.len().div_ceil(threads);
+    std::thread::scope(|sc| {
+        for (k, ((pc, mc), vc)) in p.chunks_mut(chunk).zip(opt.m.chunks_mut(chunk)).zip(opt.v.chunks_mut(chunk)).enumerate() {
+            let base = k * chunk;
+            sc.spawn(move || {
+                for i in 0..pc.len() {
+                    let gi = base + i;
+                    let mut g = 0.0f32;
+                    if gi < n {
+                        for gr in grads {
+                            g += gr[gi];
+                        }
+                    } else {
+                        // Factoriser row element: every bucket's gradient for it.
+                        let k = gi - n;
+                        for b in 0..kb {
+                            for gr in grads {
+                                g += gr[b * fl + k];
+                            }
+                        }
+                    }
+                    g *= inv_batch;
+                    mc[i] = b1 * mc[i] + (1.0 - b1) * g;
+                    vc[i] = b2 * vc[i] + (1.0 - b2) * g * g;
+                    let upd = (mc[i] / c1) / ((vc[i] / c2).sqrt() + eps);
+                    let decay = match active {
+                        Some(a) if gi < ft_b && a[gi / h] == 0 => 1.0,
+                        _ => 1.0 - lr * wd,
+                    };
+                    let x = pc[i] * decay - lr * upd;
+                    pc[i] = x.clamp(-CLIP, CLIP);
+                }
+            });
+        }
+    });
+}
+
+/// Header word 1 = output buckets | king layout id << 32 | factoriser << 40
+/// (0 for `none`, so one-bucket checkpoints are unchanged). With the
+/// factoriser, `p`, `m` and `v` are the training vector (net params + F).
+fn ckpt_word1(sh: Shape, kl: &KingLayout, fac: Fac) -> u64 {
+    sh.buckets as u64 | (kl.id() as u64) << 32 | (fac.on() as u64) << 40
+}
+
+fn save_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac, p: &[f32], opt: &Adam, seen: u64) {
     let mut w = BufWriter::new(File::create(path).unwrap());
     w.write_all(CKPT_MAGIC).unwrap();
-    for x in [sh.h as u64, sh.buckets as u64 | (kl.id() as u64) << 32, opt.step, seen] {
+    for x in [sh.h as u64, ckpt_word1(sh, kl, fac), opt.step, seen] {
         w.write_all(&x.to_le_bytes()).unwrap();
     }
     for arr in [p, &opt.m[..], &opt.v[..]] {
@@ -558,14 +734,18 @@ fn save_ckpt(path: &Path, sh: Shape, kl: &KingLayout, p: &[f32], opt: &Adam, see
     }
 }
 
-fn load_ckpt(path: &Path, sh: Shape, kl: &KingLayout) -> (Vec<f32>, Adam, u64) {
+fn load_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac) -> (Vec<f32>, Adam, u64) {
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[..8], CKPT_MAGIC, "not a v2 checkpoint");
     let word = |i: usize| u64::from_le_bytes(bytes[8 + 8 * i..16 + 8 * i].try_into().unwrap());
-    let got = (word(0) as usize, word(1) as u32 as usize, (word(1) >> 32) as usize);
-    assert_eq!(got, (sh.h, sh.buckets, kl.id()), "checkpoint shape (H, buckets, king layout id) differs");
+    let got = (word(0) as usize, word(1));
+    assert_eq!(
+        got,
+        (sh.h, ckpt_word1(sh, kl, fac)),
+        "checkpoint shape (H, buckets | king layout id << 32 | factorise << 40) differs"
+    );
     let floats: Vec<f32> = bytes[40..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
-    let n = sh.len();
+    let n = sh.len() + fac.fl;
     assert_eq!(floats.len(), 3 * n);
     (floats[..n].to_vec(), Adam { m: floats[n..2 * n].to_vec(), v: floats[2 * n..].to_vec(), step: word(2) }, word(3))
 }
@@ -1157,6 +1337,7 @@ fn cmd_train(args: &[String]) {
     let (mut threads, mut seed, mut mirror) = (threads_default(), 1u64, false);
     let (mut init, mut resume, mut ckpt) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
     let (mut exact, mut sub_batch, mut max_batches) = (false, 0usize, u64::MAX);
+    let (mut factorise, mut wd_active, mut keep_best) = (false, None::<bool>, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -1183,11 +1364,18 @@ fn cmd_train(args: &[String]) {
             "--exact" => exact = true,
             "--sub-batch" => sub_batch = v().parse().unwrap(),
             "--max-batches" => max_batches = v().parse().unwrap(),
+            "--factorise" | "--factorize" => factorise = true,
+            "--wd-active-only" => wd_active = Some(true),
+            "--no-wd-active-only" => wd_active = Some(false),
+            "--keep-best" => keep_best = true,
             other => panic!("unknown option {other}"),
         }
     }
     assert!(!data.is_empty(), "--data required");
     sh.kb = kl.kb();
+    assert!(!factorise || sh.kb > 1, "--factorise needs a king-bucket layout with KB > 1");
+    let fac = Fac::new(sh, factorise);
+    let wd_active = wd_active.unwrap_or(sh.kb > 1);
     if epoch_size == 0 {
         epoch_size = data.iter().map(|p| std::fs::metadata(p).unwrap().len() / REC as u64).sum();
     }
@@ -1195,22 +1383,42 @@ fn cmd_train(args: &[String]) {
     let ckpt = ckpt.unwrap_or_else(|| out.with_extension("ckpt"));
 
     let mut rng = Rng::new(seed);
+    if let (None, Some(i)) = (&resume, &init) {
+        warn_mirrored_init(i, sh, kl);
+    }
     let (mut p, mut opt, mut seen) = match (&resume, &init) {
-        (Some(r), _) => load_ckpt(r, sh, kl),
+        (Some(r), _) => load_ckpt(r, sh, kl, fac),
         (None, Some(i)) => {
-            let (p, s) = load_init(i, sh.buckets, sh.kb);
-            assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+            let p = if fac.on() {
+                load_init_factor(i, sh)
+            } else {
+                let (p, s) = load_init(i, sh.buckets, sh.kb);
+                assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+                p
+            };
             let n = p.len();
             (p.into_iter().map(|x| x.clamp(-CLIP, CLIP)).collect(), Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
         }
         (None, None) => {
-            let p = init_params(sh, &mut rng);
+            let p = if fac.on() { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
             let n = p.len();
             (p, Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
         }
     };
+    // Effective (merged) net params; only a separate buffer with the factoriser.
+    let mut merged = if fac.on() { vec![0.0f32; sh.len()] } else { Vec::new() };
+    if fac.on() {
+        merge_factor(&p, sh, fac, &mut merged);
+    }
     let val = val_path.as_deref().map(read_recs).unwrap_or_default();
-    let kb_note = if kl.id() != 0 { format!(" king-buckets={} (KB={})", kl.name, sh.kb) } else { String::new() };
+    assert!(!keep_best || !val.is_empty(), "--keep-best needs --val");
+    let mut kb_note = if kl.id() != 0 { format!(" king-buckets={} (KB={})", kl.name, sh.kb) } else { String::new() };
+    if fac.on() {
+        kb_note += " factorised";
+    }
+    if wd_active {
+        kb_note += " wd-active-only";
+    }
     println!(
         "train H={} buckets={}{kb_note} params={} epochs={epochs} x {epoch_size} batch={batch} lr {lr}->{lr_end} wd={wd} lambda={lambda} mirror={mirror} threads={threads} val={}",
         sh.h,
@@ -1218,10 +1426,16 @@ fn cmd_train(args: &[String]) {
         sh.len(),
         val.len()
     );
-    let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
-    println!("start val loss {vl:.6} mean|eval| {ve:.1}cp");
+    let pm0 = if fac.on() { &merged[..] } else { &p[..] };
+    let (vl, ve) = validate(pm0, sh, kl, &val, lambda, threads);
+    let q0 = quantize(pm0, sh);
+    let (ql0, _) = validate(&dequantize(&q0, sh), sh, kl, &val, lambda, threads);
+    println!("start val loss {vl:.6} (quantized {ql0:.6}) mean|eval| {ve:.1}cp");
+    // --keep-best: (quantized val loss, epoch, net bytes) of the best net so
+    // far; the start net (epoch 0: the --init / --resume net) competes too.
+    let mut best = keep_best.then(|| (ql0, seen / epoch_size, q0));
 
-    let mut bt = batch::BatchTrainer::new(sh, sub_batch, exact);
+    let mut bt = batch::BatchTrainer::new(sh, sub_batch, exact, fac.fl, wd_active);
     println!(
         "kernels {} sub-batch {}{}",
         bt.isa.name(),
@@ -1274,12 +1488,19 @@ fn cmd_train(args: &[String]) {
             if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total || batches == max_batches {
                 ep += 1;
                 let secs = started.elapsed().as_secs_f64();
-                let (vl, ve) = validate(&p, sh, kl, &val, lambda, threads);
-                let q = quantize(&p, sh);
+                if fac.on() {
+                    merge_factor(&p, sh, fac, &mut merged);
+                }
+                let pm = if fac.on() { &merged[..] } else { &p[..] };
+                let (vl, ve) = validate(pm, sh, kl, &val, lambda, threads);
+                let q = quantize(pm, sh);
                 let (ql, _) = validate(&dequantize(&q, sh), sh, kl, &val, lambda, threads);
                 let path = out.with_extension(format!("e{ep}.bin"));
                 File::create(&path).unwrap().write_all(&q).unwrap();
-                save_ckpt(&ckpt, sh, kl, &p, &opt, seen);
+                if let Some(b) = best.as_mut().filter(|b| ql < b.0) {
+                    *b = (ql, ep, q.clone());
+                }
+                save_ckpt(&ckpt, sh, kl, fac, &p, &opt, seen);
                 println!(
                     "epoch {ep} lr {cur_lr:.2e} train {:.6} val {vl:.6} (quantized {ql:.6}) mean|eval| {ve:.1}cp {:.0} pos/s -> {}",
                     epoch_loss / epoch_n as f64,
@@ -1293,7 +1514,14 @@ fn cmd_train(args: &[String]) {
     });
     drop(rx);
     loader.join().unwrap();
-    let q = quantize(&p, sh);
+    if fac.on() {
+        merge_factor(&p, sh, fac, &mut merged);
+    }
+    let mut q = quantize(if fac.on() { &merged } else { &p }, sh);
+    if let Some((bl, be, bq)) = best {
+        println!("keep-best: epoch {be} (quantized val {bl:.6}) is the output");
+        q = bq;
+    }
     File::create(&out).unwrap().write_all(&q).unwrap();
     println!("wrote {} ({} bytes, H={} buckets={}{kb_note})", out.display(), q.len(), sh.h, sh.buckets);
 }
@@ -1434,6 +1662,107 @@ mod tests {
         assert_eq!(s1.file_bytes(), (768 * 8 + 8 + 2 * 17) * 2);
         assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 8), Some(s8));
         assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 1), None);
+    }
+
+    /// Factoriser: merged rows = W + F, F's gradient = the sum of every
+    /// bucket's (checked against finite differences on the training vector),
+    /// from-scratch and one-bucket warm starts reproduce the one-bucket net,
+    /// and active-only weight decay leaves rows the batch never touched alone.
+    #[test]
+    fn factoriser_merge_gradient_and_init() {
+        let kl = KingLayout::by_name("kb4");
+        let sh = Shape { h: 8, buckets: 2, kb: kl.kb() };
+        let fac = Fac::new(sh, true);
+        assert_eq!(fac.fl, 768 * 8);
+        let mut rng = Rng::new(11);
+        // Random W and F, a positive bias so the SCReLU is live.
+        let mut p: Vec<f32> = (0..sh.len() + fac.fl).map(|_| rng.uniform(0.1)).collect();
+        for x in &mut p[sh.ft_b()..sh.out_w()] {
+            *x = 0.3;
+        }
+        let mut m = vec![0.0f32; sh.len()];
+        merge_factor(&p, sh, fac, &mut m);
+        assert_eq!(m[3 * fac.fl + 17], (p[3 * fac.fl + 17] + p[sh.len() + 17]).clamp(-CLIP, CLIP));
+        assert_eq!(&m[sh.ft_b()..], &p[sh.ft_b()..sh.len()]);
+
+        let fens = [
+            "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 | 35 | 1.0",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1 | -20 | 0.5",
+        ];
+        let samples: Vec<Sample> = fens.iter().map(|f| decode(&encode(f).unwrap(), 0.5, 2, false, kl)).collect();
+        let mut g = vec![0.0f32; sh.len()];
+        let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        for s in &samples {
+            train_sample(&m, sh, s, &mut g, &mut acc, &mut dacc);
+        }
+        let loss = |q: &[f32]| {
+            let mut mm = vec![0.0f32; sh.len()];
+            merge_factor(q, sh, fac, &mut mm);
+            let mut acc = vec![0.0; 2 * sh.h];
+            samples.iter().map(|s| (sigmoid(forward(&mm, sh, s, &mut acc)) - s.target).powi(2) as f64).sum::<f64>()
+        };
+        // An F element used by both samples' features (own king row of perspective 0).
+        let fk = (samples[0].f[0][0] as usize % 768) * sh.h + 2;
+        let gf: f32 = (0..sh.kb).map(|b| g[b * fac.fl + fk]).sum();
+        let wi = samples[1].f[1][2] as usize * sh.h + 5;
+        for (i, analytic) in [(sh.len() + fk, gf), (wi, g[wi])] {
+            let eps = 1e-3;
+            let (mut a, mut b) = (p.clone(), p.clone());
+            a[i] += eps;
+            b[i] -= eps;
+            let num = (loss(&a) - loss(&b)) / (2.0 * eps as f64);
+            assert!((num - analytic as f64).abs() < 1e-4 + 1e-2 * num.abs(), "param {i}: numeric {num} vs {analytic}");
+        }
+
+        // One AdamW step, wd active-only: an untouched bucket row keeps its value exactly.
+        let mut active = vec![0u8; sh.kb * 768];
+        for s in &samples {
+            for side in 0..2 {
+                for &f in &s.f[side][..s.n] {
+                    active[f as usize] = 1;
+                }
+            }
+        }
+        let idle = (0..sh.kb * 768).find(|&r| active[r] == 0).unwrap();
+        let n = p.len();
+        let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+        let mut q = p.clone();
+        let cx = StepCtx { sh, fac, active: Some(&active) };
+        adam_step(&mut q, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &cx);
+        assert_eq!(&q[idle * sh.h..(idle + 1) * sh.h], &p[idle * sh.h..(idle + 1) * sh.h]);
+        assert!(q[sh.len() + fk] != p[sh.len() + fk]);
+        let mut q2 = p.clone();
+        let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+        adam_step(&mut q2, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &StepCtx { sh, fac, active: None });
+        assert_eq!(q2[idle * sh.h], p[idle * sh.h] * (1.0 - 1e-3 * 0.1));
+
+        // From scratch: merged net == the KB=1 init with the same seed, in every bucket.
+        let s1 = Shape { kb: 1, ..sh };
+        let p1 = init_params(s1, &mut Rng::new(5));
+        let pf = init_factor(sh, &mut Rng::new(5));
+        assert_eq!(pf.len(), sh.len() + fac.fl);
+        merge_factor(&pf, sh, fac, &mut m);
+        assert_eq!(m, expand_buckets(&p1, s1, sh.kb));
+
+        // Checkpoint round trip keeps F and the factoriser flag.
+        let dir = std::env::temp_dir().join(format!("nnue-fac-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.ckpt");
+        let opt = Adam { m: pf.clone(), v: pf.clone(), step: 9 };
+        save_ckpt(&path, sh, kl, fac, &pf, &opt, 1234);
+        let (p2, o2, seen) = load_ckpt(&path, sh, kl, fac);
+        assert_eq!((p2, o2.step, seen), (pf, 9, 1234));
+
+        // `--init` from a one-bucket net file: merged net == that net (dequantized)
+        // in every bucket, so the start is exactly the plain net.
+        let init = dir.join("plain.bin");
+        File::create(&init).unwrap().write_all(&quantize(&p1, s1)).unwrap();
+        let q1 = dequantize(&quantize(&p1, s1), s1);
+        let pi = load_init_factor(&init, sh);
+        merge_factor(&pi, sh, fac, &mut m);
+        assert_eq!(m, expand_buckets(&q1, s1, sh.kb));
+        assert_eq!(&pi[sh.len()..], &q1[..s1.ft_b()]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1716,61 +2045,84 @@ mod tests {
         (recs, mirror)
     }
 
-    /// v2's per-sample loop (`train_sample` over the batch in order, one
-    /// thread) and its AdamW step: the reference for `batch.rs`.
-    fn reference_step(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], mirror: &[bool], opt: &mut Adam) -> (Vec<f32>, f64, Vec<f32>) {
+    /// v2's per-sample loop (`train_sample` over the batch in order on the
+    /// merged net, one thread), its active-row flags and `adam_step`: the
+    /// reference for `batch.rs`. `p` is the training vector (net + F).
+    #[allow(clippy::too_many_arguments)]
+    fn reference_step(
+        p: &[f32],
+        sh: Shape,
+        kl: &KingLayout,
+        fac: Fac,
+        wd_active: bool,
+        recs: &[Rec],
+        mirror: &[bool],
+        opt: &mut Adam,
+    ) -> (Vec<f32>, f64, Vec<f32>) {
+        let mut merged = p[..sh.len()].to_vec();
+        if fac.on() {
+            merge_factor(p, sh, fac, &mut merged);
+        }
         let mut g = vec![0.0f32; sh.len()];
         let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        let mut active = vec![0u8; sh.kb * INPUTS];
         let mut loss = 0.0f64;
         for (r, &m) in recs.iter().zip(mirror) {
             let s = decode(r, 0.5, sh.buckets, m, kl);
-            loss += train_sample(p, sh, &s, &mut g, &mut acc, &mut dacc) as f64;
+            loss += train_sample(&merged, sh, &s, &mut g, &mut acc, &mut dacc) as f64;
+            for side in 0..2 {
+                for &f in &s.f[side][..s.n] {
+                    active[f as usize] = 1;
+                }
+            }
         }
         let mut p = p.to_vec();
-        opt.step += 1;
-        let (b1, b2, eps, lr, wd, inv_batch) = (0.9f32, 0.999f32, 1e-8f32, 1e-3f32, 0.01f32, 1.0 / recs.len() as f32);
-        let c1 = 1.0 - b1.powi(opt.step.min(1 << 20) as i32);
-        let c2 = 1.0 - b2.powi(opt.step.min(1 << 20) as i32);
-        for i in 0..p.len() {
-            let mut gi = 0.0f32;
-            gi += g[i];
-            gi *= inv_batch;
-            opt.m[i] = b1 * opt.m[i] + (1.0 - b1) * gi;
-            opt.v[i] = b2 * opt.v[i] + (1.0 - b2) * gi * gi;
-            let upd = (opt.m[i] / c1) / ((opt.v[i] / c2).sqrt() + eps);
-            let x = p[i] * (1.0 - lr * wd) - lr * upd;
-            p[i] = x.clamp(-CLIP, CLIP);
-        }
+        let cx = StepCtx { sh, fac, active: wd_active.then_some(&active[..]) };
+        adam_step(&mut p, opt, std::slice::from_ref(&g), 1e-3, 0.01, 1.0 / recs.len() as f32, 3, &cx);
         (g, loss, p)
     }
 
     /// The batch trainer against v2's loop: bit-identical gradients, loss and
-    /// AdamW step with `exact`, ~1e-6 without; for every ISA, several thread
+    /// AdamW steps with `exact`, ~1e-6 without; for every ISA, several thread
     /// counts, H not a multiple of the 64-float forward tile, partial
-    /// sub-batches, king buckets and mirroring.
+    /// sub-batches, king buckets, the factoriser, active-only decay and
+    /// mirroring.
     #[test]
     fn batch_trainer_matches_reference() {
-        for (h, buckets, kl) in [(48, 8, NO_BUCKETS), (128, 1, KingLayout::by_name("kb4m")), (64, 8, KingLayout::by_name("kb8m"))] {
+        let cases = [
+            (48, 8, NO_BUCKETS, false, false),
+            (128, 1, KingLayout::by_name("kb4m"), false, true),
+            (64, 8, KingLayout::by_name("kb8m"), false, false),
+            (64, 8, KingLayout::by_name("kb8m"), true, true),
+            (32, 1, KingLayout::by_name("kb4"), true, false),
+        ];
+        for (h, buckets, kl, factorise, wd_active) in cases {
             let sh = Shape { h, buckets, kb: kl.kb() };
+            let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(5);
-            let mut p = init_params(sh, &mut rng);
+            let mut p = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
+            if factorise {
+                for x in &mut p[..sh.ft_b()] {
+                    *x = rng.uniform(0.05); // W != 0, so merging matters
+                }
+            }
             for x in &mut p[sh.ft_b()..sh.out_w()] {
                 *x = 0.2; // keep accumulators inside (0, 1) often
             }
             let (recs, mirror) = test_recs(301);
             let n = p.len();
             let mut ropt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
-            let (gref, lref, pref) = reference_step(&p, sh, kl, &recs, &mirror, &mut ropt);
+            let (gref, lref, pref) = reference_step(&p, sh, kl, fac, wd_active, &recs, &mirror, &mut ropt);
             for isa in isas() {
                 for (threads, exact) in [(1, true), (3, true), (4, false), (2, false)] {
-                    let mut bt = batch::BatchTrainer::new(sh, 64, exact);
+                    let mut bt = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
                     bt.isa = isa;
                     let mut p2 = p.clone();
                     let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
                     batch::Pool::with(threads, |pool| {
                         let loss = bt.batch(pool, &p2, &recs, &mirror, 0.5, kl);
                         let g = bt.gradient();
-                        let what = format!("H={h} {} {isa:?} threads={threads} exact={exact}", kl.name);
+                        let what = format!("H={h} {} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
                         if exact {
                             assert_eq!(loss, lref, "{what}");
                             assert!(g.iter().zip(&gref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: gradient differs");
@@ -1786,10 +2138,15 @@ mod tests {
                         if exact {
                             assert!(p2.iter().zip(&pref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam step differs");
                             assert!(opt.m.iter().zip(&ropt.m).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam m");
-                            // Second step: the trainer's FT copy must follow the update.
-                            let (g2, l2, _) = reference_step(&pref, sh, kl, &recs, &mirror, &mut Adam { m: ropt.m.clone(), v: ropt.v.clone(), step: 1 });
-                            assert_eq!(bt.batch(pool, &p2, &recs, &mirror, 0.5, kl), l2, "{what}: second step loss");
+                            assert!(opt.v.iter().zip(&ropt.v).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam v");
+                            // Second step: the trainer's (merged) FT copy and the
+                            // active-row flags must follow the update.
+                            let mut ropt2 = Adam { m: ropt.m.clone(), v: ropt.v.clone(), step: ropt.step };
+                            let (g2, l2, p3) = reference_step(&pref, sh, kl, fac, wd_active, &recs[..200], &mirror[..200], &mut ropt2);
+                            assert_eq!(bt.batch(pool, &p2, &recs[..200], &mirror[..200], 0.5, kl), l2, "{what}: second step loss");
                             assert!(bt.gradient().iter().zip(&g2).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: second step gradient");
+                            bt.adam(pool, &mut p2, &mut opt, 1e-3, 0.01, 1.0 / 200.0);
+                            assert!(p2.iter().zip(&p3).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: second Adam step");
                         }
                     });
                 }
@@ -1807,7 +2164,7 @@ mod tests {
         let mut first: Option<(f64, Vec<f32>)> = None;
         for isa in isas() {
             for threads in [1, 2, 5] {
-                let mut bt = batch::BatchTrainer::new(sh, 0, false);
+                let mut bt = batch::BatchTrainer::new(sh, 0, false, 0, false);
                 bt.isa = isa;
                 let got = batch::Pool::with(threads, |pool| (bt.batch(pool, &p, &recs, &mirror, 0.5, NO_BUCKETS), bt.gradient()));
                 match &first {

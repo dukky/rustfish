@@ -144,6 +144,18 @@ rows into every bucket. To embed a bucketed net, pass the same layout to
 `src/nnue.rs` and treats it as a shape change, so it gates at `stc`). First
 measurement: about -14% bench NPS for kb8m at H = 256.
 
+`--factorise` (both trainers, KB > 1) trains a shared 768-row block added
+to every bucket and merges it into the exported net (format and engine
+unchanged); `--wd-active-only` (default on for KB > 1) restricts AdamW
+decay on bucketed FT rows to rows seen in the batch. Train factorised
+nets from scratch, or warm-start them from a plain net with `--factorise
+--init plain.bin` (`F` = its rows, buckets 0): exact for kb4 from a `none`
+net (g4: start 0.026672 / quantized 0.026673 = g4's loss on val 100k), but
+a mirrored layout cannot start exactly from an unmirrored one-bucket net
+(kb8m from g4 starts at g4-as-m1, 0.028718; see
+`tools/nnue-trainer/README.md`). `--keep-best` makes `<out>` the best
+quantised-val epoch (start included), since warm-started kb runs peak early.
+
 ## Overnight loop: `netloop.py auto`
 
 `python3 scripts/netloop.py auto` repeats every `--interval` s (1200):

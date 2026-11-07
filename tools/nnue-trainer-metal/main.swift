@@ -200,6 +200,48 @@ func loadInit(_ path: String, _ buckets: Int, layout: Int) -> ([Float], Shape) {
     return (p, sh)
 }
 
+/// As the CPU trainer's `warn_mirrored_init`: a one-bucket init net read
+/// through a mirrored layout reproduces it exactly only if it is an m1 net.
+func warnMirroredInit(_ path: String, _ sh: Shape) {
+    let n = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int) ?? 0
+    let oneBucket = Shape.fromFileBytes(n, sh.buckets) != nil
+    let full = sh.kb > 1 && Shape.fromFileBytes(n, sh.buckets, layout: sh.layout) != nil
+    if sh.kl.mirror && oneBucket && !full {
+        out("init: note: \(path) is read with mirroring (\(sh.kl.name)); the start equals it exactly only if it is an m1 net, otherwise the start val loss is its `eval --king-buckets m1` loss")
+    }
+}
+
+/// `--factorise --init` (as the CPU trainer's `load_init_factor`): a
+/// one-bucket net becomes F with W = 0; a full bucketed net becomes W with F = 0.
+/// Returns the training vector (net params + F).
+func loadInitFactor(_ path: String, _ sh: Shape) -> [Float] {
+    let b = readFile(path)
+    if Shape.fromFileBytes(b.count, sh.buckets, layout: sh.layout) != nil {
+        let (p, s) = loadNet(path, sh.buckets, layout: sh.layout)
+        if s != sh { die("init net shape differs from --hidden/--buckets/--king-buckets") }
+        out("init: \(path) has all \(sh.kb) king buckets; factoriser starts at 0")
+        return p + [Float](repeating: 0, count: INPUTS * sh.h)
+    }
+    let (p1, s1) = loadNet(path, sh.buckets)
+    if s1.h != sh.h { die("init net shape differs from --hidden/--buckets") }
+    out("init: \(path) is a one-bucket net; its FT rows become the factoriser, buckets start at 0")
+    return [Float](repeating: 0, count: sh.ftB) + p1[s1.ftB...] + p1[0..<s1.ftB]
+}
+
+/// `--factorise` from scratch: F = the one-bucket init (same RNG draws), W = 0.
+func initFactor(_ sh: Shape, _ rng: inout Rng) -> [Float] {
+    var s1 = sh
+    s1.layout = 0
+    let p1 = initParams(s1, &rng)
+    return [Float](repeating: 0, count: sh.ftB) + p1[s1.ftB...] + p1[0..<s1.ftB]
+}
+
+/// CPU twin of the `merge_factor` kernel: effective net params from a training vector.
+func mergeFactor(_ t: [Float], _ sh: Shape) -> [Float] {
+    let fl = INPUTS * sh.h
+    return (0..<sh.len).map { i in i < sh.ftB ? min(max(t[i] + t[sh.len + i % fl], -CLIP), CLIP) : t[i] }
+}
+
 func initParams(_ sh: Shape, _ rng: inout Rng) -> [Float] {
     var p = [Float](repeating: 0, count: sh.len)
     var a: Float = 1.0 / Float(32).squareRoot()
@@ -222,22 +264,26 @@ func withExtension(_ path: String, _ ext: String) -> String {
 
 // ---------------------------------------------------------------- checkpoints (CPU trainer format)
 
-func saveCkpt(_ path: String, _ sh: Shape, _ p: UnsafePointer<Float>, _ m: UnsafePointer<Float>, _ v: UnsafePointer<Float>, step: UInt64, seen: UInt64) {
+/// Word 1 = output buckets | king layout id << 32 | factoriser << 40 (as the CPU trainer).
+/// With the factoriser, p/m/v are the training vector (net params + F).
+func ckptWord1(_ sh: Shape, _ factor: Bool) -> UInt64 { UInt64(sh.buckets) | UInt64(sh.layout) << 32 | (factor ? 1 << 40 : 0) }
+
+func saveCkpt(_ path: String, _ sh: Shape, factor: Bool, _ p: UnsafePointer<Float>, _ m: UnsafePointer<Float>, _ v: UnsafePointer<Float>, step: UInt64, seen: UInt64) {
     var d = Data(CKPT_MAGIC)
-    // Word 1 = output buckets | king layout id << 32 (as the CPU trainer).
-    for x in [UInt64(sh.h), UInt64(sh.buckets) | UInt64(sh.layout) << 32, step, seen] { withUnsafeBytes(of: x.littleEndian) { d.append(contentsOf: $0) } }
-    for arr in [p, m, v] { d.append(UnsafeBufferPointer(start: arr, count: sh.len)) }
+    for x in [UInt64(sh.h), ckptWord1(sh, factor), step, seen] { withUnsafeBytes(of: x.littleEndian) { d.append(contentsOf: $0) } }
+    let n = sh.len + (factor ? INPUTS * sh.h : 0)
+    for arr in [p, m, v] { d.append(UnsafeBufferPointer(start: arr, count: n)) }
     FileManager.default.createFile(atPath: path, contents: d)
 }
 
-func loadCkpt(_ path: String, _ sh: Shape) -> ([Float], [Float], [Float], UInt64, UInt64) {
+func loadCkpt(_ path: String, _ sh: Shape, factor: Bool) -> ([Float], [Float], [Float], UInt64, UInt64) {
     let b = readFile(path)
     guard b.count >= 40, Array(b[0..<8]) == CKPT_MAGIC else { die("not a v2 checkpoint") }
     func word(_ i: Int) -> UInt64 { b[8 + 8 * i..<16 + 8 * i].reversed().reduce(0) { $0 << 8 | UInt64($1) } }
-    guard Int(word(0)) == sh.h, Int(word(1) & 0xFFFF_FFFF) == sh.buckets, Int(word(1) >> 32) == sh.layout else {
-        die("checkpoint shape (H, buckets, king layout) differs")
+    guard Int(word(0)) == sh.h, word(1) == ckptWord1(sh, factor) else {
+        die("checkpoint shape (H, buckets, king layout, factorise) differs")
     }
-    let n = sh.len
+    let n = sh.len + (factor ? INPUTS * sh.h : 0)
     guard b.count == 40 + 12 * n else { die("checkpoint size mismatch") }
     var f = [Float](repeating: 0, count: 3 * n)
     b.withUnsafeBytes { raw in
@@ -328,6 +374,9 @@ struct Cfg {
     var mode: UInt32 = 0
     var nf: UInt32 = 768        // FT rows = king buckets * 768
     var kmirror: UInt32 = 0
+    var plen: UInt32 = 0
+    var fl: UInt32 = 0          // factoriser floats (768 * H), 0 = off
+    var wdact: UInt32 = 0
     var ktab: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
                UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
@@ -336,6 +385,7 @@ struct Cfg {
     init(_ sh: Shape) {
         h = UInt32(sh.h); nb = UInt32(sh.buckets)
         nf = UInt32(sh.ftRows); kmirror = sh.kl.mirror ? 1 : 0
+        plen = UInt32(sh.len)
         let t = sh.kl.packed
         ktab = (t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15])
     }
@@ -344,7 +394,7 @@ struct Cfg {
 final class Gpu {
     let dev: MTLDevice
     let q: MTLCommandQueue
-    let decode, fwdTrain, fwdVal, sortE, gradFused, gradOb, adam: MTLComputePipelineState
+    let decode, fwdTrain, fwdVal, plan, sortE, gradFused, gradFused1, gradOb, adam, rowActive, mergeF: MTLComputePipelineState
 
     init() {
         guard let d = MTLCreateSystemDefaultDevice() else { die("no Metal device") }
@@ -358,7 +408,8 @@ final class Gpu {
             do { let ps = try d.makeComputePipelineState(function: lib.makeFunction(name: n)!); if ProcessInfo.processInfo.environment["NNUE_DEBUG"] != nil { FileHandle.standardError.write("\(n): tgmem \(ps.staticThreadgroupMemoryLength) maxthreads \(ps.maxTotalThreadsPerThreadgroup)\n".data(using: .utf8)!) }; return ps } catch { die("pipeline \(n): \(error)") }
         }
         decode = pipe("decode"); fwdTrain = pipe("forward_train"); fwdVal = pipe("forward_val")
-        sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradOb = pipe("grad_ob"); adam = pipe("adam")
+        plan = pipe("plan_rows"); sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradFused1 = pipe("grad_fused1"); gradOb = pipe("grad_ob"); adam = pipe("adam")
+        rowActive = pipe("row_active"); mergeF = pipe("merge_factor")
     }
 
     func buf(_ bytes: Int) -> MTLBuffer { dev.makeBuffer(length: max(bytes, 16), options: .storageModeShared)! }
@@ -397,35 +448,60 @@ final class Batch {
 }
 
 /// Training state: params, Adam moments, scratch for one batch.
+/// `t` is the training vector Adam updates (net params, then F with the
+/// factoriser); `p` the effective net the kernels and export read (= `t`
+/// without the factoriser, else W + F merged after every step).
 final class Trainer {
     let g: Gpu
     let sh: Shape
     let batchN: Int
     var cfg: Cfg
-    let p, m, v, acc, gs, pft, pow_, pob, sorted, ecount: MTLBuffer
+    let factor: Bool
+    let tlen: Int
+    let t, p, m, v, acc, gs, pft, pow_, pob, sorted, ecount, rows, hdr, rng, items, act: MTLBuffer
+    /// Upper bounds on sort ranges / grad work items per batch (grid sizes).
+    let maxRanges, maxItems: Int
 
-    init(_ g: Gpu, _ sh: Shape, batch: Int, lambda: Float, params: [Float], m0: [Float]?, v0: [Float]?) {
+    init(_ g: Gpu, _ sh: Shape, batch: Int, lambda: Float, params: [Float], m0: [Float]?, v0: [Float]?, factor: Bool = false, wdActive: Bool = false) {
         self.g = g
         self.sh = sh
+        self.factor = factor
         batchN = batch
         precondition(sh.h % 4 == 0, "--hidden must be a multiple of 4")
         precondition(sh.buckets <= MAXB, "at most \(MAXB) buckets")
+        precondition(!factor || sh.kb > 1, "--factorise needs a king-bucket layout with KB > 1")
         cfg = Cfg(sh)
         cfg.lambda = lambda
         cfg.rf = UInt32(max(1, min(16, (batch + RS - 1) / RS)))
-        p = g.buf(params)
-        m = m0.map { g.buf($0) } ?? g.buf(sh.len * 4)
-        v = v0.map { g.buf($0) } ?? g.buf(sh.len * 4)
-        if m0 == nil { memset(m.contents(), 0, sh.len * 4); memset(v.contents(), 0, sh.len * 4) }
+        cfg.fl = factor ? UInt32(INPUTS * sh.h) : 0
+        cfg.wdact = wdActive ? 1 : 0
+        tlen = sh.len + Int(cfg.fl)
+        precondition(params.count == tlen, "training vector size")
+        t = g.buf(params)
+        p = factor ? g.buf(mergeFactor(params, sh)) : t
+        act = g.buf(wdActive ? sh.ftRows * 4 : 16)
+        m = m0.map { g.buf($0) } ?? g.buf(tlen * 4)
+        v = v0.map { g.buf($0) } ?? g.buf(tlen * 4)
+        if m0 == nil { memset(m.contents(), 0, tlen * 4); memset(v.contents(), 0, tlen * 4) }
         acc = g.buf(batch * 2 * sh.h * 4)
         gs = g.buf(batch * 4)
-        pft = g.buf(Int(cfg.rf) * sh.outW * 4)
-        pow_ = g.buf(Int(cfg.rf) * sh.buckets * 2 * sh.h * 4)
-        pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
+        precondition(sh.kb <= MAXKB, "at most \(MAXKB) king buckets")
+        // Rows sorted by king bucket, cut into ranges of 2 * RS rows (each
+        // bucket's last one partial) and items of `per` ranges (see plan_rows).
         let nr = (batch + RS - 1) / RS
-        // Per (range, king bucket): a CSR over that bucket's 768 features.
-        sorted = g.buf(nr * sh.kb * RS * 64 * 2)
-        ecount = g.buf(nr * sh.kb * 769 * 4)
+        let per = (nr + Int(cfg.rf) - 1) / Int(cfg.rf)
+        maxRanges = nr + sh.kb
+        maxItems = (maxRanges + sh.kb * (per - 1)) / per
+        pft = g.buf(maxItems * (INPUTS + 1) * sh.h * 4)
+        pow_ = g.buf(maxItems * sh.buckets * 2 * sh.h * 4)
+        pob = g.buf(Int(cfg.rf) * sh.buckets * 4)
+        // Per range: a CSR over its bucket's 768 features.
+        sorted = g.buf(maxRanges * RS * 64 * 2)
+        ecount = g.buf(maxRanges * 769 * 4)
+        rows = g.buf(2 * batch * 4)
+        hdr = g.buf((3 + MAXKB) * 4)
+        rng = g.buf(maxRanges * 16)
+        items = g.buf(maxItems * 16)
     }
 
     /// Encode forward + backward + (mode 0) AdamW step / (mode 1) gradient into `m`.
@@ -447,28 +523,47 @@ final class Trainer {
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 2 {
+        enc.setComputePipelineState(g.plan)
+        enc.setBuffers([b.meta, rows, hdr, rng, items], offsets: [0, 0, 0, 0, 0], range: 0..<5)
+        enc.setBytes(&c, length: cl, index: 5)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(1024, g.plan.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        enc.memoryBarrier(scope: .buffers)
         enc.setComputePipelineState(g.sortE)
-        enc.setBuffers([b.feats, b.meta, sorted, ecount], offsets: [0, 0, 0, 0], range: 0..<4)
-        enc.setBytes(&c, length: cl, index: 4)
-        enc.dispatchThreadgroups(MTLSize(width: (b.n + RS - 1) / RS, height: sh.kb, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.setBuffers([b.feats, b.meta, sorted, ecount, rows, hdr, rng], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
+        enc.setBytes(&c, length: cl, index: 7)
+        enc.dispatchThreadgroups(MTLSize(width: maxRanges, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 3 {
-        enc.setComputePipelineState(g.gradFused)
-        enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_], offsets: [0, 0, 0, 0, 0, 0, 0, 0], range: 0..<8)
-        enc.setBytes(&c, length: cl, index: 8)
-        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: Int(c.rf), depth: sh.kb), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
+        enc.setComputePipelineState(sh.kb == 1 ? g.gradFused1 : g.gradFused)
+        enc.setBuffers([p, b.meta, acc, gs, sorted, ecount, pft, pow_, rows, hdr, rng, items], offsets: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], range: 0..<12)
+        enc.setBytes(&c, length: cl, index: 12)
+        enc.dispatchThreadgroups(MTLSize(width: (sh.h + TW - 1) / TW, height: maxItems, depth: 1), threadsPerThreadgroup: MTLSize(width: 32 * NSG, height: 1, depth: 1))
         enc.setComputePipelineState(g.gradOb)
         enc.setBuffers([gs, b.meta, pob], offsets: [0, 0, 0], range: 0..<3)
         enc.setBytes(&c, length: cl, index: 3)
         enc.dispatchThreads(MTLSize(width: sh.buckets, height: Int(c.rf), depth: 1), threadsPerThreadgroup: MTLSize(width: sh.buckets, height: 1, depth: 1))
+        if c.wdact != 0 {
+            enc.setComputePipelineState(g.rowActive)
+            enc.setBuffers([ecount, rng, hdr, act], offsets: [0, 0, 0, 0], range: 0..<4)
+            enc.setBytes(&c, length: cl, index: 4)
+            enc.dispatchThreads(MTLSize(width: sh.ftRows, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 4 {
         enc.setComputePipelineState(g.adam)
-        enc.setBuffers([p, m, v, pft, pow_, pob], offsets: [0, 0, 0, 0, 0, 0], range: 0..<6)
-        enc.setBytes(&c, length: cl, index: 6)
-        enc.dispatchThreads(MTLSize(width: sh.len, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.setBuffers([t, m, v, pft, pow_, pob, hdr], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
+        enc.setBytes(&c, length: cl, index: 7)
+        enc.setBuffer(act, offset: 0, index: 8)
+        enc.dispatchThreads(MTLSize(width: tlen, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        if factor {
+            enc.memoryBarrier(scope: .buffers)
+            enc.setComputePipelineState(g.mergeF)
+            enc.setBuffers([t, p], offsets: [0, 0], range: 0..<2)
+            enc.setBytes(&c, length: cl, index: 2)
+            enc.dispatchThreads(MTLSize(width: sh.len, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
         }
         enc.endEncoding()
     }
@@ -542,9 +637,15 @@ func cmdTrain(_ args: [String]) {
     var seed: UInt64 = 1
     var mirror = false
     var initPath: String? = nil, resume: String? = nil, ckptPath: String? = nil
+    var factor = false, keepBest = false
+    var wdActive: Bool? = nil
     let it = Args(args)
     while let a = it.next() {
         switch a {
+        case "--factorise", "--factorize": factor = true
+        case "--keep-best": keepBest = true
+        case "--wd-active-only": wdActive = true
+        case "--no-wd-active-only": wdActive = false
         case "--data": data.append(it.value(a))
         case "--val": valPath = it.value(a)
         case "--out": outPath = it.value(a)
@@ -568,6 +669,8 @@ func cmdTrain(_ args: [String]) {
         }
     }
     if data.isEmpty { die("--data required") }
+    if factor && sh.kb == 1 { die("--factorise needs a king-bucket layout with KB > 1") }
+    let wdAct = wdActive ?? (sh.kb > 1)
     if epochSize == 0 {
         epochSize = data.reduce(0) { s, p in
             let sz = (try? FileManager.default.attributesOfItem(atPath: p)[.size] as? UInt64) ?? nil
@@ -582,23 +685,34 @@ func cmdTrain(_ args: [String]) {
     var p0: [Float], m0: [Float]? = nil, v0: [Float]? = nil
     var step: UInt64 = 0, seen: UInt64 = 0
     if let r = resume {
-        let (p, m, v, st, se) = loadCkpt(r, sh)
+        let (p, m, v, st, se) = loadCkpt(r, sh, factor: factor)
         p0 = p; m0 = m; v0 = v; step = st; seen = se
     } else if let i = initPath {
-        let (p, s) = loadInit(i, sh.buckets, layout: sh.layout)
-        if s != sh { die("init net shape differs from --hidden/--buckets/--king-buckets") }
-        p0 = p.map { min(max($0, -CLIP), CLIP) }
+        warnMirroredInit(i, sh)
+        if factor {
+            p0 = loadInitFactor(i, sh).map { min(max($0, -CLIP), CLIP) }
+        } else {
+            let (p, s) = loadInit(i, sh.buckets, layout: sh.layout)
+            if s != sh { die("init net shape differs from --hidden/--buckets/--king-buckets") }
+            p0 = p.map { min(max($0, -CLIP), CLIP) }
+        }
     } else {
-        p0 = initParams(sh, &rng)
+        p0 = factor ? initFactor(sh, &rng) : initParams(sh, &rng)
     }
     let g = Gpu()
     let valRecs = valPath.map(readFile) ?? []
     let val = ValSet(g, valRecs, lambda: lambda, sh: sh)
-    let tr = Trainer(g, sh, batch: batch, lambda: lambda, params: p0, m0: m0, v0: v0)
-    let kbNote = sh.layout != 0 ? " king-buckets=\(sh.kl.name) (KB=\(sh.kb))" : ""
+    let tr = Trainer(g, sh, batch: batch, lambda: lambda, params: p0, m0: m0, v0: v0, factor: factor, wdActive: wdAct)
+    let kbNote = (sh.layout != 0 ? " king-buckets=\(sh.kl.name) (KB=\(sh.kb))" : "") + (factor ? " factorised" : "") + (wdAct ? " wd-active-only" : "")
     out("train H=\(sh.h) buckets=\(sh.buckets)\(kbNote) params=\(sh.len) epochs=\(epochs) x \(epochSize) batch=\(batch) lr \(rustDisplay(lr))->\(rustDisplay(lrEnd)) wd=\(rustDisplay(wd)) lambda=\(rustDisplay(lambda)) mirror=\(mirror) threads=\(threads) val=\(valRecs.count / REC)")
+    if keepBest && valRecs.isEmpty { die("--keep-best needs --val") }
     let (vl0, ve0) = val.validate(g, tr.p, sh)
-    out("start val loss \(f6(vl0)) mean|eval| \(f1(ve0))cp")
+    let q0 = quantize(tr.p.contents().assumingMemoryBound(to: Float.self), sh)
+    let (ql0, _) = val.validate(g, g.buf(dequantize(q0, sh)), sh)
+    out("start val loss \(f6(vl0)) (quantized \(f6(ql0))) mean|eval| \(f1(ve0))cp")
+    // --keep-best: (quantized val loss, epoch, net bytes) of the best net so
+    // far; the start net (epoch 0: the --init / --resume net) competes too.
+    var best: (Double, UInt64, [UInt8])? = keepBest ? (ql0, seen / epochSize, q0) : nil
 
     // Loader thread: fills ring slots with raw records (+ mirror flag in byte 28),
     // drawing seed_b from the main RNG exactly as the CPU trainer does per batch.
@@ -674,14 +788,19 @@ func cmdTrain(_ args: [String]) {
             let (ql, _) = val.validate(g, qb, sh)
             let path = withExtension(outPath, "e\(ep).bin")
             writeFile(path, q)
-            saveCkpt(ckpt, sh, pP, tr.m.contents().assumingMemoryBound(to: Float.self), tr.v.contents().assumingMemoryBound(to: Float.self), step: step, seen: seen)
+            if let b = best, ql < b.0 { best = (ql, ep, q) }
+            saveCkpt(ckpt, sh, factor: factor, tr.t.contents().assumingMemoryBound(to: Float.self), tr.m.contents().assumingMemoryBound(to: Float.self), tr.v.contents().assumingMemoryBound(to: Float.self), step: step, seen: seen)
             out("epoch \(ep) lr \(e2(curLr)) train \(f6(epochLoss / Double(epochN))) val \(f6(vl)) (quantized \(f6(ql))) mean|eval| \(f1(ve))cp \(String(format: "%.0f", Double(seen - startSeen) / secs)) pos/s -> \(path)")
             epochLoss = 0
             epochN = 0
         }
     }
     while !pending.isEmpty { retire() }
-    let q = quantize(pP, sh)
+    var q = quantize(pP, sh)
+    if let (bl, be, bq) = best {
+        out("keep-best: epoch \(be) (quantized val \(f6(bl))) is the output")
+        q = bq
+    }
     writeFile(outPath, q)
     out("wrote \(outPath) (\(q.count) bytes, H=\(sh.h) buckets=\(sh.buckets)\(kbNote))")
     FileHandle.standardError.write(String(format: "waits: loader %.1fs gpu %.1fs gpu-busy %.1fs total %.1fs\n", loaderWait, gpuWait, gpuBusy, Date().timeIntervalSince(started)).data(using: .utf8)!)
@@ -791,12 +910,18 @@ func cpuTrainSample(_ p: [Float], _ sh: Shape, _ s: Sample, _ g: inout [Double])
 }
 
 /// GPU gradient vs CPU reference on a small batch, finite differences on a few
-/// parameters, and one AdamW step compared parameter by parameter.
+/// parameters, and one AdamW step compared parameter by parameter. With
+/// `--factorise` the checks run on the training vector (W and F), the
+/// finite differences perturb W or F through the merge, and the step also
+/// checks the merged net; `--wd-active-only` (default on for KB > 1) checks
+/// that FT rows absent from the batch are left exactly unchanged.
 func cmdGradcheck(_ args: [String]) {
     var dataPath: String? = nil
     var sh = Shape(h: 32, buckets: 8)
     var n = 256
     var mirror = false
+    var factor = false
+    var wdActive: Bool? = nil
     let it = Args(args)
     while let a = it.next() {
         switch a {
@@ -806,22 +931,36 @@ func cmdGradcheck(_ args: [String]) {
         case "--batch": n = parse(it.value(a), a)
         case "--mirror": mirror = true
         case "--king-buckets": sh.layout = layoutId(it.value(a))
+        case "--factorise", "--factorize": factor = true
+        case "--wd-active-only": wdActive = true
+        case "--no-wd-active-only": wdActive = false
         default: die("unknown option \(a)")
         }
     }
     guard let dp = dataPath else { die("--data required") }
+    if factor && sh.kb == 1 { die("--factorise needs a king-bucket layout with KB > 1") }
+    let wdAct = wdActive ?? (sh.kb > 1)
     let lambda: Float = 0.5
     var raw = Array(readFile(dp).prefix(n * REC))
     n = raw.count / REC
     for i in 0..<n { raw[i * REC + 28] = mirror ? UInt8(i & 1) : 0 }
     var rng = Rng(7)
-    var p = initParams(sh, &rng)
+    var t = initParams(sh, &rng)
+    let fl = factor ? INPUTS * sh.h : 0
+    if factor {
+        // W and F both nonzero so the merge is exercised; same total scale as one init.
+        for i in 0..<sh.ftB { t[i] *= 0.5 }
+        let a: Float = 0.5 / Float(32).squareRoot()
+        t += (0..<fl).map { _ in rng.uniform(a) }
+    }
     // Bias the FT so many accumulators sit inside (0, 1) and all branches are exercised.
-    for j in 0..<sh.h { p[sh.ftB + j] = 0.3 + 0.2 * rng.uniform(1) }
-    for b in 0..<sh.buckets { p[sh.outB + b] = 0.05 * rng.uniform(1) }
+    for j in 0..<sh.h { t[sh.ftB + j] = 0.3 + 0.2 * rng.uniform(1) }
+    for b in 0..<sh.buckets { t[sh.outB + b] = 0.05 * rng.uniform(1) }
+    let p = factor ? mergeFactor(t, sh) : t
+    let tlen = t.count
 
     let g = Gpu()
-    let tr = Trainer(g, sh, batch: n, lambda: lambda, params: p, m0: nil, v0: nil)
+    let tr = Trainer(g, sh, batch: n, lambda: lambda, params: t, m0: nil, v0: nil, factor: factor, wdActive: wdAct)
     let b = Batch(g, n)
     raw.withUnsafeBytes { b.recs.contents().copyMemory(from: $0.baseAddress!, byteCount: n * REC) }
     var cb = g.q.makeCommandBuffer()!
@@ -839,20 +978,24 @@ func cmdGradcheck(_ args: [String]) {
             lossRef += cpuTrainSample(p, sh, s, &ref)
         }
     }
+    // Factoriser gradient: the sum over king buckets of each FT row's gradient.
+    for k in 0..<fl { ref.append((0..<sh.kb).reduce(0.0) { $0 + ref[$1 * fl + k] }) }
     let lossGpu = b.sum(b.loss)
     var maxAbs = 0.0, maxRef = 0.0, worst = 0
-    for i in 0..<sh.len {
+    for i in 0..<tlen {
         let d = abs(Double(gg[i]) - ref[i])
         if d > maxAbs { maxAbs = d; worst = i }
         maxRef = max(maxRef, abs(ref[i]))
     }
-    out("gradcheck H=\(sh.h) buckets=\(sh.buckets) king-buckets=\(sh.kl.name) batch=\(n) mirror=\(mirror)")
+    out("gradcheck H=\(sh.h) buckets=\(sh.buckets) king-buckets=\(sh.kl.name) batch=\(n) mirror=\(mirror) factorise=\(factor) wd-active-only=\(wdAct)")
     out("  loss sum: gpu \(lossGpu) cpu \(lossRef) rel \(abs(lossGpu - lossRef) / lossRef)")
     out("  grad: max|gpu-cpu| \(maxAbs) at \(worst) (max|grad| \(maxRef)), rel \(maxAbs / maxRef)")
 
-    // Finite differences on the summed loss (double precision accumulation).
-    func lossAt(_ q: [Double]) -> Double {
+    // Finite differences on the summed loss (double precision accumulation),
+    // as a function of the training vector (merged through the factoriser).
+    func lossAt(_ tq: [Double]) -> Double {
         let h = sh.h
+        let q = factor ? (0..<sh.len).map { i in i < sh.ftB ? min(max(tq[i] + tq[sh.len + i % fl], -Double(CLIP)), Double(CLIP)) : tq[i] } : tq
         var l = 0.0
         var acc = [Double](repeating: 0, count: 2 * h)
         for s in samples {
@@ -867,11 +1010,15 @@ func cmdGradcheck(_ args: [String]) {
         }
         return l
     }
-    let pd = p.map { Double($0) }
+    let pd = t.map { Double($0) }
     var picks: [Int] = []
     let f0 = samples[0].f[0][0] * sh.h, f1i = samples[0].f[1][3] * sh.h
     picks += [f0, f0 + 3, f1i + 1, sh.ftB + 1, sh.ftB + sh.h - 1]
     picks += [sh.outW + samples[0].bucket * 2 * sh.h + 5, sh.outW + samples[0].bucket * 2 * sh.h + sh.h + 2, sh.outB + samples[0].bucket]
+    if factor {
+        picks += [sh.len + (samples[0].f[0][0] % INPUTS) * sh.h, sh.len + (samples[0].f[1][3] % INPUTS) * sh.h + 1,
+                  sh.len + (samples[n - 1].f[0][1] % INPUTS) * sh.h + sh.h - 1]
+    }
     var fdBad = 0
     for i in picks {
         let eps = 1e-6
@@ -880,31 +1027,47 @@ func cmdGradcheck(_ args: [String]) {
         let num = (lossAt(a) - lossAt(c)) / (2 * eps)
         let ok = abs(num - Double(gg[i])) < 1e-5 + 1e-3 * abs(num)
         if !ok { fdBad += 1 }
-        out("  fd param \(i): numeric \(String(format: "%.6e", num)) gpu \(String(format: "%.6e", Double(gg[i]))) cpu \(String(format: "%.6e", ref[i])) \(ok ? "ok" : "MISMATCH")")
+        out("  fd param \(i)\(i >= sh.len ? " (F)" : ""): numeric \(String(format: "%.6e", num)) gpu \(String(format: "%.6e", Double(gg[i]))) cpu \(String(format: "%.6e", ref[i])) \(ok ? "ok" : "MISMATCH")")
     }
 
     // One AdamW step (lr 1e-3, wd 0.01) vs CPU reference formula on the CPU reference gradient.
-    let tr2 = Trainer(g, sh, batch: n, lambda: lambda, params: p, m0: nil, v0: nil)
+    var active = [Bool](repeating: false, count: sh.ftRows)
+    for s in samples { for side in 0..<2 { for f in s.f[side] { active[f] = true } } }
+    let tr2 = Trainer(g, sh, batch: n, lambda: lambda, params: t, m0: nil, v0: nil, factor: factor, wdActive: wdAct)
     cb = g.q.makeCommandBuffer()!
     let lr: Float = 1e-3, wd: Float = 0.01
     let c1 = 1.0 - powi(0.9, 1), c2 = 1.0 - powi(0.999, 1)
     tr2.encodeStep(cb, b, lr: lr, wd: wd, c1: c1, c2: c2)
     cb.commit(); cb.waitUntilCompleted(); if let e = cb.error { die("GPU error: \(e)") }
-    let p2 = tr2.p.contents().assumingMemoryBound(to: Float.self)
+    let t2 = tr2.t.contents().assumingMemoryBound(to: Float.self)
     var maxStep = 0.0
-    var flips = 0
-    for i in 0..<sh.len {
+    var flips = 0, idleBad = 0, idleRows = 0
+    for i in 0..<tlen {
         let gr = Float(ref[i]) * (1.0 / Float(n))
         let m = (1.0 - Float(0.9)) * gr, v = (1.0 - Float(0.999)) * gr * gr
         let upd = (m / c1) / ((v / c2).squareRoot() + 1e-8)
-        let x = min(max(p[i] * (1.0 - lr * wd) - lr * upd, -CLIP), CLIP)
-        let d = abs(Double(p2[i]) - Double(x))
+        let idle = i < sh.ftB && !active[i / sh.h]
+        let decay: Float = wdAct && idle ? 1.0 : 1.0 - lr * wd
+        let x = min(max(t[i] * decay - lr * upd, -CLIP), CLIP)
+        let d = abs(Double(t2[i]) - Double(x))
         // Adam normalises: a near-zero gradient can flip sign between summation orders.
         if d > 1e-6 { flips += 1 }
+        // Rows absent from the batch have g = 0 exactly: their update is exact.
+        if idle {
+            if i % sh.h == 0 { idleRows += 1 }
+            if d != 0 { idleBad += 1 }
+        }
         maxStep = max(maxStep, d)
     }
-    out("  adam step: max|gpu-cpu| param \(maxStep), params differing > 1e-6: \(flips) of \(sh.len)")
-    let pass = maxAbs / maxRef < 1e-4 && fdBad == 0 && abs(lossGpu - lossRef) / lossRef < 1e-5
+    out("  adam step: max|gpu-cpu| param \(maxStep), params differing > 1e-6: \(flips) of \(tlen); FT rows not in the batch: \(idleRows), their params off: \(idleBad)")
+    var mergeBad = 0
+    if factor {
+        let merged = mergeFactor(Array(UnsafeBufferPointer(start: t2, count: tlen)), sh)
+        let p2 = tr2.p.contents().assumingMemoryBound(to: Float.self)
+        for i in 0..<sh.len where p2[i] != merged[i] { mergeBad += 1 }
+        out("  merged net after the step: \(mergeBad) of \(sh.len) params differ from W + F")
+    }
+    let pass = maxAbs / maxRef < 1e-4 && fdBad == 0 && abs(lossGpu - lossRef) / lossRef < 1e-5 && idleBad == 0 && mergeBad == 0
     out(pass ? "PASS" : "FAIL")
     exit(pass ? 0 : 1)
 }
@@ -914,6 +1077,7 @@ func cmdBench(_ args: [String]) {
     var dataPath: String? = nil
     var sh = Shape(h: 256, buckets: 1)
     var n = 16384, iters = 20
+    var factor = false, wdAct = false
     let it = Args(args)
     while let a = it.next() {
         switch a {
@@ -923,20 +1087,22 @@ func cmdBench(_ args: [String]) {
         case "--batch": n = parse(it.value(a), a)
         case "--iters": iters = parse(it.value(a), a)
         case "--king-buckets": sh.layout = layoutId(it.value(a))
+        case "--factorise", "--factorize": factor = true
+        case "--wd-active-only": wdAct = true
         default: die("unknown option \(a)")
         }
     }
     guard let dp = dataPath else { die("--data required") }
     var rng = Rng(1)
-    let p = initParams(sh, &rng)
+    let p = factor ? initFactor(sh, &rng) : initParams(sh, &rng)
     let g = Gpu()
-    let tr = Trainer(g, sh, batch: n, lambda: 0.5, params: p, m0: nil, v0: nil)
+    let tr = Trainer(g, sh, batch: n, lambda: 0.5, params: p, m0: nil, v0: nil, factor: factor, wdActive: wdAct)
     let b = Batch(g, n)
     let raw = Array(readFile(dp).prefix(n * REC))
     raw.withUnsafeBytes { b.recs.contents().copyMemory(from: $0.baseAddress!, byteCount: n * REC) }
     let names = ["decode", "forward", "sort", "grad", "adam"]
     var tot = 0.0
-    var line = "bench H=\(sh.h) B=\(sh.buckets) KB=\(sh.kb) batch=\(n):"
+    var line = "bench H=\(sh.h) B=\(sh.buckets) KB=\(sh.kb)\(factor ? " factorised" : "")\(wdAct ? " wd-active-only" : "") batch=\(n):"
     for st in -1..<5 {
         // Sustained: iters command buffers back to back (warm clocks), GPU span / iters.
         var best = 1e9
