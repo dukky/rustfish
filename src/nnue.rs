@@ -789,6 +789,150 @@ pub(crate) mod simd {
     }
 }
 
+/// AVX-512 (F + BW) kernels, chosen at runtime on top of either x86-64
+/// `simd` module below. Same integer arithmetic as the AVX2/scalar kernels,
+/// so results are bit-identical: wrapping i16 adds/subs, exact i32 products
+/// and an i64 final reduction. `RUSTFISH_NO_AVX512=1` (read once) forces the
+/// AVX2 path, for A/B checks on the same machine.
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod avx512 {
+    use super::{H, QA};
+    use std::arch::x86_64::*;
+    use std::sync::OnceLock;
+
+    const _: () = assert!(H % 64 == 0);
+
+    /// AVX-512F and AVX-512BW both present (and not disabled by env var).
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        static HAVE: OnceLock<bool> = OnceLock::new();
+        *HAVE.get_or_init(|| {
+            let off = std::env::var_os("RUSTFISH_NO_AVX512").is_some_and(|v| !v.is_empty() && v != "0");
+            !off && supported()
+        })
+    }
+
+    pub(crate) fn supported() -> bool {
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
+    }
+
+    /// # Safety
+    /// The CPU must support AVX-512F and AVX-512BW.
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(crate) unsafe fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        // SAFETY: unaligned 512-bit loads/stores at offsets i with i + 32 <= H.
+        unsafe {
+            let mut i = 0;
+            while i < H {
+                let mut v = _mm512_loadu_si512(src.as_ptr().add(i) as *const __m512i);
+                for a in adds {
+                    v = _mm512_add_epi16(v, _mm512_loadu_si512(a.as_ptr().add(i) as *const __m512i));
+                }
+                for s in subs {
+                    v = _mm512_sub_epi16(v, _mm512_loadu_si512(s.as_ptr().add(i) as *const __m512i));
+                }
+                _mm512_storeu_si512(out.as_mut_ptr().add(i) as *mut __m512i, v);
+                i += 32;
+            }
+        }
+    }
+
+    /// Requires |w| <= 127 (see `Network::small_out`).
+    /// # Safety
+    /// The CPU must support AVX-512F and AVX-512BW.
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(crate) unsafe fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        // c in [0,255], |w| <= 127 so c*w fits i16; madd(c*w, c) sums two
+        // exact i32 products. Each i32 lane collects 2*H/64 products of at
+        // most 255^2*127 (exact for H <= 16384); the lanes are reduced in
+        // i64, since the full sum can exceed i32.
+        unsafe {
+            let zero = _mm512_setzero_si512();
+            let qa = _mm512_set1_epi16(QA as i16);
+            let mut s0 = _mm512_setzero_si512();
+            let mut s1 = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < H {
+                let a0 = _mm512_loadu_si512(acc.as_ptr().add(i) as *const __m512i);
+                let a1 = _mm512_loadu_si512(acc.as_ptr().add(i + 32) as *const __m512i);
+                let c0 = _mm512_min_epi16(_mm512_max_epi16(a0, zero), qa);
+                let c1 = _mm512_min_epi16(_mm512_max_epi16(a1, zero), qa);
+                let w0 = _mm512_loadu_si512(w.as_ptr().add(i) as *const __m512i);
+                let w1 = _mm512_loadu_si512(w.as_ptr().add(i + 32) as *const __m512i);
+                s0 = _mm512_add_epi32(s0, _mm512_madd_epi16(_mm512_mullo_epi16(c0, w0), c0));
+                s1 = _mm512_add_epi32(s1, _mm512_madd_epi16(_mm512_mullo_epi16(c1, w1), c1));
+                i += 64;
+            }
+            let wide = |v: __m512i| {
+                _mm512_add_epi64(
+                    _mm512_cvtepi32_epi64(_mm512_castsi512_si256(v)),
+                    _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64::<1>(v)),
+                )
+            };
+            _mm512_reduce_add_epi64(_mm512_add_epi64(wide(s0), wide(s1)))
+        }
+    }
+
+    /// Exact i64 screlu dot for any i16 weights (the `!small_out` path).
+    /// # Safety
+    /// The CPU must support AVX-512F and AVX-512BW.
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(crate) unsafe fn screlu_dot_wide(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        // c^2 <= 65025 and |w| <= 32767: each product fits signed i32 before
+        // being widened to i64 by `_mm512_mul_epi32` (even lanes; odd via shift).
+        unsafe {
+            let zero = _mm512_setzero_si512();
+            let qa = _mm512_set1_epi16(QA as i16);
+            let mut sum = _mm512_setzero_si512();
+            let mut i = 0;
+            while i < H {
+                let a = _mm512_loadu_si512(acc.as_ptr().add(i) as *const __m512i);
+                let c16 = _mm512_min_epi16(_mm512_max_epi16(a, zero), qa);
+                let w16 = _mm512_loadu_si512(w.as_ptr().add(i) as *const __m512i);
+                let c_lo = _mm512_cvtepi16_epi32(_mm512_castsi512_si256(c16));
+                let c_hi = _mm512_cvtepi16_epi32(_mm512_extracti64x4_epi64::<1>(c16));
+                let w_lo = _mm512_cvtepi16_epi32(_mm512_castsi512_si256(w16));
+                let w_hi = _mm512_cvtepi16_epi32(_mm512_extracti64x4_epi64::<1>(w16));
+                let cc_lo = _mm512_mullo_epi32(c_lo, c_lo);
+                let cc_hi = _mm512_mullo_epi32(c_hi, c_hi);
+                let p_lo = _mm512_add_epi64(
+                    _mm512_mul_epi32(cc_lo, w_lo),
+                    _mm512_mul_epi32(_mm512_srli_epi64::<32>(cc_lo), _mm512_srli_epi64::<32>(w_lo)),
+                );
+                let p_hi = _mm512_add_epi64(
+                    _mm512_mul_epi32(cc_hi, w_hi),
+                    _mm512_mul_epi32(_mm512_srli_epi64::<32>(cc_hi), _mm512_srli_epi64::<32>(w_hi)),
+                );
+                sum = _mm512_add_epi64(sum, _mm512_add_epi64(p_lo, p_hi));
+                i += 32;
+            }
+            _mm512_reduce_add_epi64(sum)
+        }
+    }
+}
+
+/// Which NNUE kernel set this process uses (for logs / CI).
+pub(crate) fn simd_name() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if avx512::enabled() {
+            "avx512"
+        } else if is_x86_feature_detected!("avx2") {
+            "avx2"
+        } else {
+            "scalar"
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        "neon"
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        "scalar"
+    }
+}
+
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 pub(crate) mod simd {
     use super::{H, QA};
@@ -796,6 +940,10 @@ pub(crate) mod simd {
 
     #[inline(always)]
     pub(crate) fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::update(out, src, adds, subs) };
+        }
         // SAFETY: AVX2 is enabled at compile time (cfg); unaligned 256-bit
         // loads/stores at offsets < H.
         unsafe {
@@ -816,6 +964,10 @@ pub(crate) mod simd {
 
     #[inline(always)]
     pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::screlu_dot(acc, w) };
+        }
         // SAFETY: as above. c*w fits i16 (|w| <= 127), madd(c*w, c) sums two
         // exact i32 products; total bounded by `Network::small_out`.
         unsafe {
@@ -843,6 +995,10 @@ pub(crate) mod simd {
     /// i32; it is widened to i64 by `_mm256_mul_epi32` before accumulating.
     #[inline(always)]
     pub(crate) fn screlu_dot_wide(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::screlu_dot_wide(acc, w) };
+        }
         // SAFETY: AVX2 is enabled at compile time (cfg); unaligned loads at
         // offsets < H, and the accumulator is 4 i64 lanes.
         unsafe {
@@ -919,6 +1075,10 @@ pub(crate) mod simd {
 
     #[inline(always)]
     pub(crate) fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::update(out, src, adds, subs) };
+        }
         if avx2() {
             // SAFETY: the feature was detected above and all slices cover H i16s.
             unsafe { update_avx2(out, src, adds, subs) }
@@ -949,6 +1109,10 @@ pub(crate) mod simd {
 
     #[inline(always)]
     pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::screlu_dot(acc, w) };
+        }
         if avx2() {
             // SAFETY: detected above; |w| <= 127 bound as in the scalar path.
             unsafe { screlu_dot_avx2(acc, w) }
@@ -993,6 +1157,10 @@ pub(crate) mod simd {
 
     #[inline(always)]
     pub(crate) fn screlu_dot_wide(acc: &[i16; H], w: &[i16; H]) -> i64 {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::screlu_dot_wide(acc, w) };
+        }
         if avx2() {
             // SAFETY: detected above; products fit i32 as documented.
             unsafe { screlu_dot_wide_avx2(acc, w) }
@@ -1321,6 +1489,66 @@ mod tests {
             let s = simd::screlu_dot(&acc, &w);
             assert_eq!(s as i64, scalar::screlu_dot_wide(&acc, &w));
             assert_eq!(s, H as i64 * 255 * 255 * w[0] as i64);
+        }
+    }
+
+    /// The AVX-512 kernels against scalar, called directly (so it holds even
+    /// with `RUSTFISH_NO_AVX512` set); skipped on hosts without AVX-512.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx512_matches_scalar() {
+        if !avx512::supported() {
+            eprintln!("avx512_matches_scalar: host lacks AVX-512F/BW, skipped");
+            return;
+        }
+        let mut next = rng(777);
+        for iter in 0..4000 {
+            let mut rand_vec = |range: i32| -> [i16; H] {
+                let mut v = [0i16; H];
+                for x in v.iter_mut() {
+                    *x = ((next() % (2 * range as u64 + 1)) as i32 - range) as i16;
+                }
+                v
+            };
+            let src = rand_vec(32767);
+            let a0 = rand_vec(32767);
+            let a1 = rand_vec(32767);
+            let s0 = rand_vec(32767);
+            let s1 = rand_vec(32767);
+            for (adds, subs) in [
+                (vec![], vec![]),
+                (vec![&a0], vec![&s0]),
+                (vec![&a0], vec![&s0, &s1]),
+                (vec![&a0, &a1], vec![&s0, &s1]),
+                (vec![&a0, &a1, &s0, &s1], vec![&a1, &a0, &src, &s1]),
+            ] {
+                let mut o1 = [0i16; H];
+                let mut o2 = [0i16; H];
+                // SAFETY: AVX-512F/BW checked above.
+                unsafe { avx512::update(&mut o1, &src, &adds, &subs) };
+                scalar::update(&mut o2, &src, &adds, &subs);
+                assert_eq!(o1, o2);
+            }
+            let acc = rand_vec(if iter % 2 == 0 { 400 } else { 32767 });
+            let w = rand_vec(127);
+            let ww = rand_vec(32767);
+            // SAFETY: as above.
+            unsafe {
+                assert_eq!(avx512::screlu_dot(&acc, &w), scalar::screlu_dot(&acc, &w));
+                assert_eq!(avx512::screlu_dot_wide(&acc, &w), scalar::screlu_dot_wide(&acc, &w));
+                assert_eq!(avx512::screlu_dot_wide(&acc, &ww), scalar::screlu_dot_wide(&acc, &ww));
+            }
+        }
+        for v in [1000i16, -1000, 255, 0] {
+            let acc = [v; H];
+            for w in [[127i16; H], [-127i16; H], [32767i16; H], [-32768i16; H]] {
+                // SAFETY: as above.
+                let wide = unsafe { avx512::screlu_dot_wide(&acc, &w) };
+                assert_eq!(wide, scalar::screlu_dot_wide(&acc, &w));
+                if w[0].abs() <= 127 {
+                    assert_eq!(unsafe { avx512::screlu_dot(&acc, &w) }, scalar::screlu_dot(&acc, &w));
+                }
+            }
         }
     }
 

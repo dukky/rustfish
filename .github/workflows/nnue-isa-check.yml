@@ -1,0 +1,129 @@
+name: NNUE ISA check
+
+# Exactness + speed of the NNUE SIMD paths on whatever CPUs GitHub hands us.
+# Builds main (x86-64-v3) as the reference and this ref at x86-64-v3 and
+# x86-64-v4, then on each sampled runner compares `evalhash` and bench node
+# counts across: main, v3 with AVX-512 forced off (RUSTFISH_NO_AVX512=1, the
+# AVX2 kernels), v3 with runtime AVX-512, and v4 (AVX-512 at compile time;
+# only where the CPU has it). Any mismatch fails the job. Bench NPS is taken
+# as the median of interleaved runs. Uses `runners` + 1 runners briefly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runners:
+        description: "Number of runners to sample (each reports its CPU)"
+        default: "4"
+      bench_rounds:
+        description: "Interleaved bench runs per binary (median NPS)"
+        default: "5"
+  push:
+    branches: [nnue-avx512]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      runners: ${{ steps.plan.outputs.runners }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          N: ${{ inputs.runners || '4' }}
+        run: python3 -c "import json,sys; print('runners=' + json.dumps(list(range(int(sys.argv[1])))))" "$N" >> "$GITHUB_OUTPUT"
+      - name: Build main, v3, v4 and the v3 unit-test binary
+        run: |
+          rustc --version
+          mkdir -p engines
+          git worktree add --detach wt-main origin/main
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --manifest-path wt-main/Cargo.toml
+          cp wt-main/target/release/rustfish engines/main-v3
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --target-dir target/v3
+          cp target/v3/release/rustfish engines/v3
+          RUSTFLAGS="-C target-cpu=x86-64-v4" cargo build --release --target-dir target/v4
+          cp target/v4/release/rustfish engines/v4
+          # Default-flag test binary (runtime AVX2 + AVX-512 dispatch), as ci.yml builds it.
+          t=$(cargo test --release --no-run --message-format=json \
+            | python3 -c "import json,sys; print([j['executable'] for j in map(json.loads, sys.stdin) if j.get('executable')][0])")
+          cp "$t" engines/tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: isa-engines
+          path: engines
+          retention-days: 3
+
+  check:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(needs.build.outputs.runners) }}
+    name: runner ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: isa-engines
+          path: engines
+      - name: CPU
+        run: |
+          chmod +x engines/*
+          model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+          flags=$(grep -m1 '^flags' /proc/cpuinfo)
+          has() { grep -qw "$1" <<<"$flags" && echo yes || echo no; }
+          line="CPU: $model ($(nproc) vCPU) avx2=$(has avx2) avx512f=$(has avx512f) avx512bw=$(has avx512bw) avx512_vnni=$(has avx512_vnni)"
+          echo "$line"
+          echo "- runner ${{ matrix.runner }}: $line" >> "$GITHUB_STEP_SUMMARY"
+          echo "AVX512=$( [ "$(has avx512f)$(has avx512bw)" = yesyes ] && echo 1 || echo 0)" >> "$GITHUB_ENV"
+      - name: Unit tests (SIMD vs scalar)
+        run: |
+          engines/tests --nocapture avx512_matches_scalar
+          engines/tests --test-threads 2
+      - name: Compare evalhash, bench nodes and NPS
+        env:
+          ROUNDS: ${{ inputs.bench_rounds || '5' }}
+        run: |
+          python3 - <<'EOF'
+          import os, re, statistics, subprocess, sys
+          avx512 = os.environ["AVX512"] == "1"
+          variants = [("main-v3", "engines/main-v3", {}),
+                      ("v3-avx2", "engines/v3", {"RUSTFISH_NO_AVX512": "1"}),
+                      ("v3-auto", "engines/v3", {})]
+          if avx512:
+              variants += [("v4-avx2", "engines/v4", {"RUSTFISH_NO_AVX512": "1"}),
+                           ("v4-auto", "engines/v4", {})]
+          def run(path, env, cmds):
+              return subprocess.run([path], input=cmds, capture_output=True, text=True, check=True,
+                                    env={**os.environ, **env}).stdout
+          def grab(pat, out):
+              m = re.search(pat, out)
+              return m.group(1) if m else "-"
+          info = {}
+          for name, path, env in variants:
+              out = run(path, env, "evalhash\nbench\nquit\n")
+              info[name] = dict(hce=grab(r"Eval hash\s*:\s*(\S+)", out), nnue=grab(r"NNUE eval hash\s*:\s*(\S+)", out),
+                                nodes=grab(r"Nodes searched\s*:\s*(\d+)", out), simd=grab(r"NNUE SIMD\s*:\s*(\S+)", out),
+                                nps=[])
+          for _ in range(int(os.environ["ROUNDS"])):
+              for name, path, env in variants:
+                  info[name]["nps"].append(int(grab(r"Nodes/second\s*:\s*(\d+)", run(path, env, "bench\nquit\n"))))
+          ref = info["main-v3"]
+          ok = all((v["hce"], v["nnue"], v["nodes"]) == (ref["hce"], ref["nnue"], ref["nodes"]) for v in info.values())
+          base = statistics.median(info["v3-avx2"]["nps"])
+          rows = ["| binary | kernels | bench nodes | NNUE eval hash | median NPS | vs v3-avx2 |", "|---|---|---|---|---|---|"]
+          for name, v in info.items():
+              med = statistics.median(v["nps"])
+              rows.append(f"| {name} | {v['simd']} | {v['nodes']} | {v['nnue']} | {med:.0f} | {100 * (med / base - 1):+.1f}% |")
+          text = "\n".join(rows) + f"\n\nidentical evalhash + bench: **{'yes' if ok else 'NO'}**\n\n"
+          print(text)
+          print({k: v["nps"] for k, v in info.items()})
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(f"\n### runner ${{ matrix.runner }}\n\n" + text)
+          sys.exit(0 if ok else 1)
+          EOF

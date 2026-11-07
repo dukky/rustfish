@@ -85,6 +85,14 @@ jobs:
         with:
           name: datagen-engine
           path: engines
+      - name: Runner CPU
+        run: |
+          model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)
+          flags=$(grep -m1 '^flags' /proc/cpuinfo)
+          has() { grep -qw "$1" <<<"$flags" && echo yes || echo no; }
+          line="CPU: $model ($(nproc) vCPU) avx2=$(has avx2) avx512f=$(has avx512f) avx512bw=$(has avx512bw) avx512_vnni=$(has avx512_vnni)"
+          echo "$line"
+          echo "- shard ${{ matrix.shard }}: $line" >> "$GITHUB_STEP_SUMMARY"
       - name: Generate
         env:
           SHARD: ${{ matrix.shard }}
