@@ -897,7 +897,7 @@ fn search_root_parallel(
     if let Some(mv) = best_move {
         worker_engines[0]
             .tt
-            .store(hash, depth, score_to_tt(best_score, 0), None, bound, Some(mv));
+            .store(hash, depth, score_to_tt(best_score, 0), None, bound, Some(mv), true);
         if let Some(ordered) = best_root_order {
             root_moves.clone_from_slice(&ordered);
         }
@@ -1071,7 +1071,7 @@ fn search_root(
     };
     engine
         .tt
-        .store(key, depth, score_to_tt(best_score, 0), None, bound, best_move);
+        .store(key, depth, score_to_tt(best_score, 0), None, bound, best_move, true);
 
     (best_score, best_move, true)
 }
@@ -1169,6 +1169,9 @@ fn negamax(
     let excluded = search.excluded[ply];
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
+    // ttPv: a PV node now, or one when its TT entry was stored. Kept in the
+    // TT so the flag survives the node later being searched with a null window.
+    let tt_pv = beta - alpha > 1 || tt_entry.is_some_and(|e| e.pv);
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
@@ -1371,6 +1374,7 @@ fn negamax(
                         raw_static_eval,
                         Bound::Lower,
                         Some(mv),
+                        tt_pv,
                     );
                     return score;
                 }
@@ -1567,6 +1571,8 @@ fn negamax(
             } else {
                 0
             };
+            // ttPv nodes (PV now or when stored) reduce less.
+            let reduction = if tt_pv { (reduction - params.lmr_tt_pv).max(0) } else { reduction };
             let reduced = reduction > 0;
             let reduced_depth = (depth - 1 - reduction).max(0);
 
@@ -1665,6 +1671,7 @@ fn negamax(
                     raw_static_eval,
                     Bound::Lower,
                     best_move,
+                    tt_pv,
                 );
             }
             return alpha;
@@ -1684,7 +1691,7 @@ fn negamax(
     };
     engine
         .tt
-        .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
+        .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move, tt_pv);
 
     best
 }
@@ -1830,6 +1837,7 @@ fn quiescence(
                     raw_static_eval,
                     Bound::Lower,
                     Some(mv),
+                    tt_entry.is_some_and(|e| e.pv),
                 );
             return beta;
         }
@@ -1842,7 +1850,15 @@ fn quiescence(
     let bound = if alpha <= alpha_orig { Bound::Upper } else { Bound::Exact };
     engine
         .tt
-        .store(key, 0, score_to_tt(alpha, ply), raw_static_eval, bound, best_move.or(tt_move));
+        .store(
+            key,
+            0,
+            score_to_tt(alpha, ply),
+            raw_static_eval,
+            bound,
+            best_move.or(tt_move),
+            tt_entry.is_some_and(|e| e.pv),
+        );
     alpha
 }
 
@@ -2570,6 +2586,7 @@ mod tests {
                     None,
                     Bound::Exact,
                     None,
+                    false,
                 );
 
                 let mut rep_stack = vec![key];
