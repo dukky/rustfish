@@ -249,3 +249,4 @@
 {"base_sha": "20c0424c0e049fb5b327df62903b93c2342e29ce", "branch": "nnue-g4", "logged_at": "2026-11-07T09:38:07Z", "mode": "net-gate", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "54d584c2c0a08eca32d5b12daa94bf71b6cc0ea5", "test_id": "q-nnue-g4-1107-0938"}
 {"branch": "nnue-g4", "elo": 26.74, "elo_ci95": [10.11, 43.5], "games": 768, "llr": 3.028, "logged_at": "2026-11-07T09:44:02Z", "mode": "net-gate", "outcome": "merged", "sha": "54d584c2c0a08eca32d5b12daa94bf71b6cc0ea5", "test_id": "q-nnue-g4-1107-0938", "verdict": "H1"}
 {"branch": "main", "logged_at": "2026-11-07T09:44:03Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "0aaf3b98c791792f5985313a738210e2fca58e47", "test_id": "q-ladder-1107-0944"}
+{"branch": "main", "logged_at": "2026-11-07T10:39:51Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 27, "sha": "6637838eb67ae4b5c181601126d997d857dcd4cd"}
