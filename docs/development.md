@@ -158,6 +158,19 @@ against the current `main`, so a stale base can't happen.
   The `dispatched` log row carries a `priority` field with the score and its
   inputs. `python3 scripts/queue.py rates` prints the base rates and the pick
   order for the live queue without changing anything.
+- **Datagen bursts.** When the item the queue would start next scores below
+  `burst.below_score` (default 0.04, about a low-value simplification nonreg),
+  or nothing is pending (`burst.when_idle`), it runs one datagen seed on the 16
+  foreground runners instead (`max_parallel` 16, 16 shards x 15000 games,
+  ~15-20 min; mode `datagen-burst` in the log, then `burst-done`). Seeds come
+  from the same `next_seed` counter as the background lane. Items keep their
+  place and nobody counts as passed over; when the burst's datagen run calls
+  back, the queue picks again, so a better item added meanwhile goes first.
+  At most `burst.max_consecutive` (2) bursts run in a row while items wait,
+  then the item runs. Front, ladder and `ltc-check` items never wait for a
+  burst, and `--preempt` does not interrupt one. Turn it off with
+  `"enabled": false` in the `burst` block of `scripts/queue-settings.json`;
+  `burst.shards` must be a multiple of `burst.max_parallel`.
 - A schedule runs the queue every 30 minutes as a heartbeat: it picks up inbox
   requests, and if the SPRT callback was lost it finds the current test's final
   result itself. `datagen.yml` also calls the queue back when a run ends, so

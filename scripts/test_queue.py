@@ -7,6 +7,7 @@ The fast-forward / replay tests run real git against a throwaway bare
 "origin" and clone in a temp dir; cargo, gh and the engine are mocked, so
 nothing touches GitHub or builds anything.
 """
+import datetime
 import importlib.util
 import json
 import os
@@ -383,6 +384,183 @@ class BackgroundLane(unittest.TestCase):
     def test_other_running_datagen_blocks(self):
         state, cmds = self.lane([{"databaseId": 41, "status": "in_progress"}], "42")
         self.assertEqual((state["next_seed"], cmds), (20, []))
+
+    def test_running_burst_does_not_block(self):
+        title = "Datagen main seed 19 (16x15000 games, 5000 nodes)"
+        cmds = []
+        runs = [{"databaseId": 41, "status": "in_progress", "displayTitle": title}]
+        with mock.patch.object(q, "out", lambda *c, **k: json.dumps(runs) if c[:3] == ("gh", "run", "list") else "sha"), \
+                mock.patch.object(q, "sh", lambda *c, **k: cmds.append(c)), \
+                mock.patch.object(q, "log"), \
+                mock.patch.dict(os.environ, {"FINISHED_RUN": ""}):
+            state = {"next_seed": 20, "current": {"mode": q.BURST_MODE, "seed": 19, "test_id": "q-burst-s19"}}
+            q.background_lane(state)
+        self.assertEqual(state["next_seed"], 21)
+        self.assertIn("seed=20", cmds[0])
+        self.assertIn("max_parallel=3", cmds[0])
+
+
+BURST_ON = {"enabled": True, "below_score": 0.04, "max_consecutive": 2, "when_idle": True,
+            "shards": 16, "max_parallel": 16, "games_per_shard": 15000, "nodes": 5000}
+LOW = {"branch": "simp", "mode": "nonreg", "expect": 1.0}     # score ~0.01
+HIGH = {"branch": "feat", "mode": "stc", "expect": 20.0}      # score ~0.3
+
+
+class Burst(unittest.TestCase):
+    """Datagen bursts on the foreground runners (burst_reason / start_burst / burst_done)."""
+
+    def run_advance(self, state, burst=BURST_ON, runs=(), finished="", real_lane=False):
+        """One advance with gh mocked. Returns (started items, datagen dispatches, log rows)."""
+        started, dispatched, logs = [], [], []
+
+        def fake_start(item, st=None, priority=None):
+            started.append(item["branch"])
+            return {"test_id": f"q-{item['branch']}", "sha": "x", "base_sha": "y"}
+
+        def fake_out(*cmd, **kw):
+            if cmd[:3] == ("gh", "run", "list"):
+                return json.dumps(list(runs))
+            return "mainsha"
+
+        def fake_sh(*cmd, **kw):
+            if cmd[:4] == ("gh", "workflow", "run", "datagen.yml"):
+                dispatched.append(dict(a.split("=", 1) for a in cmd if "=" in a and not a.startswith("--")))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        patches = [mock.patch.object(q, "load_state", return_value=state),
+                   mock.patch.object(q, "save_state"),
+                   mock.patch.object(q, "find_result", return_value=None),
+                   mock.patch.object(q, "read_log", return_value=log_rows()),
+                   mock.patch.object(q, "log", logs.append),
+                   mock.patch.object(q, "start", fake_start),
+                   mock.patch.object(q, "out", fake_out),
+                   mock.patch.object(q, "sh", fake_sh),
+                   mock.patch.object(q, "BURST", burst),
+                   mock.patch.dict(os.environ, {"RESULT": "", "FINISHED_RUN": finished})]
+        if not real_lane:
+            patches.append(mock.patch.object(q, "background_lane"))
+        for p in patches:
+            p.start()
+        try:
+            q.advance()
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        return started, dispatched, logs
+
+    def done_runs(self, state):
+        """The in-flight burst's datagen run, completed."""
+        seed = state["current"]["seed"]
+        return [{"databaseId": 900 + seed, "status": "completed",
+                 "displayTitle": f"Datagen main seed {seed} (16x15000 games, 5000 nodes)"}]
+
+    def test_burst_when_best_score_below_threshold(self):
+        state = {"pending": [dict(LOW)], "current": None, "next_seed": 30}
+        started, dispatched, logs = self.run_advance(state)
+        self.assertEqual(started, [])
+        self.assertEqual(dispatched, [{"ref": "main", "shards": "16", "games_per_shard": "15000",
+                                       "nodes": "5000", "seed": "30", "max_parallel": "16"}])
+        self.assertEqual(state["current"]["mode"], "datagen-burst")
+        self.assertEqual(state["current"]["seed"], 30)
+        self.assertEqual(state["next_seed"], 31)
+        self.assertEqual(state["pending"], [LOW])  # keeps its place, not passed over
+        self.assertEqual(state["consecutive_bursts"], 1)
+        row = logs[-1]
+        self.assertEqual((row["mode"], row["outcome"], row["seed"]), ("datagen-burst", "dispatched", 30))
+        self.assertIn("simp:nonreg", row["reason"])
+
+    def test_no_burst_when_high_value_item_pending(self):
+        state = {"pending": [dict(LOW), dict(HIGH)], "current": None, "next_seed": 30}
+        started, dispatched, _ = self.run_advance(state)
+        self.assertEqual((started, dispatched), (["feat"], []))
+        self.assertEqual(state["current"]["test_id"], "q-feat")
+        self.assertEqual(state["next_seed"], 30)
+
+    def test_no_burst_for_front_or_scheduled_items(self):
+        for item in (dict(LOW, front=True), {"branch": "main", "mode": "ladder"}):
+            state = {"pending": [item], "current": None, "next_seed": 30}
+            started, dispatched, _ = self.run_advance(state)
+            self.assertEqual((started, dispatched), ([item["branch"]], []))
+
+    def test_consecutive_burst_cap(self):
+        state = {"pending": [dict(LOW), dict(LOW, branch="simp2")], "current": None, "next_seed": 30}
+        seq = []
+        for _ in range(6):
+            runs = self.done_runs(state) if state.get("current", {}) and \
+                state["current"]["mode"] == "datagen-burst" else []
+            if state.get("current") and state["current"]["mode"] != "datagen-burst":
+                state["current"] = None  # the item's SPRT ended
+            started, dispatched, _ = self.run_advance(state, runs=runs)
+            seq += [f"burst{d['seed']}" for d in dispatched] + started
+        self.assertEqual(seq, ["burst30", "burst31", "simp", "burst32", "burst33", "simp2"])
+        self.assertEqual(state["next_seed"], 34)
+        self.assertEqual(state["consecutive_bursts"], 0)
+
+    def test_burst_ends_on_its_own_callback_only(self):
+        title = "Datagen main seed 30 (16x15000 games, 5000 nodes)"
+        bg = "Datagen main seed 29 (16x15000 games, 5000 nodes)"
+        cur = {"branch": "main", "mode": "datagen-burst", "test_id": "q-burst-s30", "seed": 30,
+               "started": q.now()}
+        runs = [{"databaseId": 7, "status": "in_progress", "displayTitle": title},
+                {"databaseId": 6, "status": "in_progress", "displayTitle": bg}]
+        # The background lane's run calling back does not end the burst.
+        state = {"pending": [dict(HIGH)], "current": dict(cur), "next_seed": 31}
+        started, _, _ = self.run_advance(state, runs=runs, finished="6")
+        self.assertEqual((started, state["current"]["test_id"]), ([], "q-burst-s30"))
+        # Its own callback does (the run is still in progress while it calls back),
+        # and the queue re-picks at once: the high-value item added meanwhile goes.
+        started, dispatched, logs = self.run_advance(state, runs=runs, finished="7")
+        self.assertEqual((started, dispatched), (["feat"], []))
+        self.assertIn({"mode": "datagen-burst", "outcome": "burst-done", "seed": 30},
+                      [{k: r.get(k) for k in ("mode", "outcome", "seed")} for r in logs])
+
+    def test_lost_burst_does_not_wedge(self):
+        old = (datetime.datetime.utcnow() - datetime.timedelta(hours=3)).isoformat(timespec="seconds") + "Z"
+        cur = {"branch": "main", "mode": "datagen-burst", "test_id": "q-burst-s30", "seed": 30, "started": old}
+        state = {"pending": [dict(HIGH)], "current": dict(cur), "next_seed": 31}
+        started, _, _ = self.run_advance(state)
+        self.assertEqual(started, ["feat"])
+        state = {"pending": [dict(HIGH)], "current": dict(cur, started=q.now()), "next_seed": 31}
+        started, _, _ = self.run_advance(state)
+        self.assertEqual(started, [])  # just dispatched, not listed yet: keep waiting
+
+    def test_seed_counter_shared_with_background_lane(self):
+        state = {"pending": [dict(LOW)], "current": None, "next_seed": 40}
+        _, dispatched, logs = self.run_advance(state, real_lane=True)
+        self.assertEqual([(d["seed"], d["max_parallel"]) for d in dispatched], [("40", "16"), ("41", "3")])
+        self.assertEqual([r["mode"] for r in logs], ["datagen-burst", "datagen"])
+        self.assertEqual(state["next_seed"], 42)
+
+    def test_idle_foreground_bursts(self):
+        state = {"pending": [], "current": None, "next_seed": 50, "consecutive_bursts": 2}
+        _, dispatched, logs = self.run_advance(state)
+        self.assertEqual([d["seed"] for d in dispatched], ["50"])
+        self.assertEqual(logs[-1]["reason"], "foreground idle")
+        self.assertEqual(state["consecutive_bursts"], 0)  # nothing waited on it
+        state = {"pending": [], "current": None, "next_seed": 50}
+        _, dispatched, _ = self.run_advance(state, burst=dict(BURST_ON, when_idle=False))
+        self.assertEqual((dispatched, state["current"]), ([], None))
+
+    def test_disabled(self):
+        for burst in (dict(BURST_ON, enabled=False), {}):
+            state = {"pending": [dict(LOW)], "current": None, "next_seed": 30}
+            started, dispatched, _ = self.run_advance(state, burst=burst)
+            self.assertEqual((started, dispatched), (["simp"], []))
+            state = {"pending": [], "current": None, "next_seed": 30}
+            _, dispatched, _ = self.run_advance(state, burst=burst)
+            self.assertEqual(dispatched, [])
+
+    def test_paused_queue_does_not_burst(self):
+        state = {"pending": [dict(LOW)], "current": None, "next_seed": 30, "paused": "x"}
+        self.assertEqual(self.run_advance(state)[1], [])
+
+    def test_settings_validation(self):
+        base = {"modes": {"stc": {"shards": 16}}}
+        q.validate_settings(dict(base, burst=BURST_ON))
+        q.validate_settings(dict(base, burst=dict(BURST_ON, enabled=False, shards=5)))
+        for bad in ({"shards": 20}, {"max_parallel": 17, "shards": 17}, {"max_parallel": 8, "shards": 12}):
+            with self.assertRaises(SystemExit):
+                q.validate_settings(dict(base, burst=dict(BURST_ON, **bad)))
 
 
 if __name__ == "__main__":

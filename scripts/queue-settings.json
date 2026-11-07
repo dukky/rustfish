@@ -1,6 +1,16 @@
 {
   "check_every": 5,
   "ladder_every": 5,
+  "burst": {
+    "enabled": true,
+    "below_score": 0.04,
+    "max_consecutive": 2,
+    "when_idle": true,
+    "shards": 16,
+    "max_parallel": 16,
+    "games_per_shard": 15000,
+    "nodes": 5000
+  },
   "ladder": {
     "games_per_anchor": "64",
     "tc": "120+1",
