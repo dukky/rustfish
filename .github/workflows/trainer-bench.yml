@@ -2,15 +2,13 @@ name: Trainer bench
 
 # CPU NNUE trainer throughput on GitHub's mixed x86 runners (EPYC Zen 3/4/5,
 # Xeon): the trainer on main vs this branch, H=512 B=8, plus an exact-parity
-# check (branch `--exact` vs main `--threads 1`, bit-identical nets). Runs on
-# push to the trainer-x86-speed branch only, 3 jobs, a few minutes each.
+# check (branch `--exact` vs main `--threads 1`, bit-identical nets). Started
+# by hand (trainer-x86-speed is merged, so its push trigger is gone):
+#   gh workflow run trainer-bench.yml --ref <branch>
+# 3 jobs, a few minutes each.
 
 on:
-  push:
-    branches: [trainer-x86-speed]
-    paths:
-      - "tools/nnue-trainer/**"
-      - ".github/workflows/trainer-bench.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read

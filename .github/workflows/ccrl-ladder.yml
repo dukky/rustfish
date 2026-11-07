@@ -19,6 +19,9 @@ on:
       shards:
         description: "Parallel jobs per anchor"
         default: "2"
+      max_parallel:
+        description: "Max play jobs at once; the merge queue passes its foreground width (MAX_FOREGROUND_SHARDS from scripts/queue-settings.json lanes)"
+        default: "6"
       anchors:
         description: "Comma-separated anchor names, or 'all'"
         default: "all"
@@ -76,8 +79,10 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
-      # 16 of the 20 runners; the background lane (datagen) keeps the other 4.
-      max-parallel: 6
+      # The foreground share of the 20 runners (set by the queue from its
+      # lanes settings); the background lane (datagen) and the queue's own job
+      # keep the rest.
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     name: ${{ matrix.name }} / shard ${{ matrix.shard }}
     steps:

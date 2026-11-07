@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # push rebased candidates, fast-forward main, update queue-state
+  contents: write   # push rebased candidates, fast-forward main, pin refs/queue/*, update queue-state
   actions: write    # dispatch sprt.yml
 
 jobs:

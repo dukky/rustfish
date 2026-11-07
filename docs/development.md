@@ -32,8 +32,10 @@ sanity; GitHub Actions (public repo, free) does every strength measurement.
 | Time management change | usually unchanged | LTC gainer (STC barely exercises it) | `[0, 5]` with `--ltc --gainer` |
 
 Compute is the bottleneck, so three choices keep tests fast without raising
-the false-accept rate (still 5%): waves start at 512 STC games and double up
-to 2,048, so clear results stop early; STC bounds are `[0, 10]` while big gains
+the false-accept rate (still 5%): waves start small (192 STC games on the 6
+foreground runners) and double up to a cap (`max_rounds_per_shard` in
+`scripts/queue-settings.json`), so clear results stop early; hand STC bounds
+(`ci.py sprt`) are `[0, 10]` while big gains
 are still available (borderline tests ~4x shorter, but real +2..5 patches
 often fail — return to `[0, 5]` when typical gains shrink); and LTC is run on
 batches of merged search changes rather than every patch.
@@ -91,15 +93,18 @@ python3 scripts/gauntlet.py --engine-a ./target/release/rustfish --engine-b ../r
 ```bash
 git commit          # include "Bench: <nodes>" if behavior changed
 git push -u origin <idea-name>
-python3 scripts/ci.py sprt <idea-name>            # STC [0, 5]; follows every wave
+python3 scripts/ci.py sprt <idea-name>            # STC [0, 10]; follows every wave
 python3 scripts/ci.py sprt <idea-name> --ltc      # after an STC pass, for search changes: LTC [-5, 0]
 python3 scripts/ci.py sprt <idea-name> --nonreg   # simplifications
 ```
 - Pushing the branch also runs CI (build, tests, perft, selftest, bench).
 - `--no-wait` dispatches and exits; `--resume <test_id>` re-attaches later.
-- Each wave plays 2,048 STC games in about 15 minutes. Clear winners or
-  losers usually stop in 1-2 waves; a real +3..+5 patch can take 5-10.
-  `inconclusive` after 10 waves (about 20k games) means the effect is too
+- Shards default to the merge queue's foreground width (20 runners minus
+  `lanes.background_parallel` minus 1; 6 today) and wave sizes to the queue's
+  `stc` / `ltc-gainer` modes, so a hand test fits beside the background lane:
+  STC waves of 192, 384, 768, 1,536, then 2,496 games. Clear winners or
+  losers usually stop in 2-3 waves; a real +3..+5 patch can take 5-10.
+  `inconclusive` after 10 waves (about 18k games) means the effect is too
   small to matter: treat it as a fail.
 - Results appear in the run's job summary and in `tests/sprt-log.jsonl`.
 
@@ -123,8 +128,9 @@ against the current `main`, so a stale base can't happen.
 - State lives on the `queue-state` branch: `queue.json` (`pending` list of
   `{branch, mode}`, plus the in-flight `current`) and `log.jsonl` (every
   outcome: merged / rejected / needs-human / skipped).
-- Modes: `stc` (gainer `[0, 10]`), `nonreg` (`[-5, 0]`), `ltc-gainer`
-  (`[0, 10]` at 60+0.6), `speedup` (no SPRT; merges only if bench nodes equal
+- Modes (bounds and wave sizes in `scripts/queue-settings.json`): `stc`
+  (gainer `[0, 5]`), `nonreg` (`[-5, 0]`), `ltc-gainer` (`[0, 10]` at
+  60+0.6), `net-gate` (`[0, 10]` at 5+0.05, for nets), `speedup` (no SPRT; merges only if bench nodes equal
   `main`'s and the `evalhash` command gives the same hash as a `main` build:
   bench alone can't see an eval change that happens not to alter the bench
   tree). `evalhash` prints the HCE `Eval hash` and, when a net is active (the
@@ -142,9 +148,12 @@ against the current `main`, so a stale base can't happen.
   `queue-state`'s `inbox/`, which the next queue run consumes. Don't pass work
   as workflow inputs or edit `queue.json` by hand: GitHub cancels all but one
   pending run per concurrency group, so inputs can silently vanish.
-- **Speedups don't wait.** Every queue run merges all pending `speedup` items
-  at once, even while an SPRT or ladder is in flight (they use no runners).
-  Their commits are recorded in `queue.json`'s `identical_merges`.
+- **Speedups don't wait.** Every queue run merges pending `speedup` items at
+  once, even while an SPRT or ladder is in flight (they use no runners); at
+  most 2 per run (`MAX_SPEEDUPS_PER_RUN`: each builds the candidate and
+  `main`), and the run re-dispatches the queue for the rest. Their commits are
+  recorded in `queue.json`'s `identical_merges`. A speedup whose merge is
+  refused because `main` moved while it was built goes back to the front.
 - **Priority, not FIFO.** The next SPRT is the pending item with the highest
   expected Elo per runner-hour: `p_accept * gain / runner_hours`, with
   `runner_hours = shards * (p * hours_if_accepted + (1 - p) * hours_if_rejected)`.
@@ -153,16 +162,18 @@ against the current `main`, so a stale base can't happen.
   pseudo-samples, so a mode with few results gets sane defaults). Ties go to
   the older item. Overrides, in order: `--front` items (and requeued, retried
   or preempted ones) run first in queue order; a `ladder` or `ltc-check` keeps
-  its place, so nothing queued behind it jumps ahead; an item jumped over 3
-  times goes next, so a costly ltc-gainer can't starve behind cheap STCs.
+  its place, so nothing queued behind it jumps ahead; an item jumped over
+  max(3, number of items waiting) times goes next, so a costly ltc-gainer
+  can't starve behind cheap STCs.
   The `dispatched` log row carries a `priority` field with the score and its
   inputs. `python3 scripts/queue.py rates` prints the base rates and the pick
   order for the live queue without changing anything.
 - **Datagen bursts.** When the item the queue would start next scores below
-  `burst.below_score` (default 0.04, about a low-value simplification nonreg),
-  or nothing is pending (`burst.when_idle`), it runs one datagen seed on the 16
-  foreground runners instead (`max_parallel` 16, 16 shards x 15000 games,
-  ~15-20 min; mode `datagen-burst` in the log, then `burst-done`). Seeds come
+  `burst.below_score` (0.1 in the settings; scores scale with 1/shards, so
+  retune it when the lanes change), or nothing is pending (`burst.when_idle`),
+  it runs one datagen seed on the foreground runners instead (`burst` block:
+  `max_parallel` 6, 12 shards x 15000 games, so two rounds of ~25 min, about
+  an hour in all; mode `datagen-burst` in the log, then `burst-done`). Seeds come
   from the same `next_seed` counter as the background lane. Items keep their
   place and nobody counts as passed over; when the burst's datagen run calls
   back, the queue picks again, so a better item added meanwhile goes first.
@@ -175,16 +186,43 @@ against the current `main`, so a stale base can't happen.
   requests, and if the SPRT callback was lost it finds the current test's final
   result itself. `datagen.yml` also calls the queue back when a run ends, so
   the background lane starts its next seed at once.
+- **Runner lanes** (`lanes` in `scripts/queue-settings.json`): the background
+  datagen lane gets `background_parallel` runners (13 today, `background_shards`
+  26 = two rounds), the queue's own job 1, and the foreground (SPRTs, ladders,
+  bursts) the rest of the 20 (`MAX_FOREGROUND_SHARDS`, 6 today). Before
+  starting a background seed the queue charges other live runs against the
+  lane (SPSA and train sweeps 16 each, a hand-started ladder or `ci.py` SPRT
+  the foreground width; the queue's own `q-...` runs are the foreground) and
+  shrinks the seed to what is left, keeping its two rounds, or skips it.
+- `--preempt` cancels the in-flight test's listed waves and remembers its
+  title for 12 hours (`cancel_sweep` in `queue.json`): a wave dispatched
+  moments before, not yet listed by `gh run list`, is cancelled on a later run.
+- State is saved after every merge and dispatch, not only at the end of a
+  run, so a run killed by the 60-minute job timeout can't lose a merge, the
+  seed counter or a dispatched test.
 - If `main` moved during a test only outside the engine sources (`src/`,
   `net/nnue.bin`, `Cargo.*`, `build.rs`) or by recorded speedup merges, a
   passing candidate is replayed onto `main` without a retest. After speedups
-  the replayed tree differs from the tested one, so it is rebuilt, perft and
-  selftest are rerun, and its bench must equal the tested candidate's;
-  otherwise (or after any other engine change, or a replay conflict) it is
-  requeued at the front.
-- `scripts/queue-settings.json` is validated on load: every SPRT mode must use
-  at most 16 shards (the 16 foreground runners; 3 are the background lane and
-  1 is kept for the queue's own job).
+  the replayed tree differs from the tested one, so it is rebuilt, `cargo
+  test`, perft and selftest are rerun, and its bench and `evalhash` must equal
+  the tested candidate's; otherwise (or after any other engine change, or a
+  replay conflict) it is requeued at the front.
+- The push to `main` is never forced, so it can lose a race with anyone else
+  pushing `main` (netloop rows, ladder logs, hand-pushed commits): the queue
+  then re-fetches and decides again (replay, or requeue on an engine change),
+  up to 3 times. The tested sha is pinned at dispatch as `refs/queue/<test_id>`
+  (deleted when the test ends), so a force-push of the branch during a test
+  can't lose it; the queue's own branch pushes use `--force-with-lease`, and if
+  the branch changed under it the new commits are kept: before the test the
+  item is retried, after a merge the row says needs-human (they weren't merged).
+  An error while finishing a result requeues the item (once) instead of
+  failing the run before state is saved.
+- `scripts/queue-settings.json` is validated on load: `lanes.background_shards`
+  must be a multiple of `lanes.background_parallel`, and every SPRT mode,
+  `burst.max_parallel` and `ladder.max_parallel` (if set) must fit in the
+  foreground (`MAX_FOREGROUND_SHARDS` = 20 - 1 - `background_parallel`).
+  `test_queue.py` also checks each mode's total game cap (all waves) against a
+  minimum (stc/nonreg 15,000, ltc 4,000, net-gate 1,500).
 - Tests: `python3 scripts/test_queue.py` (stdlib unittest; real git in a temp
   dir, cargo/gh/engine mocked).
 - `needs-human` entries (rebase conflict, failed checks) are skipped; fix the
@@ -194,7 +232,9 @@ against the current `main`, so a stale base can't happen.
   `main` vs the `main` from 5 merges back. If it fails the queue pauses
   (`regression-alert` in the log) until `python3 scripts/queue.py unpause`.
 - Every 5 merges (`ladder_every` in `scripts/queue-settings.json`) it also runs
-  a CCRL ladder on `main` (elite anchors, 120+1, ~2 h). The ladder workflow
+  a CCRL ladder on `main` (elite anchors, 120+1; 11 anchors x 2 shards = 22
+  jobs at `max_parallel` = the foreground width, 6 today, so four rounds and
+  roughly 3.5-4 h, against ~2 h when it ran 16 wide). The ladder workflow
   appends the fitted rating to `tests/ladder-log.jsonl` on `main` itself, so the
   dashboard chart updates with no one involved. Run one sooner with
   `python3 scripts/queue.py add main:ladder --front`.
@@ -289,7 +329,9 @@ this pipeline before ruling it out again.
 | `.github/workflows/datagen.yml` | sharded self-play training data (docs/nnue.md) |
 | `tests/sprt-log.jsonl`, `tests/ladder-log.jsonl` | the record of every result |
 
-Capacity: GitHub runs about 20 jobs at once for this account. An STC wave uses
-19 (plus one build job) and a ladder uses about 20, so run them one at a time.
+Capacity: GitHub runs about 20 jobs at once for this account, split into the
+lanes above (`lanes` in `scripts/queue-settings.json`). Hand SPRTs and ladders
+(`ci.py`) default to the foreground width, so while the queue is busy they
+compete with its foreground: run them one at a time.
 SPRT binaries are built once per wave with `-C target-cpu=x86-64-v3` and shared
 with the shards.
