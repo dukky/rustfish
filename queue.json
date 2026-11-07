@@ -4,13 +4,7 @@
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 1
-    },
-    {
-      "branch": "feat-lmr-cutnode",
-      "mode": "stc",
-      "expect": 8.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "feat-se-negext",
@@ -73,14 +67,15 @@
     }
   ],
   "current": {
-    "branch": "nnue-g4l3",
-    "mode": "net-gate",
-    "expect": 5.0,
-    "test_id": "q-nnue-g4l3-1107-1123",
-    "sha": "4c825f77c4b90cb623e5563e38b3d5fda89285e4",
-    "base_sha": "caf535e840e5a3fe0c828ce7594fcbe9ed53bf06",
-    "started": "2026-11-07T11:23:55Z",
-    "bench": 685931
+    "branch": "feat-lmr-cutnode",
+    "mode": "stc",
+    "expect": 8.0,
+    "passed_over": 1,
+    "test_id": "q-feat-lmr-cutnode-1107-1136",
+    "sha": "479dc0acd9a175c52c5423210253b047614cb4a9",
+    "base_sha": "645a770a25b192e97b70bc9a6de47c9919cf4bf2",
+    "started": "2026-11-07T11:36:32Z",
+    "bench": 599090
   },
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
   "merges_since_check": 1,
