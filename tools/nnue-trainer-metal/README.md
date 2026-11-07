@@ -29,7 +29,8 @@ $M bench --data recs.bin --hidden 1024 --buckets 8   # per-kernel GPU time for o
 
 Flags: `--data` (repeatable) `--val --out --hidden --buckets --king-buckets --epochs
 --epoch-size --batch --lr --lr-end --wd --lambda --seed --mirror --init
---resume --checkpoint`. `--threads` is accepted and ignored. Writes
+--resume --checkpoint --factorise --wd-active-only --no-wd-active-only`.
+`--threads` is accepted and ignored. Writes
 `<out>.eN.bin` per epoch, `<out>.ckpt`, and `<out>`. At exit it prints one
 line on stderr: time spent waiting for the loader, waiting for the GPU,
 and GPU busy time.
@@ -125,18 +126,22 @@ Per batch, one command buffer:
 2. **forward_train**: one threadgroup per position, float4 columns;
    stores the pre-activation accumulators, the output gradient
    `2 err p (1-p)` and the loss.
-3. **sort_entries**: per 128-position range, buckets the 256 rows' active
+3. **plan_rows** (one threadgroup) orders the rows (position x
+   perspective) by king bucket, stably, and cuts them into ranges of 256
+   rows and work items of up to 1/16 of the batch (identity order with one
+   king bucket). **sort_entries**: per range, buckets the 256 rows' active
    features by feature, deterministically (a 256-bit row mask per feature,
    then rows emitted in order) and writes CSR offsets.
-4. **grad_fused**: threadgroup = (32-column tile, 1/16 of the batch),
+4. **grad_fused**: threadgroup = (32-column tile, work item),
    1024 threads = 32 simdgroups x 32 lanes (lane = column). For each range
    it stages `dacc[256 rows][32]` in threadgroup memory, collecting the
    output-weight and FT-bias gradients from the same accumulator reads.
    Simdgroup k then sums the staged rows of features k, k+32, ... into
    registers. No atomics, uniform control flow, conflict-free loads. Each
    threadgroup writes its own partial-gradient slice.
-5. **grad_ob** (output bias) and **adam**: sum the 16 partials in fixed
-   order, AdamW + clip, all parameters dense.
+5. **grad_ob** (output bias) and **adam**: sum the partials in fixed
+   order (an FT row: the items of its king bucket), AdamW + clip, all
+   parameters dense.
 
 Validation uses the same forward kernel on a GPU-resident decoded val set.
 For the quantised loss, the CPU quantises and dequantises the weights and
@@ -161,16 +166,23 @@ GPU:
 - `decode` finds both kings first and writes `bucket*768 + ...` indices
   (the layout table travels in `Cfg`). `meta` also carries each row's king
   bucket.
-- `sort_entries` runs per (range, king bucket): every row's features are in
-  its king's block, so each group builds the same 768-feature CSR as before
-  from its own rows (24 KB of masks, unchanged).
-- `grad_fused` gets a third grid dimension, the king bucket. Group kb sums
-  only its block's features into the same register layout; bucket 0 also
-  produces the FT-bias and output gradients, other buckets load only their
-  own rows and skip empty ranges. The fixed order of every sum is kept, so
-  training is still deterministic.
+- `plan_rows` sorts the batch's rows by king bucket (stable, so with one
+  bucket nothing moves). Every row's features are in its king's 768-row
+  block, so each bucket's rows are a dense 768-feature problem: ranges of
+  256 rows of one bucket get the same CSR as before (24 KB of masks), and a
+  work item (a run of up to `per` ranges of one bucket, `per` = the
+  one-bucket super-range length) sums into the same register layout. Every
+  row is staged exactly once, so the work is that of one bucket plus at
+  most one partial range per bucket. Items write 768 FT rows + FT bias +
+  output weights; `adam` sums an FT row over its bucket's items, the rest
+  over all items, in fixed order: training stays deterministic.
+- KB = 1 uses `grad_fused1`, the same code with the row lookup and the
+  per-side output-gradient registers compiled out; its summation order is
+  the original one, so one-bucket nets (`none`, `m1`) are bit-identical to
+  the trainer before king buckets.
 
-Validation: `gradcheck.sh` covers kb8m (H 32/B 8, H 256/B 8), kb4m with
+Validation: `gradcheck.sh` covers kb8m (H 32/B 8, H 256/B 8, H 64/B 8
+with `--mirror` and a batch that is not a multiple of 128), kb4m with
 `--mirror`, kb4, m1, all PASS with errors the same size as one-bucket nets.
 Parity on 4M records of `pool2.bin`, 1 epoch, `--val` = first 100k of
 `val.bin`:
@@ -186,12 +198,74 @@ Each evaluator gives the other trainer's nets the same quantised loss as
 that trainer reported. Warm start from `net/nnue.bin` into kb4 at lr ~0
 gives quantised val 0.027584, the one-bucket net's exact loss.
 
-Cost: the bucket loop repeats `grad_fused`'s fixed per-range feature loop
-(768 features) for every bucket while the entries are spread thinner. H =
-256, B = 1, GPU shared with a production training job: KB 1 step 13.6 ms,
-kb4m 25.5 ms (grad 17.7), kb8m 42.4 ms (grad 30.6, adam 3.8 for 8x the
-params). One idea not tried yet: a per-(range, bucket, simdgroup) bitmask of
-non-empty features so empty ones skip their offset loads.
+Bucket-sorted backward (plan_rows): 2M records of `pool3.bin`, H 128, B 8,
+`--mirror`, seed 5, 1 epoch, `--val` = first 100k of `val.bin`: kb8m CPU,
+GPU before and GPU after all give start val 0.081269, train 0.073039, val
+0.070774 (quantised 0.070792); the CPU evaluator gives the new GPU net
+0.070792. `none` and `m1` nets and checkpoints are byte-identical to the
+previous build. End-to-end kb8m went 0.45M -> 0.96M pos/s at H 128.
+
+Cost (`bench`, B 8, kernel step per 16384 batch). Uncontended moment of a
+shared GPU:
+
+| H | KB | before | after (grad / adam) |
+|---|---|---|---|
+| 256 | 1 | 5.25 ms | 4.81 ms (3.52 / 0.21) |
+| 256 | 4 (kb4m) | 13.32 ms | 6.44 ms (4.86 / 0.41) |
+| 256 | 8 (kb8m) | 26.70 ms | 6.71 ms (4.84 / 0.61) |
+| 512 | 1 | 10.92 ms | 10.19 ms (8.28 / 0.42) |
+| 512 | 4 (kb4m) | 29.17 ms | 12.86 ms (10.11 / 0.77) |
+| 512 | 8 (kb8m) | 52.43 ms | 14.37 ms (10.56 / 1.22) |
+
+kb8m costs ~1.3-1.4x one bucket (contended runs agree): the rest is the
+row-id indirection and two output-gradient register sets in `grad_fused`
+(~10%), dense AdamW over 8x the FT parameters, and a forward that gathers
+from an 8x larger table. Tried without gain: equal-sized items, and
+prefetching row id/meta/gradient per lane with simd shuffles.
+
+## Factoriser and active-only weight decay
+
+`--factorise` and `--wd-active-only` / `--no-wd-active-only` (train,
+gradcheck; bench takes the first two) work as in the CPU trainer (see its
+README: same init, same `--init` mapping, same checkpoint layout and header
+bit, merged rows in every exported net). On the GPU:
+
+- `Trainer.t` is the training vector (net params, then F); `Trainer.p` is
+  the merged net that forward, grad, validation and export read. Without
+  the factoriser they are the same buffer and nothing else changes.
+- `adam` runs over `t`; F's gradient is the sum over every work item of
+  its 768 local feature rows (each item belongs to one king bucket), in item
+  order. `merge_factor` then writes `p = clamp(W + F)` (other params copied).
+- `row_active` marks each FT row that has an entry in one of its bucket's
+  ranges; `adam` skips the decay of unmarked bucketed rows.
+
+Validation (`pool3f.bin` head, `--val` = first 100k of `val.bin`):
+
+- `gradcheck.sh`: the factoriser cases (kb4, kb4m --mirror, kb8m at H 32 /
+  64 --mirror / 256 --mirror, and kb8m with `--no-wd-active-only`) check
+  W and F gradients against the CPU reference (rel. error 1e-7 to 4e-7),
+  finite differences that perturb W or F through the merge, an AdamW step
+  in which every FT row absent from the batch is exact (unchanged with
+  active-only decay, plainly decayed without), and the merged net after the
+  step. All 16 cases PASS.
+- Parity, 2M records: H 64, B 8, kb8m, --factorise, --mirror, --wd 0.01,
+  seed 5, 2 x 1M: CPU and GPU both print start 0.081513, epoch 1 0.077781 /
+  0.069376 (q 0.069442), epoch 2 0.067674 / 0.065755 (q 0.065794 CPU,
+  0.065793 GPU); H 128, B 1, kb4, --factorise, 1 x 1M: both 0.074950 /
+  0.068991 (q 0.069007). Each evaluator gives the other trainer's nets that
+  trainer's quantised loss, and checkpoints resume across trainers to the
+  same epoch-3 numbers.
+- Warm start at lr 0: `--factorise --init g3f.bin` (KB 1, H 512, B 8) into
+  kb4 gives g3f's quantised loss (0.026746) and into kb8m the loss of g3f read
+  as m1 (0.028761, see the CPU README for why a mirrored layout cannot equal a
+  `none` net); an m1 net into kb8m gives exactly its own loss (0.078022). The
+  CPU and GPU export byte-identical nets.
+- Without `--factorise` (and, for KB > 1, with `--no-wd-active-only`) nets
+  and checkpoints are byte-identical to the previous build (none, m1, kb8m).
+
+Cost: H 512, B 8, kb8m kernel step 14.0-14.7 ms plain vs 15.2-16.5 ms
+factorised (adam + merge 1.3 -> 2.1 ms), about 5%. `row_active` is within
+noise. End-to-end ~1.0M pos/s in both cases.
 
 ## Known gaps
 
