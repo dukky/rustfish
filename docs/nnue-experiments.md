@@ -92,6 +92,30 @@ Notes:
 - 5+0.05 with the UHO book exaggerates Elo differences relative to CCRL
   conditions; confirm big steps with a ladder.
 
+## Conclusions to date (2026-11-07)
+
+Rows in `net/experiments.jsonl`; gate results in the queue log.
+
+- **Data is the lever.** g4 (from scratch on pool4, 730M, +35% data vs g3,
+  same recipe) **+26.7 [10.1, 43.5]** at the net gate. Gen 5 (pool5, 976M,
+  +34%) is trained; its validation-loss gain over g4 is smaller than g4's
+  over g3; its gate
+  candidate is g5kb8m (no `g5` row in `net/experiments.jsonl` yet).
+- **Eval-scale hypothesis rejected.** g3f vs g3fs (x0.92) +1.4 vs -8.9; g4ws
+  (g4w at g3's scale) still -22.7. Screen on best-scale loss
+  (`eval --best-scale`), not raw loss.
+- **Short warm starts on new data don't win** (g4w -21.7, over-specialised;
+  auto-loop fine-tunes never beat the champion). The auto loop only ingests.
+- **Lambda 0.3 rejected** (g4l3 -8.8, inconclusive; its loss is
+  lambda-biased, so it was gated on games).
+- **King buckets:** from scratch they are data-limited (gap 0.0011 at 50% of
+  the games vs 0.0006 at 100%, overfits from epoch 1), but an **exact
+  factoriser warm start from the champion wins**: kb8m (via g4m1) beats kb4
+  and the plain fine-tune control g4ft on val.bin and val17x2;
+  **g4kb8m merged +11.0 [4.9, 17.1]**.
+- Validation loss differences of a few 1e-4 have not predicted gate Elo on
+  their own: games remain the gate.
+
 ## Running a generation with scripts/netloop.py
 
 `scripts/netloop.py` (stdlib only) sequences one generation on the laptop.

@@ -35,7 +35,9 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 ## Repository layout
 - `src/main.rs` — remaining core types / board state / entrypoint
 - `src/book.rs` — built-in opening book
-- `src/eval.rs` — evaluation logic
+- `src/eval.rs` — hand-crafted evaluation (fallback; `UseNNUE=false`)
+- `src/nnue.rs` — NNUE inference (embedded net `net/nnue.bin`, shape constants, king layout)
+- `src/datagen.rs` — self-play training-data generation
 - `src/movegen.rs` — move generation, attack detection, UCI move parsing/helpers
 - `src/search.rs` — search, pruning, move ordering, SEE
 - `src/tt.rs` — zobrist hashing + transposition table
@@ -47,6 +49,9 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 - `scripts/test_change.py` — one-command validation for correctness, bench, and A/B smoke
 - `scripts/rating_pool.py` — run a local round-robin rating pool across fixed engine binaries
 - `scripts/openings.txt` — reusable opening suite for diversified gauntlets
+- `scripts/queue.py` + `scripts/queue-settings.json` — the GitHub merge queue (modes, lanes, bursts, ladder)
+- `scripts/netloop.py` — net pipeline: ingest data, train, screen, embed, queue a net gate (`docs/nnue-experiments.md`)
+- `tools/nnue-trainer` (CPU, Rust) and `tools/nnue-trainer-metal` (M3 GPU) — NNUE trainers
 - `plan.md` — the roadmap: current status, what is running, short/medium/long-term plans, known problems and the process audit; read this before picking new work and update it when work starts, lands or dies
 - `docs/archive/` — superseded planning/review notes kept for history (including the July 2026 plan and `post-2100-revised.md`); do **not** treat their recommendations as current
 
@@ -344,10 +349,14 @@ python3 scripts/gauntlet.py \
 ---
 
 ## Important UCI options supported by rustfish
-- `Hash` — TT size in MB
+- `Hash` — TT size in MB (default 64)
+- `Threads` — Lazy SMP threads (default 1; untested for strength)
 - `Clear Hash`
-- `OwnBook` — enable/disable built-in opening book
-- `BookStyle` — opening-book personality: `normal`, `grinder`, `chaos`
+- `Move Overhead` — ms reserved per move (default 10)
+- `UseNNUE` — NNUE eval (default on; off = HCE), `EvalFile` — load a net file instead of the embedded one
+- `OwnBook` — built-in opening book (effective default **off**; note the `uci` output still advertises `default true`)
+- `BookStyle` — opening-book personality: `normal`, `grinder`, `chaos`; `BookFile`
+- ~20 search tunables (`FutilityMarginD1`, `Lmr*`, `NodeTm*`, ...) for SPSA; see `uci` output
 
 Example:
 ```bash
@@ -412,7 +421,9 @@ For refactors:
 ---
 
 ## Current strategic priorities
-1. Strengthen search heuristics without breaking correctness.
-2. Improve evaluation stability, especially king safety / pawn structure / endgames.
-3. Track practical Elo progress with frozen binaries and gauntlets.
+See `plan.md` for the live version. In short (2026-11-07):
+1. Reach CCRL Blitz top 100 (3504), then top 10 (3751).
+2. NNUE generations on ever larger self-play pools (data is the main lever),
+   king buckets / bigger nets as data allows.
+3. Search features and simplifications through the queue's SPRTs; SPSA of the tunables.
 4. Preserve no-dependency constraint.

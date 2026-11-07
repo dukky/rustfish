@@ -135,26 +135,20 @@ engine and more nodes.
 
 ## Trainer
 
-`tools/nnue-trainer` is the std-only Rust trainer for the inference network in
-`src/nnue.rs` (`(768 -> 256) x 2 -> 1`, SCReLU). It reads the text format
-above and writes the raw little-endian i16 net file `EvalFile` expects; the
-hidden size is fixed at 256 and no float-to-quantized rescaling is needed
-because training runs in the same accumulator units as inference.
+Two std-only trainers produce the net in `src/nnue.rs` (today `(768 x kb8m
+king buckets -> 512) x 2 -> 8` output buckets, SCReLU, i16; see the header of
+`src/nnue.rs` for the file layout):
 
-```bash
-cd tools/nnue-trainer && cargo build --release
-gunzip -c datagen-s1-n5000.gz > data.txt          # artifacts are gzipped
-./target/release/nnue-trainer --data data.txt --out net.bin \
-  --epochs 1 --batch 1024 --lr 0.001 --threads 4
-```
+- `tools/nnue-trainer` (Rust, CPU): reference trainer, bit-identical across
+  ISAs and thread counts; also `eval [--best-scale]`, `scalecheck`,
+  `rescale`. ~2x faster since 2026-11-07 (~1.7M pos/s on a 4-vCPU Zen 5
+  runner, ~1.6M on the M3 at 8 threads), with `--factorise`, `--keep-best`
+  and exact warm starts.
+- `tools/nnue-trainer-metal` (Swift + Metal, M3 GPU): ~1.8M pos/s at 512x8;
+  trains the generations. `--keep-best` and exact factoriser init too.
 
 Loss is `lambda * (sigmoid(eval/400) - result)^2 + (1-lambda) *
-((eval - score)/400)^2`, trained with Adam. `--checkpoint`/`--resume` make the
-run restartable inside CI's 6 h job limit, and `--max-positions` bounds a pass.
-Measured on this (2-core) box: ~94k positions/s including text parsing, so a
-65M-position pass is ~11 minutes of compute; four CI cores should roughly halve
-that. Reading `.gz` directly is not supported (std only) — gunzip first.
-
-Training data for the first net comes from HCE self-play at 5000 nodes; after
-that, the usual bootstrap is to regenerate with the first net and retrain.
-Acceptance is an STC SPRT like every other engine change.
+((eval - score)/400)^2` with lambda 0.5 (0.3 was tried and rejected), AdamW,
+cosine lr. Flags, layouts and formats are in each trainer's README;
+`scripts/netloop.py` drives them (`docs/nnue-experiments.md`). Acceptance is a
+`net-gate` (same shape) or `stc` (new shape) SPRT like every other change.
