@@ -929,7 +929,6 @@ type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
 #[derive(Clone, Copy)]
 struct SearchParams {
     futility_margin_d1: i32,
-    futility_margin_d2: i32,
     reverse_futility_margin_d1: i32,
     reverse_futility_margin_d2: i32,
     reverse_futility_margin_d3: i32,
@@ -948,7 +947,6 @@ impl Default for SearchParams {
     fn default() -> Self {
         Self {
             futility_margin_d1: 120,
-            futility_margin_d2: 220,
             reverse_futility_margin_d1: 90,
             reverse_futility_margin_d2: 180,
             reverse_futility_margin_d3: 300,
@@ -1151,7 +1149,6 @@ fn main() {
             println!("option name EvalFile type string default");
             println!("option name UseNNUE type check default true");
             println!("option name FutilityMarginD1 type spin default 120 min 0 max 500");
-            println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
             println!("option name ReverseFutilityMarginD1 type spin default 90 min 0 max 500");
             println!("option name ReverseFutilityMarginD2 type spin default 180 min 0 max 700");
             println!("option name ReverseFutilityMarginD3 type spin default 300 min 0 max 900");

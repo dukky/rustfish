@@ -158,7 +158,6 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
     if let Ok(v) = value.trim().parse::<i32>() {
         match n.as_str() {
             "futilitymargind1" => engine.search_params.futility_margin_d1 = v.clamp(0, 500),
-            "futilitymargind2" => engine.search_params.futility_margin_d2 = v.clamp(0, 700),
             "reversefutilitymargind1" => {
                 engine.search_params.reverse_futility_margin_d1 = v.clamp(0, 500)
             }
