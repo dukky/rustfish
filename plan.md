@@ -5,7 +5,7 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-07 11:35._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-07 17:40._ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
@@ -32,7 +32,17 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   0.026086, val17x2 0.025316 vs 0.025387; kb4 smaller. Both queued (stc,
   kb8m expect 8). Factoriser/keep-best being ported to the fast CPU trainer
   (`trainer-kbf-fast`). Lambda 0.3 rejected (-8.8, inconclusive).
-- feat-lmr-cutnode: +15.6 [6.4, 24.9] at stc.
+- feat-lmr-cutnode: +15.6 [6.4, 24.9] at stc (merged).
+- **g4kb8m merged +11.0 [4.9, 17.1]** (17:31): main now embeds a kb8m king-bucket
+  net. Gen 5 (pool5, 976M, from scratch, chain11) trains now; its gate
+  candidate is g5kb8m (g5 -> m1 copy -> kb8m warm start), vs main g4kb8m.
+  Split stop rule applies to that gate (< +8 -> back to 6/13).
+- feat-threat-hist inconclusive +4.3 [-0.7, 9.3] at the old 6720-game cap;
+  requeued. feat-se-negext rebased as feat-se-negext-r2.
+- Infra today: queue hardening (fd15da6), ladder anchors 3525-3631 and
+  pentanomial CI at 40 games/anchor (~+-20), CI training sweeps
+  (train-sweep.yml), fast CPU trainer with factoriser (60be87f), M3 CPU+GPU
+  together = +19% total throughput (each job slower).
 - Ladder after each 2-3 merges or a net merge.
 
 **Mid term (days): top 100 (3504).**
