@@ -106,7 +106,8 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   but whole-engine NPS / datagen games/s within +-3% on Zen 4/5 and Xeon
   runners (NNUE is not the bottleneck at H=512). Fleet: ~1/2-2/3 of runners
   have AVX-512 (EPYC 7763 Zen 3 no; 9V74, 9V45, Xeon 6973P/8573C yes).
-  Revisit only for wider nets.
+  Re-run nnue-isa-check (branch nnue-avx512) when a net with H >= 768 or
+  king buckets is about to embed; merge as a speedup if datagen games/s rises.
 - **Local datagen** (09:30): `~/rustfish-data/datagen-gate.sh` runs seed 1004
   (main 7d1fc8a, net scale, 7 threads, ~1300 pos/s = ~4.7M/h) only while no
   GPU training runs (SIGSTOP/SIGCONT); the auto loop ingests local/L1004.txt.
