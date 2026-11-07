@@ -189,6 +189,9 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   queue's own jobs and SPRT builds are never blocked behind it.
 - Unused lever: runners can run *independent* training runs (ablation
   sweeps scored by validation loss) overnight, when no SPRT needs them.
+  `train-sweep.yml` v2 (branch `train-sweep-v2`) does this: shared <= 300M
+  pool, val.bin + val17x2 best-scale table, warm starts; it takes the 6
+  foreground runners (docs/nnue-experiments.md, "CI training sweeps").
 - Owner decisions: GitHub Pro (20 -> 40 concurrent jobs, 2x throughput) and a
   self-hosted runner on the 9600X desktop (outside the job cap).
 - Ladder cost: a 120+1 ladder is ~10 SPRTs of runner time; run it only after

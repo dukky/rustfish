@@ -212,7 +212,8 @@ variant job downloads it and trains with `--threads $(nproc) --keep-best`;
   (seeds 9 and 17 are always fetched for them). `--val` (so `--keep-best`)
   is `val.bin`.
 - **Size limit.** The pool is 32 bytes/position: 300M = 9.6 GB, which every
-  variant job downloads (a few minutes). Hosted runners have ~70 GB on
+  variant job downloads (test run: 640 MB in 11-47 s, so ~3-12 min for
+  300M). Hosted runners have ~70 GB on
   `/mnt`; `prep` needs the gzip artifacts (~12.5 B/position over every
   fetched seed) + ~2x the pool, so ~1B positions (32 GB) is the most one
   runner can build, and it would cost every variant ~10+ min of transfer.
@@ -232,9 +233,11 @@ variant job downloads it and trains with `--threads $(nproc) --keep-best`;
   enough to lose little at the limit. 320 min at 0.8M pos/s is ~15B
   position-samples.
 - **Table.** Sorted by best-scale loss on val.bin + val17x2 (`eval
-  --best-scale`, scale profiled out); also final and best epoch val
-  (float/quantised), the epoch output, the start loss, pos/s and the runner
-  CPU (`lscpu`). The CPU only changes speed: the trainer is bit-identical
+  --best-scale`, scale profiled out) of the output net; when `--keep-best`
+  kept an earlier epoch (or the start net, e0), the last epoch's best-scale
+  losses are shown too. Also final and best epoch val (float/quantised),
+  the start loss, pos/s and the runner CPU (`lscpu`). The init net is a
+  reference row. The CPU only changes speed: the trainer is bit-identical
   across ISAs and thread counts.
 - **Runners.** A sweep shares the 20 runners with the queue. With the
   `lanes` in `scripts/queue-settings.json` (13 background datagen + 6

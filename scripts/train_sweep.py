@@ -329,12 +329,19 @@ def cmd_finish(a):
         if best.exists():
             net.write_bytes(best.read_bytes())
             res["output_epoch"] = res["best_epoch"]
-    if net.exists():
+    # The output net (best epoch by --keep-best, possibly the start net) and,
+    # when that is not the last epoch, the last epoch too: what training did.
+    nets = [("", net)]
+    if epochs and res.get("output_epoch") != epochs[-1][0]:
+        nets.append(("last_", net.with_suffix(f".e{epochs[-1][0]}.bin")))
+    for pre, n in nets:
+        if not n.exists():
+            continue
         for key, v in (("val", a.val), ("val17x2", a.val17)):
             try:
-                res[key] = best_scale(a.trainer, net, v, a.args, a.threads)
+                res[pre + key] = best_scale(a.trainer, n, v, a.args, a.threads)
             except Exception as ex:  # keep the row even if eval fails
-                res[key] = {"error": str(ex)}
+                res[pre + key] = {"error": str(ex)}
     Path(a.json).write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 
@@ -361,19 +368,28 @@ def cmd_report(a):
         return (0, x + y) if x is not None and y is not None else (1, 0)
 
     f = lambda x, n=6: "-" if x is None else (f"{x:.{n}f}" if isinstance(x, float) else str(x))
-    print("Sorted by best-scale loss on val.bin + val17x2 (scale profiled out; lower is better). "
-          "`val` = float/quantised val.bin loss as printed by the trainer.\n")
-    print("| variant | epochs | final val (q) | best epoch (q) | out | best-scale val.bin (x) | "
-          "best-scale val17x2 (x) | start q | pos/s | CPU | config |")
+
+    def pair(r, pre):
+        v, w = r.get(pre + "val", {}), r.get(pre + "val17x2", {})
+        if not v and not w:
+            return "-"
+        return (f"{f(v.get('best_scale_loss'))} / {f(w.get('best_scale_loss'))} "
+                f"(x{f(v.get('scale'), 3)} / x{f(w.get('scale'), 3)})")
+
+    print("Sorted by best-scale loss (`eval --best-scale`, scale profiled out; lower is better) of the "
+          "output net on val.bin + val17x2. The output is the best epoch by quantised val.bin loss "
+          "(`--keep-best`, e0 = the start net); when it is not the last epoch, the last epoch is shown "
+          "too. `val (q)` = float (quantised) val.bin loss as printed by the trainer.\n")
+    print("| variant | best-scale val.bin / val17x2 (scale) | out | last epoch best-scale | epochs | "
+          "final val (q) | best epoch (q) | start q | pos/s | CPU | config |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in sorted(rows, key=key):
-        v, w = r.get("val", {}), r.get("val17x2", {})
+        ref = r.get("reference")
         ep = f"{r.get('epochs', '-')}{' (timeout)' if r.get('timed_out') else ''}"
-        print(f"| {r['name']} | {ep} | {f(r.get('final_val'))} ({f(r.get('final_q'))}) | "
-              f"{f(r.get('best_epoch'))} ({f(r.get('best_q'))}) | e{f(r.get('output_epoch'))} | "
-              f"{f(bs(r, 'val'))} (x{f(v.get('scale'), 3)}) | {f(bs(r, 'val17x2'))} (x{f(w.get('scale'), 3)}) | "
-              f"{f(r.get('start_q'))} | {f(r.get('pos_s'))} | {r.get('cpu', '?')} ({r.get('nproc', '?')}) | "
-              f"`{r.get('args', '')}`{' +init' if r.get('init') else ''} |")
+        print(f"| {r['name']} | {pair(r, '')} | {'-' if ref else 'e' + f(r.get('output_epoch'))} | "
+              f"{pair(r, 'last_')} | {'-' if ref else ep} | {f(r.get('final_val'))} ({f(r.get('final_q'))}) | "
+              f"{f(r.get('best_epoch'))} ({f(r.get('best_q'))}) | {f(r.get('start_q'))} | {f(r.get('pos_s'))} | "
+              f"{'-' if ref else r.get('cpu', '?')} | `{r.get('args', '')}`{' +init' if r.get('init') else ''} |")
 
 
 def main():

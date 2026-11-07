@@ -158,6 +158,8 @@ jobs:
           python3 scripts/train_sweep.py finish --name "$NAME" --args "$ARGS" $( [ -n "$INIT" ] && echo --init ) \
             --rc "$rc" --log "$O/$NAME.log" --net "$O/$NAME.bin" --trainer /mnt/sweep/nnue-trainer \
             --val /mnt/sweep/val.bin --val17 /mnt/sweep/val17x2.bin --json "$O/$NAME.json"
+          # 124 = stopped at train_minutes (best finished epoch kept); anything else failed.
+          [ "$rc" = 0 ] || [ "$rc" = 124 ] || exit "$rc"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
