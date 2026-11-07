@@ -149,6 +149,16 @@ def load_state():
         path = os.path.join(inbox, name)
         with open(path) as fh:
             req = json.load(fh)
+        if req.get("remove"):
+            # queue.py remove <branch>[:mode]: drop waiting items (never the one in flight).
+            branch, _, mode = req["remove"].partition(":")
+            gone = [p for p in state["pending"] if p["branch"] == branch and (not mode or p["mode"] == mode)]
+            state["pending"] = [p for p in state["pending"] if p not in gone]
+            for p in gone:
+                log({"branch": p["branch"], "mode": p["mode"], "outcome": "removed", "reason": "queue.py remove"})
+            os.remove(path)
+            print(f"inbox {name}: removed {len(gone)} item(s) for {req['remove']}")
+            continue
         adds = parse_adds(req.get("add", ""), req.get("expect"))
         if req.get("front"):
             # Front items run in order before anything is scored (pick_next).
@@ -1137,6 +1147,8 @@ if __name__ == "__main__":
         advance()
     elif len(args) >= 2 and args[0] == "add":
         request(parse_add_args(args[1:]))
+    elif len(args) == 2 and args[0] == "remove":
+        request({"remove": args[1]})
     elif args == ["unpause"]:
         request({"unpause": True})
     elif args == ["rates"]:
@@ -1144,5 +1156,6 @@ if __name__ == "__main__":
     else:
         sys.exit("usage: queue.py advance            (CI; RESULT env = final SPRT result JSON)\n"
                  "       queue.py add <branch:mode,...> [--front] [--preempt] [--expect <elo>]\n"
+                 "       queue.py remove <branch[:mode]>  (drop waiting items)\n"
                  "       queue.py unpause\n"
                  "       queue.py rates              (read-only: base rates and pick order)")

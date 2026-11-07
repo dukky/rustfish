@@ -39,6 +39,9 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   Split stop rule applies to that gate (< +8 -> back to 6/13).
 - feat-threat-hist inconclusive +4.3 [-0.7, 9.3] at the old 6720-game cap;
   requeued. feat-se-negext rebased as feat-se-negext-r2.
+- Queue backlog (next queue work): mark a needs-human row resolved when an
+  `-r2` of the branch is queued (feat-se-negext -> feat-se-negext-r2 still
+  shows needs-human); a test for the new `queue.py remove` inbox path.
 - Infra today: queue hardening (fd15da6), ladder anchors 3525-3631 and
   pentanomial CI at 40 games/anchor (~+-20), CI training sweeps
   (train-sweep.yml), fast CPU trainer with factoriser (60be87f), M3 CPU+GPU
