@@ -52,6 +52,11 @@
       "branch": "feat-threat-hist",
       "mode": "stc",
       "expect": 4.0
+    },
+    {
+      "branch": "feat-se-negext-r2",
+      "mode": "stc",
+      "expect": 5.0
     }
   ],
   "current": {
