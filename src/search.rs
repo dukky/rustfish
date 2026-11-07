@@ -405,9 +405,6 @@ impl MovePicker {
             } else if is_k1 {
                 score += 10_000;
             }
-            if mv.is_castle {
-                score += 10;
-            }
             score += mv
                 .promotion
                 .map(piece_value)
@@ -2272,9 +2269,8 @@ fn move_order_score(
         .map(piece_value)
         .unwrap_or(0)
         .saturating_sub(piece_value(PieceType::Pawn));
-    let castle = if mv.is_castle { 10 } else { 0 };
     let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
-    history_score(history, board.side_to_move, mv) + continuation / 2 + promo + castle
+    history_score(history, board.side_to_move, mv) + continuation / 2 + promo
 }
 
 pub(crate) fn piece_value(kind: PieceType) -> i32 {
