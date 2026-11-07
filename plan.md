@@ -50,6 +50,15 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
   explanation for g4w is now overfitting of the short warm start; g4ws still
   queued. Validation loss (even at fixed scale) has not predicted gate Elo
   for g3f: games remain the gate.
+- Scale review (subagent): with the scale removed (`nnue-trainer eval
+  --best-scale`), g3f ~ g3 on val16x2/val17x2, slightly better on val.bin
+  (matches +1.4); g4w best on recent sets, clearly worst on val.bin
+  (specialised warm start). The x2 sets' labels reward ~1.2x wider nets, so
+  raw loss there partly measures scale. **Screen on best-scale loss on
+  val.bin plus a recent set.** Tooling merged (6b9b709): netloop auto,
+  scalecheck, `rescale` (exact factor, slope or mean|eval| matching), `eval
+  --best-scale`. Per-net NNUE_EVAL_DIV retuning not justified unless a net
+  drifts 20%+.
 - **Laptop:** Metal GPU trainer (~3x CPU; king buckets ~1.3x one bucket) does
   all training. `scripts/netloop.py auto` runs unattended: ingests CI and local
   datagen, scale-checks, warm-starts a candidate per ~30M new positions, screens
