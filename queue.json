@@ -4,43 +4,37 @@
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 5
+      "passed_over": 6
     },
     {
       "branch": "simp2-qs-delta",
       "mode": "nonreg",
       "expect": 3.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "simp2-qs-failsoft",
       "mode": "stc",
       "expect": 2.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "feat-lmr-improving",
       "mode": "stc",
       "expect": 3.0,
-      "passed_over": 2
-    },
-    {
-      "branch": "feat-ttpv",
-      "mode": "stc",
-      "expect": 5.0,
-      "passed_over": 2
+      "passed_over": 3
     },
     {
       "branch": "feat-lmr-captures",
@@ -60,7 +54,18 @@
       "expect": 4.0
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-ttpv",
+    "mode": "stc",
+    "expect": 5.0,
+    "passed_over": 2,
+    "test_id": "q-feat-ttpv-1107-1732",
+    "sha": "e39f27133897d595d79fd9d9eb54847b6a33cdb0",
+    "base_sha": "921bcebf0af4a62928d30cd10542b88ff3bc4675",
+    "started": "2026-11-07T17:32:20Z",
+    "bench": 667432,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "06ab097d1e3d0b8d879e412a4226054ba62e2700",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
