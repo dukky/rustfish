@@ -3,12 +3,7 @@
     {
       "branch": "tm-ccrl",
       "mode": "nonreg",
-      "passed_over": 1
-    },
-    {
-      "branch": "nnue-g4ws",
-      "mode": "net-gate",
-      "expect": 3.0
+      "passed_over": 2
     },
     {
       "branch": "simp-castle-order",
@@ -32,14 +27,14 @@
     }
   ],
   "current": {
-    "branch": "nnue-g3fs",
+    "branch": "nnue-g4ws",
     "mode": "net-gate",
-    "expect": 8.0,
-    "test_id": "q-nnue-g3fs-1107-0204",
-    "sha": "d3fe48d3b5c611079bb4d26a47333611513aeeeb",
+    "expect": 3.0,
+    "test_id": "q-nnue-g4ws-1107-0217",
+    "sha": "48a693b46a6b0b27fe9177050f5122d254d6500e",
     "base_sha": "4726decd523d5cf4732eb921adcf81cc757dd151",
-    "started": "2026-11-07T02:04:18Z",
-    "bench": 790667
+    "started": "2026-11-07T02:17:43Z",
+    "bench": 700188
   },
   "check_base": "ad53daa6b0fe5410f26e63bd651d85ff947469db",
   "merges_since_check": 2,
