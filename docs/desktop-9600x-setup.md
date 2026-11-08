@@ -34,15 +34,25 @@ cargo test  --release --manifest-path tools/nnue-trainer/Cargo.toml    # 17 test
 
 ## 3. Measure the trainer (first thing to report back)
 
+Needs one converted seed, `s45.bin` (fetch it with the manual commands in section 4 first).
+The speed test doesn't need the real validation sets: a throwaway slice of the seed works.
+
 ```bash
-mkdir -p ~/rustfish-data && cd ~/rustfish-data
+mkdir -p ~/rustfish-data && cd ~/rustfish-data      # wherever s45.bin is
 T=~/dev/rustfish/tools/nnue-trainer/target/release/nnue-trainer
-# small real data: one CI datagen seed (see section 4), or any converted .bin
+tail -c 32000000 s45.bin > valb.bin        # last 1M positions; overlaps training: speed test only
 for th in 6 12; do
-  $T train --data s45.bin --val val.bin --out bench$th.bin --hidden 512 --buckets 8 \
-     --king-buckets kb8m --factorise --threads $th --max-batches 3000 2>&1 | grep -E "kernels|pos/s"
+  echo "== $th threads, plain"
+  $T train --data s45.bin --val valb.bin --out b$th.bin --hidden 512 --buckets 8 \
+     --threads $th --max-batches 1500 2>&1 | grep -E "kernels|pos/s"
+  echo "== $th threads, kb8m + factorise"
+  $T train --data s45.bin --val valb.bin --out bk$th.bin --hidden 512 --buckets 8 \
+     --king-buckets kb8m --factorise --threads $th --max-batches 1500 2>&1 | grep -E "kernels|pos/s"
 done
 ```
+
+`--max-batches 1500` is ~25M positions (fits in one ~31M seed), a minute or two per run.
+Report the four pos/s numbers.
 
 The log must print `kernels avx512`. Expect ~3.5-5M pos/s at 12 threads plain, less with
 kb8m + factorise. Also note the free disk (`df -h ~`): a full pool is ~32 GB per 1B
