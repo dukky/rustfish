@@ -1617,7 +1617,6 @@ fn negamax(
         } else {
             let reduction = if quiet
                 && !in_check
-                && !gives_check
                 && depth >= params.lmr_min_depth
                 && idx >= params.lmr_min_move_index
             {
@@ -1626,6 +1625,11 @@ fn negamax(
                 let mut r = engine.lmr_table[d][m];
                 if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
                     r += 1;
+                }
+                // Quiet checks are more forcing than ordinary quiets, so they
+                // are reduced one ply less rather than exempt from LMR.
+                if gives_check {
+                    r = r.saturating_sub(1);
                 }
                 // Killers, counter-moves and positive-history quiets reduce one ply less.
                 if priority_quiet {
