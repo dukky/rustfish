@@ -297,3 +297,4 @@
 {"branch": "main", "logged_at": "2026-11-08T02:03:35Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 48, "sha": "738b1c099c1e8a5220bffe7d5592e9a99313f745"}
 {"branch": "main", "logged_at": "2026-11-08T02:47:52Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 49, "sha": "738b1c099c1e8a5220bffe7d5592e9a99313f745"}
 {"branch": "simp2-qs-delta", "elo": 9.77, "elo_ci95": [2.28, 17.28], "games": 2880, "llr": 4.197, "logged_at": "2026-11-08T02:49:48Z", "mode": "nonreg", "outcome": "merged", "sha": "189756754c2ab04760ec7201e55aee480133c3d8", "test_id": "q-simp2-qs-delta-1108-0138", "verdict": "H1"}
+{"branch": "main", "consecutive": 1, "logged_at": "2026-11-08T02:49:51Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "best item simp-lmr-extra-r2:nonreg scores 0.0733 < 0.1", "seed": 50, "sha": "b1351dd052286bd825636853c5824223c768cb3e", "test_id": "q-burst-s50"}
