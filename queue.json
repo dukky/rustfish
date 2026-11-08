@@ -37,6 +37,10 @@
     {
       "branch": "feat-lmr-quiet-check",
       "mode": "stc"
+    },
+    {
+      "branch": "feat-lmr-recapture",
+      "mode": "stc"
     }
   ],
   "current": {
