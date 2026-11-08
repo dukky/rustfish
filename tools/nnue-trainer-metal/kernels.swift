@@ -274,11 +274,14 @@ kernel void plan_rows(device const uint* meta [[buffer(0)]],
 // row = position in the range), bucket the active (feature, row) entries by
 // feature, deterministically: a 256-bit row mask per feature (atomic OR is
 // order independent), then each feature's rows are emitted in increasing
-// order. Output: sorted[range][RS*64] = local row, offs[range][769] (local
-// feature f = global - kb*768 occupies sorted[offs[f] .. offs[f+1])).
+// order. Output per range: bytes sorted[range][RS*128] = local row, each
+// feature's run starting on a 4-byte word (padded to whole words, padding
+// never read), and offs[range][f] = first word | count << 16 for local
+// feature f = global - kb*768 (word-aligned runs let grad_fused fetch four
+// row ids per load).
 kernel void sort_entries(device const ushort* feats [[buffer(0)]],
                          device const uint* meta [[buffer(1)]],
-                         device ushort* sorted [[buffer(2)]],
+                         device uchar* sorted [[buffer(2)]],
                          device uint* offs [[buffer(3)]],
                          device const uint* rows [[buffer(4)]],
                          device const uint* hdr [[buffer(5)]],
@@ -314,22 +317,23 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
         for (uint w = 0; w < 8; w++) t += popcount(atomic_load_explicit(&mask[(3 * tid + i) * 8 + w], memory_order_relaxed));
         cnt[i] = t;
     }
-    uint local = cnt[0] + cnt[1] + cnt[2];
+    uint local = (cnt[0] + 3) / 4 + (cnt[1] + 3) / 4 + (cnt[2] + 3) / 4;   // words
     uint pre = simd_prefix_exclusive_sum(local);
     if (sl == 31) simd_tot[sg] = pre + local;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     uint base = pre;
     for (uint i = 0; i < sg; i++) base += simd_tot[i];
     device uint* off = offs + rg * 769;
-    if (tid == 255) off[768] = base + local;
-    device ushort* out = sorted + rg * RS * 64;
-    uint pos = base;
+    device uchar* out = sorted + rg * RS * 128;
+    uint wpos = base;
     for (uint i = 0; i < 3; i++) {
-        off[3 * tid + i] = pos;
+        off[3 * tid + i] = wpos | (cnt[i] << 16);
+        uint pos = 4 * wpos;
+        wpos += (cnt[i] + 3) / 4;
         for (uint w = 0; w < 8; w++) {
             uint bits = atomic_load_explicit(&mask[(3 * tid + i) * 8 + w], memory_order_relaxed);
             while (bits != 0) {
-                out[pos++] = ushort(w * 32 + ctz(bits));
+                out[pos++] = uchar(w * 32 + ctz(bits));
                 bits &= bits - 1;
             }
         }
@@ -351,9 +355,10 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
 // ONE (one king bucket): rows are in identity order, so range rows need no
 // lookup and simdgroup sg only ever stages side sg & 1 (one output-gradient
 // register set instead of two).
+static_assert(768 / NSG <= 32, "one CSR entry per lane");
 template <bool ONE>
 inline void grad_body(device const float* p, device const uint* meta, device const float* acc,
-                      device const float* gs, device const ushort* sorted, device const uint* offs,
+                      device const float* gs, device const uint* sorted, device const uint* offs,
                       device float* pft, device float* pow_, device const uint* rows,
                       device const uint* hdr, device const uint4* rng, device const uint4* item,
                       constant Cfg& c, uint2 tg, uint lane, uint sg, threadgroup float* dt) {
@@ -372,7 +377,9 @@ inline void grad_body(device const float* p, device const uint* meta, device con
     for (uint rg = I.y; rg < I.z; rg++) {
         uint4 R = rng[rg];
         device const uint* off = offs + rg * 769;
-        device const ushort* srt = sorted + rg * RS * 64;
+        device const uint* srt = sorted + rg * RS * 32;
+        // Lane i fetches the CSR entry of this simdgroup's i-th feature.
+        uint offl = lane < 768 / NSG ? off[sg + NSG * lane] : 0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint row = sg; row < 2 * RS; row += NSG) {
             float d = 0.0f;
@@ -393,17 +400,25 @@ inline void grad_body(device const float* p, device const uint* meta, device con
         threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
         for (uint i = 0; i < 768 / NSG; i++) {
-            uint f = sg + NSG * i;
-            uint a = off[f], b = off[f + 1];
+            uint o = simd_shuffle(offl, ushort(i));
+            uint w = o & 0xFFFF, n = o >> 16, we = w + n / 4;
             float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
-            uint e = a;
-            for (; e + 4 <= b; e += 4) {
-                s0 += dt[uint(srt[e]) * 32 + lane];
-                s1 += dt[uint(srt[e + 1]) * 32 + lane];
-                s2 += dt[uint(srt[e + 2]) * 32 + lane];
-                s3 += dt[uint(srt[e + 3]) * 32 + lane];
+            // Same order as one row id per step: groups of 4 into s0..s3,
+            // the remaining 0-3 entries into s0.
+            for (; w < we; w++) {
+                uint u = srt[w];
+                s0 += dt[(u & 0xFF) * 32 + lane];
+                s1 += dt[((u >> 8) & 0xFF) * 32 + lane];
+                s2 += dt[((u >> 16) & 0xFF) * 32 + lane];
+                s3 += dt[(u >> 24) * 32 + lane];
             }
-            for (; e < b; e++) s0 += dt[uint(srt[e]) * 32 + lane];
+            uint r = n & 3;
+            if (r != 0) {
+                uint u = srt[w];
+                s0 += dt[(u & 0xFF) * 32 + lane];
+                if (r > 1) s0 += dt[((u >> 8) & 0xFF) * 32 + lane];
+                if (r > 2) s0 += dt[((u >> 16) & 0xFF) * 32 + lane];
+            }
             gr[i] += (s0 + s1) + (s2 + s3);
         }
     }
@@ -449,7 +464,7 @@ inline void grad_body(device const float* p, device const uint* meta, device con
 
 kernel void grad_fused(device const float* p [[buffer(0)]], device const uint* meta [[buffer(1)]],
                        device const float* acc [[buffer(2)]], device const float* gs [[buffer(3)]],
-                       device const ushort* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
+                       device const uint* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
                        device float* pft [[buffer(6)]], device float* pow_ [[buffer(7)]],
                        device const uint* rows [[buffer(8)]], device const uint* hdr [[buffer(9)]],
                        device const uint4* rng [[buffer(10)]], device const uint4* item [[buffer(11)]],
@@ -461,7 +476,7 @@ kernel void grad_fused(device const float* p [[buffer(0)]], device const uint* m
 
 kernel void grad_fused1(device const float* p [[buffer(0)]], device const uint* meta [[buffer(1)]],
                        device const float* acc [[buffer(2)]], device const float* gs [[buffer(3)]],
-                       device const ushort* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
+                       device const uint* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
                        device float* pft [[buffer(6)]], device float* pow_ [[buffer(7)]],
                        device const uint* rows [[buffer(8)]], device const uint* hdr [[buffer(9)]],
                        device const uint4* rng [[buffer(10)]], device const uint4* item [[buffer(11)]],
@@ -501,7 +516,7 @@ kernel void row_active(device const uint* offs [[buffer(0)]],
     for (uint rg = 0; rg < nr && a == 0; rg++) {
         if (rng[rg].x != kb) continue;
         device const uint* off = offs + rg * 769;
-        a = off[f + 1] > off[f] ? 1 : 0;
+        a = (off[f] >> 16) != 0 ? 1 : 0;
     }
     act[row] = a;
 }
