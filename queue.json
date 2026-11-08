@@ -43,21 +43,10 @@
       "passed_over": 1
     }
   ],
-  "current": {
-    "branch": "nnue-g6kb8m",
-    "mode": "net-gate",
-    "expect": 8.0,
-    "front": true,
-    "test_id": "q-nnue-g6kb8m-1108-0336",
-    "sha": "3d079755bf893e2c70c8654bc846213aaec92267",
-    "base_sha": "1c80b5c5e832f4d3494af6975291e46e9a82604c",
-    "started": "2026-11-08T03:36:26Z",
-    "bench": 700819,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1,
+  "merges_since_check": 2,
+  "merges_since_ladder": 2,
   "next_seed": 52,
   "consecutive_bursts": 0
 }

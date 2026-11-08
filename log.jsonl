@@ -301,3 +301,4 @@
 {"branch": "main", "logged_at": "2026-11-08T03:33:33Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 51, "sha": "1c80b5c5e832f4d3494af6975291e46e9a82604c"}
 {"branch": "main", "logged_at": "2026-11-08T03:35:40Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 50, "sha": "b1351dd052286bd825636853c5824223c768cb3e", "test_id": "q-burst-s50"}
 {"base_sha": "1c80b5c5e832f4d3494af6975291e46e9a82604c", "branch": "nnue-g6kb8m", "logged_at": "2026-11-08T03:36:26Z", "mode": "net-gate", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "3d079755bf893e2c70c8654bc846213aaec92267", "test_id": "q-nnue-g6kb8m-1108-0336"}
+{"branch": "nnue-g6kb8m", "elo": 17.16, "elo_ci95": [6.6, 27.74], "games": 1824, "llr": 4.198, "logged_at": "2026-11-08T04:03:02Z", "mode": "net-gate", "outcome": "merged", "sha": "3d079755bf893e2c70c8654bc846213aaec92267", "test_id": "q-nnue-g6kb8m-1108-0336", "verdict": "H1"}
