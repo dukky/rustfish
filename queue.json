@@ -33,6 +33,10 @@
     {
       "branch": "main",
       "mode": "ladder"
+    },
+    {
+      "branch": "feat-lmr-quiet-check",
+      "mode": "stc"
     }
   ],
   "current": {
