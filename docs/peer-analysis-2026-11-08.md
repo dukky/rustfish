@@ -63,6 +63,85 @@ noted. The anchor versions are not always the projects' current releases.
   IIR, SEE, killers, counter-moves, history, continuation history,
   ProbCut, singular extensions, check extensions, node-fraction TM.
 
+## Current CCRL peers around 3490 (single-CPU list, 7 Nov 2026)
+
+These are the *current strongest versions* from the CCRL Blitz single-CPU
+list, not the older queue anchors. Rustfish's 3492 measured on the ladder sits
+around #102.
+
+- **#95 Carp 3.0.1 — 3525.** Andrea Sgobbi (Italy), Rust, repo since Nov 2022,
+  inactive since Sep 2025. Didactic engine, simple NNUE. Proof that clean,
+  simple Rust + NNUE can reach 3525 without a large net.
+- **#96 Panda 2.0 — 3523.** Sebastiano Rebonato-Scott (UK), Rust, repo since
+  Feb 2024, active Aug 2026. NNUE `(768 -> 512) x 2 -> 1 x 8`, trained on
+  self-play with Bullet; custom hindsight datagen; Lazy SMP from akimbo; PGO
+  worth 5-10 Elo. **Closest architecture to rustfish** and the most useful
+  comparison: same 512-wide, 8-output-bucket shape, 31 Elo higher.
+- **#97 Lunar 0.4.0 — 3514.** Patrick Hilhorst (Netherlands), Rust, repo since
+  Nov 2022, active Nov 2026. Long incremental development from HCE to NNUE;
+  simple CReLU accumulator, later a stronger net. Good example of sustained
+  iteration rather than one architecture jump.
+- **#98 Ursus 1.0 — 3512.** Zander Chown (USA), **Zig**, repo since Mar 2025,
+  active Nov 2026. Bitboards, alpha-beta, NNUE; Bullet training, OpenBench
+  SPRT, Kaggle GPU, weather-factory SPSA; references Stormphrax/Pawnocchio.
+  Reached 3512 in about 1.5 years, showing language is not the limit.
+- **#99 Lambergar 1.5 — 3506.** Janez Podobnik (Slovenia), **Zig**, repo since
+  Nov 2023, active May 2026. NNUE (default) and HCE options, **threat-aware
+  quiet history**, self-play datagen, PyTorch training, AVX2 inline assembly,
+  SPSA. The threat-aware history is the same family as rustfish's recent
+  `feat-threat-hist`.
+- **#100 Endspiel 2.0 — 3505.** Thilo Horstmann (Germany), Rust, repo May
+  2026. Layer-stacked king-bucketed NNUE, 1536 feature transformer, Bullet,
+  billions of self-play positions plus Lc0 T80 score labels, Syzygy, Ponder,
+  MultiPV, SMP. AI-assisted, GPL, own net; the current top-100 gate.
+- **#101 Schoenemann 0.5 — 3502.** Jochen Gehtab (Germany), C++, repo since
+  Mar 2024, active Apr 2026. NNUE with 512 hidden, PVS, own data plus Monty
+  data; simple and strong.
+- **#102 Grail 3.0 — 3490.** Jørgen Hanssen (Norway), Rust, repo since Dec
+  2024, active Nov 2026. NNUE trained on ~500M self-play positions; king
+  buckets (12 regions, same layout as PlentyChess); integrated datagen,
+  CUDA/Metal trainer, SPSA and PGO all in-repo. A close methodological peer,
+  with less data than rustfish but a fully integrated pipeline.
+- **#104 Leorik 3.2 — 3489.** Thomas Jahn (Germany), C#, repo since Jan 2022,
+  active May 2026. NNUE `(768x5 -> 640) x 2 -> 1x8`, horizontal mirroring,
+  5 input / 8 output buckets, trained on **6B labeled positions** with Bullet;
+  history-corrected NNUE; Chess960; MultiPV/Ponder. Shows that a bigger net
+  and much more data do not automatically beat a well-tuned smaller one.
+- **#104 Tucano 12 — 3489.** Alcides Schulz (Brazil), C, first released 2012,
+  NNUE since v10 (2022), v12 returns to the v10 architecture with incremental
+  evaluation; external net file. A long-lived engine that modernised its eval.
+- **#105 Bagatur 5.5c — 3485.** Krasimir Topchiyski (Bulgaria), **Java**,
+  repo since 2016, active 2026. NNUE since v5.0, Android and desktop, Syzygy,
+  own book; strong evidence that Java is not a 3500 ceiling.
+- **#106 Fire 9 — 3482.** Norman Schmidt, C++, long-lived freeware engine;
+  halfkp_256x2-32-32 NNUE (Fire 9.3) in a mature search. Old net shape,
+  still ~3480.
+- **#107 Celeris 2.0 — 3478.** Evan Fung, Rust, repo since Apr 2025, inactive
+  since Aug 2025. NNUE, AVX2/BMI2; a learning project that reached ~3480 in
+  months.
+- **#108 Midnight 9 — 3477.** Archishmaan Peyyety (USA), C++, repo since 2022,
+  last push Sep 2024. Moved to NNUE around v8; older but still ~3477.
+
+### What the current peer set says
+
+- **The net shape is not the gap.** Panda uses the same
+  `(768 -> 512) x 2 -> 1 x 8` shape and is 31 Elo ahead. Carp, Celeris and
+  Schoenemann are simpler still and sit at 3478-3525. The difference is
+  data quality, search/tuning and time, not a missing layer stack.
+- **Data volume is not linear.** Leorik has 6B positions at 3489; Grail has
+  ~500M at 3490; rustfish has ~1.7B at 3492. More positions help, but labels,
+  recency, search and tuning decide the last 20-30 Elo.
+- **Threat-aware history is a shared next step.** Lambergar is at 3506 with it;
+  rustfish's search-side `feat-threat-hist` was worth +4.7. The net-side threat
+  features are the larger version of the same idea.
+- **King buckets are table stakes at this level.** Grail, Endspiel, Leorik and
+  rustfish all use them; not having them would be the anomaly.
+- **Language is irrelevant.** Rust, Zig, C#, Java and C++ all appear between
+  3477 and 3525.
+- **The top-100 line is porous.** There is no special wall at 3506; several
+  small, single-author engines sit on both sides of it. Rustfish's 3492 is
+  mid-pack, not an outlier.
+
 ## Forum threads and reactions
 
 ### Endspiel (the normal, accepted AI-assisted path)
