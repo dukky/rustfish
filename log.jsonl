@@ -319,3 +319,4 @@
 {"branch": "main", "logged_at": "2026-11-08T10:19:35Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 62, "sha": "6e8deebedae3805b15f9d13f32e7997b33084b7f"}
 {"branch": "feat-lmr-recapture", "logged_at": "2026-11-08T11:04:48Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "feat-lmr-recapture", "logged_at": "2026-11-08T11:07:27Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
+{"branch": "feat-threat-hist", "elo": 4.71, "elo_ci95": [1.75, 7.67], "games": 17856, "llr": 4.833, "logged_at": "2026-11-08T12:20:00Z", "mode": "stc", "outcome": "merged", "sha": "0d7899529d6595052061fb81ecbdf3f9873015c2", "test_id": "q-feat-threat-hist-1108-0522", "verdict": "H1"}

@@ -39,21 +39,10 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "feat-threat-hist",
-    "mode": "stc",
-    "expect": 4.0,
-    "passed_over": 1,
-    "test_id": "q-feat-threat-hist-1108-0522",
-    "sha": "0d7899529d6595052061fb81ecbdf3f9873015c2",
-    "base_sha": "3d079755bf893e2c70c8654bc846213aaec92267",
-    "started": "2026-11-08T05:22:28Z",
-    "bench": 623729,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 63,
   "consecutive_bursts": 0
 }
