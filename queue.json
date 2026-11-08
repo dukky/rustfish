@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-g7kb8m",
-      "mode": "net-gate",
-      "expect": 8.0,
-      "front": true
-    },
-    {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
@@ -40,20 +34,26 @@
     }
   ],
   "current": {
-    "branch": "simp2-qs-failsoft",
-    "mode": "stc",
-    "expect": 2.0,
-    "passed_over": 6,
-    "test_id": "q-simp2-qs-failsoft-1108-1346",
-    "sha": "a110a08a5dc722c9c4654fe180983423537325b8",
-    "base_sha": "e011524367f41b595f4fd7b7776d093507939535",
-    "started": "2026-11-08T13:46:58Z",
-    "bench": 669994,
+    "branch": "nnue-g7kb8m",
+    "mode": "net-gate",
+    "expect": 8.0,
+    "front": true,
+    "test_id": "q-nnue-g7kb8m-1108-1617",
+    "sha": "6e357376ea9cac5768ce2060fefd60b082a9ce99",
+    "base_sha": "7e743bb53ea2fac4ca7b5ce10e3a9ebf3c430e2f",
+    "started": "2026-11-08T16:17:58Z",
+    "bench": 609317,
     "evalhash": "248c85c4a1cc6558"
   },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
   "next_seed": 66,
-  "consecutive_bursts": 0
+  "consecutive_bursts": 0,
+  "cancel_sweep": [
+    {
+      "prefix": "SPRT q-simp2-qs-failsoft-1108-1346 ",
+      "until": "2026-11-09T04:17:19Z"
+    }
+  ]
 }
