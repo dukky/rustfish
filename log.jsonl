@@ -292,3 +292,4 @@
 {"branch": "main", "logged_at": "2026-11-07T23:49:54Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 45, "sha": "e42fe7ab79ee3274597df0ddf4da667f031a3cf1"}
 {"branch": "main", "logged_at": "2026-11-08T00:33:31Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 46, "sha": "e42fe7ab79ee3274597df0ddf4da667f031a3cf1"}
 {"branch": "main", "logged_at": "2026-11-08T01:19:37Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 47, "sha": "e42fe7ab79ee3274597df0ddf4da667f031a3cf1"}
+{"branch": "main", "ci": [3456.1, 3492.5], "elo": null, "elo_ci95": null, "games": 440, "llr": null, "logged_at": "2026-11-08T01:38:24Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3474.3, "sha": "e42fe7ab79ee3274597df0ddf4da667f031a3cf1", "test_id": "q-ladder-1107-2329", "verdict": "ladder"}
