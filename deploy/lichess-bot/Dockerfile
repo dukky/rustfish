@@ -5,6 +5,7 @@ FROM rust:1-slim AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY net ./net
 # Dokku builds on the host that runs the bot, so native codegen is safe.
 RUN RUSTFLAGS="-C target-cpu=native" cargo build --release
 
