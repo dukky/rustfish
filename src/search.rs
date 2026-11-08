@@ -1556,6 +1556,12 @@ fn negamax(
                 if priority_quiet {
                     r -= 1;
                 }
+                // Recaptures are tactically forcing too; reduce them one ply less.
+                if let Some(prev) = prev_move {
+                    if prev.to == mv.to {
+                        r = r.saturating_sub(1);
+                    }
+                }
                 // Node type: expected cut nodes reduce more, PV nodes less.
                 if cut_node {
                     r += params.lmr_cut_node;
