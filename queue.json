@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "simp2-qs-failsoft",
-      "mode": "stc",
-      "expect": 2.0,
-      "passed_over": 6
-    },
-    {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
@@ -40,17 +34,20 @@
     }
   ],
   "current": {
-    "branch": "main",
-    "mode": "datagen-burst",
-    "test_id": "q-burst-s64",
-    "seed": 64,
-    "sha": "e011524367f41b595f4fd7b7776d093507939535",
+    "branch": "simp2-qs-failsoft",
+    "mode": "stc",
+    "expect": 2.0,
+    "passed_over": 6,
+    "test_id": "q-simp2-qs-failsoft-1108-1346",
+    "sha": "a110a08a5dc722c9c4654fe180983423537325b8",
     "base_sha": "e011524367f41b595f4fd7b7776d093507939535",
-    "started": "2026-11-08T13:06:52Z"
+    "started": "2026-11-08T13:46:58Z",
+    "bench": 669994,
+    "evalhash": "248c85c4a1cc6558"
   },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
   "next_seed": 65,
-  "consecutive_bursts": 2
+  "consecutive_bursts": 0
 }
