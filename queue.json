@@ -43,21 +43,10 @@
       "passed_over": 1
     }
   ],
-  "current": {
-    "branch": "simp2-qs-delta",
-    "mode": "nonreg",
-    "expect": 3.0,
-    "passed_over": 5,
-    "test_id": "q-simp2-qs-delta-1108-0138",
-    "sha": "189756754c2ab04760ec7201e55aee480133c3d8",
-    "base_sha": "74c6410c4aaeea8e42b0098f8b921316fd498d58",
-    "started": "2026-11-08T01:38:53Z",
-    "bench": 641616,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
-  "merges_since_check": 0,
-  "merges_since_ladder": 0,
+  "merges_since_check": 1,
+  "merges_since_ladder": 1,
   "next_seed": 50,
   "consecutive_bursts": 0
 }
