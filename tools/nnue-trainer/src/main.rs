@@ -838,12 +838,20 @@ fn cmd_convert(args: &[String]) {
 fn cmd_shuffle(args: &[String]) {
     let mut out_path = None;
     let mut inputs = Vec::new();
+    // `--consume <file>`: an input deleted as soon as it has been scattered, so a
+    // new pool can be built from the previous one without room for both.
+    let mut consume = Vec::new();
     let mut seed = 1u64;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => out_path = Some(PathBuf::from(it.next().unwrap())),
             "--seed" => seed = it.next().unwrap().parse().unwrap(),
+            "--consume" => {
+                let p = PathBuf::from(it.next().unwrap());
+                consume.push(p.clone());
+                inputs.push(p);
+            }
             _ => inputs.push(PathBuf::from(a)),
         }
     }
@@ -860,6 +868,13 @@ fn cmd_shuffle(args: &[String]) {
             let mut rec = [0u8; REC];
             while r.read_exact(&mut rec).is_ok() {
                 ws[rng.below(buckets)].write_all(&rec).unwrap();
+            }
+            if consume.contains(inp) {
+                for w in ws.iter_mut() {
+                    w.flush().unwrap();
+                }
+                std::fs::remove_file(inp).unwrap();
+                eprintln!("{}: scattered and removed (--consume)", inp.display());
             }
         }
     }
