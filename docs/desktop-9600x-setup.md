@@ -80,7 +80,7 @@ Manual alternative for one seed:
 id=$(gh run list -R dukky/rustfish -w datagen.yml -L 100 --json databaseId,displayTitle \
      -q '.[] | select(.displayTitle|test("seed 45 ")) | .databaseId' | head -1)
 gh run download $id -R dukky/rustfish -D dl45
-gunzip -c dl45/*/*.gz | $T convert - s45.bin
+gunzip -c dl45/*/*.gz | $T convert - s45.bin   # NOTE: doubles the data (shard + merged artifacts); fine for the speed test only, use dl() in the long test
 $T scalecheck --net ~/dev/rustfish/net/nnue.bin --buckets 8 --king-buckets kb8m --data s45.bin --n 200000
 # slope ~1.13 = net scale (fine); ~0.57 = half scale (needs x2, see scripts/netloop.py x2_copy)
 ```
@@ -176,20 +176,19 @@ It also exercises the whole pipeline on the desktop. ~1B positions, ~3-4 h, ~60 
 
 ```bash
 cd ~/rustfish-data; T=~/dev/rustfish/tools/nnue-trainer/target/release/nnue-trainer
-# 1. seeds 19-60 (net scale, no x2 needed); skips seeds without a finished run
-for s in $(seq 19 60); do
-  [ -f s$s.bin ] && continue
-  id=$(gh run list -R dukky/rustfish -w datagen.yml -L 200 --json databaseId,displayTitle,conclusion \
-       -q ".[] | select(.conclusion==\"success\" and (.displayTitle|test(\"seed $s \"))) | .databaseId" | head -1)
-  [ -z "$id" ] && continue
-  gh run download $id -R dukky/rustfish -D dl$s && gunzip -c dl$s/*/*.gz | $T convert - s$s.bin && rm -rf dl$s
-done
-# 2. validation sets, same as the laptop's: last 1M of seed 9; last 1M of seed 17 with scores x2
-for s in 9 17; do id=$(gh run list -R dukky/rustfish -w datagen.yml -L 300 --json databaseId,displayTitle,conclusion \
-  -q ".[] | select(.conclusion==\"success\" and (.displayTitle|test(\"seed $s \"))) | .databaseId" | head -1)
-  gh run download $id -R dukky/rustfish -D dl$s && gunzip -c dl$s/*/*.gz | $T convert - raw$s.bin && rm -rf dl$s; done
-tail -c 32000000 raw9.bin > val.bin
-tail -c 32000000 raw17.bin > val17.bin
+dl() {  # dl <seed> <out.bin>: the merged artifact only (runs also upload per-shard artifacts)
+  id=$(gh run list -R dukky/rustfish -w datagen.yml -L 300 --json databaseId,displayTitle,conclusion \
+       -q ".[] | select(.conclusion==\"success\" and (.displayTitle|test(\"seed $1 \"))) | .databaseId" | head -1)
+  [ -z "$id" ] && return 1
+  name=$(gh api repos/dukky/rustfish/actions/runs/$id/artifacts --jq '.artifacts[].name' | grep -E "^datagen-s$1-n[0-9]+$" | head -1)
+  [ -z "$name" ] && return 1
+  gh run download $id -R dukky/rustfish -n $name -D dl$1 && gunzip -c dl$1/*.gz | $T convert - $2; rm -rf dl$1
+}
+# 1. seeds 19-60 (net scale, no x2); ~1.15B positions, ~37 GB. Fewer seeds if disk is short.
+for s in $(seq 19 60); do [ -f s$s.bin ] || dl $s s$s.bin; done
+# 2. validation sets (must match the laptop): val.bin = last 1M of seed 9; val17x2 = last 1M of seed 17, x2
+dl 9 raw9.bin && tail -c 32000000 raw9.bin > val.bin && rm raw9.bin
+dl 17 raw17.bin && tail -c 32000000 raw17.bin > val17.bin && rm raw17.bin
 python3 - <<'PY'
 import array
 a = array.array('h'); a.frombytes(open('val17.bin', 'rb').read())
@@ -197,8 +196,9 @@ for i in range(12, len(a), 16):            # score = i16 #12 of each 32-byte rec
     a[i] = max(-32768, min(32767, 2 * a[i]))
 open('val17x2.bin', 'wb').write(a.tobytes())
 PY
-sha256sum val.bin val17x2.bin    # compare with the laptop: shasum -a 256 ~/rustfish-data/{val.bin,fix/val17x2.bin}
-rm raw9.bin raw17.bin val17.bin
+rm val17.bin
+sha256sum val.bin val17x2.bin    # must be 7d2d9157...e3af85dd and abe51b80...8e7cc404b1
+df -h ~                          # shuffle needs ~the pool size free again (~37 GB for 19-60)
 # 3. pool (exclude nothing else: seeds >= 19 never contain the val tails), then the recipe
 $T shuffle --out poolR.bin s{19..60}.bin 2>/dev/null || $T shuffle --out poolR.bin s*.bin
 $T train --data poolR.bin --val val.bin --out gR.bin --hidden 512 --buckets 8 --epochs 10 --lr 1e-3 --lr-end 1e-5 --threads 12
