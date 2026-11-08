@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "main",
-      "mode": "ladder",
-      "front": true
-    },
-    {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
@@ -36,18 +31,18 @@
   ],
   "current": {
     "branch": "main",
-    "mode": "datagen-burst",
-    "test_id": "q-burst-s66",
-    "seed": 66,
+    "mode": "ladder",
+    "front": true,
+    "test_id": "q-ladder-1108-1710",
     "sha": "4287318983741ae5ed4874e5573dd5936ae4ef62",
     "base_sha": "4287318983741ae5ed4874e5573dd5936ae4ef62",
-    "started": "2026-11-08T16:29:32Z"
+    "started": "2026-11-08T17:10:01Z"
   },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
   "next_seed": 68,
-  "consecutive_bursts": 1,
+  "consecutive_bursts": 0,
   "cancel_sweep": [
     {
       "prefix": "SPRT q-simp2-qs-failsoft-1108-1346 ",

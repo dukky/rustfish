@@ -332,3 +332,5 @@
 {"branch": "nnue-g7kb8m", "elo": 30.58, "elo_ci95": [13.12, 48.21], "games": 672, "llr": 3.238, "logged_at": "2026-11-08T16:29:29Z", "mode": "net-gate", "outcome": "merged", "sha": "6e357376ea9cac5768ce2060fefd60b082a9ce99", "test_id": "q-nnue-g7kb8m-1108-1617", "verdict": "H1"}
 {"branch": "main", "consecutive": 1, "logged_at": "2026-11-08T16:29:32Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "best item simp2-razor-d1:nonreg scores 0.0733 < 0.1", "seed": 66, "sha": "4287318983741ae5ed4874e5573dd5936ae4ef62", "test_id": "q-burst-s66"}
 {"branch": "main", "logged_at": "2026-11-08T16:43:59Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 67, "sha": "4287318983741ae5ed4874e5573dd5936ae4ef62"}
+{"branch": "main", "logged_at": "2026-11-08T17:10:00Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 66, "sha": "4287318983741ae5ed4874e5573dd5936ae4ef62", "test_id": "q-burst-s66"}
+{"branch": "main", "logged_at": "2026-11-08T17:10:01Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "4287318983741ae5ed4874e5573dd5936ae4ef62", "test_id": "q-ladder-1108-1710"}
