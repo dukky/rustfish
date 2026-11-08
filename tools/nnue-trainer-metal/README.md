@@ -149,7 +149,39 @@ Validation uses the same forward kernel on a GPU-resident decoded val set.
 For the quantised loss, the CPU quantises and dequantises the weights and
 uploads them to a second buffer.
 
+Bit-identical speed-ups (`metal-speed-2`, nets and checkpoints byte-equal to
+the previous build for none / m1 / kb8m / kb8m `--factorise`, gradcheck
+output identical):
+
+- CSR row ids are bytes, each feature's run starting on a 4-byte word
+  (`offs` = first word | count << 16), so `grad_fused` fetches 4 row ids per
+  load in the same 4-accumulator order; each lane prefetches one of its
+  simdgroup's 24 CSR entries at the start of a range (`simd_shuffle`
+  instead of two dependent loads per feature). grad -10%.
+- Factoriser: `adam_ft` fuses AdamW of W and F with the merge (pft read
+  once instead of twice, no merge pass). adam + merge 2.0 -> 1.5 ms.
+- King buckets: `order_samples` groups the batch by (stm, other) king
+  bucket and `forward_train` visits samples in that order, so concurrent
+  threadgroups gather from the same FT blocks. forward 3.0 -> 2.3 ms.
+
+Kernel step per 16384 batch, H 512, B 8, shuffled data, interleaved runs:
+plain 9.6 -> 9.1 ms, kb8m `--factorise` 14.5 -> 12.3 ms (grad 9.2 -> 8.3,
+forward 2.9 -> 2.3, adam 2.0 -> 1.5). End to end (6M positions):
+1.69M -> 1.79M pos/s plain, 1.12M -> 1.32M pos/s kb8m `--factorise`.
+Note `bench` uses the first records of `--data` unshuffled; consecutive
+positions of one game share king buckets and flatter the forward, so bench
+on a shuffled file.
+
 Approaches that lost (kept here so nobody retries them blind):
+
+- (metal-speed-2) Fetching a simdgroup's row-id words cooperatively (runs
+  laid out simdgroup-major, 4 words per lane, `simd_shuffle` per word):
+  grad +15%; the inner loop is issue-bound, not load-latency-bound.
+  Likewise 2-word (`uint2`) row-id loads with runs padded to 8: +3%.
+  Replacing the dynamically indexed `oacc[side][bucket]` with constant
+  indices (unrolled compare): +30% (register pressure). Pairing busy with
+  rare squares per simdgroup (per-range max load -10%): no gain.
+  Shift-and-mask row offsets: no change.
 
 - Per-entry threadgroup float atomics: these don't exist in MSL, and a CAS
   loop ran at 1.2M pos/s at H = 256.
@@ -237,7 +269,9 @@ bit, merged rows in every exported net). On the GPU:
   the factoriser they are the same buffer and nothing else changes.
 - `adam` runs over `t`; F's gradient is the sum over every work item of
   its 768 local feature rows (each item belongs to one king bucket), in item
-  order. `merge_factor` then writes `p = clamp(W + F)` (other params copied).
+  order. `adam_ft` (one thread per F element: its F and the 8 W elements
+  under it, partials read once) also writes `p = clamp(W + F)`; `adam`
+  copies the other params into `p`.
 - `row_active` marks each FT row that has an entry in one of its bucket's
   ranges; `adam` skips the decay of unmarked bucketed rows.
 
@@ -284,6 +318,9 @@ noise. End-to-end ~1.0M pos/s in both cases.
 - Results are deterministic per build but not bit-identical to the CPU
   trainer (float summation order), and not across changes to
   `NSG`/`RS`/`Rf`.
-- The rest of the speed is in `grad_fused`. Ideas not tried: 64-column
+- The rest of the speed is in `grad_fused` (~65% of a kb8m step: ~25%
+  staging, the rest the CSR sums). Adam is at the memory-bandwidth limit;
+  a sparse/lazy AdamW is not exact (zero-gradient steps still move a
+  parameter through m / sqrt(v)), so it was not done. Ideas not tried: 64-column
   tiles with half-precision staging (would change numerics), or splitting
   forward and backward over two batches to overlap.

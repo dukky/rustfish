@@ -236,7 +236,7 @@ func initFactor(_ sh: Shape, _ rng: inout Rng) -> [Float] {
     return [Float](repeating: 0, count: sh.ftB) + p1[s1.ftB...] + p1[0..<s1.ftB]
 }
 
-/// CPU twin of the `merge_factor` kernel: effective net params from a training vector.
+/// CPU twin of the merge in the `adam_ft` kernel: effective net params from a training vector.
 func mergeFactor(_ t: [Float], _ sh: Shape) -> [Float] {
     let fl = INPUTS * sh.h
     return (0..<sh.len).map { i in i < sh.ftB ? min(max(t[i] + t[sh.len + i % fl], -CLIP), CLIP) : t[i] }
