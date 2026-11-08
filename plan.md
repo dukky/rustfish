@@ -142,7 +142,11 @@ Dated log, newest last; superseded detail is in the commit history and
 
 ## Known problems
 
-- **Disk is now the gen-7 blocker (~14:00 2026-11-08):** 64 GB free with
+- **Gen-7 disk fix done (6f71956):** `shuffle --consume pool6.bin` deletes
+  the old pool once scattered, so pool7 is built in place (peak ~ new pool +
+  new data). chain13 builds pool7 at +440M new positions (~10:30), then
+  g7 -> g7m1 -> g7kb8m (~15:30). Streaming shuffle still needed within days.
+- **(superseded) Disk was the gen-7 blocker (~14:00 2026-11-08):** 64 GB free with
   pool6 (42 GB) on disk; pool7 (~1.8B, ~58 GB) can't be shuffled next to
   pool6. Options: build pool7 straight from the source files (needs a clean
   manifest of pool6's sources, val tails excluded, x2 fixes) after deleting
