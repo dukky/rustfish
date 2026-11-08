@@ -29,6 +29,10 @@
       "mode": "stc",
       "expect": 3.0,
       "passed_over": 4
+    },
+    {
+      "branch": "main",
+      "mode": "ladder"
     }
   ],
   "current": {
