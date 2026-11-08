@@ -12,7 +12,7 @@ chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 | | |
 |---|---|
-| Strength | **3474 CCRL Blitz** (pentanomial CI 3456-3493, 2026-11-08 01:38, new anchor set); was **3463** (95% CI 3434-3493) on `0aaf3b9` (g4), ladder 2026-11-07 11:23. Since then merged: feat-lmr-cutnode +15.6, g4kb8m +11.0, simp-nmp-margin +8.2, tm-ccrl-r2 (nonreg): **estimate ~3495**. Short-term goal (3400) passed on 2026-11-06 (3429). Was 3168 on the morning of 2026-11-06. |
+| Strength | **3492 CCRL Blitz** (pentanomial CI 3475-3510, 2026-11-08 19:23, same anchor set as 3474; ~#103 on the 2026-11-07 list, top 100 = 3506); before: **3474** (pentanomial CI 3456-3493, 2026-11-08 01:38, new anchor set); was **3463** (95% CI 3434-3493) on `0aaf3b9` (g4), ladder 2026-11-07 11:23. Since then merged: feat-lmr-cutnode +15.6, g4kb8m +11.0, simp-nmp-margin +8.2, tm-ccrl-r2 (nonreg): **estimate ~3495**. Short-term goal (3400) passed on 2026-11-06 (3429). Was 3168 on the morning of 2026-11-06. |
 | Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ reached; **mid term top 100 = 3506** (#100 Endspiel 3505); **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
 | Eval | NNUE g4kb8m: (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. Exact factoriser warm start from g4 (from scratch on pool4, 730M positions). |
 | Search | PVS, aspiration, TT buckets, NMP (eval >= beta), RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension, cut-node LMR; node-fraction time management. |
