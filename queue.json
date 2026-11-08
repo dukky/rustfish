@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "simp2-razor-d1",
-      "mode": "nonreg",
-      "expect": 1.0,
-      "passed_over": 6
-    },
-    {
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
       "expect": 1.0,
@@ -29,15 +23,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "datagen-burst",
-    "test_id": "q-burst-s73",
-    "seed": 73,
-    "sha": "62e6e5be7683c374b9b62b0e63e62a380747f8c2",
-    "base_sha": "62e6e5be7683c374b9b62b0e63e62a380747f8c2",
-    "started": "2026-11-08T20:05:58Z"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
