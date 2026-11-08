@@ -307,3 +307,5 @@
 {"branch": "main", "logged_at": "2026-11-08T04:42:28Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 52, "sha": "3d079755bf893e2c70c8654bc846213aaec92267", "test_id": "q-burst-s52"}
 {"branch": "main", "consecutive": 2, "logged_at": "2026-11-08T04:42:29Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "best item simp-lmr-extra-r2:nonreg scores 0.0733 < 0.1", "seed": 54, "sha": "3d079755bf893e2c70c8654bc846213aaec92267", "test_id": "q-burst-s54"}
 {"branch": "main", "logged_at": "2026-11-08T05:06:28Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 55, "sha": "3d079755bf893e2c70c8654bc846213aaec92267"}
+{"branch": "main", "logged_at": "2026-11-08T05:21:49Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 54, "sha": "3d079755bf893e2c70c8654bc846213aaec92267", "test_id": "q-burst-s54"}
+{"branch": "simp-lmr-extra-r2", "logged_at": "2026-11-08T05:21:50Z", "mode": "nonreg", "outcome": "needs-human", "reason": "rebase conflict"}

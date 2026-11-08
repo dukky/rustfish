@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "simp-lmr-extra-r2",
-      "mode": "nonreg",
-      "expect": 1.0,
-      "passed_over": 8
-    },
-    {
       "branch": "simp2-qs-failsoft",
       "mode": "stc",
       "expect": 2.0,
@@ -43,15 +37,7 @@
       "passed_over": 1
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "datagen-burst",
-    "test_id": "q-burst-s54",
-    "seed": 54,
-    "sha": "3d079755bf893e2c70c8654bc846213aaec92267",
-    "base_sha": "3d079755bf893e2c70c8654bc846213aaec92267",
-    "started": "2026-11-08T04:42:29Z"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
