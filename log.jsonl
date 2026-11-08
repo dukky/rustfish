@@ -310,3 +310,4 @@
 {"branch": "main", "logged_at": "2026-11-08T05:21:49Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 54, "sha": "3d079755bf893e2c70c8654bc846213aaec92267", "test_id": "q-burst-s54"}
 {"branch": "simp-lmr-extra-r2", "logged_at": "2026-11-08T05:21:50Z", "mode": "nonreg", "outcome": "needs-human", "reason": "rebase conflict"}
 {"base_sha": "3d079755bf893e2c70c8654bc846213aaec92267", "branch": "feat-threat-hist", "logged_at": "2026-11-08T05:22:28Z", "mode": "stc", "outcome": "dispatched", "priority": {"considered": 6, "gain": 4.0, "gain_source": "expect", "p_accept": 0.296, "rule": "score", "runner_hours": 6.55, "samples": 57, "score": 0.1807}, "sha": "0d7899529d6595052061fb81ecbdf3f9873015c2", "test_id": "q-feat-threat-hist-1108-0522"}
+{"branch": "main", "logged_at": "2026-11-08T05:51:05Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 56, "sha": "d0739dfa3bb8ddbc091802ae27f06e23385391b6"}
