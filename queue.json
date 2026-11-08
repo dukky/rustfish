@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "nnue-g6kb8m",
-      "mode": "net-gate",
-      "expect": 8.0,
-      "front": true
-    },
-    {
       "branch": "simp-lmr-extra-r2",
       "mode": "nonreg",
       "expect": 1.0,
@@ -50,17 +44,20 @@
     }
   ],
   "current": {
-    "branch": "main",
-    "mode": "datagen-burst",
-    "test_id": "q-burst-s50",
-    "seed": 50,
-    "sha": "b1351dd052286bd825636853c5824223c768cb3e",
-    "base_sha": "b1351dd052286bd825636853c5824223c768cb3e",
-    "started": "2026-11-08T02:49:51Z"
+    "branch": "nnue-g6kb8m",
+    "mode": "net-gate",
+    "expect": 8.0,
+    "front": true,
+    "test_id": "q-nnue-g6kb8m-1108-0336",
+    "sha": "3d079755bf893e2c70c8654bc846213aaec92267",
+    "base_sha": "1c80b5c5e832f4d3494af6975291e46e9a82604c",
+    "started": "2026-11-08T03:36:26Z",
+    "bench": 700819,
+    "evalhash": "248c85c4a1cc6558"
   },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
   "next_seed": 52,
-  "consecutive_bursts": 1
+  "consecutive_bursts": 0
 }
