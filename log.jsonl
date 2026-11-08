@@ -317,3 +317,4 @@
 {"branch": "main", "logged_at": "2026-11-08T08:50:28Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 60, "sha": "9cd7c5ab9654a5584940d2a06ccbb6fab8f6b02b"}
 {"branch": "main", "logged_at": "2026-11-08T09:34:46Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 61, "sha": "f61936b2ef55294f4f4cf340a8bdf9b9dc6837c7"}
 {"branch": "main", "logged_at": "2026-11-08T10:19:35Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 62, "sha": "6e8deebedae3805b15f9d13f32e7997b33084b7f"}
+{"branch": "feat-lmr-recapture", "logged_at": "2026-11-08T11:04:48Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
