@@ -321,3 +321,5 @@
 {"branch": "feat-lmr-recapture", "logged_at": "2026-11-08T11:07:27Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "feat-threat-hist", "elo": 4.71, "elo_ci95": [1.75, 7.67], "games": 17856, "llr": 4.833, "logged_at": "2026-11-08T12:20:00Z", "mode": "stc", "outcome": "merged", "sha": "0d7899529d6595052061fb81ecbdf3f9873015c2", "test_id": "q-feat-threat-hist-1108-0522", "verdict": "H1"}
 {"branch": "main", "consecutive": 1, "logged_at": "2026-11-08T12:20:06Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "best item simp2-qs-failsoft:stc scores 0.0871 < 0.1", "seed": 63, "sha": "e011524367f41b595f4fd7b7776d093507939535", "test_id": "q-burst-s63"}
+{"branch": "main", "logged_at": "2026-11-08T13:06:51Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 63, "sha": "e011524367f41b595f4fd7b7776d093507939535", "test_id": "q-burst-s63"}
+{"branch": "main", "consecutive": 2, "logged_at": "2026-11-08T13:06:52Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "best item simp2-qs-failsoft:stc scores 0.0871 < 0.1", "seed": 64, "sha": "e011524367f41b595f4fd7b7776d093507939535", "test_id": "q-burst-s64"}
