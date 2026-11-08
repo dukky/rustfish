@@ -1,6 +1,12 @@
 {
   "pending": [
     {
+      "branch": "nnue-g7kb8m",
+      "mode": "net-gate",
+      "expect": 8.0,
+      "front": true
+    },
+    {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
@@ -48,6 +54,6 @@
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
-  "next_seed": 65,
+  "next_seed": 66,
   "consecutive_bursts": 0
 }
