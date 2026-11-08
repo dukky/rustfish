@@ -394,7 +394,7 @@ struct Cfg {
 final class Gpu {
     let dev: MTLDevice
     let q: MTLCommandQueue
-    let decode, fwdTrain, fwdVal, plan, sortE, gradFused, gradFused1, gradOb, adam, adamFt, rowActive: MTLComputePipelineState
+    let decode, orderS, fwdTrain, fwdVal, plan, sortE, gradFused, gradFused1, gradOb, adam, adamFt, rowActive: MTLComputePipelineState
 
     init() {
         guard let d = MTLCreateSystemDefaultDevice() else { die("no Metal device") }
@@ -407,7 +407,7 @@ final class Gpu {
         func pipe(_ n: String) -> MTLComputePipelineState {
             do { let ps = try d.makeComputePipelineState(function: lib.makeFunction(name: n)!); if ProcessInfo.processInfo.environment["NNUE_DEBUG"] != nil { FileHandle.standardError.write("\(n): tgmem \(ps.staticThreadgroupMemoryLength) maxthreads \(ps.maxTotalThreadsPerThreadgroup)\n".data(using: .utf8)!) }; return ps } catch { die("pipeline \(n): \(error)") }
         }
-        decode = pipe("decode"); fwdTrain = pipe("forward_train"); fwdVal = pipe("forward_val")
+        decode = pipe("decode"); orderS = pipe("order_samples"); fwdTrain = pipe("forward_train"); fwdVal = pipe("forward_val")
         plan = pipe("plan_rows"); sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradFused1 = pipe("grad_fused1"); gradOb = pipe("grad_ob"); adam = pipe("adam"); adamFt = pipe("adam_ft")
         rowActive = pipe("row_active")
     }
@@ -458,7 +458,7 @@ final class Trainer {
     var cfg: Cfg
     let factor: Bool
     let tlen: Int
-    let t, p, m, v, acc, gs, pft, pow_, pob, sorted, ecount, rows, hdr, rng, items, act: MTLBuffer
+    let t, p, m, v, acc, gs, perm, pft, pow_, pob, sorted, ecount, rows, hdr, rng, items, act: MTLBuffer
     /// Upper bounds on sort ranges / grad work items per batch (grid sizes).
     let maxRanges, maxItems: Int
 
@@ -485,6 +485,7 @@ final class Trainer {
         if m0 == nil { memset(m.contents(), 0, tlen * 4); memset(v.contents(), 0, tlen * 4) }
         acc = g.buf(batch * 2 * sh.h * 4)
         gs = g.buf(batch * 4)
+        perm = g.buf(sh.kb > 1 ? batch * 4 : 16)
         precondition(sh.kb <= MAXKB, "at most \(MAXKB) king buckets")
         // Rows sorted by king bucket, cut into ranges of 2 * RS rows (each
         // bucket's last one partial) and items of `per` ranges (see plan_rows).
@@ -516,9 +517,17 @@ final class Trainer {
         if only < 0 || only == 0 { b.encodeDecode(g, enc, c) }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 1 {
+        if sh.kb > 1 {
+            enc.setComputePipelineState(g.orderS)
+            enc.setBuffers([b.meta, perm], offsets: [0, 0], range: 0..<2)
+            enc.setBytes(&c, length: cl, index: 2)
+            enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
+            enc.memoryBarrier(scope: .buffers)
+        }
         enc.setComputePipelineState(g.fwdTrain)
         enc.setBuffers([p, b.feats, b.meta, b.target, acc, gs, b.loss], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
         enc.setBytes(&c, length: cl, index: 7)
+        enc.setBuffer(perm, offset: 0, index: 8)
         enc.dispatchThreadgroups(MTLSize(width: b.n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: fwdThreads(sh.h), height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)

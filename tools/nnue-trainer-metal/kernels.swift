@@ -159,6 +159,40 @@ inline float forward_one(device const float* p, device const ushort* feats, devi
     return p[(c.nf + 1) * h + c.nb * 2 * h + b] + t;
 }
 
+// King buckets: the order in which forward_train's threadgroups visit the
+// samples, grouped by (stm king bucket, other king bucket), so concurrent
+// threadgroups gather from the same two 768-row blocks of the FT table
+// (cache locality). Each sample's arithmetic is unchanged, so the order
+// within a group (atomics, not deterministic) does not matter.
+kernel void order_samples(device const uint* meta [[buffer(0)]],
+                          device uint* perm [[buffer(1)]],
+                          constant Cfg& c [[buffer(2)]],
+                          uint tid [[thread_position_in_threadgroup]],
+                          uint tpg [[threads_per_threadgroup]]) {
+    threadgroup atomic_uint hist[MAXKB * MAXKB];
+    uint nkb = c.nf / 768, nk = nkb * nkb;
+    for (uint k = tid; k < nk; k += tpg) atomic_store_explicit(&hist[k], 0u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = tid; s < c.count; s += tpg) {
+        uint m = meta[s];
+        atomic_fetch_add_explicit(&hist[((m >> 16) & 0xFF) * nkb + (m >> 24)], 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        uint t = 0;
+        for (uint k = 0; k < nk; k++) {
+            uint n = atomic_load_explicit(&hist[k], memory_order_relaxed);
+            atomic_store_explicit(&hist[k], t, memory_order_relaxed);
+            t += n;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = tid; s < c.count; s += tpg) {
+        uint m = meta[s];
+        perm[atomic_fetch_add_explicit(&hist[((m >> 16) & 0xFF) * nkb + (m >> 24)], 1u, memory_order_relaxed)] = s;
+    }
+}
+
 kernel void forward_train(device const float* p [[buffer(0)]],
                           device const ushort* feats [[buffer(1)]],
                           device const uint* meta [[buffer(2)]],
@@ -167,7 +201,8 @@ kernel void forward_train(device const float* p [[buffer(0)]],
                           device float* gs [[buffer(5)]],
                           device float* loss [[buffer(6)]],
                           constant Cfg& c [[buffer(7)]],
-                          uint s [[threadgroup_position_in_grid]],
+                          device const uint* perm [[buffer(8)]],
+                          uint tgi [[threadgroup_position_in_grid]],
                           uint tid [[thread_position_in_threadgroup]],
                           uint tpg [[threads_per_threadgroup]],
                           uint sl [[thread_index_in_simdgroup]],
@@ -175,6 +210,7 @@ kernel void forward_train(device const float* p [[buffer(0)]],
                           uint nsg [[simdgroups_per_threadgroup]]) {
     threadgroup float red[32];
     threadgroup ushort fl[64];
+    uint s = c.nf > 768 ? perm[tgi] : tgi;
     float out = forward_one(p, feats, meta, acc, true, c, s, tid, tpg, sl, sg, nsg, red, fl);
     if (tid == 0) {
         float pred = sigm(out);
