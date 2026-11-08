@@ -134,3 +134,15 @@ for the same cores).
 - AVX-512 engine kernels exist on branch `nnue-avx512` (parked: no whole-engine gain at
   512 wide); re-check with `nnue-isa-check.yml` if nets get wider.
 - Keep `~/rustfish-data` out of any file indexer / backup that rescans large files.
+
+## Measured (2026-11-08, 9600X, s45.bin, 1500 batches)
+
+| config | 6 threads | 12 threads | M3 Metal |
+|---|---|---|---|
+| plain 512x8 | 3.94M pos/s | **4.08M** | 1.79M |
+| kb8m + factorise | 1.83M | **1.98M** | 1.32M |
+
+Identical losses at 6 and 12 threads (deterministic). SMT adds only 4-8%: the trainer is
+memory-bound on 6 cores. A generation on ~1.7B positions (g 10 epochs + m1 + kb8m 4 epochs)
+takes ~2.2 h here vs ~4.3 h on the laptop, so the desktop should run generations. The CPU
+kb8m path is relatively slower (2x below plain vs 1.35x on Metal): a target for optimisation.
