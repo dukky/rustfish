@@ -6,7 +6,7 @@ import Foundation
 // (NF = KB*768 FT rows; KB = king buckets, see `--king-buckets`).
 //
 // Per batch: decode -> forward_train -> plan_rows -> sort_entries -> grad_fused + grad_ob
-// (+ row_active) -> adam (+ merge_factor).
+// (+ row_active) -> adam (+ adam_ft with the factoriser).
 // Gradients are written as per-work-item partials and summed in a fixed
 // order by `adam`; every reduction has a fixed order, so training is
 // deterministic run to run (it differs from the CPU trainer only in float
@@ -526,6 +526,19 @@ kernel void row_active(device const uint* offs [[buffer(0)]],
 // factoriser F: every item's 768 local feature rows, i.e. the sum over king
 // buckets), then AdamW + clipping (same formula as the CPU trainer). `p` is
 // the training vector: the net's params, then (factoriser) F.
+// With the factoriser, adam runs only over the FT bias and output layer
+// (i = thread + i0, i0 = FT size) and also writes the merged net `pm`
+// (a copy); adam_ft does the FT rows and F.
+inline float adam_upd(float g, device float* m, device float* v, uint i, constant Cfg& c) {
+    g *= c.inv_batch;
+    const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
+    float mi = b1 * m[i] + (1.0f - b1) * g;
+    float vi = b2 * v[i] + (1.0f - b2) * g * g;
+    m[i] = mi;
+    v[i] = vi;
+    return (mi / c.c1) / (sqrt(vi / c.c2) + eps);
+}
+
 kernel void adam(device float* p [[buffer(0)]],
                  device float* m [[buffer(1)]],
                  device float* v [[buffer(2)]],
@@ -535,7 +548,10 @@ kernel void adam(device float* p [[buffer(0)]],
                  device const uint* hdr [[buffer(6)]],
                  constant Cfg& c [[buffer(7)]],
                  device const uint* act [[buffer(8)]],
-                 uint i [[thread_position_in_grid]]) {
+                 device float* pm [[buffer(9)]],
+                 constant uint& i0 [[buffer(10)]],
+                 uint gid [[thread_position_in_grid]]) {
+    uint i = gid + i0;
     uint h = c.h;
     uint ft = c.nf * h, out_w = ft + h, out_b = out_w + c.nb * 2 * h;
     if (i >= c.plen + c.fl) return;
@@ -558,25 +574,60 @@ kernel void adam(device float* p [[buffer(0)]],
         for (uint r = 0; r < ni; r++) g += pft[r * 769 * h + k];
     }
     if (c.mode == 1) { m[i] = g; return; }
-    g *= c.inv_batch;
-    const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
-    float mi = b1 * m[i] + (1.0f - b1) * g;
-    float vi = b2 * v[i] + (1.0f - b2) * g * g;
-    m[i] = mi;
-    v[i] = vi;
-    float upd = (mi / c.c1) / (sqrt(vi / c.c2) + eps);
+    float upd = adam_upd(g, m, v, i, c);
     float decay = (c.wdact != 0 && i < ft && act[i / h] == 0) ? 1.0f : c.decay;
     float x = p[i] * decay - c.lr * upd;
     p[i] = clamp(x, -CLIP, CLIP);
+    if (c.fl != 0 && i < c.plen) pm[i] = p[i];
 }
 
-// Factoriser: effective net params from the training vector `t`
-// (FT row element = clamp(W + F), the rest copied).
-kernel void merge_factor(device const float* t [[buffer(0)]],
-                         device float* p [[buffer(1)]],
-                         constant Cfg& c [[buffer(2)]],
-                         uint i [[thread_position_in_grid]]) {
-    if (i >= c.plen) return;
-    p[i] = i < c.nf * c.h ? clamp(t[i] + t[c.plen + i % c.fl], -CLIP, CLIP) : t[i];
+// Factoriser, FT part: thread k (< 768 * H) owns F[k] and W[kb][k] of every
+// king bucket. Item partials are read once, in item order (= bucket order),
+// giving each W row the sum over its bucket's items and F the sum over all
+// items in the same order as adam; then AdamW on W and F, and the merged
+// net pm = clamp(W + F) for each bucket (the effective net the other
+// kernels read).
+kernel void adam_ft(device float* p [[buffer(0)]],
+                    device float* m [[buffer(1)]],
+                    device float* v [[buffer(2)]],
+                    device const float* pft [[buffer(3)]],
+                    device const uint* hdr [[buffer(6)]],
+                    constant Cfg& c [[buffer(7)]],
+                    device const uint* act [[buffer(8)]],
+                    device float* pm [[buffer(9)]],
+                    uint k [[thread_position_in_grid]]) {
+    if (k >= c.fl) return;
+    uint h = c.h, nkb = c.nf / 768;
+    float gw[MAXKB];
+    float gf = 0.0f;
+    for (uint kb = 0; kb < nkb; kb++) {
+        float g = 0.0f;
+        uint i1 = hdr[3 + kb];
+        for (uint r = hdr[2 + kb]; r < i1; r++) {
+            float x = pft[r * 769 * h + k];
+            g += x;
+            gf += x;
+        }
+        gw[kb] = g;
+    }
+    uint fi = c.plen + k;
+    if (c.mode == 1) {
+        for (uint kb = 0; kb < nkb; kb++) m[kb * c.fl + k] = gw[kb];
+        m[fi] = gf;
+        return;
+    }
+    float w[MAXKB];
+    for (uint kb = 0; kb < nkb; kb++) {
+        uint i = kb * c.fl + k;
+        float upd = adam_upd(gw[kb], m, v, i, c);
+        float decay = (c.wdact != 0 && act[i / h] == 0) ? 1.0f : c.decay;
+        float x = p[i] * decay - c.lr * upd;
+        w[kb] = clamp(x, -CLIP, CLIP);
+        p[i] = w[kb];
+    }
+    float upd = adam_upd(gf, m, v, fi, c);
+    float f = clamp(p[fi] * c.decay - c.lr * upd, -CLIP, CLIP);
+    p[fi] = f;
+    for (uint kb = 0; kb < nkb; kb++) pm[kb * c.fl + k] = clamp(w[kb] + f, -CLIP, CLIP);
 }
 """
