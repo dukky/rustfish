@@ -139,6 +139,12 @@ Dated log, newest last; superseded detail is in the commit history and
 
 ## Known problems
 
+- **Disk is now the gen-7 blocker (~14:00 2026-11-08):** 64 GB free with
+  pool6 (42 GB) on disk; pool7 (~1.8B, ~58 GB) can't be shuffled next to
+  pool6. Options: build pool7 straight from the source files (needs a clean
+  manifest of pool6's sources, val tails excluded, x2 fixes) after deleting
+  pool6, or do fix (1) below first. g6kb8m (val.bin 0.025832 / val17x2
+  0.024920 vs g5kb8m 0.025886 / 0.025096) is gating now.
 - **Disk (pick up before gen 7, ~3-4 days):** data grows ~1B positions/day
   (~32 GB/day) and we keep sources + a shuffled pool copy (+ a third copy
   while shuffling): ~64 GB/day against 88 GB free on a 460 GB disk. Fixes in
