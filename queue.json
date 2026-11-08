@@ -29,15 +29,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "front": true,
-    "test_id": "q-ladder-1108-1710",
-    "sha": "4287318983741ae5ed4874e5573dd5936ae4ef62",
-    "base_sha": "4287318983741ae5ed4874e5573dd5936ae4ef62",
-    "started": "2026-11-08T17:10:01Z"
-  },
+  "current": null,
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
