@@ -146,3 +146,70 @@ Identical losses at 6 and 12 threads (deterministic). SMT adds only 4-8%: the tr
 memory-bound on 6 cores. A generation on ~1.7B positions (g 10 epochs + m1 + kb8m 4 epochs)
 takes ~2.2 h here vs ~4.3 h on the laptop, so the desktop should run generations. The CPU
 kb8m path is relatively slower (2x below plain vs 1.35x on Metal): a target for optimisation.
+
+## Remote access: SSH over Tailscale
+
+```bash
+# desktop (Ubuntu / WSL2)
+sudo apt install -y openssh-server && sudo systemctl enable --now ssh
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --ssh            # log in with the same account as the laptop
+tailscale ip -4                    # note the 100.x address; MagicDNS name = machine name
+# laptop (macOS): install Tailscale from the App Store, log in, then
+ssh <user>@<desktop-name>          # or tailscale ssh <user>@<desktop-name>
+```
+
+- `--ssh` lets Tailscale handle auth (no keys needed); otherwise add the laptop's
+  `~/.ssh/id_ed25519.pub` to the desktop's `~/.ssh/authorized_keys`.
+- WSL2: run Tailscale inside WSL (above) or on Windows with SSH into WSL via
+  `wsl` port forwarding; inside-WSL is simpler. Keep the PC from sleeping (Windows
+  power settings: sleep never on AC).
+- Long jobs: run them in `tmux` (`sudo apt install tmux; tmux new -s train`) so they
+  survive disconnects; reattach with `tmux attach -t train`.
+- Copying nets/logs: `scp <user>@<desktop-name>:~/rustfish-data/g8kb8m.bin .`
+
+## A useful few-hour test: a recent-data net (gen 8 candidate)
+
+Answers an open question for Wednesday (plan.md disk item 2): does a net trained only on
+recent data (CI seeds 19+, from the NNUE-era engines) match one trained on everything?
+It also exercises the whole pipeline on the desktop. ~1B positions, ~3-4 h, ~60 GB disk.
+
+```bash
+cd ~/rustfish-data; T=~/dev/rustfish/tools/nnue-trainer/target/release/nnue-trainer
+# 1. seeds 19-60 (net scale, no x2 needed); skips seeds without a finished run
+for s in $(seq 19 60); do
+  [ -f s$s.bin ] && continue
+  id=$(gh run list -R dukky/rustfish -w datagen.yml -L 200 --json databaseId,displayTitle,conclusion \
+       -q ".[] | select(.conclusion==\"success\" and (.displayTitle|test(\"seed $s \"))) | .databaseId" | head -1)
+  [ -z "$id" ] && continue
+  gh run download $id -R dukky/rustfish -D dl$s && gunzip -c dl$s/*/*.gz | $T convert - s$s.bin && rm -rf dl$s
+done
+# 2. validation sets, same as the laptop's: last 1M of seed 9; last 1M of seed 17 with scores x2
+for s in 9 17; do id=$(gh run list -R dukky/rustfish -w datagen.yml -L 300 --json databaseId,displayTitle,conclusion \
+  -q ".[] | select(.conclusion==\"success\" and (.displayTitle|test(\"seed $s \"))) | .databaseId" | head -1)
+  gh run download $id -R dukky/rustfish -D dl$s && gunzip -c dl$s/*/*.gz | $T convert - raw$s.bin && rm -rf dl$s; done
+tail -c 32000000 raw9.bin > val.bin
+tail -c 32000000 raw17.bin > val17.bin
+python3 - <<'PY'
+import array
+a = array.array('h'); a.frombytes(open('val17.bin', 'rb').read())
+for i in range(12, len(a), 16):            # score = i16 #12 of each 32-byte record
+    a[i] = max(-32768, min(32767, 2 * a[i]))
+open('val17x2.bin', 'wb').write(a.tobytes())
+PY
+sha256sum val.bin val17x2.bin    # compare with the laptop: shasum -a 256 ~/rustfish-data/{val.bin,fix/val17x2.bin}
+rm raw9.bin raw17.bin val17.bin
+# 3. pool (exclude nothing else: seeds >= 19 never contain the val tails), then the recipe
+$T shuffle --out poolR.bin s{19..60}.bin 2>/dev/null || $T shuffle --out poolR.bin s*.bin
+$T train --data poolR.bin --val val.bin --out gR.bin --hidden 512 --buckets 8 --epochs 10 --lr 1e-3 --lr-end 1e-5 --threads 12
+$T train --data poolR.bin --val val.bin --out gRm1.bin --hidden 512 --buckets 8 --king-buckets m1 --init gR.bin --epochs 1 --lr 2e-4 --lr-end 1e-5 --keep-best --threads 12
+$T train --data poolR.bin --val val.bin --out gRkb8m.bin --hidden 512 --buckets 8 --king-buckets kb8m --factorise --init gRm1.bin --epochs 4 --lr 2e-4 --lr-end 1e-6 --keep-best --threads 12
+# 4. compare with main's net (best-scale; lower is better on both = candidate)
+git -C ~/dev/rustfish pull -q && cp ~/dev/rustfish/net/nnue.bin main.bin
+for n in main gRkb8m; do for v in val.bin val17x2.bin; do
+  echo "$n $v $($T eval --net $n.bin --val $v --buckets 8 --king-buckets kb8m --best-scale | tail -1)"; done; done
+```
+
+If `shuffle` with the brace list fails because some seeds are missing, list the files
+that exist (`ls s*.bin`). If gRkb8m wins on both sets it can go straight to section 6
+(embed + net-gate); either way the numbers decide whether gen 8 drops the old data.
