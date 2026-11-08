@@ -5,7 +5,7 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-07 18:35 (UK time)._ Live state (current test, queue, results, strength
+_Last updated: 2026-11-08 10:30 (UK). **Unattended until Wed 11 Nov evening: see docs/handoff-2026-11-08.md.**_ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
