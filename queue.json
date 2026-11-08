@@ -39,10 +39,18 @@
       "mode": "stc"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "datagen-burst",
+    "test_id": "q-burst-s63",
+    "seed": 63,
+    "sha": "e011524367f41b595f4fd7b7776d093507939535",
+    "base_sha": "e011524367f41b595f4fd7b7776d093507939535",
+    "started": "2026-11-08T12:20:06Z"
+  },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
-  "next_seed": 63,
-  "consecutive_bursts": 0
+  "next_seed": 64,
+  "consecutive_bursts": 1
 }
