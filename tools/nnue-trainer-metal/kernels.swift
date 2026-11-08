@@ -6,7 +6,7 @@ import Foundation
 // (NF = KB*768 FT rows; KB = king buckets, see `--king-buckets`).
 //
 // Per batch: decode -> forward_train -> plan_rows -> sort_entries -> grad_fused + grad_ob
-// (+ row_active) -> adam (+ merge_factor).
+// (+ row_active) -> adam (+ adam_ft with the factoriser).
 // Gradients are written as per-work-item partials and summed in a fixed
 // order by `adam`; every reduction has a fixed order, so training is
 // deterministic run to run (it differs from the CPU trainer only in float
@@ -159,6 +159,40 @@ inline float forward_one(device const float* p, device const ushort* feats, devi
     return p[(c.nf + 1) * h + c.nb * 2 * h + b] + t;
 }
 
+// King buckets: the order in which forward_train's threadgroups visit the
+// samples, grouped by (stm king bucket, other king bucket), so concurrent
+// threadgroups gather from the same two 768-row blocks of the FT table
+// (cache locality). Each sample's arithmetic is unchanged, so the order
+// within a group (atomics, not deterministic) does not matter.
+kernel void order_samples(device const uint* meta [[buffer(0)]],
+                          device uint* perm [[buffer(1)]],
+                          constant Cfg& c [[buffer(2)]],
+                          uint tid [[thread_position_in_threadgroup]],
+                          uint tpg [[threads_per_threadgroup]]) {
+    threadgroup atomic_uint hist[MAXKB * MAXKB];
+    uint nkb = c.nf / 768, nk = nkb * nkb;
+    for (uint k = tid; k < nk; k += tpg) atomic_store_explicit(&hist[k], 0u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = tid; s < c.count; s += tpg) {
+        uint m = meta[s];
+        atomic_fetch_add_explicit(&hist[((m >> 16) & 0xFF) * nkb + (m >> 24)], 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        uint t = 0;
+        for (uint k = 0; k < nk; k++) {
+            uint n = atomic_load_explicit(&hist[k], memory_order_relaxed);
+            atomic_store_explicit(&hist[k], t, memory_order_relaxed);
+            t += n;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = tid; s < c.count; s += tpg) {
+        uint m = meta[s];
+        perm[atomic_fetch_add_explicit(&hist[((m >> 16) & 0xFF) * nkb + (m >> 24)], 1u, memory_order_relaxed)] = s;
+    }
+}
+
 kernel void forward_train(device const float* p [[buffer(0)]],
                           device const ushort* feats [[buffer(1)]],
                           device const uint* meta [[buffer(2)]],
@@ -167,7 +201,8 @@ kernel void forward_train(device const float* p [[buffer(0)]],
                           device float* gs [[buffer(5)]],
                           device float* loss [[buffer(6)]],
                           constant Cfg& c [[buffer(7)]],
-                          uint s [[threadgroup_position_in_grid]],
+                          device const uint* perm [[buffer(8)]],
+                          uint tgi [[threadgroup_position_in_grid]],
                           uint tid [[thread_position_in_threadgroup]],
                           uint tpg [[threads_per_threadgroup]],
                           uint sl [[thread_index_in_simdgroup]],
@@ -175,6 +210,7 @@ kernel void forward_train(device const float* p [[buffer(0)]],
                           uint nsg [[simdgroups_per_threadgroup]]) {
     threadgroup float red[32];
     threadgroup ushort fl[64];
+    uint s = c.nf > 768 ? perm[tgi] : tgi;
     float out = forward_one(p, feats, meta, acc, true, c, s, tid, tpg, sl, sg, nsg, red, fl);
     if (tid == 0) {
         float pred = sigm(out);
@@ -274,11 +310,14 @@ kernel void plan_rows(device const uint* meta [[buffer(0)]],
 // row = position in the range), bucket the active (feature, row) entries by
 // feature, deterministically: a 256-bit row mask per feature (atomic OR is
 // order independent), then each feature's rows are emitted in increasing
-// order. Output: sorted[range][RS*64] = local row, offs[range][769] (local
-// feature f = global - kb*768 occupies sorted[offs[f] .. offs[f+1])).
+// order. Output per range: bytes sorted[range][RS*128] = local row, each
+// feature's run starting on a 4-byte word (padded to whole words, padding
+// never read), and offs[range][f] = first word | count << 16 for local
+// feature f = global - kb*768 (word-aligned runs let grad_fused fetch four
+// row ids per load).
 kernel void sort_entries(device const ushort* feats [[buffer(0)]],
                          device const uint* meta [[buffer(1)]],
-                         device ushort* sorted [[buffer(2)]],
+                         device uchar* sorted [[buffer(2)]],
                          device uint* offs [[buffer(3)]],
                          device const uint* rows [[buffer(4)]],
                          device const uint* hdr [[buffer(5)]],
@@ -314,22 +353,23 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
         for (uint w = 0; w < 8; w++) t += popcount(atomic_load_explicit(&mask[(3 * tid + i) * 8 + w], memory_order_relaxed));
         cnt[i] = t;
     }
-    uint local = cnt[0] + cnt[1] + cnt[2];
+    uint local = (cnt[0] + 3) / 4 + (cnt[1] + 3) / 4 + (cnt[2] + 3) / 4;   // words
     uint pre = simd_prefix_exclusive_sum(local);
     if (sl == 31) simd_tot[sg] = pre + local;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     uint base = pre;
     for (uint i = 0; i < sg; i++) base += simd_tot[i];
     device uint* off = offs + rg * 769;
-    if (tid == 255) off[768] = base + local;
-    device ushort* out = sorted + rg * RS * 64;
-    uint pos = base;
+    device uchar* out = sorted + rg * RS * 128;
+    uint wpos = base;
     for (uint i = 0; i < 3; i++) {
-        off[3 * tid + i] = pos;
+        off[3 * tid + i] = wpos | (cnt[i] << 16);
+        uint pos = 4 * wpos;
+        wpos += (cnt[i] + 3) / 4;
         for (uint w = 0; w < 8; w++) {
             uint bits = atomic_load_explicit(&mask[(3 * tid + i) * 8 + w], memory_order_relaxed);
             while (bits != 0) {
-                out[pos++] = ushort(w * 32 + ctz(bits));
+                out[pos++] = uchar(w * 32 + ctz(bits));
                 bits &= bits - 1;
             }
         }
@@ -351,9 +391,10 @@ kernel void sort_entries(device const ushort* feats [[buffer(0)]],
 // ONE (one king bucket): rows are in identity order, so range rows need no
 // lookup and simdgroup sg only ever stages side sg & 1 (one output-gradient
 // register set instead of two).
+static_assert(768 / NSG <= 32, "one CSR entry per lane");
 template <bool ONE>
 inline void grad_body(device const float* p, device const uint* meta, device const float* acc,
-                      device const float* gs, device const ushort* sorted, device const uint* offs,
+                      device const float* gs, device const uint* sorted, device const uint* offs,
                       device float* pft, device float* pow_, device const uint* rows,
                       device const uint* hdr, device const uint4* rng, device const uint4* item,
                       constant Cfg& c, uint2 tg, uint lane, uint sg, threadgroup float* dt) {
@@ -372,7 +413,9 @@ inline void grad_body(device const float* p, device const uint* meta, device con
     for (uint rg = I.y; rg < I.z; rg++) {
         uint4 R = rng[rg];
         device const uint* off = offs + rg * 769;
-        device const ushort* srt = sorted + rg * RS * 64;
+        device const uint* srt = sorted + rg * RS * 32;
+        // Lane i fetches the CSR entry of this simdgroup's i-th feature.
+        uint offl = lane < 768 / NSG ? off[sg + NSG * lane] : 0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint row = sg; row < 2 * RS; row += NSG) {
             float d = 0.0f;
@@ -393,17 +436,25 @@ inline void grad_body(device const float* p, device const uint* meta, device con
         threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
         for (uint i = 0; i < 768 / NSG; i++) {
-            uint f = sg + NSG * i;
-            uint a = off[f], b = off[f + 1];
+            uint o = simd_shuffle(offl, ushort(i));
+            uint w = o & 0xFFFF, n = o >> 16, we = w + n / 4;
             float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
-            uint e = a;
-            for (; e + 4 <= b; e += 4) {
-                s0 += dt[uint(srt[e]) * 32 + lane];
-                s1 += dt[uint(srt[e + 1]) * 32 + lane];
-                s2 += dt[uint(srt[e + 2]) * 32 + lane];
-                s3 += dt[uint(srt[e + 3]) * 32 + lane];
+            // Same order as one row id per step: groups of 4 into s0..s3,
+            // the remaining 0-3 entries into s0.
+            for (; w < we; w++) {
+                uint u = srt[w];
+                s0 += dt[(u & 0xFF) * 32 + lane];
+                s1 += dt[((u >> 8) & 0xFF) * 32 + lane];
+                s2 += dt[((u >> 16) & 0xFF) * 32 + lane];
+                s3 += dt[(u >> 24) * 32 + lane];
             }
-            for (; e < b; e++) s0 += dt[uint(srt[e]) * 32 + lane];
+            uint r = n & 3;
+            if (r != 0) {
+                uint u = srt[w];
+                s0 += dt[(u & 0xFF) * 32 + lane];
+                if (r > 1) s0 += dt[((u >> 8) & 0xFF) * 32 + lane];
+                if (r > 2) s0 += dt[((u >> 16) & 0xFF) * 32 + lane];
+            }
             gr[i] += (s0 + s1) + (s2 + s3);
         }
     }
@@ -449,7 +500,7 @@ inline void grad_body(device const float* p, device const uint* meta, device con
 
 kernel void grad_fused(device const float* p [[buffer(0)]], device const uint* meta [[buffer(1)]],
                        device const float* acc [[buffer(2)]], device const float* gs [[buffer(3)]],
-                       device const ushort* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
+                       device const uint* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
                        device float* pft [[buffer(6)]], device float* pow_ [[buffer(7)]],
                        device const uint* rows [[buffer(8)]], device const uint* hdr [[buffer(9)]],
                        device const uint4* rng [[buffer(10)]], device const uint4* item [[buffer(11)]],
@@ -461,7 +512,7 @@ kernel void grad_fused(device const float* p [[buffer(0)]], device const uint* m
 
 kernel void grad_fused1(device const float* p [[buffer(0)]], device const uint* meta [[buffer(1)]],
                        device const float* acc [[buffer(2)]], device const float* gs [[buffer(3)]],
-                       device const ushort* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
+                       device const uint* sorted [[buffer(4)]], device const uint* offs [[buffer(5)]],
                        device float* pft [[buffer(6)]], device float* pow_ [[buffer(7)]],
                        device const uint* rows [[buffer(8)]], device const uint* hdr [[buffer(9)]],
                        device const uint4* rng [[buffer(10)]], device const uint4* item [[buffer(11)]],
@@ -501,7 +552,7 @@ kernel void row_active(device const uint* offs [[buffer(0)]],
     for (uint rg = 0; rg < nr && a == 0; rg++) {
         if (rng[rg].x != kb) continue;
         device const uint* off = offs + rg * 769;
-        a = off[f + 1] > off[f] ? 1 : 0;
+        a = (off[f] >> 16) != 0 ? 1 : 0;
     }
     act[row] = a;
 }
@@ -511,6 +562,19 @@ kernel void row_active(device const uint* offs [[buffer(0)]],
 // factoriser F: every item's 768 local feature rows, i.e. the sum over king
 // buckets), then AdamW + clipping (same formula as the CPU trainer). `p` is
 // the training vector: the net's params, then (factoriser) F.
+// With the factoriser, adam runs only over the FT bias and output layer
+// (i = thread + i0, i0 = FT size) and also writes the merged net `pm`
+// (a copy); adam_ft does the FT rows and F.
+inline float adam_upd(float g, device float* m, device float* v, uint i, constant Cfg& c) {
+    g *= c.inv_batch;
+    const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
+    float mi = b1 * m[i] + (1.0f - b1) * g;
+    float vi = b2 * v[i] + (1.0f - b2) * g * g;
+    m[i] = mi;
+    v[i] = vi;
+    return (mi / c.c1) / (sqrt(vi / c.c2) + eps);
+}
+
 kernel void adam(device float* p [[buffer(0)]],
                  device float* m [[buffer(1)]],
                  device float* v [[buffer(2)]],
@@ -520,7 +584,10 @@ kernel void adam(device float* p [[buffer(0)]],
                  device const uint* hdr [[buffer(6)]],
                  constant Cfg& c [[buffer(7)]],
                  device const uint* act [[buffer(8)]],
-                 uint i [[thread_position_in_grid]]) {
+                 device float* pm [[buffer(9)]],
+                 constant uint& i0 [[buffer(10)]],
+                 uint gid [[thread_position_in_grid]]) {
+    uint i = gid + i0;
     uint h = c.h;
     uint ft = c.nf * h, out_w = ft + h, out_b = out_w + c.nb * 2 * h;
     if (i >= c.plen + c.fl) return;
@@ -543,25 +610,60 @@ kernel void adam(device float* p [[buffer(0)]],
         for (uint r = 0; r < ni; r++) g += pft[r * 769 * h + k];
     }
     if (c.mode == 1) { m[i] = g; return; }
-    g *= c.inv_batch;
-    const float b1 = 0.9f, b2 = 0.999f, eps = 1e-8f;
-    float mi = b1 * m[i] + (1.0f - b1) * g;
-    float vi = b2 * v[i] + (1.0f - b2) * g * g;
-    m[i] = mi;
-    v[i] = vi;
-    float upd = (mi / c.c1) / (sqrt(vi / c.c2) + eps);
+    float upd = adam_upd(g, m, v, i, c);
     float decay = (c.wdact != 0 && i < ft && act[i / h] == 0) ? 1.0f : c.decay;
     float x = p[i] * decay - c.lr * upd;
     p[i] = clamp(x, -CLIP, CLIP);
+    if (c.fl != 0 && i < c.plen) pm[i] = p[i];
 }
 
-// Factoriser: effective net params from the training vector `t`
-// (FT row element = clamp(W + F), the rest copied).
-kernel void merge_factor(device const float* t [[buffer(0)]],
-                         device float* p [[buffer(1)]],
-                         constant Cfg& c [[buffer(2)]],
-                         uint i [[thread_position_in_grid]]) {
-    if (i >= c.plen) return;
-    p[i] = i < c.nf * c.h ? clamp(t[i] + t[c.plen + i % c.fl], -CLIP, CLIP) : t[i];
+// Factoriser, FT part: thread k (< 768 * H) owns F[k] and W[kb][k] of every
+// king bucket. Item partials are read once, in item order (= bucket order),
+// giving each W row the sum over its bucket's items and F the sum over all
+// items in the same order as adam; then AdamW on W and F, and the merged
+// net pm = clamp(W + F) for each bucket (the effective net the other
+// kernels read).
+kernel void adam_ft(device float* p [[buffer(0)]],
+                    device float* m [[buffer(1)]],
+                    device float* v [[buffer(2)]],
+                    device const float* pft [[buffer(3)]],
+                    device const uint* hdr [[buffer(6)]],
+                    constant Cfg& c [[buffer(7)]],
+                    device const uint* act [[buffer(8)]],
+                    device float* pm [[buffer(9)]],
+                    uint k [[thread_position_in_grid]]) {
+    if (k >= c.fl) return;
+    uint h = c.h, nkb = c.nf / 768;
+    float gw[MAXKB];
+    float gf = 0.0f;
+    for (uint kb = 0; kb < nkb; kb++) {
+        float g = 0.0f;
+        uint i1 = hdr[3 + kb];
+        for (uint r = hdr[2 + kb]; r < i1; r++) {
+            float x = pft[r * 769 * h + k];
+            g += x;
+            gf += x;
+        }
+        gw[kb] = g;
+    }
+    uint fi = c.plen + k;
+    if (c.mode == 1) {
+        for (uint kb = 0; kb < nkb; kb++) m[kb * c.fl + k] = gw[kb];
+        m[fi] = gf;
+        return;
+    }
+    float w[MAXKB];
+    for (uint kb = 0; kb < nkb; kb++) {
+        uint i = kb * c.fl + k;
+        float upd = adam_upd(gw[kb], m, v, i, c);
+        float decay = (c.wdact != 0 && act[i / h] == 0) ? 1.0f : c.decay;
+        float x = p[i] * decay - c.lr * upd;
+        w[kb] = clamp(x, -CLIP, CLIP);
+        p[i] = w[kb];
+    }
+    float upd = adam_upd(gf, m, v, fi, c);
+    float f = clamp(p[fi] * c.decay - c.lr * upd, -CLIP, CLIP);
+    p[fi] = f;
+    for (uint kb = 0; kb < nkb; kb++) pm[kb * c.fl + k] = clamp(w[kb] + f, -CLIP, CLIP);
 }
 """

@@ -236,7 +236,7 @@ func initFactor(_ sh: Shape, _ rng: inout Rng) -> [Float] {
     return [Float](repeating: 0, count: sh.ftB) + p1[s1.ftB...] + p1[0..<s1.ftB]
 }
 
-/// CPU twin of the `merge_factor` kernel: effective net params from a training vector.
+/// CPU twin of the merge in the `adam_ft` kernel: effective net params from a training vector.
 func mergeFactor(_ t: [Float], _ sh: Shape) -> [Float] {
     let fl = INPUTS * sh.h
     return (0..<sh.len).map { i in i < sh.ftB ? min(max(t[i] + t[sh.len + i % fl], -CLIP), CLIP) : t[i] }
@@ -394,7 +394,7 @@ struct Cfg {
 final class Gpu {
     let dev: MTLDevice
     let q: MTLCommandQueue
-    let decode, fwdTrain, fwdVal, plan, sortE, gradFused, gradFused1, gradOb, adam, rowActive, mergeF: MTLComputePipelineState
+    let decode, orderS, fwdTrain, fwdVal, plan, sortE, gradFused, gradFused1, gradOb, adam, adamFt, rowActive: MTLComputePipelineState
 
     init() {
         guard let d = MTLCreateSystemDefaultDevice() else { die("no Metal device") }
@@ -407,9 +407,9 @@ final class Gpu {
         func pipe(_ n: String) -> MTLComputePipelineState {
             do { let ps = try d.makeComputePipelineState(function: lib.makeFunction(name: n)!); if ProcessInfo.processInfo.environment["NNUE_DEBUG"] != nil { FileHandle.standardError.write("\(n): tgmem \(ps.staticThreadgroupMemoryLength) maxthreads \(ps.maxTotalThreadsPerThreadgroup)\n".data(using: .utf8)!) }; return ps } catch { die("pipeline \(n): \(error)") }
         }
-        decode = pipe("decode"); fwdTrain = pipe("forward_train"); fwdVal = pipe("forward_val")
-        plan = pipe("plan_rows"); sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradFused1 = pipe("grad_fused1"); gradOb = pipe("grad_ob"); adam = pipe("adam")
-        rowActive = pipe("row_active"); mergeF = pipe("merge_factor")
+        decode = pipe("decode"); orderS = pipe("order_samples"); fwdTrain = pipe("forward_train"); fwdVal = pipe("forward_val")
+        plan = pipe("plan_rows"); sortE = pipe("sort_entries"); gradFused = pipe("grad_fused"); gradFused1 = pipe("grad_fused1"); gradOb = pipe("grad_ob"); adam = pipe("adam"); adamFt = pipe("adam_ft")
+        rowActive = pipe("row_active")
     }
 
     func buf(_ bytes: Int) -> MTLBuffer { dev.makeBuffer(length: max(bytes, 16), options: .storageModeShared)! }
@@ -458,7 +458,7 @@ final class Trainer {
     var cfg: Cfg
     let factor: Bool
     let tlen: Int
-    let t, p, m, v, acc, gs, pft, pow_, pob, sorted, ecount, rows, hdr, rng, items, act: MTLBuffer
+    let t, p, m, v, acc, gs, perm, pft, pow_, pob, sorted, ecount, rows, hdr, rng, items, act: MTLBuffer
     /// Upper bounds on sort ranges / grad work items per batch (grid sizes).
     let maxRanges, maxItems: Int
 
@@ -485,6 +485,7 @@ final class Trainer {
         if m0 == nil { memset(m.contents(), 0, tlen * 4); memset(v.contents(), 0, tlen * 4) }
         acc = g.buf(batch * 2 * sh.h * 4)
         gs = g.buf(batch * 4)
+        perm = g.buf(sh.kb > 1 ? batch * 4 : 16)
         precondition(sh.kb <= MAXKB, "at most \(MAXKB) king buckets")
         // Rows sorted by king bucket, cut into ranges of 2 * RS rows (each
         // bucket's last one partial) and items of `per` ranges (see plan_rows).
@@ -516,9 +517,17 @@ final class Trainer {
         if only < 0 || only == 0 { b.encodeDecode(g, enc, c) }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 1 {
+        if sh.kb > 1 {
+            enc.setComputePipelineState(g.orderS)
+            enc.setBuffers([b.meta, perm], offsets: [0, 0], range: 0..<2)
+            enc.setBytes(&c, length: cl, index: 2)
+            enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1024, height: 1, depth: 1))
+            enc.memoryBarrier(scope: .buffers)
+        }
         enc.setComputePipelineState(g.fwdTrain)
         enc.setBuffers([p, b.feats, b.meta, b.target, acc, gs, b.loss], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
         enc.setBytes(&c, length: cl, index: 7)
+        enc.setBuffer(perm, offset: 0, index: 8)
         enc.dispatchThreadgroups(MTLSize(width: b.n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: fwdThreads(sh.h), height: 1, depth: 1))
         }
         enc.memoryBarrier(scope: .buffers)
@@ -552,17 +561,20 @@ final class Trainer {
         }
         enc.memoryBarrier(scope: .buffers)
         if only < 0 || only == 4 {
+        // Factoriser: adam_ft updates the FT rows + F and writes their
+        // merged rows into p; adam the rest (copying it into p). Disjoint
+        // indices, so no barrier between them.
+        let ft = sh.ftRows * sh.h
+        var i0 = UInt32(factor ? ft : 0)
         enc.setComputePipelineState(g.adam)
         enc.setBuffers([t, m, v, pft, pow_, pob, hdr], offsets: [0, 0, 0, 0, 0, 0, 0], range: 0..<7)
         enc.setBytes(&c, length: cl, index: 7)
-        enc.setBuffer(act, offset: 0, index: 8)
-        enc.dispatchThreads(MTLSize(width: tlen, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.setBuffers([act, p], offsets: [0, 0], range: 8..<10)
+        enc.setBytes(&i0, length: 4, index: 10)
+        enc.dispatchThreads(MTLSize(width: factor ? sh.len - ft : tlen, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         if factor {
-            enc.memoryBarrier(scope: .buffers)
-            enc.setComputePipelineState(g.mergeF)
-            enc.setBuffers([t, p], offsets: [0, 0], range: 0..<2)
-            enc.setBytes(&c, length: cl, index: 2)
-            enc.dispatchThreads(MTLSize(width: sh.len, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            enc.setComputePipelineState(g.adamFt)
+            enc.dispatchThreads(MTLSize(width: Int(cfg.fl), height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         }
         }
         enc.endEncoding()
