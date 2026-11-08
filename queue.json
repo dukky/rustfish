@@ -29,12 +29,20 @@
       "mode": "stc"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "datagen-burst",
+    "test_id": "q-burst-s71",
+    "seed": 71,
+    "sha": "ba43cc3525cd5fcc852249fd9846e8b2ca290cef",
+    "base_sha": "ba43cc3525cd5fcc852249fd9846e8b2ca290cef",
+    "started": "2026-11-08T19:23:19Z"
+  },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
-  "next_seed": 71,
-  "consecutive_bursts": 0,
+  "next_seed": 72,
+  "consecutive_bursts": 1,
   "cancel_sweep": [
     {
       "prefix": "SPRT q-simp2-qs-failsoft-1108-1346 ",
