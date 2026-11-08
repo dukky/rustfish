@@ -345,3 +345,4 @@
 {"branch": "main", "logged_at": "2026-11-08T20:32:43Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 74, "sha": "c11ca1ca876f841d9fd764afd9d92c0e06ecc382"}
 {"branch": "main", "logged_at": "2026-11-08T20:48:04Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 73, "sha": "62e6e5be7683c374b9b62b0e63e62a380747f8c2", "test_id": "q-burst-s73"}
 {"branch": "simp2-razor-d1", "logged_at": "2026-11-08T20:48:04Z", "mode": "nonreg", "outcome": "needs-human", "reason": "rebase conflict"}
+{"branch": "simp2-rfp-linear", "logged_at": "2026-11-08T20:48:06Z", "mode": "nonreg", "outcome": "needs-human", "reason": "rebase conflict"}

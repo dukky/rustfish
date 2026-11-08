@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "simp2-rfp-linear",
-      "mode": "nonreg",
-      "expect": 1.0,
-      "passed_over": 6
-    },
-    {
       "branch": "feat-lmr-improving",
       "mode": "stc",
       "expect": 3.0,
