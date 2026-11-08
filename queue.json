@@ -43,10 +43,18 @@
       "passed_over": 1
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "datagen-burst",
+    "test_id": "q-burst-s52",
+    "seed": 52,
+    "sha": "3d079755bf893e2c70c8654bc846213aaec92267",
+    "base_sha": "3d079755bf893e2c70c8654bc846213aaec92267",
+    "started": "2026-11-08T04:03:06Z"
+  },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
-  "next_seed": 52,
-  "consecutive_bursts": 0
+  "next_seed": 53,
+  "consecutive_bursts": 1
 }
