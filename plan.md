@@ -40,6 +40,9 @@ Top 100 needs 3506 (32 to go).
   simplification nonregs, ordered by expected Elo per runner-hour.
 - Ladder after the next net merge or 2-3 search merges (pentanomial CI,
   ~+-20 at 40 games/anchor over 11 anchors 3318-3631).
+- simp-lmr-extra-r2 hit a second rebase conflict (LMR block changed by
+  cut-node + negext merges) on 2026-11-08 05:21: dropped for now (expect ~0,
+  -15% nodes); redo from current main later if a simplification pass runs.
 - Queue backlog: mark a needs-human row resolved when its `-r2` is queued
   (feat-se-negext still shows needs-human); a test for the `queue.py remove`
   inbox path; a scheduled ladder should replace (not duplicate) a pending
