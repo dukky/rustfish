@@ -4,43 +4,48 @@
       "branch": "simp2-qs-failsoft",
       "mode": "stc",
       "expect": 2.0,
-      "passed_over": 5
+      "passed_over": 6
     },
     {
       "branch": "simp2-razor-d1",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 5
+      "passed_over": 6
     },
     {
       "branch": "simp2-rfp-linear",
       "mode": "nonreg",
       "expect": 1.0,
-      "passed_over": 5
+      "passed_over": 6
     },
     {
       "branch": "feat-lmr-improving",
       "mode": "stc",
       "expect": 3.0,
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "feat-lmr-captures",
       "mode": "stc",
       "expect": 3.0,
-      "passed_over": 3
-    },
-    {
-      "branch": "feat-threat-hist",
-      "mode": "stc",
-      "expect": 4.0,
-      "passed_over": 1
+      "passed_over": 4
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-threat-hist",
+    "mode": "stc",
+    "expect": 4.0,
+    "passed_over": 1,
+    "test_id": "q-feat-threat-hist-1108-0522",
+    "sha": "0d7899529d6595052061fb81ecbdf3f9873015c2",
+    "base_sha": "3d079755bf893e2c70c8654bc846213aaec92267",
+    "started": "2026-11-08T05:22:28Z",
+    "bench": 623729,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
   "next_seed": 56,
-  "consecutive_bursts": 2
+  "consecutive_bursts": 0
 }
