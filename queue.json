@@ -1,6 +1,15 @@
 {
   "pending": [
     {
+      "branch": "main",
+      "mode": "ltc-check",
+      "base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a"
+    },
+    {
+      "branch": "main",
+      "mode": "ladder"
+    },
+    {
       "branch": "feat-lmr-captures",
       "mode": "stc",
       "expect": 3.0,
@@ -19,21 +28,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "feat-lmr-improving",
-    "mode": "stc",
-    "expect": 3.0,
-    "passed_over": 5,
-    "test_id": "q-feat-lmr-improving-1108-2049",
-    "sha": "c147d5cde4f5f5759ca80003b3436ff3fd109994",
-    "base_sha": "c11ca1ca876f841d9fd764afd9d92c0e06ecc382",
-    "started": "2026-11-08T20:49:05Z",
-    "bench": 501406,
-    "evalhash": "248c85c4a1cc6558"
-  },
-  "check_base": "f3e3f4fa3a17b6884f563b15d1f312b74db72f2a",
-  "merges_since_check": 4,
-  "merges_since_ladder": 4,
+  "current": null,
+  "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
+  "merges_since_check": 0,
+  "merges_since_ladder": 0,
   "next_seed": 80,
   "consecutive_bursts": 0,
   "cancel_sweep": [
