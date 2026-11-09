@@ -379,3 +379,4 @@
 {"branch": "main", "logged_at": "2026-11-09T12:16:56Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 94, "sha": "051168c41bd3855098ee9b2fcc99ed7a7a356939"}
 {"branch": "main", "logged_at": "2026-11-09T13:03:39Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 95, "sha": "051168c41bd3855098ee9b2fcc99ed7a7a356939"}
 {"branch": "main", "logged_at": "2026-11-09T13:51:24Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 96, "sha": "051168c41bd3855098ee9b2fcc99ed7a7a356939"}
+{"branch": "simp2-razor-d1", "elo": -3.19, "elo_ci95": [-6.13, -0.25], "games": 17856, "llr": -1.539, "logged_at": "2026-11-09T14:38:33Z", "mode": "nonreg", "outcome": "rejected", "sha": "5f5275de4ae36ff1681ea768b7c0cb9a35d38c31", "test_id": "q-simp2-razor-d1-1109-0740", "verdict": "inconclusive"}
