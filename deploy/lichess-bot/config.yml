@@ -38,7 +38,7 @@ engine:
     gaviota:
       enabled: false
   uci_options:                   # only options rustfish actually exposes
-    Hash: 64
+    Hash: 256                    # 3 concurrent games = 768 MB of hash
     Threads: 1
     OwnBook: true                # built-in book keeps openings varied
   silence_stderr: false
