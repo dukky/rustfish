@@ -19,14 +19,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "test_id": "q-ladder-1109-0210",
-    "sha": "88e13a1894334b0ee2c31279e085f05534144d13",
-    "base_sha": "88e13a1894334b0ee2c31279e085f05534144d13",
-    "started": "2026-11-09T02:11:01Z"
-  },
+  "current": null,
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 0,
   "merges_since_ladder": 0,

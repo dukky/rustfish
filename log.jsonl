@@ -360,3 +360,4 @@
 {"branch": "main", "logged_at": "2026-11-09T02:11:01Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "88e13a1894334b0ee2c31279e085f05534144d13", "test_id": "q-ladder-1109-0210"}
 {"branch": "main", "logged_at": "2026-11-09T02:49:36Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 82, "sha": "88e13a1894334b0ee2c31279e085f05534144d13"}
 {"branch": "main", "logged_at": "2026-11-09T03:35:24Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 83, "sha": "88e13a1894334b0ee2c31279e085f05534144d13"}
+{"branch": "main", "ci": [3492.3, 3528.2], "elo": null, "elo_ci95": null, "games": 440, "llr": null, "logged_at": "2026-11-09T04:16:54Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3510.2, "sha": "88e13a1894334b0ee2c31279e085f05534144d13", "test_id": "q-ladder-1109-0210", "verdict": "ladder"}
