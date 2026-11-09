@@ -3,6 +3,10 @@
     {
       "branch": "main",
       "mode": "ladder"
+    },
+    {
+      "branch": "feat-root-lmr",
+      "mode": "stc"
     }
   ],
   "current": {
