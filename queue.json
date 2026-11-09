@@ -1,11 +1,15 @@
 {
-  "pending": [
-    {
-      "branch": "feat-root-lmr",
-      "mode": "stc"
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "feat-root-lmr",
+    "mode": "stc",
+    "test_id": "q-feat-root-lmr-1109-2212",
+    "sha": "f9e8d473c25c8e39d617f87fa4918dc52a4df241",
+    "base_sha": "1ec3c5a3375522da0936596de64802b9ef91fd49",
+    "started": "2026-11-09T22:12:27Z",
+    "bench": 407158,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
