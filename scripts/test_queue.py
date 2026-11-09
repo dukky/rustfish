@@ -993,5 +993,68 @@ class LiveSettings(unittest.TestCase):
             self.assertEqual(prof["shards"], q.MAX_FOREGROUND_SHARDS, name)
 
 
+class InboxRemove(unittest.TestCase):
+    """The queue.py remove inbox path drops waiting items, but never the in-flight one."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="queue-remove-test-")
+        self.state = os.path.join(self.tmp, "state")
+        os.makedirs(os.path.join(self.state, "inbox"))
+        self.logs = []
+        self.patches = [
+            mock.patch.object(q, "STATE", self.state),
+            mock.patch.object(q, "sh", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")),
+            mock.patch.object(q, "log", self.logs.append),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, pending, request):
+        with open(os.path.join(self.state, "queue.json"), "w") as fh:
+            json.dump({"pending": pending, "current": {"branch": "live", "mode": "stc"}}, fh)
+        with open(os.path.join(self.state, "inbox", "0001.json"), "w") as fh:
+            json.dump(request, fh)
+
+    def test_remove_branch_and_mode(self):
+        pending = [
+            {"branch": "a", "mode": "stc"},
+            {"branch": "a", "mode": "nonreg"},
+            {"branch": "b", "mode": "stc"},
+        ]
+        self.write(pending, {"remove": "a:nonreg"})
+        state = q.load_state()
+        self.assertEqual(state["pending"],
+                         [{"branch": "a", "mode": "stc"}, {"branch": "b", "mode": "stc"}])
+        self.assertEqual(state["current"], {"branch": "live", "mode": "stc"})
+        self.assertEqual([(r["branch"], r["mode"], r["outcome"]) for r in self.logs],
+                         [("a", "nonreg", "removed")])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "inbox", "0001.json")))
+
+    def test_remove_branch_all_modes(self):
+        pending = [
+            {"branch": "a", "mode": "stc"},
+            {"branch": "a", "mode": "nonreg"},
+            {"branch": "b", "mode": "stc"},
+        ]
+        self.write(pending, {"remove": "a"})
+        state = q.load_state()
+        self.assertEqual(state["pending"], [{"branch": "b", "mode": "stc"}])
+        self.assertEqual(len(self.logs), 2)
+        self.assertTrue(all(r["outcome"] == "removed" for r in self.logs))
+
+    def test_missing_item_is_a_noop(self):
+        pending = [{"branch": "a", "mode": "stc"}]
+        self.write(pending, {"remove": "missing:stc"})
+        state = q.load_state()
+        self.assertEqual(state["pending"], pending)
+        self.assertEqual(self.logs, [])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "inbox", "0001.json")))
+
+
 if __name__ == "__main__":
     unittest.main()
