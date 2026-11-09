@@ -91,9 +91,13 @@ matchmaking:
   challenge_variant: "standard"
   challenge_timeout: 5           # minutes idle before sending a challenge
   challenge_initial_time:
+    - 60
+    - 120
     - 180
     - 300
   challenge_increment:
+    - 0
+    - 1
     - 2
     - 3
   opponent_rating_difference: 300
