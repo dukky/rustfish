@@ -60,6 +60,12 @@ const PROBCUT_MARGIN: i32 = 190;
 const PROBCUT_REDUCTION: i32 = 3;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
+// Root LMR: after the early root moves, search late moves one ply shallower
+// first. A reduced move that beats alpha is re-searched at full depth, so this
+// only saves work on moves that fail low.
+const ROOT_LMR_MIN_DEPTH: i32 = 5;
+const ROOT_LMR_MIN_INDEX: usize = 4;
+const ROOT_LMR_REDUCTION: i32 = 1;
 
 pub(crate) fn build_lmr_table() -> [[i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH] {
     let mut table = [[0i32; LMR_MAX_MOVES]; LMR_MAX_DEPTH];
@@ -1082,9 +1088,14 @@ fn search_root(
                 false,
             );
         } else {
+            let reduction = if idx >= ROOT_LMR_MIN_INDEX && depth >= ROOT_LMR_MIN_DEPTH {
+                ROOT_LMR_REDUCTION
+            } else {
+                0
+            };
             score = -negamax(
                 board,
-                depth - 1,
+                depth - 1 - reduction,
                 -alpha - 1,
                 -alpha,
                 1,
@@ -1097,6 +1108,25 @@ fn search_root(
                 None,
                 true,
             );
+            if reduction > 0 && score > alpha {
+                // The reduced search says this move might beat alpha; verify it
+                // at full depth before accepting the score.
+                score = -negamax(
+                    board,
+                    depth - 1,
+                    -alpha - 1,
+                    -alpha,
+                    1,
+                    search,
+                    engine,
+                    rep_stack,
+                    child_key,
+                    Some(mv),
+                    true,
+                    None,
+                    true,
+                );
+            }
             if score > alpha && score < beta {
                 score = -negamax(
                     board,
