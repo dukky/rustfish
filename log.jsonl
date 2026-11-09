@@ -357,3 +357,4 @@
 {"branch": "main", "logged_at": "2026-11-09T01:14:55Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 80, "sha": "88e13a1894334b0ee2c31279e085f05534144d13"}
 {"branch": "main", "logged_at": "2026-11-09T02:02:29Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 81, "sha": "88e13a1894334b0ee2c31279e085f05534144d13"}
 {"branch": "main", "elo": 61.29, "elo_ci95": [44.17, 78.71], "games": 504, "llr": 4.336, "logged_at": "2026-11-09T02:10:57Z", "mode": "ltc-check", "outcome": "check-passed", "sha": "88e13a1894334b0ee2c31279e085f05534144d13", "test_id": "q-main-ltc-check-1109-0050", "verdict": "H1"}
+{"branch": "main", "logged_at": "2026-11-09T02:11:01Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "88e13a1894334b0ee2c31279e085f05534144d13", "test_id": "q-ladder-1109-0210"}
