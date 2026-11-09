@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "feat-lmr-captures",
-      "mode": "stc",
-      "expect": 3.0,
-      "passed_over": 4
-    },
-    {
       "branch": "feat-lmr-quiet-check",
       "mode": "stc"
     },
@@ -19,7 +13,18 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-lmr-captures",
+    "mode": "stc",
+    "expect": 3.0,
+    "passed_over": 4,
+    "test_id": "q-feat-lmr-captures-1109-0417",
+    "sha": "8f3f95154ded20052bf72632c6749bac6c12873e",
+    "base_sha": "ff23f3689189b3e845a3ba072a0214465401d2af",
+    "started": "2026-11-09T04:17:32Z",
+    "bench": 460758,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
