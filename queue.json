@@ -1,10 +1,18 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "datagen-burst",
+    "test_id": "q-burst-s112",
+    "seed": 112,
+    "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f",
+    "base_sha": "3e755820687c49c4d55e908fc3d90101ae37e82f",
+    "started": "2026-11-09T23:24:56Z"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
-  "next_seed": 112,
+  "next_seed": 113,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3"
