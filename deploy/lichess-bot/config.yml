@@ -86,8 +86,8 @@ greeting:
   goodbye_spectators: "Thanks for watching!"
 
 matchmaking:
-  allow_matchmaking: false       # user testing: accept challenges, don't race outgoing ones
-  allow_during_games: false
+  allow_matchmaking: true        # challenge opponents while filling available slots
+  allow_during_games: true       # keep matchmaking while games are active
   challenge_variant: "standard"
   challenge_timeout: 5           # minutes idle before sending a challenge
   challenge_initial_time:
