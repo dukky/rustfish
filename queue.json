@@ -5,14 +5,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "test_id": "q-ladder-1109-2005",
-    "sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8",
-    "base_sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8",
-    "started": "2026-11-09T20:05:06Z"
-  },
+  "current": null,
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 1,
   "merges_since_ladder": 1,

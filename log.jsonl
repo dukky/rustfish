@@ -400,3 +400,4 @@
 {"branch": "main", "logged_at": "2026-11-09T20:16:58Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 107, "sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8"}
 {"branch": "main", "logged_at": "2026-11-09T21:02:31Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 108, "sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8"}
 {"branch": "main", "logged_at": "2026-11-09T21:51:10Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 109, "sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8"}
+{"branch": "main", "ci": [3490.5, 3526.5], "elo": null, "elo_ci95": null, "games": 440, "llr": null, "logged_at": "2026-11-09T22:11:48Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3508.5, "sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8", "test_id": "q-ladder-1109-2005", "verdict": "ladder"}
