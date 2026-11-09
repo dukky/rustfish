@@ -57,7 +57,7 @@ correspondence:
   ponder: false
 
 challenge:
-  concurrency: 1                 # 2-core shared server: one game at a time
+  concurrency: 3                 # allow three simultaneous games; 2-core host
   games_reserved_for_humans: 0
   sort_by: "best"
   preference: "none"
@@ -76,8 +76,8 @@ challenge:
   modes:
     - casual
     - rated
-  bullet_requires_increment: true
-  max_simultaneous_games_per_user: 1
+  bullet_requires_increment: false
+  max_simultaneous_games_per_user: 3
 
 greeting:
   hello: "Hi! I'm {me}, a from-scratch Rust engine. Good luck!"
