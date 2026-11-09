@@ -365,3 +365,4 @@
 {"branch": "main", "logged_at": "2026-11-09T04:20:46Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 84, "sha": "ff23f3689189b3e845a3ba072a0214465401d2af"}
 {"branch": "main", "logged_at": "2026-11-09T05:08:42Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 85, "sha": "ff23f3689189b3e845a3ba072a0214465401d2af"}
 {"branch": "main", "logged_at": "2026-11-09T05:57:36Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 86, "sha": "ff23f3689189b3e845a3ba072a0214465401d2af"}
+{"branch": "feat-lmr-captures", "elo": -3.3, "elo_ci95": [-8.62, 2.02], "games": 5376, "llr": -3.933, "logged_at": "2026-11-09T06:27:14Z", "mode": "stc", "outcome": "rejected", "sha": "8f3f95154ded20052bf72632c6749bac6c12873e", "test_id": "q-feat-lmr-captures-1109-0417", "verdict": "H0"}
