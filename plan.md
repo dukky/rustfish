@@ -5,15 +5,15 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-08 10:30 (UK). **Unattended until Wed 11 Nov evening: see docs/handoff-2026-11-08.md.**_ Live state (current test, queue, results, strength
+_Last updated: 2026-11-09 19:45 (UK). **Unattended until Wed 11 Nov evening: see docs/handoff-2026-11-08.md.**_ Live state (current test, queue, results, strength
 chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **3492 CCRL Blitz** (pentanomial CI 3475-3510, 2026-11-08 19:23, same anchor set as 3474; ~#103 on the 2026-11-07 list, top 100 = 3506); before: **3474** (pentanomial CI 3456-3493, 2026-11-08 01:38, new anchor set); was **3463** (95% CI 3434-3493) on `0aaf3b9` (g4), ladder 2026-11-07 11:23. Since then merged: feat-lmr-cutnode +15.6, g4kb8m +11.0, simp-nmp-margin +8.2, tm-ccrl-r2 (nonreg): **estimate ~3495**. Short-term goal (3400) passed on 2026-11-06 (3429). Was 3168 on the morning of 2026-11-06. |
-| Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ reached; **mid term top 100 = 3506** (#100 Endspiel 3505); **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
+| Strength | **3510 CCRL Blitz** (pentanomial CI 3492-3528, 2026-11-09 02:11, `88e13a1`, g7kb8m; draw-aware 3506.3). The point estimate is at the top-100 line, but the CI still overlaps it. Before: **3492** (CI 3475-3510, 2026-11-08 19:23), **3474** (2026-11-08 01:38), **3463** (g4, 2026-11-07). Short-term goal (3400) passed on 2026-11-06 (3429). |
+| Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ reached; **mid term top 100 = 3506** (#100 Endspiel 3505): point estimate 3510, CI overlaps, confirm with the next ladder; **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
 | Eval | NNUE g4kb8m: (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. Exact factoriser warm start from g4 (from scratch on pool4, 730M positions). |
 | Search | PVS, aspiration, TT buckets, NMP (eval >= beta), RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension, cut-node LMR; node-fraction time management. |
 | Compute | M3 laptop: GPU training (~1.8M pos/s at 512x8), datagen when the GPU is idle. CI (20 runners): 13 datagen / 6 test (trial), queue job 1. |
@@ -26,7 +26,8 @@ implied rating rose 3452 -> 3489 (+37, noisy): the stronger new anchors
 (3525-3631, where we score 23-41%) pull the fit down, so part of the gap is
 anchor-set change, part is self-play inflation. Lesson: discount self-play
 gains ~0.3-0.6x for CCRL estimates; compare ladders on a fixed anchor set.
-Top 100 needs 3506 (32 to go).
+Top 100 needs 3506; the latest ladder's point estimate is 3510 but its CI
+(3492-3528) still straddles the line, so confirm with the next ladder.
 
 ## Plan
 
@@ -50,7 +51,7 @@ Top 100 needs 3506 (32 to go).
   (2026-11-07 20:00: the front ladder arrived seconds after a dispatch, then
   5 merges queued a second ladder and an ltc-check ahead of it).
 
-**Mid term (days): top 100 (3504).**
+**Mid term (days): confirm top 100 (3506).**
 - Net generations every ~1/3 more data (gen 6 next), each followed by the
   m1 -> kb8m exact warm start that won for g4; drop the oldest, weakest data
   once the pool is large. King buckets from scratch need ~3-4B positions.

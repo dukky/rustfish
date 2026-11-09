@@ -8,12 +8,14 @@ now places on the CCRL Blitz list (single-CPU engines, best versions; list of
 | Target | CCRL Blitz | Rank today |
 |---|---|---|
 | Short term | 3400 | ~#131 of 865 (reached 2026-11-06) |
-| Mid term: top 100 | 3506 | #100 (list of 2026-11-07) |
+| Mid term: top 100 | 3506 | #100 (list of 2026-11-07); **3510 point estimate on 2026-11-09** |
 | Long term: top 10 | 3751 | #10 |
 
-rustfish measured **3463** (CCRL ladder, 2026-11-07, net g4). Merges
-since then (cut-node LMR, a king-bucket net, NMP simplification) put it
-around 3495 by SPRT estimate, just short of the top 100.
+rustfish measured **3510** (CCRL ladder, 2026-11-09, net g7kb8m plus the
+LMR improvements; pentanomial CI **3492–3528**, draw-aware 3506.3). The point
+estimate is at the top-100 line, but the confidence interval still overlaps it,
+so top 100 is provisional until another ladder confirms it. Before that it was
+**3492** (2026-11-08) and **3463** (2026-11-07, net g4).
 
 **Live progress dashboard: https://rustfish-dash.dev.duk.im**: current strength,
 the test in flight, the merge queue, recent results, strength over time and the
@@ -24,7 +26,7 @@ Actions, so it never needs updating by hand; redeploy only when
 
 | | |
 |---|---|
-| Strength | 3463 CCRL Blitz (ladder 2026-11-07); live on the dashboard, history in `tests/ladder-log.jsonl` |
+| Strength | **3510** CCRL Blitz (ladder 2026-11-09, g7kb8m; CI 3492–3528, draw-aware 3506); live on the dashboard, history in `tests/ladder-log.jsonl` |
 | Roadmap | [`plan.md`](plan.md) |
 | How changes are tested and merged | [`docs/development.md`](docs/development.md) |
 | Working on the code | [`AGENTS.md`](AGENTS.md), and [`docs/handoff.md`](docs/handoff.md) for a new agent |
