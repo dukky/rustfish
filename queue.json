@@ -1,5 +1,10 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "main",
+      "mode": "ladder"
+    }
+  ],
   "current": {
     "branch": "main",
     "mode": "datagen-burst",
