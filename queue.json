@@ -1,22 +1,17 @@
 {
   "pending": [
     {
-      "branch": "main",
-      "mode": "ladder"
-    },
-    {
       "branch": "feat-root-lmr",
       "mode": "stc"
     }
   ],
   "current": {
     "branch": "main",
-    "mode": "datagen-burst",
-    "test_id": "q-burst-s105",
-    "seed": 105,
-    "sha": "051168c41bd3855098ee9b2fcc99ed7a7a356939",
-    "base_sha": "051168c41bd3855098ee9b2fcc99ed7a7a356939",
-    "started": "2026-11-09T19:18:14Z"
+    "mode": "ladder",
+    "test_id": "q-ladder-1109-2005",
+    "sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8",
+    "base_sha": "b8702ff3129c9e9d6fe3c6280ce48162641939a8",
+    "started": "2026-11-09T20:05:06Z"
   },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 1,
