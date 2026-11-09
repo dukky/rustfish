@@ -86,7 +86,7 @@ greeting:
   goodbye_spectators: "Thanks for watching!"
 
 matchmaking:
-  allow_matchmaking: true        # challenge other bots when idle
+  allow_matchmaking: false       # user testing: accept challenges, don't race outgoing ones
   allow_during_games: false
   challenge_variant: "standard"
   challenge_timeout: 5           # minutes idle before sending a challenge
