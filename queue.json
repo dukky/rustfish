@@ -3,16 +3,16 @@
   "current": {
     "branch": "main",
     "mode": "datagen-burst",
-    "test_id": "q-burst-s144",
-    "seed": 144,
+    "test_id": "q-burst-s146",
+    "seed": 146,
     "sha": "614ea1b084ff8b18f726946771f7d1bb58d14563",
     "base_sha": "614ea1b084ff8b18f726946771f7d1bb58d14563",
-    "started": "2026-11-10T13:12:09Z"
+    "started": "2026-11-10T14:00:01Z"
   },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
-  "next_seed": 146,
+  "next_seed": 147,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
