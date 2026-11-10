@@ -424,3 +424,5 @@
 {"branch": "main", "logged_at": "2026-11-10T04:03:15Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 121, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s121"}
 {"branch": "main", "consecutive": 0, "logged_at": "2026-11-10T04:03:17Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "foreground idle", "seed": 123, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s123"}
 {"branch": "main", "logged_at": "2026-11-10T04:11:38Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 124, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f"}
+{"branch": "main", "logged_at": "2026-11-10T04:50:55Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 123, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s123"}
+{"branch": "main", "consecutive": 0, "logged_at": "2026-11-10T04:50:57Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "foreground idle", "seed": 125, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s125"}
