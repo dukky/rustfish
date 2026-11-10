@@ -487,3 +487,5 @@
 {"branch": "main", "logged_at": "2026-11-10T21:09:03Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 162, "sha": "614ea1b084ff8b18f726946771f7d1bb58d14563", "test_id": "q-burst-s162"}
 {"branch": "main", "consecutive": 0, "logged_at": "2026-11-10T21:09:05Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "foreground idle", "seed": 164, "sha": "614ea1b084ff8b18f726946771f7d1bb58d14563", "test_id": "q-burst-s164"}
 {"branch": "main", "logged_at": "2026-11-10T21:21:08Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 165, "sha": "614ea1b084ff8b18f726946771f7d1bb58d14563"}
+{"branch": "main", "logged_at": "2026-11-10T21:55:51Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 164, "sha": "614ea1b084ff8b18f726946771f7d1bb58d14563", "test_id": "q-burst-s164"}
+{"branch": "main", "consecutive": 0, "logged_at": "2026-11-10T21:55:53Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "foreground idle", "seed": 166, "sha": "614ea1b084ff8b18f726946771f7d1bb58d14563", "test_id": "q-burst-s166"}
