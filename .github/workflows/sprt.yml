@@ -24,6 +24,9 @@ on:
       settings:
         description: "JSON: tc, hash, elo0, elo1, shards, rounds_per_shard, max_waves"
         default: '{"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 5, "shards": 16, "rounds_per_shard": 64, "max_waves": 10}'
+      concurrency:
+        description: "fastchess -concurrency; 1 for a clean single-game SMP bench, 0 = nproc"
+        default: "0"
       wave:
         default: "1"
       prior:
@@ -133,13 +136,16 @@ jobs:
           ROUNDS: ${{ fromJSON(inputs.settings).rounds_per_shard }}
           SHARD: ${{ matrix.shard }}
           SEED: ${{ github.run_id }}${{ matrix.shard }}
+          CONCURRENCY: ${{ inputs.concurrency }}
         run: |
+          CONC="${CONCURRENCY:-0}"
+          [ "$CONC" = "0" ] && CONC="$(nproc)"
           engines/fastchess \
             -engine cmd=engines/cand name=candidate \
             -engine cmd=engines/base name=base \
             -each proto=uci tc="$TC" option.Hash="$HASH" option.OwnBook=false \
             -rounds "$ROUNDS" -repeat \
-            -concurrency "$(nproc)" \
+            -concurrency "$CONC" \
             -openings file="$BOOK" format=epd order=random \
             -srand "$SEED" \
             -draw movenumber=40 movecount=8 score=10 \
