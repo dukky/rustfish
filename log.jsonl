@@ -438,3 +438,4 @@
 {"branch": "main", "logged_at": "2026-11-10T07:18:10Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 132, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f"}
 {"branch": "main", "logged_at": "2026-11-10T07:57:02Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 131, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s131"}
 {"branch": "main", "consecutive": 0, "logged_at": "2026-11-10T07:57:04Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "foreground idle", "seed": 133, "sha": "4eff1a3e7f65d1f40104b514eb3c93aa59d9955e", "test_id": "q-burst-s133"}
+{"branch": "fix-ownbook-default", "logged_at": "2026-11-10T08:05:57Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9"}
