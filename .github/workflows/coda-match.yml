@@ -1,0 +1,230 @@
+name: Coda match
+
+# One-off, owner-requested experiment: rustfish vs the official Coda 0.9.4
+# Linux release. This workflow is deliberately kept off main. It is not a gate
+# and its result is not a CCRL rating; it is a direct head-to-head sanity check.
+
+run-name: "rustfish vs Coda 0.9.4"
+
+on:
+  workflow_dispatch:
+    inputs:
+      tc:
+        description: "fastchess time control"
+        default: "10+0.1"
+      rounds_per_shard:
+        description: "Rounds per shard; each round is a colour-reversed pair"
+        default: "8"
+      shards:
+        description: "Parallel shard jobs"
+        default: "16"
+      concurrency:
+        description: "fastchess -concurrency per shard"
+        default: "2"
+
+permissions:
+  contents: read
+
+env:
+  FASTCHESS_VERSION: v1.8.2-alpha
+  BOOK: UHO_Lichess_4852_v1.epd
+  CODA_VERSION: v0.9.4
+  CODA_ASSET: coda-0.9.4-linux-x86-64-v3
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: plan
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          n = int(os.environ["SHARDS"])
+          print("matrix=" + json.dumps({"include": [{"shard": i} for i in range(n)]}))
+          PY
+
+      - name: Build rustfish
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          mkdir -p engines
+          cargo build --release
+          cp target/release/rustfish engines/rustfish
+          out=$( (printf 'uci\nisready\nsetoption name OwnBook value false\nposition startpos\ngo depth 4\nquit\n') | engines/rustfish 2>&1 ) || true
+          grep -q bestmove <<<"$out" || { echo "$out"; exit 1; }
+          printf 'rustfish: '; grep -m1 '^id name' <<<"$out"
+
+      - name: Fetch Coda 0.9.4
+        run: |
+          url="https://github.com/adamtwiss/coda/releases/download/$CODA_VERSION/$CODA_ASSET"
+          curl -sSfL -o engines/coda "$url"
+          curl -sSfL -o /tmp/coda.sha256 "$url.sha256"
+          expected=$(awk '{print $1}' /tmp/coda.sha256)
+          actual=$(sha256sum engines/coda | awk '{print $1}')
+          test "$expected" = "$actual" || { echo "Coda checksum mismatch"; exit 1; }
+          chmod +x engines/coda
+          out=$( (printf 'uci\nisready\nsetoption name OwnBook value false\nposition startpos\ngo depth 4\nquit\n') | engines/coda 2>&1 ) || true
+          grep -q bestmove <<<"$out" || { echo "$out"; exit 1; }
+          printf 'coda: '; grep -m1 '^id name' <<<"$out"
+
+      - name: Fetch fastchess and openings
+        run: |
+          curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
+          mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
+          install -m 755 "$(find fastchess-dist -type f -name fastchess | head -1)" engines/fastchess
+          curl -sSL -o book.zip "https://github.com/official-stockfish/books/raw/master/$BOOK.zip"
+          unzip -q book.zip -d engines
+          engines/fastchess -version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: match-engines
+          path: engines
+          retention-days: 1
+
+  play:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: match-engines
+          path: engines
+
+      - name: Prepare
+        run: |
+          chmod +x engines/rustfish engines/coda engines/fastchess
+          mv "engines/$BOOK" .
+
+      - name: Play
+        env:
+          TC: ${{ inputs.tc }}
+          ROUNDS: ${{ inputs.rounds_per_shard }}
+          SHARD: ${{ matrix.shard }}
+          SEED: ${{ github.run_id }}${{ matrix.shard }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+        run: |
+          engines/fastchess \
+            -engine cmd=engines/rustfish name=rustfish \
+            -engine cmd=engines/coda name=coda \
+            -each proto=uci tc="$TC" option.Hash=128 option.Threads=1 option.OwnBook=false \
+            -rounds "$ROUNDS" -repeat \
+            -concurrency "$CONCURRENCY" \
+            -openings file="$BOOK" format=epd order=random \
+            -srand "$SEED" \
+            -draw movenumber=40 movecount=8 score=10 \
+            -resign movecount=3 score=600 \
+            -recover \
+            -ratinginterval 0 \
+            -pgnout file="games-$SHARD.pgn" \
+            | tee "fastchess-$SHARD.log"
+          grep -E 'Ptnml|Score of' "fastchess-$SHARD.log" | tail -3
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            fastchess-*.log
+            games-*.pgn
+          if-no-files-found: warn
+
+  report:
+    needs: play
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Score the match
+        run: |
+          python3 - <<'PY'
+          import glob, json, math, os, re
+
+          wins = draws = losses = 0
+          games = 0
+          for path in sorted(glob.glob("shards/*.pgn")):
+              text = open(path, errors="replace").read()
+              for block in re.split(r"\n\s*\n", text):
+                  tags = dict(re.findall(r'\[(\w+)\s+"([^"]*)"\]', block))
+                  result = tags.get("Result")
+                  white = tags.get("White", "")
+                  black = tags.get("Black", "")
+                  if result not in ("1-0", "0-1", "1/2-1/2"):
+                      continue
+                  if white == "rustfish":
+                      score = 1.0 if result == "1-0" else 0.5 if result == "1/2-1/2" else 0.0
+                  elif black == "rustfish":
+                      score = 1.0 if result == "0-1" else 0.5 if result == "1/2-1/2" else 0.0
+                  else:
+                      continue
+                  games += 1
+                  if score == 1.0:
+                      wins += 1
+                  elif score == 0.5:
+                      draws += 1
+                  else:
+                      losses += 1
+
+          def elo(p):
+              if p <= 0.0:
+                  return None
+              if p >= 1.0:
+                  return None
+              return -400.0 * math.log10(1.0 / p - 1.0)
+
+          p = (wins + 0.5 * draws) / games if games else 0.0
+          z = 1.959963984540054
+          denom = 1.0 + z * z / games if games else 1.0
+          center = (p + z * z / (2 * games)) / denom if games else 0.0
+          half = (z * math.sqrt(p * (1 - p) / games + z * z / (4 * games * games)) / denom) if games else 0.0
+          lo, hi = max(0.0, center - half), min(1.0, center + half)
+
+          row = {
+              "games": games, "wins": wins, "draws": draws, "losses": losses,
+              "score": p, "score_ci95": [lo, hi],
+              "elo_diff": elo(p),
+              "elo_diff_ci95": [elo(lo), elo(hi)],
+              "note": "Head-to-head vs official Coda 0.9.4; positive Elo means rustfish stronger.",
+          }
+          json.dump(row, open("match-result.json", "w"), indent=2)
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("## rustfish vs Coda 0.9.4\n\n")
+              fh.write(f"- **{games} games**: {wins}W {draws}D {losses}L\n")
+              fh.write(f"- rustfish score: **{100*p:.2f}%** (95% CI {100*lo:.2f}–{100*hi:.2f}%)\n")
+              if row["elo_diff"] is not None:
+                  fh.write(f"- Elo difference: **{row['elo_diff']:+.1f}**")
+                  if row["elo_diff_ci95"][0] is not None:
+                      fh.write(f" (95% CI {row['elo_diff_ci95'][0]:+.1f} .. {row['elo_diff_ci95'][1]:+.1f})")
+                  fh.write("\n")
+              else:
+                  fh.write("- Elo difference: undefined (all wins or all losses)\n")
+              fh.write("\nPositive Elo means rustfish is stronger.\n")
+          print(json.dumps(row, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coda-match-result
+          path: |
+            match-result.json
+            shards/*.pgn
+          if-no-files-found: warn
