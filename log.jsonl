@@ -429,3 +429,4 @@
 {"branch": "main", "logged_at": "2026-11-10T04:57:12Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 126, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f"}
 {"branch": "main", "logged_at": "2026-11-10T05:36:45Z", "mode": "datagen-burst", "outcome": "burst-done", "seed": 125, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s125"}
 {"branch": "main", "consecutive": 0, "logged_at": "2026-11-10T05:36:47Z", "mode": "datagen-burst", "outcome": "dispatched", "reason": "foreground idle", "seed": 127, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f", "test_id": "q-burst-s127"}
+{"branch": "main", "logged_at": "2026-11-10T05:44:45Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 128, "sha": "3e755820687c49c4d55e908fc3d90101ae37e82f"}
