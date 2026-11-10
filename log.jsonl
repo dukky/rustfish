@@ -450,3 +450,4 @@
 {"branch": "main", "logged_at": "2026-11-10T10:16:06Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9", "test_id": "q-ladder-1110-1016"}
 {"branch": "main", "logged_at": "2026-11-10T10:30:05Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 139, "sha": "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9"}
 {"branch": "main", "logged_at": "2026-11-10T11:15:48Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 140, "sha": "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9"}
+{"branch": "main", "logged_at": "2026-11-10T12:06:57Z", "mode": "datagen", "outcome": "dispatched", "reason": "background lane idle", "seed": 141, "sha": "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9"}
