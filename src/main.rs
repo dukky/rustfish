@@ -1170,7 +1170,7 @@ fn main() {
             println!("option name Threads type spin default 1 min 1 max 32");
             println!("option name Clear Hash type button");
             println!("option name Move Overhead type spin default 10 min 0 max 5000");
-            println!("option name OwnBook type check default true");
+            println!("option name OwnBook type check default false");
             println!("option name BookStyle type combo default normal var normal var grinder var chaos");
             println!("option name BookFile type string default");
             println!("option name EvalFile type string default");
