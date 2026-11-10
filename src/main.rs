@@ -1035,7 +1035,7 @@ impl EngineState {
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
             searches_since_decay: 0,
-            threads: 1,
+            threads: 4,
             hash_mb,
             opening_book,
             // CCRL and most testers use their own opening books; an engine
