@@ -20,9 +20,10 @@
 //!   (`[tile][row][16]`), so a unit's gradient is one contiguous
 //!   `rows * 64` B block that stays in L1/L2.
 //! - The batch runs in sub-batches of `sb` samples so the stored
-//!   accumulators stay in cache; one phase runs the forward of sub-batch
-//!   k, the output layer of k-1 and the backward of k-2, which keeps every
-//!   thread busy while the column units drain.
+//!   accumulators stay in cache, as one stream of units without barriers:
+//!   the forward of sub-batch k, the output layer of k-1 and the backward
+//!   of k-2 run side by side, and each unit waits only for the units whose
+//!   results it reads (see `run`).
 //! - AdamW reads the one gradient, updates and re-zeroes it, in parallel.
 //!   It writes the FT's params and moments with non-temporal stores, so
 //!   that (on AMD's victim-cache L3) the weights and gradient the next
@@ -52,6 +53,8 @@ const FB: usize = 32;
 const AB: usize = 16;
 /// Fused AdamW units per column tile.
 const ADAM_SPLIT: usize = 8;
+/// Accumulator buffers (sub-batches in flight).
+const NACC: usize = 3;
 /// Largest king-bucket count (one bucket per square).
 const MAX_KB: usize = 64;
 
@@ -265,7 +268,7 @@ pub struct BatchTrainer {
     /// Gradient of params `ft_b()..len()` (FT bias, output weights, output
     /// bias), standard layout.
     grest: ABuf,
-    acc: [ABuf; 3],
+    acc: [ABuf; NACC],
     /// The batch's decoded samples.
     samples: Vec<Sample>,
     /// Per sub-batch, its `(sample << 1) | side` pairs stably sorted by the
@@ -313,7 +316,7 @@ impl BatchTrainer {
             wt: ABuf::new(rows * sh.h),
             wt_ok: false,
             grest: ABuf::new(sh.len() - sh.ft_b()),
-            acc: [ABuf::new(sb * 2 * sh.h), ABuf::new(sb * 2 * sh.h), ABuf::new(sb * 2 * sh.h)],
+            acc: std::array::from_fn(|_| ABuf::new(sb * 2 * sh.h)),
             samples: vec![blank; sb],
             pairs: Vec::new(),
             grad: Vec::new(),
@@ -457,7 +460,7 @@ impl BatchTrainer {
         let wt = self.wt.ptr();
         let gft = self.gft.ptr();
         let grest = self.grest.ptr();
-        let accs = [self.acc[0].ptr(), self.acc[1].ptr(), self.acc[2].ptr()];
+        let accs: [Ptr; NACC] = std::array::from_fn(|i| self.acc[i].ptr());
         let samples = SPtr(self.samples.as_mut_ptr());
         let pairs = UPtr(self.pairs.as_mut_ptr());
         let grad = Ptr(self.grad.as_mut_ptr());
@@ -510,31 +513,52 @@ impl BatchTrainer {
                 }
             }
         });
-        // Phase q: accumulators of sub-batch q, output layer of q - 1,
-        // backward of q - 2.
-        for q in 0..nsb + 2 {
+        // One stream of units, no barriers. "Phase" q lists the backward
+        // of sub-batch q - 2 (one unit per column tile), the accumulators of
+        // q and the output layer of q - 1 (then, with `fused`, AdamW in
+        // `ADAM_SPLIT` row ranges per tile). Units are claimed in list
+        // order and wait only for what they read; every wait is on an
+        // earlier unit, so all of them have owners and finish.
+        //   backward (k, c): output layer of k, and backward (k - 1, c)
+        //   accumulators (k): backward of k - NACC (frees acc buffer k % NACC)
+        //   output layer (k): accumulators of k
+        //   AdamW (c): backward (nsb - 1, c)
+        let fwd_units = |k: usize| (2 * sb_len(k)).div_ceil(FB);
+        let out_units = |k: usize| sb_len(k).div_ceil(FB);
+        let phase = |q: usize| {
             let back = if (2..nsb + 2).contains(&q) { tiles } else { 0 };
-            let fwd = if q < nsb { (2 * sb_len(q)).div_ceil(FB) } else { 0 };
-            let out = if (1..nsb + 1).contains(&q) { sb_len(q - 1).div_ceil(FB) } else { 0 };
-            // Last phase with `fused`: AdamW in `ADAM_SPLIT` row ranges per
-            // column tile, each waiting for its tile's backward (units are
-            // claimed in order, so every backward has an owner by then).
-            let fuse = if q == nsb + 1 { fused } else { None };
-            let adam_units = if fuse.is_some() { tiles * ADAM_SPLIT } else { 0 };
-            let done: Vec<AtomicBool> = (0..if fuse.is_some() { tiles } else { 0 }).map(|_| AtomicBool::new(false)).collect();
-            let ft_lines = if fl { INPUTS } else { rows };
-            par_units(pool, back + fwd + out + adam_units, &|u| unsafe {
+            let fwd = if q < nsb { fwd_units(q) } else { 0 };
+            let out = if (1..nsb + 1).contains(&q) { out_units(q - 1) } else { 0 };
+            let adam = if q == nsb + 1 && fused.is_some() { tiles * ADAM_SPLIT } else { 0 };
+            (back, fwd, out, adam)
+        };
+        let mut starts = vec![0usize; nsb + 3];
+        for q in 0..nsb + 2 {
+            let (b, f, o, a) = phase(q);
+            starts[q + 1] = starts[q] + b + f + o + a;
+        }
+        let counter = |n: usize| (0..n).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+        let (acc_done, out_done, bwd_done, tile_k) = (counter(nsb), counter(nsb), counter(nsb), counter(tiles));
+        let wait = |ready: &dyn Fn() -> bool| {
+            let mut spins = 0u32;
+            while !ready() {
+                spins += 1;
+                if spins < 1 << 12 {
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        };
+        let ft_lines = if fl { INPUTS } else { rows };
+        {
+            par_units(pool, starts[nsb + 2], &|g| unsafe {
+                let q = starts.partition_point(|&x| x <= g) - 1;
+                let u = g - starts[q];
+                let (back, fwd, out, _) = phase(q);
                 if u >= back + fwd + out {
                     let (t, part) = ((u - back - fwd - out) / ADAM_SPLIT, (u - back - fwd - out) % ADAM_SPLIT);
-                    let mut spins = 0u32;
-                    while !done[t].load(Ordering::Acquire) {
-                        spins += 1;
-                        if spins < 1 << 12 {
-                            std::hint::spin_loop();
-                        } else {
-                            std::thread::yield_now();
-                        }
-                    }
+                    wait(&|| tile_k[t].load(Ordering::Acquire) == nsb);
                     let o = t * ftr * TB;
                     let a = TileAdamArgs {
                         p: ft[0].get().add(o),
@@ -552,22 +576,25 @@ impl BatchTrainer {
                         active: act.get(),
                         gen,
                     };
-                    tile_adam_dispatch(isa, fuse.unwrap(), &a);
+                    tile_adam_dispatch(isa, fused.unwrap(), &a);
                     return;
                 }
                 if u < back {
                     let k = q - 2;
+                    wait(&|| out_done[k].load(Ordering::Acquire) == out_units(k) && tile_k[u].load(Ordering::Acquire) == k);
                     let len = sb_len(k);
                     let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
                     let gr = std::slice::from_raw_parts(grad.get().add(k * sb), len);
-                    let a = BwdArgs { sh, rows, p, ss, acc: accs[k % 3].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
+                    let a = BwdArgs { sh, rows, p, ss, acc: accs[k % NACC].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
                     bwd_dispatch(isa, &a);
-                    if fuse.is_some() {
-                        done[u].store(true, Ordering::Release);
-                    }
+                    tile_k[u].store(k + 1, Ordering::Release);
+                    bwd_done[k].fetch_add(1, Ordering::AcqRel);
                 } else if u < back + fwd {
                     let k = q;
                     let j = u - back;
+                    if k >= NACC {
+                        wait(&|| bwd_done[k - NACC].load(Ordering::Acquire) == tiles);
+                    }
                     let len = sb_len(k);
                     let (p0, p1) = (j * FB, ((j + 1) * FB).min(2 * len));
                     if !sorted {
@@ -582,11 +609,13 @@ impl BatchTrainer {
                     }
                     let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
                     let pr = std::slice::from_raw_parts(pairs.get().add(2 * k * sb + p0), p1 - p0);
-                    let a = AccArgs { sh, rows, tf, p, wt: wt.get(), ss, pairs: pr, acc: accs[k % 3].get() };
+                    let a = AccArgs { sh, rows, tf, p, wt: wt.get(), ss, pairs: pr, acc: accs[k % NACC].get() };
                     acc_dispatch(isa, &a);
+                    acc_done[k].fetch_add(1, Ordering::AcqRel);
                 } else {
                     let k = q - 1;
                     let j = u - back - fwd;
+                    wait(&|| acc_done[k].load(Ordering::Acquire) == fwd_units(k));
                     let len = sb_len(k);
                     let (s0, s1) = (j * FB, ((j + 1) * FB).min(len));
                     let base = k * sb;
@@ -596,11 +625,12 @@ impl BatchTrainer {
                         tf,
                         p,
                         ss,
-                        acc: accs[k % 3].get().add(s0 * 2 * sh.h),
+                        acc: accs[k % NACC].get().add(s0 * 2 * sh.h),
                         grad: grad.get().add(base + s0),
                         loss: loss.get().add(base + s0),
                     };
                     out_dispatch(isa, exact, &a);
+                    out_done[k].fetch_add(1, Ordering::AcqRel);
                 }
             });
         }

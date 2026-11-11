@@ -72,6 +72,18 @@ weights and gradient in AMD's victim-cache L3), runs per column tile
 inside the last backward phase on a tile-major copy of the FT state
 (`step`/`export`), and skips stores for lines it does not change (rows of
 impossible features); the forward reads bucket-sorted pairs.
+The batch's units run as one dependency-ordered stream (no barriers;
++2-4%, 3 sub-batches in flight: 4 was 5% slower).
+
+Approaches that lost on the 9600X (kb8m H 512, exact variants):
+- Backward over bucket-sorted pairs (dacc staged, then scattered one
+  bucket's rows at a time): -10%; the gradient tile is fine in L2.
+- CSR backward as in the Metal trainer (entries grouped by feature, each
+  gradient line loaded and stored once): -10% at sub-batch 512, -12% at
+  256, -27% at 128. Keeping the sum order exact means one dependent add
+  chain per feature, and the staged dacc reloads cost as much as the
+  scattered read-modify-writes they replace.
+- Sub-batch 256 / 1024 / 2048 instead of 512: within noise or slower.
 
 M3 (8 threads, quiet): ~1.6M (was ~0.5M). The kernels synchronise a few
 dozen times per batch, so they lose more than the old loop when the cores are
