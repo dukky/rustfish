@@ -4,6 +4,11 @@
       "branch": "feat-conthist-rekey",
       "mode": "stc",
       "expect": 4.0
+    },
+    {
+      "branch": "feat-qs-evasion-prune",
+      "mode": "stc",
+      "expect": 2.0
     }
   ],
   "current": {
@@ -20,7 +25,7 @@
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
-  "next_seed": 184,
+  "next_seed": 185,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
