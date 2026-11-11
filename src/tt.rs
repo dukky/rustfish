@@ -349,6 +349,160 @@ impl Zobrist {
     }
 }
 
+/// Cuckoo tables for upcoming-repetition detection (Marcel van Kervinck's
+/// method, as in Stockfish's `has_game_cycle`). Every reversible move of a
+/// non-pawn piece between two squares on an empty board is stored by the
+/// key difference it makes, `piece[s1] ^ piece[s2] ^ side`, so "can one move
+/// turn the current position into that earlier one?" is two table probes.
+/// Holds 3668 moves in 8192 slots; built once from the fixed zobrist keys.
+pub(crate) struct Cuckoo {
+    keys: Vec<u64>,
+    /// (s1, s2) with s1 < s2; s1 == s2 == 0 marks an empty slot.
+    squares: Vec<(u8, u8)>,
+    /// Squares strictly between s1 and s2 (0 for knight and king moves).
+    between: Vec<u64>,
+}
+
+const CUCKOO_SIZE: usize = 8192;
+
+#[inline(always)]
+fn cuckoo_h1(key: u64) -> usize {
+    (key & 0x1fff) as usize
+}
+
+#[inline(always)]
+fn cuckoo_h2(key: u64) -> usize {
+    ((key >> 16) & 0x1fff) as usize
+}
+
+impl Cuckoo {
+    fn build(zobrist: &Zobrist) -> Self {
+        use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
+        let mut keys = vec![0u64; CUCKOO_SIZE];
+        let mut squares = vec![(0u8, 0u8); CUCKOO_SIZE];
+        let mut between = vec![0u64; CUCKOO_SIZE];
+        let mut count = 0;
+        for color in [Color::White, Color::Black] {
+            for kind in [
+                PieceType::Knight,
+                PieceType::Bishop,
+                PieceType::Rook,
+                PieceType::Queen,
+                PieceType::King,
+            ] {
+                let pi = piece_index(Piece { color, kind });
+                for s1 in 0..64usize {
+                    let attacks = match kind {
+                        PieceType::Knight => KNIGHT_ATTACKS[s1],
+                        PieceType::Bishop => bishop_attacks(s1, 0),
+                        PieceType::Rook => rook_attacks(s1, 0),
+                        PieceType::Queen => bishop_attacks(s1, 0) | rook_attacks(s1, 0),
+                        _ => KING_ATTACKS[s1],
+                    };
+                    for s2 in (s1 + 1)..64 {
+                        if (attacks >> s2) & 1 == 0 {
+                            continue;
+                        }
+                        let b1 = 1u64 << s1;
+                        let b2 = 1u64 << s2;
+                        let btw = match kind {
+                            PieceType::Knight | PieceType::King => 0,
+                            _ => {
+                                if bishop_attacks(s1, 0) >> s2 & 1 != 0 {
+                                    bishop_attacks(s1, b2) & bishop_attacks(s2, b1)
+                                } else {
+                                    rook_attacks(s1, b2) & rook_attacks(s2, b1)
+                                }
+                            }
+                        };
+                        let mut key = zobrist.piece[pi][s1] ^ zobrist.piece[pi][s2] ^ zobrist.side;
+                        let mut sq = (s1 as u8, s2 as u8);
+                        let mut bt = btw;
+                        let mut i = cuckoo_h1(key);
+                        loop {
+                            std::mem::swap(&mut keys[i], &mut key);
+                            std::mem::swap(&mut squares[i], &mut sq);
+                            std::mem::swap(&mut between[i], &mut bt);
+                            if sq == (0, 0) {
+                                break;
+                            }
+                            i = if i == cuckoo_h1(key) { cuckoo_h2(key) } else { cuckoo_h1(key) };
+                        }
+                        count += 1;
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(count, 3668);
+        Self { keys, squares, between }
+    }
+
+    /// Number of moves stored.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.squares.iter().filter(|&&sq| sq != (0, 0)).count()
+    }
+
+    /// The process-wide table (zobrist keys are fixed, so one table serves
+    /// every EngineState).
+    pub(crate) fn get() -> &'static Cuckoo {
+        static TABLE: std::sync::OnceLock<Cuckoo> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| Cuckoo::build(&Zobrist::new()))
+    }
+
+    /// Slot holding the move whose key difference is `diff`, if any.
+    #[inline(always)]
+    fn lookup(&self, diff: u64) -> Option<usize> {
+        let i = cuckoo_h1(diff);
+        if self.keys[i] == diff {
+            return Some(i);
+        }
+        let j = cuckoo_h2(diff);
+        if self.keys[j] == diff {
+            return Some(j);
+        }
+        None
+    }
+
+    /// Whether the side to move has a reversible move that reaches a position
+    /// already on `rep_stack` (whose last entry is `key`, the current
+    /// position), looking back at most `max_back` plies (the plies since the
+    /// last null move). Only odd distances >= 3 can be one move away. Returns
+    /// the (from, to) of a matching move. The move is not checked for
+    /// legality (a pinned piece or one that ignores a check can match).
+    pub(crate) fn upcoming_repetition(
+        &self,
+        board: &Board,
+        rep_stack: &[u64],
+        key: u64,
+        max_back: usize,
+    ) -> Option<(u8, u8)> {
+        let n = rep_stack.len() - 1;
+        let end = (board.halfmove_clock as usize).min(max_back).min(n);
+        if end < 3 {
+            return None;
+        }
+        let occ = board.bb.occ_all();
+        let mut i = 3;
+        while i <= end {
+            if let Some(slot) = self.lookup(key ^ rep_stack[n - i]) {
+                if self.between[slot] & occ == 0 {
+                    let (s1, s2) = self.squares[slot];
+                    // Exactly one of s1/s2 holds the piece (the key difference
+                    // says the other is empty); it must be ours to move.
+                    let sq = if board.squares[s1 as usize].is_some() { s1 } else { s2 };
+                    if board.squares[sq as usize].is_some_and(|p| p.color == board.side_to_move) {
+                        let to = if sq == s1 { s2 } else { s1 };
+                        return Some((sq, to));
+                    }
+                }
+            }
+            i += 2;
+        }
+        None
+    }
+}
+
 pub(crate) fn splitmix64(seed: &mut u64) -> u64 {
     *seed = seed.wrapping_add(0x9e3779b97f4a7c15);
     let mut z = *seed;
