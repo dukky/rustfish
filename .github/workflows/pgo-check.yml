@@ -38,11 +38,21 @@ jobs:
           PGO_REFERENCE: plain
         run: |
           s=$(date +%s); scripts/build-pgo.sh pgo; echo "pgo build $(( $(date +%s) - s ))s (incl. llvm-tools install)" | tee -a build-times.txt
+      - name: PGO + ext-TSP block placement build
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3 -Cllvm-args=-enable-ext-tsp-block-placement
+          PGO_REFERENCE: plain
+        run: scripts/build-pgo.sh pgo-tsp
       - name: Compare
         run: |
-          scripts/pgo-compare.sh ./plain ./pgo 7 13 0 1 | tee cmp.txt
+          cp plain plain2
+          echo "== A/A (noise) plain vs plain copy" | tee cmp.txt
+          scripts/pgo-compare.sh ./plain ./plain2 11 13 0 1 | grep mean | tee -a cmp.txt
+          echo "== plain vs pgo" | tee -a cmp.txt
           # datagen as the datagen workflow runs it: all vCPUs.
-          scripts/pgo-compare.sh ./plain ./pgo 5 13 400 "$(nproc)" | grep '^datagen' | tee -a cmp.txt
+          scripts/pgo-compare.sh ./plain ./pgo 11 13 250 "$(nproc)" | grep -E 'mean|identical' | tee -a cmp.txt
+          echo "== plain vs pgo + ext-tsp" | tee -a cmp.txt
+          scripts/pgo-compare.sh ./plain ./pgo-tsp 11 13 250 "$(nproc)" | grep -E 'mean|identical' | tee -a cmp.txt
           {
             echo "### runner ${{ matrix.runner }}"
             echo '```'
