@@ -993,6 +993,8 @@ class Auto:
             gpu += ["--king-buckets", main["layout"]]
         if self.a.gpu_backend == "cuda":
             gpu += ["--threads", self.a.gpu_threads]
+            if self.a.gpu_half:
+                gpu += ["--half"]
         plan = {"name": name, "files": files, "new_positions": total, "replay_positions": total,
                 "replay_pool": self.a.replay_pool, "replay_offset": led["replay_offset"],
                 "train_cmd": " ".join(map(str, gpu))}
@@ -1394,6 +1396,8 @@ def main():
                                           f"{DEFAULT_CUDA_TRAINER} for cuda)")
     p.add_argument("--gpu-threads", type=int, default=2,
                    help="--threads for the CUDA trainer's CPU decode (default 2; it is GPU-bound beyond that)")
+    p.add_argument("--gpu-half", action="store_true",
+                   help="cuda only: --half (fp16 forward weights, +15%%; val loss equal to ~6 digits); default off")
     p.add_argument("--kb-trainer", default=str(AUTO_KB_TRAINER),
                    help="CPU trainer with --king-buckets, for eval if main has a king layout")
     p.add_argument("--eval-threads", type=int, default=4)
