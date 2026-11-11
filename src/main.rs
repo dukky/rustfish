@@ -926,7 +926,10 @@ impl Board {
 /// threat bits say whether the opponent attacks the from/to square.
 type HistoryTable = [[[[[i32; 64]; 64]; 2]; 2]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
-type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// 1-ply continuation history, [prev piece][prev to][piece][to] with
+/// coloured pieces (`tt::piece_index`): how good `mv` was as a reply to the
+/// previous move, by the pieces that made them.
+type ContinuationHistoryTable = [[[[i32; 64]; 12]; 64]; 12];
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -1031,7 +1034,7 @@ impl EngineState {
             eval_cache: evalcache::EvalCache::new(),
             history: [[[[[0; 64]; 64]; 2]; 2]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
-            continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            continuation_history: [[[[0; 64]; 12]; 64]; 12],
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
             searches_since_decay: 0,
@@ -1076,7 +1079,7 @@ impl EngineState {
         self.eval_cache.clear();
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
-        self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.continuation_history = [[[[0; 64]; 12]; 64]; 12];
         self.searches_since_decay = 0;
         self.position_history.clear();
     }
@@ -1101,7 +1104,7 @@ impl EngineState {
 
     // Ages history between moves. Gravity already bounds magnitude; this
     // only fades stale entries that are no longer being updated.
-    // Halves every entry once; walked in memory order (the 2 MB
+    // Halves every entry once; walked in memory order (the 2.4 MB
     // continuation table used to be strided, ~4% of a 5000-node search).
     fn decay_history(&mut self) {
         let history = self.history.as_flattened_mut().as_flattened_mut().as_flattened_mut().as_flattened_mut();

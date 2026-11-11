@@ -1,5 +1,6 @@
 use super::*;
 use crate::movegen::{threat_maps, ThreatMaps};
+use crate::tt::piece_index;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
@@ -251,17 +252,34 @@ fn threat_escape_bonus(board: &Board, maps: &ThreatMaps, threatened: u64, mv: Mo
     }
 }
 
+/// Continuation-history row for replies to `prev` (the move that led to
+/// `board`), keyed by the piece now on its destination square.
+#[inline(always)]
+fn continuation_row<'a>(
+    engine: &'a EngineState,
+    board: &Board,
+    prev_move: Option<Move>,
+) -> Option<&'a [[i32; 64]; 12]> {
+    let prev = prev_move?;
+    let prev_piece = board.squares[prev.to as usize]?;
+    Some(&engine.continuation_history[piece_index(prev_piece)][prev.to as usize])
+}
+
+#[inline(always)]
+fn continuation_entry(row: &[[i32; 64]; 12], board: &Board, mv: Move) -> i32 {
+    board.squares[mv.from as usize]
+        .map(|piece| row[piece_index(piece)][mv.to as usize])
+        .unwrap_or(0)
+}
+
 fn continuation_history_score(
     engine: &EngineState,
-    side: Color,
+    board: &Board,
     prev_move: Option<Move>,
     mv: Move,
 ) -> i32 {
-    prev_move
-        .map(|prev| {
-            engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-                [mv.to as usize]
-        })
+    continuation_row(engine, board, prev_move)
+        .map(|row| continuation_entry(row, board, mv))
         .unwrap_or(0)
 }
 
@@ -296,7 +314,7 @@ fn apply_history_delta(engine: &mut EngineState, side: Color, threats: u64, mv: 
 
 fn apply_continuation_history_delta(
     engine: &mut EngineState,
-    side: Color,
+    board: &Board,
     prev_move: Option<Move>,
     mv: Move,
     delta: i32,
@@ -304,8 +322,13 @@ fn apply_continuation_history_delta(
     let Some(prev) = prev_move else {
         return;
     };
-    let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-        [mv.to as usize];
+    let (Some(prev_piece), Some(piece)) =
+        (board.squares[prev.to as usize], board.squares[mv.from as usize])
+    else {
+        return;
+    };
+    let h = &mut engine.continuation_history[piece_index(prev_piece)][prev.to as usize]
+        [piece_index(piece)][mv.to as usize];
     apply_gravity(h, delta);
 }
 
@@ -466,8 +489,7 @@ impl MovePicker {
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
         let side_hist = &history[color_index(side)];
-        let cont_row = prev_move
-            .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
+        let cont_row = continuation_row(engine, board, prev_move);
 
         for mv in move_buf.iter().copied() {
             picker.total += 1;
@@ -489,7 +511,7 @@ impl MovePicker {
 
             let (tf, tt) = threat_slot(threats, mv);
             let h = side_hist[tf][tt][mv.from as usize][mv.to as usize];
-            let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
+            let ch = cont_row.map(|row| continuation_entry(row, board, mv)).unwrap_or(0);
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
             let is_counter = Some(mv) == counter_move;
@@ -1599,7 +1621,7 @@ fn negamax(
             0
         };
         let quiet_continuation = if quiet {
-            continuation_history_score(engine, side, prev_move, mv)
+            continuation_history_score(engine, board, prev_move, mv)
         } else {
             0
         };
@@ -1795,11 +1817,11 @@ fn negamax(
                     search.killers[ply][0] = Some(mv);
                 }
                 apply_history_delta(engine, side, threats, mv, bonus);
-                apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                apply_continuation_history_delta(engine, board, prev_move, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, threats, tried, -bonus);
-                        apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_continuation_history_delta(engine, board, prev_move, tried, -bonus);
                     }
                 }
             }
@@ -2461,7 +2483,7 @@ fn move_order_score(
         .unwrap_or(0)
         .saturating_sub(piece_value(PieceType::Pawn));
     let castle = if mv.is_castle { 10 } else { 0 };
-    let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
+    let continuation = continuation_history_score(engine, board, prev_move, mv);
     let params = &engine.search_params;
     let threats = history_threats(maps, params);
     let bonus = params.threat_escape_bonus;
