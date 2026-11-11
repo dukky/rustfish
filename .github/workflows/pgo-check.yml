@@ -1,0 +1,51 @@
+name: PGO check
+
+# Measures the PGO build (scripts/build-pgo.sh) against a plain x86-64-v3
+# release build on a few runners: bench + evalhash must be identical, then
+# interleaved bench NPS and datagen games/s (scripts/pgo-compare.sh). Runs on
+# pushes to the pgo-build branch, or by hand once merged.
+
+on:
+  push:
+    branches: [pgo-build]
+    paths: [scripts/build-pgo.sh, scripts/pgo-compare.sh, .github/workflows/pgo-check.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2, 3, 4]
+    name: runner ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU
+        run: lscpu | grep -E 'Model name|^CPU\(s\)' | tee cpu.txt
+      - name: Plain build
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          s=$(date +%s); cargo build --release; echo "plain build $(( $(date +%s) - s ))s" | tee build-times.txt
+          cp target/release/rustfish plain
+      - name: PGO build
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+          PGO_REFERENCE: plain
+        run: |
+          s=$(date +%s); scripts/build-pgo.sh pgo; echo "pgo build $(( $(date +%s) - s ))s (incl. llvm-tools install)" | tee -a build-times.txt
+      - name: Compare
+        run: |
+          scripts/pgo-compare.sh ./plain ./pgo 7 13 0 1 | tee cmp.txt
+          # datagen as the datagen workflow runs it: all vCPUs.
+          scripts/pgo-compare.sh ./plain ./pgo 5 13 400 "$(nproc)" | grep '^datagen' | tee -a cmp.txt
+          {
+            echo "### runner ${{ matrix.runner }}"
+            echo '```'
+            cat cpu.txt build-times.txt cmp.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
