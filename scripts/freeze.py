@@ -2,6 +2,7 @@
 import argparse
 import datetime as dt
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -46,10 +47,21 @@ def main() -> int:
     ap.add_argument("--bench-depth", type=int, default=5)
     ap.add_argument("--note", default="")
     ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--pgo", action="store_true",
+                    help="freeze a profile-guided build (scripts/build-pgo.sh, checked against a plain "
+                         "build's bench/evalhash) instead of target/release; ~5%% faster, same moves")
     args = ap.parse_args()
 
     engine_path = pathlib.Path(args.engine)
-    if not args.skip_build:
+    if args.pgo:
+        if args.skip_build:
+            print("error: --pgo builds; drop --skip-build", file=sys.stderr)
+            return 2
+        run(["cargo", "build", "--release"])
+        engine_path = ROOT / "target" / "release-pgo" / "rustfish"
+        subprocess.run(["bash", str(ROOT / "scripts" / "build-pgo.sh"), str(engine_path)],
+                       cwd=ROOT, check=True, env={**os.environ, "PGO_REFERENCE": str(DEFAULT_ENGINE)})
+    elif not args.skip_build:
         run(["cargo", "build", "--release"])
 
     if not engine_path.exists():
@@ -59,7 +71,7 @@ def main() -> int:
     BIN_DIR.mkdir(exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S")
     git_meta = git_info()
-    frozen_name = freeze_name(args.engine_name, git_meta["sha"], stamp)
+    frozen_name = freeze_name(args.engine_name + ("_pgo" if args.pgo else ""), git_meta["sha"], stamp)
     frozen_path = BIN_DIR / frozen_name
     meta_path = BIN_DIR / f"{frozen_name}.json"
 
@@ -81,6 +93,7 @@ def main() -> int:
         "engine_name": args.engine_name,
         "source_engine": str(engine_path),
         "git": git_meta,
+        "pgo": args.pgo,
         "bench_depth": args.bench_depth,
         "bench_output": bench_output.strip().splitlines(),
         "note": args.note,
