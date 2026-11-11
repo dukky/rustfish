@@ -47,15 +47,15 @@ binaries; few build from source. A submission should point them at one page:
 | `Threads` | spin 1-32 | 1 | |
 | `Clear Hash` | button | | |
 | `Move Overhead` | spin 0-5000 | 10 | ms kept back per move for GUI/network lag |
-| `OwnBook` | check | **true** | built-in opening book; see open items |
+| `OwnBook` | check | false | built-in opening book; off by default, as CCRL expects |
 | `BookStyle` | combo `normal`/`grinder`/`chaos` | normal | only matters with OwnBook on |
 | `BookFile` | string | empty | external book path |
-| `FutilityMarginD1`, `FutilityMarginD2`, `ReverseFutilityMarginD1..D3`, `NullReductionBase`, `NullReductionDepthDiv`, `LmpLimitD1..D3`, `LmrMinDepth`, `LmrMinMoveIndex`, `LmrExtraDepth`, `LmrExtraMoveIndex` | spin | tuned | search tuning; testers should leave these alone |
+| `EvalFile` | string | empty | load a net file instead of the embedded one; leave empty |
+| `UseNNUE` | check | true | off = hand-crafted eval (much weaker); leave on |
+| `FutilityMarginD1..D2`, `ReverseFutilityMarginD1..D3`, `NullReductionBase`, `NullReductionDepthDiv`, `ThreatHistory`, `ThreatEscapeBonus`, `LmpLimitD1..D3`, `LmrMinDepth`, `LmrMinMoveIndex`, `LmrExtraDepth`, `LmrExtraMoveIndex`, `LmrCutNode`, `LmrPvNode`, `LmrNotImproving`, `SeNegativeExtension`, `NodeTmBase`, `NodeTmScale` | spin / check | tuned | search and time-management tuning; testers should leave these alone |
 
-**OwnBook is on by default.** CCRL plays from its own opening books and
-expects engine books to be off. Tell testers to set `OwnBook=false`, or ship
-releases with the book off by default (open item 3). This document does not
-change the default.
+`OwnBook` defaults to off and the `uci` output says so (fixed in
+`1b3d81d`, 2026-11-10), so testers need not change anything.
 
 ## Cutting a release
 1. Make sure `main` is green (CI) and the commit you want is on it.
@@ -85,10 +85,9 @@ tag.
    the final name, author string and a version number (for example
    `id name Rustfish 1.0`). CCRL lists engines by name plus version, and the
    current string has no version. `Cargo.toml` is still `0.1.0`.
-3. **OwnBook default.** Testers usually turn engine books off, but a tester
-   who misses it would play rustfish's book over their own openings. Shipping
-   releases with `OwnBook` defaulting to `false` removes that risk.
-4. **Exposed tuning options.** The 16 search-tuning spin options show up in
+3. ~~**OwnBook default.**~~ Done: off by default and advertised as
+   `default false` (`1b3d81d`).
+4. **Exposed tuning options.** The 22 search-tuning options show up in
    every GUI's engine dialog. Consider hiding them in release builds or
    removing them, so testers don't change them by accident.
 5. **stop / go infinite.** Already implemented on `main` (see above); nothing

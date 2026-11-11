@@ -5,181 +5,144 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-09 19:45 (UK). **Unattended until Wed 11 Nov evening: see docs/handoff-2026-11-08.md.**_ Live state (current test, queue, results, strength
-chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
+_Last updated: 2026-11-11 23:30 (UK)._ Live state (current test, queue,
+results, strength chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **3510 CCRL Blitz** (pentanomial CI 3492-3528, 2026-11-09 02:11, `88e13a1`, g7kb8m; draw-aware 3506.3). The point estimate is at the top-100 line, but the CI still overlaps it. Before: **3492** (CI 3475-3510, 2026-11-08 19:23), **3474** (2026-11-08 01:38), **3463** (g4, 2026-11-07). Short-term goal (3400) passed on 2026-11-06 (3429). |
-| Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ reached; **mid term top 100 = 3506** (#100 Endspiel 3505): point estimate 3510, CI overlaps, confirm with the next ladder; **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
-| Eval | NNUE g4kb8m: (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. Exact factoriser warm start from g4 (from scratch on pool4, 730M positions). |
-| Search | PVS, aspiration, TT buckets, NMP (eval >= beta), RFP, futility, LMP, LMR, IIR, SEE, killers, counter-moves, history, 1-ply continuation history, ProbCut, singular extensions + multi-cut, check extension, cut-node LMR; node-fraction time management. |
-| Compute | M3 laptop: GPU training (~1.8M pos/s at 512x8), datagen when the GPU is idle. CI (20 runners): 13 datagen / 6 test (trial), queue job 1. |
+| Strength | **~3508 CCRL Blitz**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
+| Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ (2026-11-06); **mid term top 100 = 3506**: at the line (~3508), needs a clear margin; **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
+| Eval | NNUE **g7kb8m** (merged +30.6, 2026-11-08): (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. g7 from scratch on pool7 (1.72B positions), m1 copy, kb8m factoriser warm start. |
+| Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR (cut-node, not-improving, quiet checks reduced one ply less, root moves), IIR, SEE, killers, counter-moves, history + threat-aware history with escape bonus, 1-ply continuation history, ProbCut, singular extensions + multi-cut + negative extension, check extension; node-fraction time management. |
+| Compute | **Desktop 9600X** (Zen 5, AVX-512, DDR5-6000, 180 GB free on WSL): main training + datagen machine from 2026-11-11; CPU trainer ~3x the M3; CUDA trainer for its 1080 Ti in progress (desktop session). **M3 laptop:** GPU (Metal) trainer for net-shape experiments on the fixed pool7. **CI (20 runners): testing only** (18 test shards, queue job 1, 1 idle background slot); CI datagen stopped 2026-11-11. |
 
-**Ladder 2026-11-08 01:38 (e42fe7a, new anchor set 3318-3631, 40 games each):
-3474 [3456, 3493] pentanomial** (binomial [3441, 3508]). Only +11 over 3463
-although self-play merges since sum to ~+66 (cut-node 15.6, kb8m 11.0,
-g5kb8m 30.4, se-negext 8.9). On the 6 anchors common to both ladders the
-implied rating rose 3452 -> 3489 (+37, noisy): the stronger new anchors
-(3525-3631, where we score 23-41%) pull the fit down, so part of the gap is
-anchor-set change, part is self-play inflation. Lesson: discount self-play
-gains ~0.3-0.6x for CCRL estimates; compare ladders on a fixed anchor set.
-Top 100 needs 3506; the latest ladder's point estimate is 3510 but its CI
-(3492-3528) still straddles the line, so confirm with the next ladder.
+**Self-play vs ladder, 2026-11-09..10:** feat-lmr-quiet-check (+12.9) and
+feat-root-lmr (+12.2) merged between the 3510 and 3508 ladders, and the
+ladder did not move. Both passed fast (2880 games) so their true gains are
+smaller than their point estimates, and the ladder CI (+-18) can hide +10;
+but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
+(+20-30 per generation) are the lever that has moved the ladder.
 
 ## Plan
 
-**Short term (next ~24 h): gen 5 gate, feature batch, ladder.**
-- Gen 5 (pool5, 976M, from scratch, chain11) is trained; its gate candidate
-  is **g5kb8m** (g5 -> m1 copy -> kb8m exact warm start) vs main g4kb8m.
-  Split stop rule: g5 < +8 at that gate -> back to 6/13 runners.
-- Runner split trial: 13 datagen / 6 test (`lanes` in queue-settings.json).
-- Queue: feature tests (feat-threat-hist requeued after +4.3 inconclusive,
-  feat-se-negext-r2, ttPv, LMR improving, capture LMR, qsearch fail-soft) and
-  simplification nonregs, ordered by expected Elo per runner-hour.
-- Ladder after the next net merge or 2-3 search merges (pentanomial CI,
-  ~+-20 at 40 games/anchor over 11 anchors 3318-3631).
-- simp-lmr-extra-r2 hit a second rebase conflict (LMR block changed by
-  cut-node + negext merges) on 2026-11-08 05:21: dropped for now (expect ~0,
-  -15% nodes); redo from current main later if a simplification pass runs.
-- Queue backlog: mark a needs-human row resolved when its `-r2` is queued
-  (feat-se-negext still shows needs-human); a test for the `queue.py remove`
-  inbox path; a scheduled ladder should replace (not duplicate) a pending
-  manual one, and a scheduled ltc-check shouldn't jump a `--front` ladder
-  (2026-11-07 20:00: the front ladder arrived seconds after a dispatch, then
-  5 merges queued a second ladder and an ltc-check ahead of it).
+**Short term (next ~24-48 h): gen 8 on the desktop, 1024-wide test.**
+- pool7 (54.9 GB) copying laptop -> desktop over Tailscale (LAN, ~12.5 MB/s
+  powerline, done ~00:15 2026-11-12). Gen 8 = pool7 + the CI seeds generated since +
+  the desktop's 3 x 1M-game runs; same recipe (g8 -> g8m1 -> g8kb8m),
+  gate vs g7kb8m.
+- **g7h1024** (Metal, laptop, pool7, 10 epochs, done ~05:45 2026-11-12):
+  epoch 1 val 0.026793 vs g7's 0.027082 at 2.45x the training cost. Compare
+  best-scale on val.bin + val17x2 at the end; if it wins clearly, measure
+  NPS cost and gate a 1024 net in games (stc, shape change).
+- Queue: feat-cuckoo (running), feat-conthist-rekey (+4 exp),
+  feat-qs-evasion-prune (+2 exp; if merged add `QsQuietEvasions` to
+  docs/ccrl-submission.md and tune/spsa-params.json).
+- Ladder after the next net merge.
 
-**Mid term (days): confirm top 100 (3506).**
-- Net generations every ~1/3 more data (gen 6 next), each followed by the
-  m1 -> kb8m exact warm start that won for g4; drop the oldest, weakest data
-  once the pool is large. King buckets from scratch need ~3-4B positions.
-- SPSA of the ~30 search tunables after the feature batch lands (the new
-  LMR/singular/threat terms interact).
-- Search backlog: continuation history re-keyed to [piece][to][piece][to]
-  then 2/4 ply, cuckoo upcoming-repetition, root LMR, quiet-check LMR,
-  qsearch polish.
-- Second trainer: 9600X. CPU trainer ~2x faster since dd12f29 (Zen 5
-  runner 1.69M pos/s on 4 vCPU; M3 1.6M at 8 threads when quiet ~ the Metal
-  trainer); projected ~4M pos/s on the 9600X (12 threads, unmeasured), so it
-  may take generations while the M3 GPU does experiments; 1080 Ti (CUDA port) only as a last
-  resort (power draw).
+**Mid term (days-weeks): clear top 100, start on bigger nets.**
+- Data decision (Hermes notes `docs/research-2026-11-11-coda-lc0-compute.md`,
+  critique `docs/research-2026-11-11-critique.md`): own self-play still gains
+  +17-31 per generation, so keep it as arm A; arm B = the same positions
+  rescored by g7kb8m at higher nodes (cheap, best-evidenced: Viridithas
+  +50/+25/+24); arm C = Lc0 T80 subset (binpack reader, Q -> cp calibration,
+  ODbL check first). One variable each, current net shape, gated in games.
+- Net-shape experiments on the laptop GPU against fixed pool7 (results
+  compare with g7/g7m1/g7kb8m directly): 1024-wide (running), threat
+  inputs (parked at -22% NPS; re-check with AVX-512 at 1024), other
+  bucket layouts. Winners are retrained on pool8+ on the desktop. Pool7
+  results stay useful until the data changes kind or the desktop has
+  spare training capacity (~1-2 weeks).
+- SPSA of the search tunables (`spsa-nnue`) once the feature batch drains:
+  the LMR, singular and threat terms all changed in a week.
+- Search backlog: continuation history 2/4 ply (after re-key), quiet-check
+  and root LMR polish, qsearch polish, improving ply-4 fallback.
+- Streaming shuffle (trainers read many source files through a shuffle
+  buffer, no pool copy): halves disk; needed before pools outgrow 180 GB.
+- PGO on the desktop x86: +5% on the M3, noise on CI x86; measure on the
+  9600X (datagen games/s) before using it there.
 
 **Long term: top 10 (3751).**
-- Bigger nets (768-1024 wide, king buckets, possibly a second hidden layer)
-  once data and trainer throughput allow; AVX-512 paths for them
-  (`nnue-avx512`).
+- Bigger nets (1024+ wide, king buckets, possibly a second hidden layer);
+  AVX-512 inference paths for them (`nnue-avx512`).
 - Multi-billion-position pools with opening diversity; better data
-  (deeper/softnode search, filtering).
+  (deeper/softnode search, rescoring, filtering).
 - Novel ideas only offline and cheap until a clear wall: uncertainty head,
   hard-example weighting, two-net disagreement.
 - CCRL submission (identity and docs ready; release and licence are the
   owner's call), Lichess bot, Syzygy.
 
-## Status log 2026-11-07
+## Status log
 
 Dated log, newest last; superseded detail is in the commit history and
 `docs/nnue-experiments.md` ("Conclusions to date").
 
-- **Overnight:** simp-nmp-margin merged +8.2 [1.1, 15.4]; simp-lmr-goodhist
-  merged (neutral); simp-castle-order rejected. Ladder 3429 on g3.
-- **Scale hypothesis rejected:** g3f +1.4, g3fs -8.9, g4ws -22.7; g4w's loss
-  (-21.7) was over-specialisation of a short warm start. Screen on
-  best-scale loss on val.bin + val17x2; games remain the gate.
-  correction-history-r2 rejected under NNUE (+0.1 over 13.8k games).
-- **g4 merged +26.7 [10.1, 43.5]** (from scratch, +35% data). Ladder
-  **3463** (11:23). Background datagen lane raised; datagen bursts fill
-  low-value gaps.
-- **Runner split trial (10:45):** 13 datagen / 6 test, ~58M positions/h.
-  Stop rule: gen 5 < +8 -> back to 6/13.
-- **g4l3 (lambda 0.3) rejected** (-8.8, inconclusive).
-- **King buckets:** from scratch data-limited (learning curve: gap 0.0011 at
-  50% of games vs 0.0006 at 100%); exact factoriser warm starts from g4 win:
-  kb8m (via g4m1) > kb4 > g4ft on val.bin and val17x2.
-  **g4kb8m merged +11.0 [4.9, 17.1]** (17:31).
-- **feat-lmr-cutnode merged +15.6 [6.4, 24.9]**; tm-ccrl-r2 merged as
-  nonreg; feat-threat-hist +4.3 inconclusive, requeued.
-- **Gen 5** (pool5, 976M) trained; smaller validation gain over g4 than g4
-  had over g3. g5kb8m is the gate candidate.
-- **Infra:** queue hardening (fd15da6), datagen bursts (1685c16),
-  settings-driven lanes, `queue.py remove`, ladder anchors to 3631 with
-  pentanomial CIs, fast CPU trainer (2x, factoriser, `--exact`), CI
-  train-sweep v2, Metal trainer `--keep-best` / exact init. Auto loop is
-  ingest-only (short fine-tunes don't win). Local datagen runs only while
-  the GPU is idle (`~/rustfish-data/datagen-gate.sh`).
-- **Parked:** AVX-512 NNUE paths (`nnue-avx512`: kernels +30-90% but
-  whole-engine NPS within +-3%; re-check at H >= 768); threat inputs
-  (`threat-inputs`: -1% val loss but -22% NPS).
-- Search gap backlog (audit 2026-11-07, Elo guesses at our level):
-  threat-aware quiet history + escape bonus (+8-15); ttPv flag in TT for
-  LMR/pruning (+5-10); !improving in LMR (+3-6); LMR for late/bad captures
-  (+3-6); re-key continuation history to [piece][to][piece][to] before
-  retrying 2/4-ply (+3-8); LMR re-search depth adjust (+2-5); cuckoo
-  upcoming-repetition (+2-4); reduce (not skip) LMR on quiet checks, root
-  LMR, qsearch polish, improving ply-4 fallback (+1-3 each). New options
-  still to add to docs/ccrl-submission.md after merges.
-- Next: SPSA of the search tunables (`spsa-nnue`) when the queue is quiet.
+**2026-11-07**
+- simp-nmp-margin +8.2; g4 merged +26.7; g4kb8m merged +11.0 (king
+  buckets via exact factoriser warm start; from scratch is data-limited);
+  feat-lmr-cutnode +15.6; feat-se-negext-r2 +8.9; tm-ccrl-r2 nonreg.
+  Rejected: scale hypothesis (g3f/g3fs/g4ws), correction-history-r2,
+  g4l3 (lambda 0.3), feat-ttpv (-3.9). Ladder 3463.
+- Infra: queue hardening, datagen bursts, settings-driven lanes,
+  `queue.py remove`, ladder anchors to 3631 with pentanomial CIs, fast CPU
+  trainer (2x, factoriser), Metal `--keep-best`.
 
-## CI efficiency (measured 2026-11-06)
+**2026-11-08..10 (unattended)**
+- Merged: simp2-qs-delta (nonreg, +9.8), feat-threat-hist +4.7 (17.9k
+  games), **nnue-g7kb8m +30.6** (net-gate), feat-lmr-improving +5.1,
+  feat-lmr-quiet-check +12.9, feat-root-lmr +12.2; fix-ownbook-default
+  (`OwnBook` now advertises `default false`).
+- Rejected: feat-lmr-captures -3.3, simp2-razor-d1 -3.2, simp2-rfp-linear
+  -6.6; simp2-qs-failsoft removed by hand (slow, ~0). simp-lmr-extra-r2
+  still needs a redo from current main (expect ~0, -15% nodes).
+- Ladders: 3492 -> 3510 -> 3508.5 -> 3507.6.
+- Gen 7 disk fix (`shuffle --consume`, 6f71956). Desktop 9600X set up
+  (docs/desktop-9600x-setup.md): CPU trainer ~3x the M3.
 
-- STC waves: ~90% of wall time is games. Fine.
-- Net-gate waves (5+0.05): ~170 s, of which ~60 s was rebuilding engines;
-  fixed by caching the engines across waves (`34091d5`).
+**2026-11-11**
+- CI datagen stopped (GitHub-hosted runners are for testing): queue
+  lanes -> 18 test shards, bursts off (0d3af12). PGO tooling merged
+  (77f0d75; opt-in, CI unchanged).
+- Laptop disk audit; pool7 -> desktop copy; g7h1024 started on the M3 GPU.
+- Hermes/DeepSeek notes on Coda, Lc0 data and compute, and the peer
+  analysis (docs/peer-analysis-2026-11-08.md) read and critiqued.
+
+## CI efficiency
+
+- STC waves: ~90% of wall time is games. Net-gate waves cache engines
+  across waves (`34091d5`).
 - The largest waste was *what* was tested (~10 doomed nets, ~24 rejected
-  search patches, ~200k games in two days): screen by validation loss first.
-- Datagen must leave runners free: the queue sizes it from `lanes` in
-  `scripts/queue-settings.json`, so its own jobs and SPRTs are never blocked.
-- Unused lever: runners can run *independent* training runs (ablation
-  sweeps scored by validation loss) overnight, when no SPRT needs them.
-  `train-sweep.yml` v2 (branch `train-sweep-v2`) does this: shared <= 300M
-  pool, val.bin + val17x2 best-scale table, warm starts; it takes the 6
-  foreground runners (docs/nnue-experiments.md, "CI training sweeps").
-- Owner decisions: GitHub Pro (20 -> 40 concurrent jobs, 2x throughput) and a
-  self-hosted runner on the 9600X desktop (outside the job cap).
+  search patches in two days): screen nets by validation loss first.
+- CI is for testing only from 2026-11-11 (no bulk datagen or training on
+  GitHub-hosted runners). Foreground = 19 - background_parallel (>= 1);
+  allowing 0 would give 19 shards (small queue.py change).
+- Owner decisions: GitHub Pro (20 -> 40 concurrent jobs) and a self-hosted
+  runner on the 9600X (outside the job cap).
 - Ladder cost: a 120+1 ladder is ~10 SPRTs of runner time; run it only after
-  real gains. A 10+0.1 ladder is ~12x cheaper and comparable with other
-  short-TC claims (e.g. the 3463 "24h" engine, which was rated at 10+0.1).
-- PGO (2026-11-11, `scripts/build-pgo.sh`, branch `pgo-build`): identical
-  bench/evalhash everywhere. M3: +4.8% bench NPS, +4.5% fewer cycles, +6%
-  datagen games/s. GitHub x86-64-v3 runners (EPYC 7763/9V45/9V74, Xeon
-  8573C): -4..+2% NPS, -0.5..+3.6% datagen, inside the A/A noise (+-2%);
-  ext-TSP block placement on top did not help. So CI stays plain; the
-  datagen/ladder/release integration is parked on `pgo-ci-integration`.
-  `freeze.py --pgo` is opt-in for M3 freezes.
+  real gains. A 10+0.1 ladder is ~12x cheaper.
+- PGO (2026-11-11, `scripts/build-pgo.sh`): identical bench/evalhash
+  everywhere. M3: +4.8% bench NPS, +6% datagen games/s. GitHub x86-64-v3
+  runners: inside the A/A noise (+-2%). CI stays plain; integration parked
+  on `pgo-ci-integration`. `freeze.py --pgo` is opt-in.
 
 ## Known problems
 
-- **Gen-7 disk fix done (6f71956):** `shuffle --consume pool6.bin` deletes
-  the old pool once scattered, so pool7 is built in place (peak ~ new pool +
-  new data). chain13 builds pool7 at +440M new positions (~10:30), then
-  g7 -> g7m1 -> g7kb8m (~15:30). Streaming shuffle still needed within days.
-- **(superseded) Disk was the gen-7 blocker (~14:00 2026-11-08):** 64 GB free with
-  pool6 (42 GB) on disk; pool7 (~1.8B, ~58 GB) can't be shuffled next to
-  pool6. Options: build pool7 straight from the source files (needs a clean
-  manifest of pool6's sources, val tails excluded, x2 fixes) after deleting
-  pool6, or do fix (1) below first. g6kb8m (val.bin 0.025832 / val17x2
-  0.024920 vs g5kb8m 0.025886 / 0.025096) is gating now.
-- **Disk (pick up before gen 7, ~3-4 days):** data grows ~1B positions/day
-  (~32 GB/day) and we keep sources + a shuffled pool copy (+ a third copy
-  while shuffling): ~64 GB/day against 88 GB free on a 460 GB disk. Fixes in
-  order: (1) trainers read many source files with an on-the-fly shuffle
-  buffer, no pool copy (~halves disk; subagent job); (2) recent-data window
-  (drop seeds 4-13 from much weaker engines; test as a CI sweep, one
-  variable) -> caps ~100-130 GB; (3) move data + generations to the 9600X if
-  its disk is larger; (4) binpack-style compression (~2-3 B/position) only if
-  needed. CI datagen artifacts (90-day retention) are a re-downloadable cold
-  copy. Manual cleanup the owner can run: raw seed .gz dirs
-  ~/rustfish-data/s{4,5,6,8,9,11} (~5 GB) and finished worktrees.
-
-- **Anchors near the top.** The elite set now reaches 3631 (11 anchors,
-  3318-3631); add stronger anchors before the ladder passes ~3600. Check
-  each new anchor against its neighbours.
-- **`OwnBook` advertises `default true`** in the `uci` output although the
-  engine default is off (src/main.rs); wrong for GUIs that trust it. Fix in
-  a small branch.
-- **SPRT bounds:** `stc` is [0, 5]; `net-gate` (5+0.05, [0, 10], up to 5
-  waves) is for same-shape nets only.
+- **Disk / data size.** Data grows with every generation and we keep
+  sources + a shuffled pool (+ a copy while shuffling without `--consume`).
+  Laptop: 59 GB free; keep pool7 for shape experiments, `auto/` (52 GB)
+  can go once the desktop copy is verified. Desktop: 180 GB free on the
+  250 GB WSL volume (~1 TB more on other drives). Fixes in order:
+  streaming shuffle; recent-data window (drop seeds from much weaker
+  engines; test as one variable); binpack-style compression (~2-3
+  B/position) if still needed.
+- **Anchors near the top.** The elite set reaches 3631 (11 anchors,
+  3318-3631); add stronger anchors before the ladder passes ~3600.
+- **SPRT bounds:** `stc` is [0, 5]; `net-gate` (5+0.05, [0, 10]) is for
+  same-shape nets only; a 1024 net goes through `stc`.
+- **Queue backlog:** mark a needs-human row resolved when its `-r2`
+  merges; a scheduled ladder should replace (not duplicate) a pending
+  manual one; a scheduled ltc-check shouldn't jump a `--front` ladder.
 - **Bot merges skip `ci.yml`**; the queue runs the same checks itself.
 - **Time management** is tested at 60+0.6 and 10+0.1; CCRL also plays 40/15.
 - **Lazy SMP is untested for strength** (bot and 4-CPU lists).
@@ -197,15 +160,14 @@ Rules added from the 2026-11-04..06 history:
 - No strategic pivot on a sample that cannot support it (e.g. 200 games).
 - Every ladder anchor's score is sanity-checked against its neighbours.
 
-Division of labour: GitHub Actions plays every game and generates data; the
-laptop trains nets and does correctness/speed work; the Dokku box runs the
-dashboard (later the bot); the LLM writes candidates and keeps this plan
-current, not polling and merging (the queue does that).
+Division of labour (from 2026-11-11): GitHub Actions plays every test game
+and the ladders; the desktop generates data and trains production nets; the
+laptop GPU runs net-shape experiments and the laptop does
+correctness/speed work; the Dokku box runs the dashboard and the Lichess
+bot; the LLM writes candidates and keeps this plan current, not polling and
+merging (the queue does that).
 
 ## History
-
-- 2026-11-07: removed the 2026-11-06 "train the net properly" strategy and
-  "next 24 hours" tables (done: E1-E3, generation loop, GPU trainer); see git history.
 
 - Jul 2026: pre-pipeline notes in `docs/archive/` (their rejections are void).
 - 2026-10-29: depth-8 cap fixed, SPRT pipeline and CCRL ladder: ~2081.
@@ -215,4 +177,6 @@ current, not polling and merging (the queue does that).
   ~3001 (refit). net2 +149.
 - 2026-11-04: net3 +40, net4 +13, ProbCut +4: 3168 (refit) on net4.
 - 2026-11-04..05: net5-net13 all rejected (see the audit); 512-wide -30.
-- 2026-11-06: audit; trainer v2; black-marlin anchor removed.
+- 2026-11-06: audit; trainer v2; 3429 on g3.
+- 2026-11-07: g4, king buckets, LMR features: 3463.
+- 2026-11-08..10: g7kb8m, LMR batch: 3508-3510 (top-100 line).

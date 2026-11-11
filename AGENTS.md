@@ -421,9 +421,10 @@ For refactors:
 ---
 
 ## Current strategic priorities
-See `plan.md` for the live version. In short (2026-11-07):
-1. Reach CCRL Blitz top 100 (3504), then top 10 (3751).
+See `plan.md` for the live version. In short (2026-11-11):
+1. Reach CCRL Blitz top 100 (3506; ~3508 now, at the line), then top 10 (3751).
 2. NNUE generations on ever larger self-play pools (data is the main lever),
-   king buckets / bigger nets as data allows.
+   trained on the 9600X desktop; bigger nets (1024 wide) tested on the laptop GPU.
+   GitHub Actions is for testing only (no bulk datagen or training).
 3. Search features and simplifications through the queue's SPRTs; SPSA of the tunables.
 4. Preserve no-dependency constraint.

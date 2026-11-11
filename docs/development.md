@@ -105,7 +105,7 @@ python3 scripts/ci.py sprt <idea-name> --nonreg   # simplifications
 - Pushing the branch also runs CI (build, tests, perft, selftest, bench).
 - `--no-wait` dispatches and exits; `--resume <test_id>` re-attaches later.
 - Shards default to the merge queue's foreground width (20 runners minus
-  `lanes.background_parallel` minus 1; 6 today) and wave sizes to the queue's
+  `lanes.background_parallel` minus 1; 18 today) and wave sizes to the queue's
   `stc` / `ltc-gainer` modes, so a hand test fits beside the background lane:
   STC waves of 192, 384, 768, 1,536, then 2,496 games. Clear winners or
   losers usually stop in 2-3 waves; a real +3..+5 patch can take 5-10.
@@ -177,7 +177,8 @@ against the current `main`, so a stale base can't happen.
   The `dispatched` log row carries a `priority` field with the score and its
   inputs. `python3 scripts/queue.py rates` prints the base rates and the pick
   order for the live queue without changing anything.
-- **Datagen bursts.** When the item the queue would start next scores below
+- **Datagen bursts** (disabled since 2026-11-11, `burst.enabled` false: CI
+  is for testing only). When the item the queue would start next scores below
   `burst.below_score` (0.1 in the settings; scores scale with 1/shards, so
   retune it when the lanes change), or nothing is pending (`burst.when_idle`),
   it runs one datagen seed on the foreground runners instead (`burst` block:
@@ -196,9 +197,9 @@ against the current `main`, so a stale base can't happen.
   result itself. `datagen.yml` also calls the queue back when a run ends, so
   the background lane starts its next seed at once.
 - **Runner lanes** (`lanes` in `scripts/queue-settings.json`): the background
-  datagen lane gets `background_parallel` runners (13 today, `background_shards`
-  26 = two rounds), the queue's own job 1, and the foreground (SPRTs, ladders,
-  bursts) the rest of the 20 (`MAX_FOREGROUND_SHARDS`, 6 today). Before
+  datagen lane gets `background_parallel` runners (1 today and idle: CI
+  datagen stopped on 2026-11-11; it must stay >= 1), the queue's own job 1, and the foreground (SPRTs, ladders,
+  bursts) the rest of the 20 (`MAX_FOREGROUND_SHARDS`, 18 today). Before
   starting a background seed the queue charges other live runs against the
   lane (SPSA and train sweeps 16 each, a hand-started ladder or `ci.py` SPRT
   the foreground width; the queue's own `q-...` runs are the foreground) and

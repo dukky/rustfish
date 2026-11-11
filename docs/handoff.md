@@ -58,10 +58,11 @@ itself (every 5 merges) or by a human.
 
 ## Nets (only if you are asked to work on them)
 
-Nets are trained on the laptop (Metal GPU trainer `tools/nnue-trainer-metal`,
-or the CPU trainer `tools/nnue-trainer`, ~2x faster since 2026-11-07 and with
-the factoriser) or in CI with `train-sweep.yml` (ablations scored on
-validation loss). `scripts/netloop.py` pulls datagen output, trains, screens on
+Production nets are trained on the 9600X desktop (CPU trainer
+`tools/nnue-trainer`, AVX-512, ~3x the M3; see docs/desktop-9600x-setup.md);
+the laptop's Metal GPU trainer (`tools/nnue-trainer-metal`) runs net-shape
+experiments on a fixed pool. GitHub Actions is for testing only since
+2026-11-11 (no bulk datagen or training there). `scripts/netloop.py` pulls datagen output, trains, screens on
 best-scale validation loss (val.bin + val17x2), embeds the net on a
 `nnue-<id>` branch and queues the gate; every run, failed or not, gets a row
 in `net/experiments.jsonl`. `netloop.py auto` runs unattended but only
