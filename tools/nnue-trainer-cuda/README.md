@@ -21,6 +21,14 @@ $G train --data pool.bin --val val.bin --out net.bin --hidden 512 --buckets 8 \
 `eval`, `shuffle`, `convert`, ... are the CPU trainer's (they run on the
 CPU). `--exact` and `--sub-batch` are ignored.
 
+`--half` (GPU only, off by default): the forward reads an fp16 copy of the
+merged FT rows (master weights, gradients and AdamW stay f32), which halves
+its ~2 GB of row reads per batch: +14-18% (table below). fp16 keeps 11
+mantissa bits, finer than the engine's 1/255 FT quantisation; kb8m H 512,
+3 x 2M positions: val 0.037563 (quantized 0.037727) vs f32 0.037562
+(0.037754). Not bit-identical to f32 runs, so A/B it before relying on it
+for a generation.
+
 ## Deterministic, not bit-identical to the CPU
 
 No float atomics: every sum has a fixed order, so reruns (any `--threads`)
@@ -59,14 +67,12 @@ for a CPU trainer run next to it.
 
 ## Speed (GTX 1080 Ti, batch 16384, B 8, `--mirror`, steady state)
 
-| net | 1080 Ti | 9600X CPU trainer |
-|---|---|---|
-| H 256 plain | 6.8M | 7.7M |
-| H 256 kb8m `--factorise` | 5.9M | 4.6M |
-| H 512 plain | 4.2M | 4.1M |
-| H 512 kb8m `--factorise` | 3.5M | 2.2M |
-| H 1024 plain | 2.1M | 1.8M |
-| H 1024 kb8m `--factorise` | 1.9M | 0.73M |
+| net | 1080 Ti | 1080 Ti `--half` | 9600X CPU trainer |
+|---|---|---|---|
+| H 256 plain | 7.0M | 8.0M | 7.7M |
+| H 512 plain | 4.3M | 4.9M | 4.1M |
+| H 512 kb8m `--factorise` | 3.6M | 4.1M | 2.2M |
+| H 1024 kb8m `--factorise` | 1.9M | 2.25M | 0.73M |
 
 Per batch at kb8m H 512 (in the trainer): forward 1.75 ms (~2 GB of FT row
 reads, about the 1080 Ti's L2 bandwidth), FT backward ~1.9 ms, output-layer

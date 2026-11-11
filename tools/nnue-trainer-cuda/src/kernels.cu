@@ -6,6 +6,7 @@
 // = FT bias (H) | output weights (B * 2H) | output bias (B).
 
 #include <stdint.h>
+#include <cuda_fp16.h>
 
 #define INPUTS 768
 #define CLIP 1.98f
@@ -29,8 +30,16 @@ struct AdamC {
 
 // One block per sample (visited in `order`), H/2 threads: thread t owns
 // side t / (H/4) and four columns. Accumulators, output gradient, loss.
-extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
-                                   float *acc, float *gout, float *loss, int H, int buckets) {
+__device__ __forceinline__ float4 row4(const float *wt, size_t at) { return __ldg((const float4 *)(wt + at)); }
+__device__ __forceinline__ float4 row4(const __half *wt, size_t at) {
+    uint2 u = __ldg((const uint2 *)(wt + at));
+    float2 a = __half22float2(*(const __half2 *)&u.x), b = __half22float2(*(const __half2 *)&u.y);
+    return make_float4(a.x, a.y, b.x, b.y);
+}
+
+template <typename W>
+__device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *order, const W *wt, const float *rest,
+                                             float *acc, float *gout, float *loss, int H, int buckets) {
     int sample = order[blockIdx.x];
     const GSample &s = ss[sample];
     int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
@@ -48,17 +57,17 @@ extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, con
     // Four row loads in flight, added in feature order.
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float4 w0 = __ldg((const float4 *)(wt + (size_t)feats[i] * H + c));
-        float4 w1 = __ldg((const float4 *)(wt + (size_t)feats[i + 1] * H + c));
-        float4 w2 = __ldg((const float4 *)(wt + (size_t)feats[i + 2] * H + c));
-        float4 w3 = __ldg((const float4 *)(wt + (size_t)feats[i + 3] * H + c));
+        float4 w0 = row4(wt, (size_t)feats[i] * H + c);
+        float4 w1 = row4(wt, (size_t)feats[i + 1] * H + c);
+        float4 w2 = row4(wt, (size_t)feats[i + 2] * H + c);
+        float4 w3 = row4(wt, (size_t)feats[i + 3] * H + c);
         a.x += w0.x; a.y += w0.y; a.z += w0.z; a.w += w0.w;
         a.x += w1.x; a.y += w1.y; a.z += w1.z; a.w += w1.w;
         a.x += w2.x; a.y += w2.y; a.z += w2.z; a.w += w2.w;
         a.x += w3.x; a.y += w3.y; a.z += w3.z; a.w += w3.w;
     }
     for (; i < n; i++) {
-        float4 w = __ldg((const float4 *)(wt + (size_t)feats[i] * H + c));
+        float4 w = row4(wt, (size_t)feats[i] * H + c);
         a.x += w.x; a.y += w.y; a.z += w.z; a.w += w.w;
     }
     *(float4 *)(acc + ((size_t)sample * 2 + side) * H + c) = a;
@@ -79,6 +88,17 @@ extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, con
         gout[sample] = 2.0f * err * pred * (1.0f - pred);
         loss[sample] = err * err;
     }
+}
+
+extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
+                                   float *acc, float *gout, float *loss, int H, int buckets) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets);
+}
+
+// `--half`: the same with the fp16 copy of the merged FT rows.
+extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order, const __half *wt, const float *rest,
+                                        float *acc, float *gout, float *loss, int H, int buckets) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets);
 }
 
 // ---------------------------------------------------------------- FT backward
@@ -251,8 +271,8 @@ extern "C" __global__ void adam_flat(AdamC c, float *p, float *m, float *v, cons
 // bucket's W, then the merged rows into wt. Without: each bucket's row.
 // `active` (null = plain decay): rows without the batch's flag skip decay.
 extern "C" __global__ void adam_ft(AdamC c, float *pw, float *mw, float *vw, float *pf, float *mf, float *vf,
-                                   float *wt, const float *part, const int *ilo, const uint8_t *active, int H,
-                                   int kb, int fac) {
+                                   float *wt, __half *wth, const float *part, const int *ilo,
+                                   const uint8_t *active, int H, int kb, int fac) {
     size_t e = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     size_t nf = (size_t)INPUTS * H;
     if (e >= nf) return;
@@ -282,6 +302,16 @@ extern "C" __global__ void adam_ft(AdamC c, float *pw, float *mw, float *vw, flo
         pw[i] = pp;
         mw[i] = mm;
         vw[i] = vv;
-        wt[i] = fac ? fminf(fmaxf(pp + fp, -CLIP), CLIP) : pp;
+        float w = fac ? fminf(fmaxf(pp + fp, -CLIP), CLIP) : pp;
+        if (wth)
+            wth[i] = __float2half_rn(w);
+        else
+            wt[i] = w;
     }
+}
+
+// `--half`: fp16 copy of the merged FT rows (at import).
+extern "C" __global__ void to_half(const float *src, __half *dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2half_rn(src[i]);
 }

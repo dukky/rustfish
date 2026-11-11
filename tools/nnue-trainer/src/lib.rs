@@ -1396,6 +1396,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let (mut init, mut resume, mut ckpt) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
     let (mut exact, mut sub_batch, mut max_batches) = (false, 0usize, u64::MAX);
     let (mut factorise, mut wd_active, mut keep_best) = (false, None::<bool>, false);
+    let mut half = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -1426,6 +1427,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--wd-active-only" => wd_active = Some(true),
             "--no-wd-active-only" => wd_active = Some(false),
             "--keep-best" => keep_best = true,
+            "--half" => half = true,
             other => panic!("unknown option {other}"),
         }
     }
@@ -1494,7 +1496,8 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     // far; the start net (epoch 0: the --init / --resume net) competes too.
     let mut best = keep_best.then(|| (ql0, seen / epoch_size, q0));
 
-    let cfg = BackendCfg { sh, fl: fac.fl, wd_active, exact, sub_batch, batch };
+    assert!(!half || gpu.is_some(), "--half (fp16 forward weights) needs a GPU trainer");
+    let cfg = BackendCfg { sh, fl: fac.fl, wd_active, exact, sub_batch, batch, half };
     let mut bt: Box<dyn Backend> = match gpu {
         Some(mk) => mk(&cfg),
         None => Box::new(batch::BatchTrainer::new(sh, sub_batch, exact, fac.fl, wd_active)),
@@ -1610,6 +1613,8 @@ pub struct BackendCfg {
     pub wd_active: bool,
     pub exact: bool,
     pub sub_batch: usize,
+    /// GPU only: the forward reads an fp16 copy of the FT (`--half`).
+    pub half: bool,
     pub batch: usize,
 }
 
