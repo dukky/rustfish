@@ -58,6 +58,20 @@ const NACC: usize = 3;
 /// Largest king-bucket count (one bucket per square).
 const MAX_KB: usize = 64;
 
+/// Writes FT-copy line `w` (`TB` floats) at element `idx` of the copy:
+/// f32, or with `half` packed fp16 (round to nearest even).
+#[inline(always)]
+unsafe fn put_wt<V: Simd>(wt: *mut f32, half: bool, idx: usize, w: &[f32; TB]) {
+    if half {
+        let d = (wt as *mut u16).add(idx);
+        for k in (0..TB).step_by(V::W) {
+            V::load(w.as_ptr().add(k)).store_h(d.add(k));
+        }
+    } else {
+        std::ptr::copy_nonoverlapping(w.as_ptr(), wt.add(idx), TB);
+    }
+}
+
 /// King bucket of a sample's perspective (every feature of a side lies in
 /// its bucket's block of rows).
 #[inline(always)]
@@ -265,6 +279,8 @@ pub struct BatchTrainer {
     tf: usize,
     wt: ABuf,
     wt_ok: bool,
+    /// `--half`: `wt` holds fp16 values (packed, same element indices).
+    pub half: bool,
     /// Gradient of params `ft_b()..len()` (FT bias, output weights, output
     /// bias), standard layout.
     grest: ABuf,
@@ -297,6 +313,11 @@ pub struct BatchTrainer {
 impl BatchTrainer {
     /// `sb` = sub-batch size (0 = automatic: ~2 MB of accumulators).
     pub fn new(sh: Shape, sb: usize, exact: bool, fl: usize, wd_active: bool) -> Self {
+        Self::with_half(sh, sb, exact, fl, wd_active, false)
+    }
+
+    /// `new`; with `half` the forward reads an fp16 copy of the FT rows.
+    pub fn with_half(sh: Shape, sb: usize, exact: bool, fl: usize, wd_active: bool, half: bool) -> Self {
         assert!(fl == 0 || (fl == INPUTS * sh.h && sh.kb > 1), "factoriser needs KB > 1");
         assert!(sh.h % TB == 0 && sh.h > 0, "--hidden must be a multiple of {TB}");
         let sb = if sb == 0 { ((2 << 20) / (8 * sh.h)).clamp(128, 2048) } else { sb };
@@ -315,6 +336,7 @@ impl BatchTrainer {
             tf: if sh.h % TF == 0 { TF } else { TB },
             wt: ABuf::new(rows * sh.h),
             wt_ok: false,
+            half,
             grest: ABuf::new(sh.len() - sh.ft_b()),
             acc: std::array::from_fn(|_| ABuf::new(sb * 2 * sh.h)),
             samples: vec![blank; sb],
@@ -379,6 +401,7 @@ impl BatchTrainer {
                 kb: self.sh.kb,
                 active: std::ptr::null(),
                 gen: 0,
+                half: false,
             };
             adam_dispatch(self.isa, &c, &a);
         }
@@ -455,6 +478,7 @@ impl BatchTrainer {
             self.sync_weights(p);
         }
         let (sh, rows, tiles, sb, isa, exact, tf) = (self.sh, self.rows, self.tiles, self.sb, self.isa, self.exact, self.tf);
+        let half = self.half;
         let nsb = n.div_ceil(sb);
         self.pairs.resize(2 * nsb * sb, 0);
         let wt = self.wt.ptr();
@@ -575,6 +599,7 @@ impl BatchTrainer {
                         kb,
                         active: act.get(),
                         gen,
+                        half,
                     };
                     tile_adam_dispatch(isa, fused.unwrap(), &a);
                     return;
@@ -609,7 +634,7 @@ impl BatchTrainer {
                     }
                     let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
                     let pr = std::slice::from_raw_parts(pairs.get().add(2 * k * sb + p0), p1 - p0);
-                    let a = AccArgs { sh, rows, tf, p, wt: wt.get(), ss, pairs: pr, acc: accs[k % NACC].get() };
+                    let a = AccArgs { sh, rows, tf, p, wt: wt.get(), half, ss, pairs: pr, acc: accs[k % NACC].get() };
                     acc_dispatch(isa, &a);
                     acc_done[k].fetch_add(1, Ordering::AcqRel);
                 } else {
@@ -649,7 +674,12 @@ impl BatchTrainer {
                 if self.fl > 0 {
                     x = (x + p[n + (r % INPUTS) * h + j]).clamp(-CLIP, CLIP);
                 }
-                unsafe { *wt.add((j / tf * rows + r) * tf + j % tf) = x };
+                let at = (j / tf * rows + r) * tf + j % tf;
+                if self.half {
+                    unsafe { *(wt as *mut u16).add(at) = crate::simd::f32_to_f16(x) };
+                } else {
+                    unsafe { *wt.add(at) = x };
+                }
             }
         }
         self.wt_ok = true;
@@ -661,7 +691,7 @@ impl BatchTrainer {
     pub fn adam(&mut self, pool: &Pool, p: &mut [f32], opt: &mut Adam, lr: f32, wd: f32, inv_batch: f32) {
         assert!(!self.ft_live, "batch/adam after step: export first");
         let c = adam_consts(opt, lr, wd, inv_batch);
-        let gen = self.gen;
+        let (gen, half) = (self.gen, self.half);
         let (h, rows, tiles, ftb) = (self.sh.h, self.rows, self.tiles, self.sh.ft_b());
         let (pp, mp, vp) = (Ptr(p.as_mut_ptr()), Ptr(opt.m.as_mut_ptr()), Ptr(opt.v.as_mut_ptr()));
         if !self.wt_ok {
@@ -685,11 +715,11 @@ impl BatchTrainer {
             let a = if u < ft_units {
                 let (f0, f1) = (u * AB, ((u + 1) * AB).min(units_rows));
                 let (p, m, v, g, wt, active) = (pp.get(), mp.get(), vp.get(), gft.get(), wt.get(), active.get());
-                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active, gen }
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active, gen, half }
             } else {
                 let (p, m, v) = (pp.get().add(ftb), mp.get().add(ftb), vp.get().add(ftb));
                 let (g, wt, active) = (grest.get(), wt.get(), std::ptr::null());
-                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active, gen: 0 }
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active, gen: 0, half }
             };
             adam_dispatch(isa, &c, &a);
         });
@@ -718,8 +748,9 @@ struct AccArgs<'a> {
     rows: usize,
     tf: usize,
     p: &'a [f32],
-    /// Tile-major FT weights (`BatchTrainer::wt`).
+    /// Tile-major FT weights (`BatchTrainer::wt`; fp16 if `half`).
     wt: *const f32,
+    half: bool,
     /// The sub-batch's samples, and the block of its bucket-sorted pairs.
     ss: &'a [Sample],
     pairs: &'a [u32],
@@ -754,16 +785,23 @@ struct BwdArgs<'a> {
 /// Bias + active rows for one `TW`-column tile, in registers. `tile` is
 /// row 0 of the tile in the tile-major FT copy, `bias` the tile's bias.
 #[inline(always)]
-unsafe fn fwd_tile<V: Simd, const TW: usize>(tile: *const f32, bias: *const f32, feats: &[u16], out: *mut f32) {
+unsafe fn fwd_tile<V: Simd, const TW: usize, const HALF: bool>(tile: *const f32, bias: *const f32, feats: &[u16], out: *mut f32) {
     let n = TW / V::W;
     let mut r = [V::zero(); 16];
     for (k, x) in r[..n].iter_mut().enumerate() {
         *x = V::load(bias.add(k * V::W));
     }
     for &f in feats {
-        let row = tile.add(f as usize * TW);
-        for (k, x) in r[..n].iter_mut().enumerate() {
-            *x = x.add(V::load(row.add(k * V::W)));
+        if HALF {
+            let row = (tile as *const u16).add(f as usize * TW);
+            for (k, x) in r[..n].iter_mut().enumerate() {
+                *x = x.add(V::load_h(row.add(k * V::W)));
+            }
+        } else {
+            let row = tile.add(f as usize * TW);
+            for (k, x) in r[..n].iter_mut().enumerate() {
+                *x = x.add(V::load(row.add(k * V::W)));
+            }
         }
     }
     for (k, x) in r[..n].iter().enumerate() {
@@ -794,24 +832,27 @@ unsafe fn dot_tile<V: Simd, const TW: usize>(a: *const f32, w: *const f32, lanes
 /// king bucket, so a block reads the rows of one or two buckets: that part
 /// of the tile stays in L1/L2 while the block reuses it.
 #[inline(always)]
-unsafe fn acc_cols<V: Simd, const TW: usize>(a: &AccArgs, col: usize) {
+unsafe fn acc_cols<V: Simd, const TW: usize, const HALF: bool>(a: &AccArgs, col: usize) {
     let h = a.sh.h;
     let bias = a.p.as_ptr().add(a.sh.ft_b() + col);
-    let tile = a.wt.add(col / TW * a.rows * TW);
+    // Element offset of the tile (fp16 elements are packed the same way).
+    let off = col / TW * a.rows * TW;
+    let tile = if HALF { (a.wt as *const u16).add(off) as *const f32 } else { a.wt.add(off) };
     for &pr in a.pairs {
         let (j, side) = ((pr >> 1) as usize, (pr & 1) as usize);
         let s = &a.ss[j];
-        fwd_tile::<V, TW>(tile, bias, &s.f[side][..s.n], a.acc.add(j * 2 * h + side * h + col));
+        fwd_tile::<V, TW, HALF>(tile, bias, &s.f[side][..s.n], a.acc.add(j * 2 * h + side * h + col));
     }
 }
 
 #[inline(always)]
 unsafe fn acc_impl<V: Simd>(a: &AccArgs) {
     for col in (0..a.sh.h).step_by(a.tf) {
-        if a.tf == TF {
-            acc_cols::<V, TF>(a, col);
-        } else {
-            acc_cols::<V, TB>(a, col);
+        match (a.tf == TF, a.half) {
+            (true, false) => acc_cols::<V, TF, false>(a, col),
+            (true, true) => acc_cols::<V, TF, true>(a, col),
+            (false, false) => acc_cols::<V, TB, false>(a, col),
+            (false, true) => acc_cols::<V, TB, true>(a, col),
         }
     }
 }
@@ -939,6 +980,7 @@ struct AdamArgs {
     active: *const AtomicU32,
     /// The batch whose rows count as active.
     gen: u32,
+    half: bool,
 }
 
 /// The AdamW constants of the next step (advances `opt.step`).
@@ -972,6 +1014,7 @@ struct TileAdamArgs {
     kb: usize,
     active: *const AtomicU32,
     gen: u32,
+    half: bool,
 }
 
 /// `adam_rows` for one column tile, row by row in the same per-element
@@ -980,13 +1023,13 @@ struct TileAdamArgs {
 #[inline(always)]
 unsafe fn tile_adam<V: Simd>(c: &AdamC, a: &TileAdamArgs) {
     let col = a.c * TB;
-    let wt_at = |r: usize| a.wt.add((col / a.tf * a.rows + r) * a.tf + col % a.tf);
+    let wt_at = |r: usize| (col / a.tf * a.rows + r) * a.tf + col % a.tf;
     let decay = |r: usize| if !a.active.is_null() && (*a.active.add(r)).load(Ordering::Relaxed) != a.gen { 1.0 } else { c.decay };
     let line = |r: usize, d: f32, g: *mut f32| adam_line::<V>(c, d, a.p.add(r * TB), a.m.add(r * TB), a.v.add(r * TB), g);
     if !a.fl {
         for r in a.r0..a.r1 {
             let w = line(r, decay(r), a.g.add(r * TB));
-            std::ptr::copy_nonoverlapping(w.as_ptr(), wt_at(r), TB);
+            put_wt::<V>(a.wt, a.half, wt_at(r), &w);
         }
     } else {
         for f in a.r0..a.r1 {
@@ -1001,10 +1044,11 @@ unsafe fn tile_adam<V: Simd>(c: &AdamC, a: &TileAdamArgs) {
             for b in 0..a.kb {
                 let r = b * INPUTS + f;
                 let wp = line(r, decay(r), a.g.add(r * TB));
-                let w = wt_at(r);
+                let mut w = [0.0f32; TB];
                 for k in 0..TB {
-                    *w.add(k) = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
+                    w[k] = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
                 }
+                put_wt::<V>(a.wt, a.half, wt_at(r), &w);
             }
         }
     }
@@ -1084,14 +1128,14 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
             c.decay
         }
     };
-    let wt_at = |r: usize, j: usize| a.wt.add((j / a.tf * a.rows + r) * a.tf + j % a.tf);
+    let wt_at = |r: usize, j: usize| (j / a.tf * a.rows + r) * a.tf + j % a.tf;
     if a.fl == 0 {
         for f in a.f0..a.f1 {
             let decay = row_decay(f);
             for t in 0..a.tiles {
                 let i = f * a.h + t * TB;
                 let w = adam_line::<V>(c, decay, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + f) * TB));
-                std::ptr::copy_nonoverlapping(w.as_ptr(), wt_at(f, t * TB), TB);
+                put_wt::<V>(a.wt, a.half, wt_at(f, t * TB), &w);
             }
         }
         return;
@@ -1117,10 +1161,11 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
                 let r = b * INPUTS + f;
                 let i = r * a.h + t * TB;
                 let wp = adam_line::<V>(c, d, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB));
-                let w = wt_at(r, t * TB);
+                let mut w = [0.0f32; TB];
                 for k in 0..TB {
-                    *w.add(k) = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
+                    w[k] = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
                 }
+                put_wt::<V>(a.wt, a.half, wt_at(r, t * TB), &w);
             }
         }
     }
@@ -1187,7 +1232,7 @@ mod portable {
 #[cfg(target_arch = "x86_64")]
 use crate::simd::{Avx2, Avx512};
 #[cfg(target_arch = "x86_64")]
-entry!(avx2, "avx2,fma", Avx2);
+entry!(avx2, "avx2,fma,f16c", Avx2);
 #[cfg(target_arch = "x86_64")]
 entry!(avx512, "avx512f,avx512bw,avx512vl,avx2,fma", Avx512);
 #[cfg(target_arch = "aarch64")]

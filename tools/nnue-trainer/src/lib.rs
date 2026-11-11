@@ -1496,11 +1496,10 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     // far; the start net (epoch 0: the --init / --resume net) competes too.
     let mut best = keep_best.then(|| (ql0, seen / epoch_size, q0));
 
-    assert!(!half || gpu.is_some(), "--half (fp16 forward weights) needs a GPU trainer");
     let cfg = BackendCfg { sh, fl: fac.fl, wd_active, exact, sub_batch, batch, half };
     let mut bt: Box<dyn Backend> = match gpu {
         Some(mk) => mk(&cfg),
-        None => Box::new(batch::BatchTrainer::new(sh, sub_batch, exact, fac.fl, wd_active)),
+        None => Box::new(batch::BatchTrainer::with_half(sh, sub_batch, exact, fac.fl, wd_active, half)),
     };
     println!("{}", bt.describe());
     // Loader thread: feed + shuffle + the per-batch mirror flags (the same
@@ -1613,7 +1612,7 @@ pub struct BackendCfg {
     pub wd_active: bool,
     pub exact: bool,
     pub sub_batch: usize,
-    /// GPU only: the forward reads an fp16 copy of the FT (`--half`).
+    /// `--half`: the forward reads an fp16 copy of the FT rows.
     pub half: bool,
     pub batch: usize,
 }
@@ -1622,7 +1621,13 @@ pub type MakeBackend = dyn Fn(&BackendCfg) -> Box<dyn Backend>;
 
 impl Backend for batch::BatchTrainer {
     fn describe(&self) -> String {
-        format!("kernels {} sub-batch {}{}", self.isa.name(), self.sub_batch(), if self.exact { " exact (v2 --threads 1 summation order)" } else { "" })
+        format!(
+            "kernels {} sub-batch {}{}{}",
+            self.isa.name(),
+            self.sub_batch(),
+            if self.exact { " exact (v2 --threads 1 summation order)" } else { "" },
+            if self.half { ", fp16 forward weights (--half)" } else { "" }
+        )
     }
     fn step(&mut self, pool: &batch::Pool, p: &mut [f32], opt: &mut Adam, recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout, lr: f32, wd: f32) -> f64 {
         batch::BatchTrainer::step(self, pool, p, opt, recs, mirror, lambda, kl, lr, wd)
@@ -2308,6 +2313,111 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fp16_conversions_match_hardware() {
+        use simd::{f16_to_f32, f32_to_f16, Simd};
+        // Every half -> f32 -> half round trip (NaNs keep being NaN).
+        for h in 0..=u16::MAX {
+            let x = f16_to_f32(h);
+            if x.is_nan() {
+                assert!(f16_to_f32(f32_to_f16(x)).is_nan());
+            } else {
+                assert_eq!(f32_to_f16(x), h, "{h:#06x}");
+            }
+        }
+        // Software vs the hardware conversions, both directions.
+        let mut xs: Vec<f32> = vec![0.0, -0.0, 1.98, -1.98, 65504.0, 65520.0, 1e-8, 6.1e-5, 5.96e-8, 2.98e-8, 70000.0];
+        let mut rng = Rng::new(3);
+        for _ in 0..200_000 {
+            xs.push(f32::from_bits((rng.next_u64() >> 32) as u32 & 0xBFFF_FFFF));
+            xs.push(rng.uniform(2.0));
+        }
+        xs.retain(|x| !x.is_nan());
+        xs.truncate(xs.len() / 16 * 16);
+        for isa in isas() {
+            let mut hw = vec![0u16; xs.len()];
+            let mut back = vec![0.0f32; xs.len()];
+            unsafe {
+                match isa {
+                    simd::Isa::Portable => {
+                        for i in (0..xs.len()).step_by(8) {
+                            simd::Portable::load(xs.as_ptr().add(i)).store_h(hw.as_mut_ptr().add(i));
+                            simd::Portable::load_h(hw.as_ptr().add(i)).store(back.as_mut_ptr().add(i));
+                        }
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    simd::Isa::Avx2 => avx2_conv(&xs, &mut hw, &mut back),
+                    #[cfg(target_arch = "x86_64")]
+                    simd::Isa::Avx512 => avx512_conv(&xs, &mut hw, &mut back),
+                    #[allow(unreachable_patterns)]
+                    _ => continue,
+                }
+            }
+            for (i, &x) in xs.iter().enumerate() {
+                assert_eq!(hw[i], f32_to_f16(x), "{isa:?} f32 {x:e} ({:#010x})", x.to_bits());
+                assert_eq!(back[i].to_bits(), f16_to_f32(hw[i]).to_bits(), "{isa:?} half {:#06x}", hw[i]);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    unsafe fn avx2_conv(xs: &[f32], hw: &mut [u16], back: &mut [f32]) {
+        use simd::Simd;
+        for i in (0..xs.len()).step_by(8) {
+            simd::Avx2::load(xs.as_ptr().add(i)).store_h(hw.as_mut_ptr().add(i));
+            simd::Avx2::load_h(hw.as_ptr().add(i)).store(back.as_mut_ptr().add(i));
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma")]
+    unsafe fn avx512_conv(xs: &[f32], hw: &mut [u16], back: &mut [f32]) {
+        use simd::Simd;
+        for i in (0..xs.len()).step_by(16) {
+            simd::Avx512::load(xs.as_ptr().add(i)).store_h(hw.as_mut_ptr().add(i));
+            simd::Avx512::load_h(hw.as_ptr().add(i)).store(back.as_mut_ptr().add(i));
+        }
+    }
+
+    #[test]
+    fn half_forward_is_deterministic_and_close() {
+        let (h, buckets, kl) = (64, 8, KingLayout::by_name("kb8m"));
+        let sh = Shape { h, buckets, kb: kl.kb() };
+        let fac = Fac::new(sh, true);
+        let mut rng = Rng::new(11);
+        let p0 = init_factor(sh, &mut rng);
+        let n = p0.len();
+        let (recs, mirror) = test_recs(400);
+        let run = |isa: simd::Isa, threads: usize, half: bool| {
+            let mut p = AVec::from(p0.clone());
+            let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
+            let mut bt = batch::BatchTrainer::with_half(sh, 64, false, fac.fl, true, half);
+            bt.isa = isa;
+            let mut losses = Vec::new();
+            batch::Pool::with(threads, |pool| {
+                for (a, b) in [(0, 400), (50, 350), (0, 300)] {
+                    losses.push(bt.step(pool, &mut p, &mut opt, &recs[a..b], &mirror[a..b], 0.5, kl, 1e-3, 0.01));
+                }
+                bt.export(&mut p, &mut opt);
+            });
+            (losses, p.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
+        };
+        let first = run(simd::Isa::Portable, 1, true);
+        for isa in isas() {
+            for threads in [1, 3] {
+                let got = run(isa, threads, true);
+                assert_eq!(got.0, first.0, "{isa:?} threads={threads}: losses");
+                assert!(got.1 == first.1, "{isa:?} threads={threads}: params");
+            }
+        }
+        let full = run(simd::Isa::Portable, 1, false);
+        for (a, b) in first.0.iter().zip(&full.0) {
+            assert!((a - b).abs() <= 1e-3 * b, "half loss {a} vs f32 {b}");
+        }
+        assert!(first.1 != full.1, "--half changed nothing");
     }
 
     #[test]

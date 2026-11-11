@@ -72,6 +72,16 @@ weights and gradient in AMD's victim-cache L3), runs per column tile
 inside the last backward phase on a tile-major copy of the FT state
 (`step`/`export`), and skips stores for lines it does not change (rows of
 impossible features); the forward reads bucket-sorted pairs.
+`--half` (off by default; also in the CUDA trainer): the forward reads an
+fp16 copy of the FT rows (F16C / AVX-512 `vcvtph2ps`, the same format and
+round-to-nearest-even as the GPU; master weights, gradients and AdamW stay
+f32). It halves the copy's cache footprint: kb8m H 512 +12% (1.54M ->
+1.73M, measured under load), plain nets ~+1% (their copy already fits).
+kb8m H 512, 3 x 2M positions: val 0.037560 (quantized 0.037757) vs f32
+0.037563 (0.037791). Deterministic across ISAs and threads (unit tests check
+the software conversion against the hardware one); not bit-identical to
+f32 runs.
+
 The batch's units run as one dependency-ordered stream (no barriers;
 +2-4%, 3 sub-batches in flight: 4 was 5% slower).
 

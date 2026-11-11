@@ -25,7 +25,7 @@ impl Isa {
             None | Some("") => best,
             Some("portable") => Isa::Portable,
             #[cfg(target_arch = "x86_64")]
-            Some("avx2") if std::is_x86_feature_detected!("avx2") => Isa::Avx2,
+            Some("avx2") if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c") => Isa::Avx2,
             #[cfg(target_arch = "x86_64")]
             Some("avx512") if best == Isa::Avx512 => Isa::Avx512,
             #[cfg(target_arch = "aarch64")]
@@ -40,7 +40,7 @@ impl Isa {
             if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
                 return Isa::Avx512;
             }
-            if std::is_x86_feature_detected!("avx2") {
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c") {
                 return Isa::Avx2;
             }
         }
@@ -90,6 +90,79 @@ pub trait Simd: Copy {
     /// data to other threads).
     #[inline(always)]
     unsafe fn fence() {}
+    /// `W` IEEE fp16 values to f32 (exact).
+    #[inline(always)]
+    unsafe fn load_h(p: *const u16) -> Self {
+        let mut t = [0.0f32; 16];
+        for (i, x) in t[..Self::W].iter_mut().enumerate() {
+            *x = f16_to_f32(*p.add(i));
+        }
+        Self::load(t.as_ptr())
+    }
+    /// To fp16, round to nearest even (as F16C / AVX-512 / CUDA).
+    #[inline(always)]
+    unsafe fn store_h(self, p: *mut u16) {
+        let mut t = [0.0f32; 16];
+        self.store(t.as_mut_ptr());
+        for (i, &x) in t[..Self::W].iter().enumerate() {
+            *p.add(i) = f32_to_f16(x);
+        }
+    }
+}
+
+/// IEEE binary16 -> binary32 (exact).
+#[inline]
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h as u32) & 0x8000) << 16;
+    let exp = ((h >> 10) & 0x1F) as u32;
+    let man = (h & 0x3FF) as u32;
+    let bits = if exp == 0 {
+        if man == 0 {
+            sign
+        } else {
+            // Subnormal: normalise.
+            let shift = man.leading_zeros() - 21;
+            sign | ((113 - shift) << 23) | ((man << shift) & 0x3FF) << 13
+        }
+    } else if exp == 31 {
+        sign | 0x7F80_0000 | man << 13
+    } else {
+        sign | (exp + 112) << 23 | man << 13
+    };
+    f32::from_bits(bits)
+}
+
+/// IEEE binary32 -> binary16, round to nearest even (overflow to inf).
+#[inline]
+pub fn f32_to_f16(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xFF) as i32;
+    let man = b & 0x7F_FFFF;
+    if exp == 0xFF {
+        return sign | 0x7C00 | if man != 0 { 0x200 | (man >> 13) as u16 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 31 {
+        return sign | 0x7C00;
+    }
+    if e <= 0 {
+        // Subnormal (or zero) half.
+        if e < -10 {
+            return sign;
+        }
+        let m = man | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = m >> shift;
+        let rem = m & ((1 << shift) - 1);
+        let mid = 1 << (shift - 1);
+        let r = if rem > mid || (rem == mid && half & 1 == 1) { half + 1 } else { half };
+        return sign | r as u16;
+    }
+    let half = ((e as u32) << 10) | (man >> 13);
+    let rem = man & 0x1FFF;
+    let r = if rem > 0x1000 || (rem == 0x1000 && half & 1 == 1) { half + 1 } else { half };
+    sign | r as u16
 }
 
 /// Plain Rust lanes; LLVM vectorises these for whatever the build targets.
@@ -215,6 +288,16 @@ mod x86 {
         unsafe fn fence() {
             _mm_sfence()
         }
+        #[inline]
+        #[target_feature(enable = "avx2,fma,f16c")]
+        unsafe fn load_h(p: *const u16) -> Self {
+            Avx2(_mm256_cvtph_ps(_mm_loadu_si128(p as *const __m128i)))
+        }
+        #[inline]
+        #[target_feature(enable = "avx2,fma,f16c")]
+        unsafe fn store_h(self, p: *mut u16) {
+            _mm_storeu_si128(p as *mut __m128i, _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(self.0))
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -273,6 +356,16 @@ mod x86 {
         #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma")]
         unsafe fn fence() {
             _mm_sfence()
+        }
+        #[inline]
+        #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma")]
+        unsafe fn load_h(p: *const u16) -> Self {
+            Avx512(_mm512_cvtph_ps(_mm256_loadu_si256(p as *const __m256i)))
+        }
+        #[inline]
+        #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma")]
+        unsafe fn store_h(self, p: *mut u16) {
+            _mm256_storeu_si256(p as *mut __m256i, _mm512_cvtps_ph::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(self.0))
         }
     }
 }
