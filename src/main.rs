@@ -959,6 +959,9 @@ struct SearchParams {
     // Node-fraction time management, see NODE_TM_MIN_DEPTH in search.rs.
     node_tm_base: u64,
     node_tm_scale: u64,
+    // Qsearch in check: once one evasion avoids being mated, search at most
+    // this many quiet evasions.
+    qs_quiet_evasions: usize,
 }
 
 impl Default for SearchParams {
@@ -986,6 +989,7 @@ impl Default for SearchParams {
             lmr_extra_move_index: 8,
             node_tm_base: 175,
             node_tm_scale: 75,
+            qs_quiet_evasions: 2,
         }
     }
 }
@@ -1197,6 +1201,7 @@ fn main() {
             println!("option name LmrExtraMoveIndex type spin default 8 min 1 max 32");
             println!("option name NodeTmBase type spin default 175 min 110 max 300");
             println!("option name NodeTmScale type spin default 75 min 50 max 300");
+            println!("option name QsQuietEvasions type spin default 2 min 0 max 64");
             println!("uciok");
             flush_stdout();
             continue;

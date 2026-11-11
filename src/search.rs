@@ -1936,6 +1936,11 @@ fn quiescence(
         return alpha;
     }
 
+    // In check: quiet evasions searched so far, and whether some evasion has
+    // already returned a score that is not a mate against us (fail-hard
+    // scores are >= alpha, so with a non-mate alpha the first one does).
+    let mut quiet_evasions = 0usize;
+    let mut evasion_found = false;
     while let Some((mv, stage)) = picker.next() {
         if !in_check {
             // Stage buckets already encode the SEE sign, so only the TT move
@@ -1946,6 +1951,13 @@ fn quiescence(
             if stage == Stage::Tt && see(board, mv) < 0 {
                 continue;
             }
+        } else if mv.promotion.is_none() && !is_capture_move(board, mv) {
+            // Once an evasion holds, only the first few quiet evasions (by
+            // history order) are worth searching.
+            if evasion_found && quiet_evasions >= engine.search_params.qs_quiet_evasions {
+                continue;
+            }
+            quiet_evasions += 1;
         }
 
         let undo = board.make_move(mv);
@@ -1958,6 +1970,9 @@ fn quiescence(
 
         if search.stop {
             return 0;
+        }
+        if score > -MATE_SCORE + MAX_PLY as i32 {
+            evasion_found = true;
         }
 
         if score >= beta {
