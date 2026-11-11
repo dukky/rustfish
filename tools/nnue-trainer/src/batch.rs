@@ -468,27 +468,34 @@ impl BatchTrainer {
         let ft = [self.ftp.ptr(), self.ftm.ptr(), self.ftv.ptr()];
         let (fl, kb) = (self.fl > 0, sh.kb);
         let act = APtr(if active.is_empty() { std::ptr::null() } else { active.as_ptr() });
+        let decode_one = |r: usize, s: &mut Sample| {
+            *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
+            if !active.is_empty() {
+                // Store only if unset: every thread writing the same hot
+                // flags makes their lines bounce between cores.
+                for side in 0..2 {
+                    for &f in &s.f[side][..s.n] {
+                        let a = &active[f as usize];
+                        if a.load(Ordering::Relaxed) != gen {
+                            a.store(gen, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        };
+        // KB = 1: the sorted order is the identity, so the forward units
+        // decode their own samples (no extra phase).
+        let sorted = sh.kb > 1;
         // Decode every sub-batch and bucket-sort its pairs (counting sort,
         // stable: within a bucket the pairs keep sample-then-side order).
-        par_units(pool, nsb, &|k| unsafe {
+        par_units(pool, if sorted { nsb } else { 0 }, &|k| unsafe {
             let (base, len) = (k * sb, sb_len(k));
             let ss = std::slice::from_raw_parts_mut(samples.get().add(base), len);
             let mut start = [0u32; MAX_KB + 1];
             for (i, s) in ss.iter_mut().enumerate() {
-                let r = base + i;
-                *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
+                decode_one(base + i, s);
                 for side in 0..2 {
                     start[king_bucket(s, side) + 1] += 1;
-                    if !active.is_empty() {
-                        // Store only if unset: every thread writing the same
-                        // hot flags makes their lines bounce between cores.
-                        for &f in &s.f[side][..s.n] {
-                            let a = &active[f as usize];
-                            if a.load(Ordering::Relaxed) != gen {
-                                a.store(gen, Ordering::Relaxed);
-                            }
-                        }
-                    }
                 }
             }
             for b in 1..=MAX_KB {
@@ -563,6 +570,16 @@ impl BatchTrainer {
                     let j = u - back;
                     let len = sb_len(k);
                     let (p0, p1) = (j * FB, ((j + 1) * FB).min(2 * len));
+                    if !sorted {
+                        // Identity order: pairs p0..p1 are samples p0/2..p1/2.
+                        let ss = std::slice::from_raw_parts_mut(samples.get().add(k * sb), len);
+                        for i in p0 / 2..p1 / 2 {
+                            decode_one(k * sb + i, &mut ss[i]);
+                            for side in 0..2 {
+                                *pairs.get().add(2 * k * sb + 2 * i + side) = (i as u32) << 1 | side as u32;
+                            }
+                        }
+                    }
                     let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
                     let pr = std::slice::from_raw_parts(pairs.get().add(2 * k * sb + p0), p1 - p0);
                     let a = AccArgs { sh, rows, tf, p, wt: wt.get(), ss, pairs: pr, acc: accs[k % 3].get() };
