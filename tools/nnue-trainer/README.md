@@ -60,6 +60,19 @@ H = 512, B = 8, batch 16384, `--mirror`, positions/s (GitHub 4-vCPU runners,
 | Intel Xeon 8573C | 0.43M | 0.90M | 0.40M | 0.77M |
 | AMD EPYC 7763 (Zen 3, AVX2) | 0.41M | 0.69M | | |
 
+Ryzen 5 9600X (Zen 5, 6 cores / 12 threads, DDR5-6000, WSL2, native
+build, 12 threads), H 512 B 8 `--mirror`: plain 3.9M -> 4.1M, kb4 2.9M ->
+3.3M, kb8m `--factorise` 1.8M -> 2.1-2.2M (trainer-kb-speed). King buckets
+are bound by AdamW, which updates the whole 8x larger FT every batch:
+it writes 12 B per FT param (params, m, v), and a single-CCD Zen 5 writes
+only ~31 GB/s to DRAM (reads ~57 GB/s; measured), ~30% of a kb8m batch.
+The rest of the gap to plain is cache footprint. What helps, all exact:
+AdamW streams p/m/v with non-temporal stores (keeps the next batch's
+weights and gradient in AMD's victim-cache L3), runs per column tile
+inside the last backward phase on a tile-major copy of the FT state
+(`step`/`export`), and skips stores for lines it does not change (rows of
+impossible features); the forward reads bucket-sorted pairs.
+
 M3 (8 threads, quiet): ~1.6M (was ~0.5M). The kernels synchronise a few
 dozen times per batch, so they lose more than the old loop when the cores are
 oversubscribed (e.g. next to datagen): use fewer threads then.

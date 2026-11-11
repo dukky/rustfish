@@ -1535,8 +1535,7 @@ fn cmd_train(args: &[String]) {
             let t = seen as f64 / total as f64;
             let cur_lr = lr_end + 0.5 * (lr - lr_end) * (1.0 + (std::f64::consts::PI * t).cos() as f32);
             let (recs, flags) = rx.recv().unwrap();
-            let loss = bt.batch(pool, &p, &recs, &flags, lambda, kl);
-            bt.adam(pool, &mut p, &mut opt, cur_lr, wd, 1.0 / recs.len() as f32);
+            let loss = bt.step(pool, &mut p, &mut opt, &recs, &flags, lambda, kl, cur_lr, wd);
             seen += recs.len() as u64;
             batches += 1;
             epoch_loss += loss;
@@ -1545,6 +1544,7 @@ fn cmd_train(args: &[String]) {
             if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total || batches == max_batches {
                 ep += 1;
                 let secs = started.elapsed().as_secs_f64();
+                bt.export(&mut p, &mut opt);
                 if fac.on() {
                     merge_factor(&p, sh, fac, &mut merged);
                 }
@@ -2212,6 +2212,54 @@ mod tests {
     }
 
     /// Without `exact`, results do not depend on threads or ISA at all.
+    #[test]
+    fn fused_step_matches_batch_then_adam() {
+        let cases = [
+            (48, 8, NO_BUCKETS, false, false),
+            (128, 1, KingLayout::by_name("kb4m"), false, true),
+            (64, 8, KingLayout::by_name("kb8m"), true, true),
+            (32, 1, KingLayout::by_name("kb4"), true, false),
+        ];
+        for (h, buckets, kl, factorise, wd_active) in cases {
+            let sh = Shape { h, buckets, kb: kl.kb() };
+            let fac = Fac::new(sh, factorise);
+            let mut rng = Rng::new(7);
+            let p0 = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
+            let n = p0.len();
+            let (recs, mirror) = test_recs(301);
+            let steps: [(usize, usize); 3] = [(0, 301), (0, 200), (37, 290)];
+            let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            for isa in isas() {
+                for (threads, exact) in [(1, true), (3, false), (4, true)] {
+                    let what = format!("H={h} {} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
+                    let mut want = (AVec::from(p0.clone()), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 });
+                    let mut got = (AVec::from(p0.clone()), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 });
+                    let mut ra = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
+                    let mut rb = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
+                    ra.isa = isa;
+                    rb.isa = isa;
+                    batch::Pool::with(threads, |pool| {
+                        for (i, &(a, b)) in steps.iter().enumerate() {
+                            let (r, m) = (&recs[a..b], &mirror[a..b]);
+                            let la = ra.batch(pool, &want.0, r, m, 0.5, kl);
+                            ra.adam(pool, &mut want.0, &mut want.1, 1e-3, 0.01, 1.0 / r.len() as f32);
+                            let lb = rb.step(pool, &mut got.0, &mut got.1, r, m, 0.5, kl, 1e-3, 0.01);
+                            assert_eq!(la, lb, "{what}: step {i} loss");
+                            if i == 1 {
+                                rb.export(&mut got.0, &mut got.1); // mid-run export keeps going
+                            }
+                        }
+                        rb.export(&mut got.0, &mut got.1);
+                    });
+                    assert_eq!(bits(&want.0), bits(&got.0), "{what}: params");
+                    assert_eq!(bits(&want.1.m), bits(&got.1.m), "{what}: m");
+                    assert_eq!(bits(&want.1.v), bits(&got.1.v), "{what}: v");
+                    assert_eq!(want.1.step, got.1.step);
+                }
+            }
+        }
+    }
+
     #[test]
     fn batch_trainer_is_deterministic() {
         let sh = Shape { h: 96, buckets: 8, kb: 1 };

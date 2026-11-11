@@ -37,7 +37,7 @@
 
 use crate::simd::{Isa, Portable, Simd};
 use crate::{decode, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, INPUTS};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::Thread;
 
 
@@ -47,8 +47,11 @@ pub const TB: usize = 16;
 const TF: usize = 64;
 /// Samples per forward unit.
 const FB: usize = 32;
-/// FT rows per AdamW unit.
+/// FT rows per AdamW unit (unfused `adam`).
+#[cfg_attr(not(test), allow(dead_code))]
 const AB: usize = 16;
+/// Fused AdamW units per column tile.
+const ADAM_SPLIT: usize = 8;
 /// Largest king-bucket count (one bucket per square).
 const MAX_KB: usize = 64;
 
@@ -179,7 +182,6 @@ fn par_units(pool: &Pool, units: usize, f: &(dyn Fn(usize) + Sync)) {
 pub struct ABuf {
     v: Vec<f32>,
     off: usize,
-    #[cfg_attr(not(test), allow(dead_code))]
     len: usize,
 }
 
@@ -210,12 +212,12 @@ impl Ptr {
 }
 
 #[derive(Clone, Copy)]
-struct APtr(*const AtomicU8);
+struct APtr(*const AtomicU32);
 unsafe impl Send for APtr {}
 unsafe impl Sync for APtr {}
 impl APtr {
     #[inline(always)]
-    fn get(self) -> *const AtomicU8 {
+    fn get(self) -> *const AtomicU32 {
         self.0
     }
 }
@@ -275,8 +277,18 @@ pub struct BatchTrainer {
     /// the net's params in the training vector, 0 without it. The forward
     /// pass then reads the merged rows `clamp(W + F)` from `wt`.
     fl: usize,
-    /// `--wd-active-only`: FT rows that occurred in the batch (empty if off).
-    active: Vec<AtomicU8>,
+    /// `--wd-active-only`: per FT row, the last batch (`gen`) it occurred
+    /// in (empty if off).
+    active: Vec<AtomicU32>,
+    gen: u32,
+    /// `step`: the FT's training state, tile-major (`[tile][row][TB]`, the
+    /// `rows` FT rows then, with the factoriser, F's 768 rows), so that the
+    /// AdamW of a column tile is one sequential stream. It is the master
+    /// copy while `ft_live`; `export` writes it back to `p` and the moments.
+    ftp: ABuf,
+    ftm: ABuf,
+    ftv: ABuf,
+    ft_live: bool,
 }
 
 impl BatchTrainer {
@@ -307,7 +319,12 @@ impl BatchTrainer {
             grad: Vec::new(),
             loss: Vec::new(),
             fl,
-            active: if wd_active { (0..rows).map(|_| AtomicU8::new(0)).collect() } else { Vec::new() },
+            active: if wd_active { (0..rows).map(|_| AtomicU32::new(0)).collect() } else { Vec::new() },
+            gen: 0,
+            ftp: ABuf::new(0),
+            ftm: ABuf::new(0),
+            ftv: ABuf::new(0),
+            ft_live: false,
         }
     }
 
@@ -317,9 +334,114 @@ impl BatchTrainer {
 
     /// Accumulates the gradient of the summed loss over `recs` (record `i`
     /// mirrored iff `mirror[i]`) into the internal buffers; returns the
-    /// summed loss. Call `adam` to apply and clear it.
+    /// summed loss. Call `adam` to apply and clear it. Training uses `step`
+    /// (the same results); these two are its reference in the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn batch(&mut self, pool: &Pool, p: &[f32], recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout) -> f64 {
+        assert!(!self.ft_live, "batch/adam after step: export first");
+        self.run(pool, p, recs, mirror, lambda, kl, None)
+    }
+
+    /// `batch` + `adam` in one pass, bit-identical to them: each column
+    /// unit of the last sub-batch's backward runs the AdamW of its tile
+    /// while the tile's gradient is in L2, on the trainer's tile-major copy
+    /// of the FT state (`p`'s and `opt`'s FT parts are stale until
+    /// `export`; the FT bias and output layer are updated in `p` and `opt`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(&mut self, pool: &Pool, p: &mut [f32], opt: &mut Adam, recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout, lr: f32, wd: f32) -> f64 {
+        if !self.ft_live {
+            self.import(p, opt);
+        }
+        let c = adam_consts(opt, lr, wd, 1.0 / recs.len() as f32);
+        let loss = self.run(pool, p, recs, mirror, lambda, kl, Some(&c));
+        // FT bias and output layer (all of their gradient is in by now).
+        let ftb = self.sh.ft_b();
+        let rest = self.sh.len() - ftb;
+        unsafe {
+            let a = AdamArgs {
+                p: p.as_mut_ptr().add(ftb),
+                m: opt.m.as_mut_ptr().add(ftb),
+                v: opt.v.as_mut_ptr().add(ftb),
+                g: self.grest.ptr().get(),
+                wt: std::ptr::null_mut(),
+                tf: self.tf,
+                h: self.sh.h,
+                rows: self.rows,
+                tiles: self.tiles,
+                f0: 0,
+                f1: 0,
+                flat: rest,
+                n: self.sh.len(),
+                fl: self.fl,
+                kb: self.sh.kb,
+                active: std::ptr::null(),
+                gen: 0,
+            };
+            adam_dispatch(self.isa, &c, &a);
+        }
+        loss
+    }
+
+    fn ft_rows(&self) -> usize {
+        self.rows + if self.fl > 0 { INPUTS } else { 0 }
+    }
+
+    /// Index in `p` (and the moments) of FT-state row `r`, column `j`.
+    fn ft_src(&self, r: usize, j: usize) -> usize {
+        let h = self.sh.h;
+        if r < self.rows {
+            r * h + j
+        } else {
+            self.sh.len() + (r - self.rows) * h + j
+        }
+    }
+
+    /// Loads the tile-major FT state from `p` and `opt`.
+    fn import(&mut self, p: &[f32], opt: &Adam) {
+        let (rows, len) = (self.ft_rows(), self.ft_rows() * self.sh.h);
+        if self.ftp.len != len {
+            (self.ftp, self.ftm, self.ftv) = (ABuf::new(len), ABuf::new(len), ABuf::new(len));
+        }
+        let (dp, dm, dv) = (self.ftp.ptr().get(), self.ftm.ptr().get(), self.ftv.ptr().get());
+        for t in 0..self.tiles {
+            for r in 0..rows {
+                let (src, dst) = (self.ft_src(r, t * TB), (t * rows + r) * TB);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(p.as_ptr().add(src), dp.add(dst), TB);
+                    std::ptr::copy_nonoverlapping(opt.m.as_ptr().add(src), dm.add(dst), TB);
+                    std::ptr::copy_nonoverlapping(opt.v.as_ptr().add(src), dv.add(dst), TB);
+                }
+            }
+        }
+        self.sync_weights(p);
+        self.ft_live = true;
+    }
+
+    /// Writes the FT state of `step` back to `p` and `opt` (call before
+    /// reading `p`'s FT, e.g. to validate or checkpoint). `step` can go on.
+    pub fn export(&mut self, p: &mut [f32], opt: &mut Adam) {
+        if !self.ft_live {
+            return;
+        }
+        let rows = self.ft_rows();
+        let (sp, sm, sv) = (self.ftp.ptr().get(), self.ftm.ptr().get(), self.ftv.ptr().get());
+        for t in 0..self.tiles {
+            for r in 0..rows {
+                let (dst, src) = (self.ft_src(r, t * TB), (t * rows + r) * TB);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(sp.add(src), p.as_mut_ptr().add(dst), TB);
+                    std::ptr::copy_nonoverlapping(sm.add(src), opt.m.as_mut_ptr().add(dst), TB);
+                    std::ptr::copy_nonoverlapping(sv.add(src), opt.v.as_mut_ptr().add(dst), TB);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(&mut self, pool: &Pool, p: &[f32], recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout, fused: Option<&AdamC>) -> f64 {
         let n = recs.len();
+        self.gen += 1;
+        let gen = self.gen;
         assert_eq!(mirror.len(), n);
         assert_eq!(p.len(), self.sh.len() + self.fl);
         self.grad.resize(n, 0.0);
@@ -342,6 +464,10 @@ impl BatchTrainer {
         let loss = Ptr(self.loss.as_mut_ptr());
         let active = &self.active[..];
         let sb_len = |k: usize| sb.min(n - k * sb);
+        let ftr = self.ft_rows();
+        let ft = [self.ftp.ptr(), self.ftm.ptr(), self.ftv.ptr()];
+        let (fl, kb) = (self.fl > 0, sh.kb);
+        let act = APtr(if active.is_empty() { std::ptr::null() } else { active.as_ptr() });
         // Decode every sub-batch and bucket-sort its pairs (counting sort,
         // stable: within a bucket the pairs keep sample-then-side order).
         par_units(pool, nsb, &|k| unsafe {
@@ -358,8 +484,8 @@ impl BatchTrainer {
                         // hot flags makes their lines bounce between cores.
                         for &f in &s.f[side][..s.n] {
                             let a = &active[f as usize];
-                            if a.load(Ordering::Relaxed) == 0 {
-                                a.store(1, Ordering::Relaxed);
+                            if a.load(Ordering::Relaxed) != gen {
+                                a.store(gen, Ordering::Relaxed);
                             }
                         }
                     }
@@ -383,7 +509,45 @@ impl BatchTrainer {
             let back = if (2..nsb + 2).contains(&q) { tiles } else { 0 };
             let fwd = if q < nsb { (2 * sb_len(q)).div_ceil(FB) } else { 0 };
             let out = if (1..nsb + 1).contains(&q) { sb_len(q - 1).div_ceil(FB) } else { 0 };
-            par_units(pool, back + fwd + out, &|u| unsafe {
+            // Last phase with `fused`: AdamW in `ADAM_SPLIT` row ranges per
+            // column tile, each waiting for its tile's backward (units are
+            // claimed in order, so every backward has an owner by then).
+            let fuse = if q == nsb + 1 { fused } else { None };
+            let adam_units = if fuse.is_some() { tiles * ADAM_SPLIT } else { 0 };
+            let done: Vec<AtomicBool> = (0..if fuse.is_some() { tiles } else { 0 }).map(|_| AtomicBool::new(false)).collect();
+            let ft_lines = if fl { INPUTS } else { rows };
+            par_units(pool, back + fwd + out + adam_units, &|u| unsafe {
+                if u >= back + fwd + out {
+                    let (t, part) = ((u - back - fwd - out) / ADAM_SPLIT, (u - back - fwd - out) % ADAM_SPLIT);
+                    let mut spins = 0u32;
+                    while !done[t].load(Ordering::Acquire) {
+                        spins += 1;
+                        if spins < 1 << 12 {
+                            std::hint::spin_loop();
+                        } else {
+                            std::thread::yield_now();
+                        }
+                    }
+                    let o = t * ftr * TB;
+                    let a = TileAdamArgs {
+                        p: ft[0].get().add(o),
+                        m: ft[1].get().add(o),
+                        v: ft[2].get().add(o),
+                        g: gft.get().add(t * rows * TB),
+                        wt: wt.get(),
+                        tf,
+                        rows,
+                        c: t,
+                        r0: ft_lines * part / ADAM_SPLIT,
+                        r1: ft_lines * (part + 1) / ADAM_SPLIT,
+                        fl,
+                        kb,
+                        active: act.get(),
+                        gen,
+                    };
+                    tile_adam_dispatch(isa, fuse.unwrap(), &a);
+                    return;
+                }
                 if u < back {
                     let k = q - 2;
                     let len = sb_len(k);
@@ -391,6 +555,9 @@ impl BatchTrainer {
                     let gr = std::slice::from_raw_parts(grad.get().add(k * sb), len);
                     let a = BwdArgs { sh, rows, p, ss, acc: accs[k % 3].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
                     bwd_dispatch(isa, &a);
+                    if fuse.is_some() {
+                        done[u].store(true, Ordering::Release);
+                    }
                 } else if u < back + fwd {
                     let k = q;
                     let j = u - back;
@@ -443,16 +610,11 @@ impl BatchTrainer {
 
     /// One AdamW step (same maths and constants as v2) from the accumulated
     /// gradient times `inv_batch`, with clipping; clears the gradient.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn adam(&mut self, pool: &Pool, p: &mut [f32], opt: &mut Adam, lr: f32, wd: f32, inv_batch: f32) {
-        opt.step += 1;
-        let (b1, b2) = (0.9f32, 0.999f32);
-        let c = AdamC {
-            c1: 1.0 - b1.powi(opt.step.min(1 << 20) as i32),
-            c2: 1.0 - b2.powi(opt.step.min(1 << 20) as i32),
-            lr,
-            decay: 1.0 - lr * wd,
-            inv_batch,
-        };
+        assert!(!self.ft_live, "batch/adam after step: export first");
+        let c = adam_consts(opt, lr, wd, inv_batch);
+        let gen = self.gen;
         let (h, rows, tiles, ftb) = (self.sh.h, self.rows, self.tiles, self.sh.ft_b());
         let (pp, mp, vp) = (Ptr(p.as_mut_ptr()), Ptr(opt.m.as_mut_ptr()), Ptr(opt.v.as_mut_ptr()));
         if !self.wt_ok {
@@ -476,11 +638,11 @@ impl BatchTrainer {
             let a = if u < ft_units {
                 let (f0, f1) = (u * AB, ((u + 1) * AB).min(units_rows));
                 let (p, m, v, g, wt, active) = (pp.get(), mp.get(), vp.get(), gft.get(), wt.get(), active.get());
-                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active }
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active, gen }
             } else {
                 let (p, m, v) = (pp.get().add(ftb), mp.get().add(ftb), vp.get().add(ftb));
                 let (g, wt, active) = (grest.get(), wt.get(), std::ptr::null());
-                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active }
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active, gen: 0 }
             };
             adam_dispatch(isa, &c, &a);
         });
@@ -727,7 +889,79 @@ struct AdamArgs {
     n: usize,
     fl: usize,
     kb: usize,
-    active: *const AtomicU8,
+    active: *const AtomicU32,
+    /// The batch whose rows count as active.
+    gen: u32,
+}
+
+/// The AdamW constants of the next step (advances `opt.step`).
+fn adam_consts(opt: &mut Adam, lr: f32, wd: f32, inv_batch: f32) -> AdamC {
+    opt.step += 1;
+    let (b1, b2) = (0.9f32, 0.999f32);
+    AdamC {
+        c1: 1.0 - b1.powi(opt.step.min(1 << 20) as i32),
+        c2: 1.0 - b2.powi(opt.step.min(1 << 20) as i32),
+        lr,
+        decay: 1.0 - lr * wd,
+        inv_batch,
+    }
+}
+
+/// Column tile `c` of the tile-major FT state (`p`, `m`, `v` and `g` point
+/// at the tile).
+struct TileAdamArgs {
+    p: *mut f32,
+    m: *mut f32,
+    v: *mut f32,
+    g: *mut f32,
+    wt: *mut f32,
+    tf: usize,
+    rows: usize,
+    c: usize,
+    /// Rows (features with the factoriser) `r0..r1` of the tile.
+    r0: usize,
+    r1: usize,
+    fl: bool,
+    kb: usize,
+    active: *const AtomicU32,
+    gen: u32,
+}
+
+/// `adam_rows` for one column tile, row by row in the same per-element
+/// order (factoriser: F from every bucket's gradient first, then each
+/// bucket's W, then the merged rows).
+#[inline(always)]
+unsafe fn tile_adam<V: Simd>(c: &AdamC, a: &TileAdamArgs) {
+    let col = a.c * TB;
+    let wt_at = |r: usize| a.wt.add((col / a.tf * a.rows + r) * a.tf + col % a.tf);
+    let decay = |r: usize| if !a.active.is_null() && (*a.active.add(r)).load(Ordering::Relaxed) != a.gen { 1.0 } else { c.decay };
+    let line = |r: usize, d: f32, g: *mut f32| adam_line::<V>(c, d, a.p.add(r * TB), a.m.add(r * TB), a.v.add(r * TB), g);
+    if !a.fl {
+        for r in a.r0..a.r1 {
+            let w = line(r, decay(r), a.g.add(r * TB));
+            std::ptr::copy_nonoverlapping(w.as_ptr(), wt_at(r), TB);
+        }
+    } else {
+        for f in a.r0..a.r1 {
+            let mut gf = [0.0f32; TB];
+            for b in 0..a.kb {
+                let g = a.g.add((b * INPUTS + f) * TB);
+                for (k, x) in gf.iter_mut().enumerate() {
+                    *x += *g.add(k);
+                }
+            }
+            let fp = line(a.rows + f, c.decay, gf.as_mut_ptr());
+            for b in 0..a.kb {
+                let r = b * INPUTS + f;
+                let wp = line(r, decay(r), a.g.add(r * TB));
+                let w = wt_at(r);
+                for k in 0..TB {
+                    *w.add(k) = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
+                }
+            }
+        }
+    }
+    V::fence();
 }
 
 /// v2's AdamW expression, element by element (vectorised by LLVM; lane-wise
@@ -763,8 +997,15 @@ unsafe fn adam_line<V: Simd>(c: &AdamC, decay: f32, p: *mut f32, m: *mut f32, v:
     for (k, src) in [p, m, v].into_iter().enumerate() {
         std::ptr::copy_nonoverlapping(src, l[k].as_mut_ptr(), TB);
     }
+    let old = l;
     let [lp, lm, lv] = &mut l;
     adam_run(c, decay, lp.as_mut_ptr(), lm.as_mut_ptr(), lv.as_mut_ptr(), g, TB);
+    // Rows no position can hit (m = v = 0, no decay) do not change: skip
+    // the stores, memory writes are the limit (~31 GB/s on a 9600X).
+    let same = |a: &[f32; TB], b: &[f32; TB]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+    if (0..3).all(|k| same(&l[k], &old[k])) {
+        return l[0];
+    }
     for (k, dst) in [p, m, v].into_iter().enumerate() {
         if dst as usize % 64 == 0 {
             for i in (0..TB).step_by(V::W) {
@@ -790,7 +1031,7 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
     }
     // v2: rows that did not occur in the batch skip the decay (`* 1.0`).
     let row_decay = |r: usize| {
-        if !a.active.is_null() && (*a.active.add(r)).swap(0, Ordering::Relaxed) == 0 {
+        if !a.active.is_null() && (*a.active.add(r)).load(Ordering::Relaxed) != a.gen {
             1.0
         } else {
             c.decay
@@ -865,6 +1106,10 @@ macro_rules! entry {
             pub unsafe fn adam(c: &AdamC, a: &AdamArgs) {
                 adam_impl::<$v>(c, a)
             }
+            #[target_feature(enable = $feat)]
+            pub unsafe fn tile_adam(c: &AdamC, a: &TileAdamArgs) {
+                super::tile_adam::<$v>(c, a)
+            }
         }
     };
 }
@@ -886,6 +1131,9 @@ mod portable {
     }
     pub unsafe fn adam(c: &AdamC, a: &AdamArgs) {
         adam_impl::<Portable>(c, a)
+    }
+    pub unsafe fn tile_adam(c: &AdamC, a: &TileAdamArgs) {
+        super::tile_adam::<Portable>(c, a)
     }
 }
 
@@ -945,5 +1193,17 @@ unsafe fn adam_dispatch(isa: Isa, c: &AdamC, a: &AdamArgs) {
         Isa::Avx512 => avx512::adam(c, a),
         #[cfg(target_arch = "aarch64")]
         Isa::Neon => neon::adam(c, a),
+    }
+}
+
+unsafe fn tile_adam_dispatch(isa: Isa, c: &AdamC, a: &TileAdamArgs) {
+    match isa {
+        Isa::Portable => portable::tile_adam(c, a),
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx2 => avx2::tile_adam(c, a),
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx512 => avx512::tile_adam(c, a),
+        #[cfg(target_arch = "aarch64")]
+        Isa::Neon => neon::tile_adam(c, a),
     }
 }
