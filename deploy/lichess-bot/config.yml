@@ -89,7 +89,7 @@ matchmaking:
   allow_matchmaking: true        # challenge opponents while filling available slots
   allow_during_games: true       # keep matchmaking while games are active
   challenge_variant: "standard"
-  challenge_timeout: 5           # minutes idle before sending a challenge
+  challenge_timeout: 30          # minutes idle before sending a challenge
   challenge_initial_time:
     - 60
     - 120
