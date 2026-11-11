@@ -15,12 +15,17 @@ on:
       tag:
         description: "Name used in the binary file names (no release is created)"
         default: "vtest"
+      pgo:
+        description: "Profile-guided builds (scripts/build-pgo.sh); tag pushes use env.PGO_DEFAULT"
+        default: "true"
 
 permissions:
   contents: write
 
 env:
   TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  # PGO on tag pushes: set to "false" to release plain builds.
+  PGO_DEFAULT: "true"
 
 jobs:
   build:
@@ -48,14 +53,24 @@ jobs:
         env:
           CPU: ${{ matrix.cpu }}
           TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+          PGO: ${{ github.event_name == 'push' && env.PGO_DEFAULT || inputs.pgo }}
         run: |
           flags=""
           if [ -n "$CPU" ]; then flags="-C target-cpu=$CPU"; fi
           # The search runs on the main thread; MSVC's default 1 MB main-thread
           # stack is far below the 8 MB Linux/macOS give it, so raise it.
           if [[ "$TARGET" == *windows-msvc ]]; then flags="$flags -C link-arg=/STACK:8388608"; fi
-          echo "RUSTFLAGS=$flags"
+          echo "RUSTFLAGS=$flags PGO=$PGO"
           RUSTFLAGS="$flags" cargo build --release --target "$TARGET"
+          if [ "$PGO" = true ]; then
+            # Profiles on this runner (every variant runs here); fails if the
+            # PGO binary's bench/evalhash differ from the plain build's.
+            # Replaces the plain binary in place, so the steps below are unchanged.
+            RUSTFLAGS="$flags" PGO_TARGET="$TARGET" PGO_REFERENCE="target/$TARGET/release/rustfish$EXT" \
+              scripts/build-pgo.sh "target/$TARGET/release/rustfish-pgo$EXT"
+            mv "target/$TARGET/release/rustfish-pgo$EXT" "target/$TARGET/release/rustfish$EXT"
+          fi
 
       - name: Name binary
         id: name

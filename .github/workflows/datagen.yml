@@ -33,6 +33,9 @@ on:
       max_parallel:
         description: "Max shards running at once (the queue passes lanes.background_parallel, or the foreground width for a burst; 1 runner is kept for the queue's own runs)"
         default: "3"
+      pgo:
+        description: "Profile-guided build (scripts/build-pgo.sh): identical games, ~5% more per hour. false = plain release build"
+        default: "true"
 
 permissions:
   contents: read
@@ -58,12 +61,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+      # build-pgo.sh from this workflow's own commit, so older refs get PGO too.
+      - uses: actions/checkout@v4
+        if: ${{ inputs.pgo == 'true' }}
+        with:
+          path: pgo-tools
+          sparse-checkout: scripts/build-pgo.sh
+          sparse-checkout-cone-mode: false
       - name: Build rustfish
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
+          PGO: ${{ inputs.pgo }}
         run: |
           cargo build --release
-          mkdir -p engines && cp target/release/rustfish engines/rustfish
+          mkdir -p engines
+          if [ "$PGO" = true ]; then
+            # PGO changes code layout only; build-pgo.sh fails if the PGO
+            # binary's bench or evalhash differ from the plain build's.
+            cp pgo-tools/scripts/build-pgo.sh scripts/build-pgo.sh && rm -rf pgo-tools
+            PGO_REFERENCE=target/release/rustfish scripts/build-pgo.sh engines/rustfish
+          else
+            cp target/release/rustfish engines/rustfish
+          fi
           printf 'bench\nquit\n' | engines/rustfish | grep 'Nodes searched'
           git rev-parse HEAD > engines/sha.txt
       - uses: actions/upload-artifact@v4
@@ -145,7 +164,7 @@ jobs:
           {
             echo "## Datagen seed $SEED, $NODES nodes/move"
             echo
-            echo "- engine: \`$(cat engines/sha.txt)\`"
+            echo "- engine: \`$(cat engines/sha.txt)\` (pgo=${{ inputs.pgo }})"
             echo "- shards finished: $(ls shards/shard-*.txt.gz | wc -l) / $SHARDS ($GAMES games each)"
             echo "- positions: $total"
             echo "- file: \`$(basename "$out")\`, $(du -h "$out" | cut -f1) gzipped"

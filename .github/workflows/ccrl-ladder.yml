@@ -31,6 +31,9 @@ on:
       test_id:
         description: "Set by the merge queue: log the result and call the queue back"
         default: ""
+      pgo:
+        description: "Profile-guided rustfish build (scripts/build-pgo.sh), as a release would ship. false = plain release build"
+        default: "true"
 
 permissions:
   contents: write   # append to tests/ladder-log.jsonl when started by the queue
@@ -91,10 +94,17 @@ jobs:
       - name: Build rustfish
         env:
           RUSTFLAGS: -C target-cpu=native
+          PGO: ${{ inputs.pgo }}
         run: |
           cargo build --release
-          printf 'uci\nisready\nposition startpos\ngo depth 4\nquit\n' | ./target/release/rustfish | tail -1
-          mkdir -p engines && cp target/release/rustfish engines/rustfish
+          mkdir -p engines
+          if [ "$PGO" = true ]; then
+            # Fails if the PGO binary's bench/evalhash differ from the plain build's.
+            PGO_REFERENCE=target/release/rustfish scripts/build-pgo.sh engines/rustfish
+          else
+            cp target/release/rustfish engines/rustfish
+          fi
+          printf 'uci\nisready\nposition startpos\ngo depth 4\nquit\n' | engines/rustfish | tail -1
 
       - uses: actions/setup-go@v5
         if: matrix.kind == 'go'
