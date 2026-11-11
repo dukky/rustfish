@@ -652,9 +652,50 @@ fn validate(p: &[f32], sh: Shape, kl: &KingLayout, val: &[Rec], lambda: f32, thr
 
 // ---------------------------------------------------------------- optimiser
 
+/// A 64-byte aligned `[f32]` (the batch kernels' AdamW writes whole cache
+/// lines of the FT with non-temporal stores).
+#[derive(Clone)]
+struct AVec {
+    buf: Vec<Line>,
+    len: usize,
+}
+
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+struct Line([f32; 16]);
+
+impl AVec {
+    fn zeros(len: usize) -> Self {
+        AVec { buf: vec![Line([0.0; 16]); len.div_ceil(16)], len }
+    }
+}
+
+impl From<Vec<f32>> for AVec {
+    fn from(v: Vec<f32>) -> Self {
+        let mut a = AVec::zeros(v.len());
+        a.copy_from_slice(&v);
+        a
+    }
+}
+
+impl std::ops::Deref for AVec {
+    type Target = [f32];
+    fn deref(&self) -> &[f32] {
+        // SAFETY: `Line` is 16 f32 with no padding; `len <= 16 * buf.len()`.
+        unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const f32, self.len) }
+    }
+}
+
+impl std::ops::DerefMut for AVec {
+    fn deref_mut(&mut self) -> &mut [f32] {
+        // SAFETY: as in `deref`.
+        unsafe { std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut f32, self.len) }
+    }
+}
+
 struct Adam {
-    m: Vec<f32>,
-    v: Vec<f32>,
+    m: AVec,
+    v: AVec,
     step: u64,
 }
 
@@ -747,7 +788,7 @@ fn load_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac) -> (Vec<f32>, Ad
     let floats: Vec<f32> = bytes[40..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
     let n = sh.len() + fac.fl;
     assert_eq!(floats.len(), 3 * n);
-    (floats[..n].to_vec(), Adam { m: floats[n..2 * n].to_vec(), v: floats[2 * n..].to_vec(), step: word(2) }, word(3))
+    (floats[..n].to_vec(), Adam { m: floats[n..2 * n].to_vec().into(), v: floats[2 * n..].to_vec().into(), step: word(2) }, word(3))
 }
 
 // ---------------------------------------------------------------- data feed
@@ -1401,7 +1442,7 @@ fn cmd_train(args: &[String]) {
     if let (None, Some(i)) = (&resume, &init) {
         warn_mirrored_init(i, sh, kl);
     }
-    let (mut p, mut opt, mut seen) = match (&resume, &init) {
+    let (p, mut opt, mut seen) = match (&resume, &init) {
         (Some(r), _) => load_ckpt(r, sh, kl, fac),
         (None, Some(i)) => {
             let p = if fac.on() {
@@ -1412,14 +1453,15 @@ fn cmd_train(args: &[String]) {
                 p
             };
             let n = p.len();
-            (p.into_iter().map(|x| x.clamp(-CLIP, CLIP)).collect(), Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
+            (p.into_iter().map(|x| x.clamp(-CLIP, CLIP)).collect(), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 }, 0)
         }
         (None, None) => {
             let p = if fac.on() { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
             let n = p.len();
-            (p, Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 }, 0)
+            (p, Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 }, 0)
         }
     };
+    let mut p = AVec::from(p);
     // Effective (merged) net params; only a separate buffer with the factoriser.
     let mut merged = if fac.on() { vec![0.0f32; sh.len()] } else { Vec::new() };
     if fac.on() {
@@ -1740,14 +1782,14 @@ mod tests {
         }
         let idle = (0..sh.kb * 768).find(|&r| active[r] == 0).unwrap();
         let n = p.len();
-        let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+        let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
         let mut q = p.clone();
         let cx = StepCtx { sh, fac, active: Some(&active) };
         adam_step(&mut q, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &cx);
         assert_eq!(&q[idle * sh.h..(idle + 1) * sh.h], &p[idle * sh.h..(idle + 1) * sh.h]);
         assert!(q[sh.len() + fk] != p[sh.len() + fk]);
         let mut q2 = p.clone();
-        let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+        let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
         adam_step(&mut q2, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &StepCtx { sh, fac, active: None });
         assert_eq!(q2[idle * sh.h], p[idle * sh.h] * (1.0 - 1e-3 * 0.1));
 
@@ -1763,7 +1805,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nnue-fac-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.ckpt");
-        let opt = Adam { m: pf.clone(), v: pf.clone(), step: 9 };
+        let opt = Adam { m: pf.clone().into(), v: pf.clone().into(), step: 9 };
         save_ckpt(&path, sh, kl, fac, &pf, &opt, 1234);
         let (p2, o2, seen) = load_ckpt(&path, sh, kl, fac);
         assert_eq!((p2, o2.step, seen), (pf, 9, 1234));
@@ -2126,14 +2168,14 @@ mod tests {
             }
             let (recs, mirror) = test_recs(301);
             let n = p.len();
-            let mut ropt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+            let mut ropt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
             let (gref, lref, pref) = reference_step(&p, sh, kl, fac, wd_active, &recs, &mirror, &mut ropt);
             for isa in isas() {
                 for (threads, exact) in [(1, true), (3, true), (4, false), (2, false)] {
                     let mut bt = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
                     bt.isa = isa;
                     let mut p2 = p.clone();
-                    let mut opt = Adam { m: vec![0.0; n], v: vec![0.0; n], step: 0 };
+                    let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
                     batch::Pool::with(threads, |pool| {
                         let loss = bt.batch(pool, &p2, &recs, &mirror, 0.5, kl);
                         let g = bt.gradient();
@@ -2152,8 +2194,8 @@ mod tests {
                         assert!(bt.gradient().iter().all(|&x| x == 0.0), "{what}: gradient not cleared");
                         if exact {
                             assert!(p2.iter().zip(&pref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam step differs");
-                            assert!(opt.m.iter().zip(&ropt.m).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam m");
-                            assert!(opt.v.iter().zip(&ropt.v).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam v");
+                            assert!(opt.m.iter().zip(ropt.m.iter()).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam m");
+                            assert!(opt.v.iter().zip(ropt.v.iter()).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam v");
                             // Second step: the trainer's (merged) FT copy and the
                             // active-row flags must follow the update.
                             let mut ropt2 = Adam { m: ropt.m.clone(), v: ropt.v.clone(), step: ropt.step };

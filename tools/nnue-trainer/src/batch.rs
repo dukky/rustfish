@@ -4,10 +4,15 @@
 //! over threads every batch) and scattered each sample's 2H-wide dacc into
 //! rows 2 KB apart, i.e. L2/L3 traffic of ~3x the FT per sample. Here:
 //!
-//! - **Forward** is split by samples (blocks of `FB`): each sample's
+//! - **Decode** runs first for the whole batch; each sub-batch's
+//!   `(sample, side)` pairs are also counting-sorted (stably) by the side's
+//!   king bucket.
+//! - **Forward** runs over blocks of `FB` sorted pairs: each pair's
 //!   accumulators are built 64 floats at a time in registers (bias + active
-//!   rows, in feature order, exactly as `forward`), stored, and the output
-//!   dot product, sigmoid, loss and output gradient are computed.
+//!   rows, in feature order, exactly as `forward`). A block reads the rows
+//!   of one or two buckets, so with king buckets that slice of the column
+//!   tile stays in L2. The **output layer** (dot product, sigmoid, loss,
+//!   output gradient) then runs over blocks of samples.
 //! - **Backward** is split by *columns*: unit `c` owns columns
 //!   `16c..16c+16` (one cache line) of every gradient row, for every sample
 //!   of the sub-batch, in sample order. One gradient buffer, no reduction,
@@ -15,10 +20,13 @@
 //!   (`[tile][row][16]`), so a unit's gradient is one contiguous
 //!   `rows * 64` B block that stays in L1/L2.
 //! - The batch runs in sub-batches of `sb` samples so the stored
-//!   accumulators stay in cache; backward of sub-batch k shares a phase
-//!   with forward of sub-batch k+1, which keeps every thread busy while the
-//!   column units drain.
+//!   accumulators stay in cache; one phase runs the forward of sub-batch
+//!   k, the output layer of k-1 and the backward of k-2, which keeps every
+//!   thread busy while the column units drain.
 //! - AdamW reads the one gradient, updates and re-zeroes it, in parallel.
+//!   It writes the FT's params and moments with non-temporal stores, so
+//!   that (on AMD's victim-cache L3) the weights and gradient the next
+//!   batch reads are still in L3 (kb8m H 512 does not fit otherwise).
 //!
 //! Every gradient element is summed in batch order, so results do not
 //! depend on the thread count, the scheduling, or the ISA (all SIMD
@@ -32,6 +40,7 @@ use crate::{decode, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, INPUTS}
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::Thread;
 
+
 /// Backward column tile (floats): one 64-byte cache line.
 pub const TB: usize = 16;
 /// Forward register tile (floats).
@@ -40,6 +49,19 @@ const TF: usize = 64;
 const FB: usize = 32;
 /// FT rows per AdamW unit.
 const AB: usize = 16;
+/// Largest king-bucket count (one bucket per square).
+const MAX_KB: usize = 64;
+
+/// King bucket of a sample's perspective (every feature of a side lies in
+/// its bucket's block of rows).
+#[inline(always)]
+fn king_bucket(s: &Sample, side: usize) -> usize {
+    if s.n == 0 {
+        0
+    } else {
+        s.f[side][0] as usize / INPUTS
+    }
+}
 
 // ---------------------------------------------------------------- pool
 
@@ -199,6 +221,17 @@ impl APtr {
 }
 
 #[derive(Clone, Copy)]
+struct UPtr(*mut u32);
+unsafe impl Send for UPtr {}
+unsafe impl Sync for UPtr {}
+impl UPtr {
+    #[inline(always)]
+    fn get(self) -> *mut u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy)]
 struct SPtr(*mut Sample);
 unsafe impl Send for SPtr {}
 unsafe impl Sync for SPtr {}
@@ -230,8 +263,12 @@ pub struct BatchTrainer {
     /// Gradient of params `ft_b()..len()` (FT bias, output weights, output
     /// bias), standard layout.
     grest: ABuf,
-    acc: [ABuf; 2],
-    samples: [Vec<Sample>; 2],
+    acc: [ABuf; 3],
+    /// The batch's decoded samples.
+    samples: Vec<Sample>,
+    /// Per sub-batch, its `(sample << 1) | side` pairs stably sorted by the
+    /// side's king bucket (`2 * sb` slots per sub-batch).
+    pairs: Vec<u32>,
     grad: Vec<f32>,
     loss: Vec<f32>,
     /// `--factorise`: length of the shared block `F` (768 x H) stored after
@@ -251,6 +288,7 @@ impl BatchTrainer {
         let sb = sb.div_ceil(FB) * FB;
         let rows = sh.kb * INPUTS;
         let blank = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
+        assert!(sh.kb <= MAX_KB);
         BatchTrainer {
             sh,
             rows,
@@ -263,8 +301,9 @@ impl BatchTrainer {
             wt: ABuf::new(rows * sh.h),
             wt_ok: false,
             grest: ABuf::new(sh.len() - sh.ft_b()),
-            acc: [ABuf::new(sb * 2 * sh.h), ABuf::new(sb * 2 * sh.h)],
-            samples: [vec![blank; sb], vec![blank; sb]],
+            acc: [ABuf::new(sb * 2 * sh.h), ABuf::new(sb * 2 * sh.h), ABuf::new(sb * 2 * sh.h)],
+            samples: vec![blank; sb],
+            pairs: Vec::new(),
             grad: Vec::new(),
             loss: Vec::new(),
             fl,
@@ -285,60 +324,99 @@ impl BatchTrainer {
         assert_eq!(p.len(), self.sh.len() + self.fl);
         self.grad.resize(n, 0.0);
         self.loss.resize(n, 0.0);
+        let blank = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
+        self.samples.resize(n, blank);
         if !self.wt_ok {
             self.sync_weights(p);
         }
         let (sh, rows, tiles, sb, isa, exact, tf) = (self.sh, self.rows, self.tiles, self.sb, self.isa, self.exact, self.tf);
+        let nsb = n.div_ceil(sb);
+        self.pairs.resize(2 * nsb * sb, 0);
         let wt = self.wt.ptr();
         let gft = self.gft.ptr();
         let grest = self.grest.ptr();
-        let accs = [self.acc[0].ptr(), self.acc[1].ptr()];
-        let samples = [SPtr(self.samples[0].as_mut_ptr()), SPtr(self.samples[1].as_mut_ptr())];
+        let accs = [self.acc[0].ptr(), self.acc[1].ptr(), self.acc[2].ptr()];
+        let samples = SPtr(self.samples.as_mut_ptr());
+        let pairs = UPtr(self.pairs.as_mut_ptr());
         let grad = Ptr(self.grad.as_mut_ptr());
         let loss = Ptr(self.loss.as_mut_ptr());
         let active = &self.active[..];
-        let nsb = n.div_ceil(sb);
         let sb_len = |k: usize| sb.min(n - k * sb);
-        for k in 0..=nsb {
-            let back = if k >= 1 { tiles } else { 0 };
-            let fwd = if k < nsb { sb_len(k).div_ceil(FB) } else { 0 };
-            par_units(pool, back + fwd, &|u| unsafe {
-                if u < back {
-                    let kb = k - 1;
-                    let len = sb_len(kb);
-                    let ss = std::slice::from_raw_parts(samples[kb % 2].get(), len);
-                    let gr = std::slice::from_raw_parts(grad.get().add(kb * sb), len);
-                    let a = BwdArgs { sh, rows, p, ss, acc: accs[kb % 2].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
-                    bwd_dispatch(isa, &a);
-                } else {
-                    let j = u - back;
-                    let len = sb_len(k);
-                    let (s0, s1) = (j * FB, ((j + 1) * FB).min(len));
-                    let base = k * sb;
-                    let ss = std::slice::from_raw_parts_mut(samples[k % 2].get().add(s0), s1 - s0);
-                    for (i, s) in ss.iter_mut().enumerate() {
-                        let r = base + s0 + i;
-                        *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
-                        if !active.is_empty() {
-                            for side in 0..2 {
-                                for &f in &s.f[side][..s.n] {
-                                    active[f as usize].store(1, Ordering::Relaxed);
-                                }
+        // Decode every sub-batch and bucket-sort its pairs (counting sort,
+        // stable: within a bucket the pairs keep sample-then-side order).
+        par_units(pool, nsb, &|k| unsafe {
+            let (base, len) = (k * sb, sb_len(k));
+            let ss = std::slice::from_raw_parts_mut(samples.get().add(base), len);
+            let mut start = [0u32; MAX_KB + 1];
+            for (i, s) in ss.iter_mut().enumerate() {
+                let r = base + i;
+                *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
+                for side in 0..2 {
+                    start[king_bucket(s, side) + 1] += 1;
+                    if !active.is_empty() {
+                        // Store only if unset: every thread writing the same
+                        // hot flags makes their lines bounce between cores.
+                        for &f in &s.f[side][..s.n] {
+                            let a = &active[f as usize];
+                            if a.load(Ordering::Relaxed) == 0 {
+                                a.store(1, Ordering::Relaxed);
                             }
                         }
                     }
-                    let a = FwdArgs {
+                }
+            }
+            for b in 1..=MAX_KB {
+                start[b] += start[b - 1];
+            }
+            let out = pairs.get().add(2 * base);
+            for (i, s) in ss.iter().enumerate() {
+                for side in 0..2 {
+                    let b = &mut start[king_bucket(s, side)];
+                    *out.add(*b as usize) = (i as u32) << 1 | side as u32;
+                    *b += 1;
+                }
+            }
+        });
+        // Phase q: accumulators of sub-batch q, output layer of q - 1,
+        // backward of q - 2.
+        for q in 0..nsb + 2 {
+            let back = if (2..nsb + 2).contains(&q) { tiles } else { 0 };
+            let fwd = if q < nsb { (2 * sb_len(q)).div_ceil(FB) } else { 0 };
+            let out = if (1..nsb + 1).contains(&q) { sb_len(q - 1).div_ceil(FB) } else { 0 };
+            par_units(pool, back + fwd + out, &|u| unsafe {
+                if u < back {
+                    let k = q - 2;
+                    let len = sb_len(k);
+                    let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
+                    let gr = std::slice::from_raw_parts(grad.get().add(k * sb), len);
+                    let a = BwdArgs { sh, rows, p, ss, acc: accs[k % 3].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
+                    bwd_dispatch(isa, &a);
+                } else if u < back + fwd {
+                    let k = q;
+                    let j = u - back;
+                    let len = sb_len(k);
+                    let (p0, p1) = (j * FB, ((j + 1) * FB).min(2 * len));
+                    let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
+                    let pr = std::slice::from_raw_parts(pairs.get().add(2 * k * sb + p0), p1 - p0);
+                    let a = AccArgs { sh, rows, tf, p, wt: wt.get(), ss, pairs: pr, acc: accs[k % 3].get() };
+                    acc_dispatch(isa, &a);
+                } else {
+                    let k = q - 1;
+                    let j = u - back - fwd;
+                    let len = sb_len(k);
+                    let (s0, s1) = (j * FB, ((j + 1) * FB).min(len));
+                    let base = k * sb;
+                    let ss = std::slice::from_raw_parts(samples.get().add(base + s0), s1 - s0);
+                    let a = OutArgs {
                         sh,
-                        rows,
                         tf,
                         p,
-                        wt: wt.get(),
                         ss,
-                        acc: accs[k % 2].get().add(s0 * 2 * sh.h),
+                        acc: accs[k % 3].get().add(s0 * 2 * sh.h),
                         grad: grad.get().add(base + s0),
                         loss: loss.get().add(base + s0),
                     };
-                    fwd_dispatch(isa, exact, &a);
+                    out_dispatch(isa, exact, &a);
                 }
             });
         }
@@ -426,16 +504,27 @@ impl BatchTrainer {
 
 // ---------------------------------------------------------------- kernels
 
-struct FwdArgs<'a> {
+struct AccArgs<'a> {
     sh: Shape,
     rows: usize,
     tf: usize,
     p: &'a [f32],
     /// Tile-major FT weights (`BatchTrainer::wt`).
     wt: *const f32,
+    /// The sub-batch's samples, and the block of its bucket-sorted pairs.
     ss: &'a [Sample],
-    /// `ss.len() * 2h` accumulators out.
+    pairs: &'a [u32],
+    /// The sub-batch's accumulators (`ss.len() * 2h`).
     acc: *mut f32,
+}
+
+struct OutArgs<'a> {
+    sh: Shape,
+    tf: usize,
+    p: &'a [f32],
+    /// A block of samples and its accumulators, output gradients and losses.
+    ss: &'a [Sample],
+    acc: *const f32,
     grad: *mut f32,
     loss: *mut f32,
 }
@@ -492,40 +581,37 @@ unsafe fn dot_tile<V: Simd, const TW: usize>(a: *const f32, w: *const f32, lanes
     }
 }
 
-/// One column tile of every sample in the block: the tile of the FT stays
-/// in L1/L2 while the block's samples reuse its rows.
+/// One column tile of every pair in the block. The pairs are sorted by
+/// king bucket, so a block reads the rows of one or two buckets: that part
+/// of the tile stays in L1/L2 while the block reuses it.
 #[inline(always)]
-unsafe fn fwd_cols<V: Simd, const EXACT: bool, const TW: usize>(a: &FwdArgs, side: usize, col: usize, lanes: &mut [[f32; 16]; FB]) {
-    let sh = a.sh;
-    let h = sh.h;
-    let fw = a.p.as_ptr();
-    let bias = fw.add(sh.ft_b() + col);
+unsafe fn acc_cols<V: Simd, const TW: usize>(a: &AccArgs, col: usize) {
+    let h = a.sh.h;
+    let bias = a.p.as_ptr().add(a.sh.ft_b() + col);
     let tile = a.wt.add(col / TW * a.rows * TW);
-    for (j, s) in a.ss.iter().enumerate() {
-        let out = a.acc.add(j * 2 * h + side * h + col);
-        fwd_tile::<V, TW>(tile, bias, &s.f[side][..s.n], out);
-        if !EXACT {
-            let ow = fw.add(sh.out_w() + s.bucket * 2 * h + side * h + col);
-            dot_tile::<V, TW>(out, ow, lanes[j].as_mut_ptr());
-        }
+    for &pr in a.pairs {
+        let (j, side) = ((pr >> 1) as usize, (pr & 1) as usize);
+        let s = &a.ss[j];
+        fwd_tile::<V, TW>(tile, bias, &s.f[side][..s.n], a.acc.add(j * 2 * h + side * h + col));
     }
 }
 
 #[inline(always)]
-unsafe fn fwd_impl<V: Simd, const EXACT: bool>(a: &FwdArgs) {
-    let sh = a.sh;
-    let h = sh.h;
-    debug_assert!(a.ss.len() <= FB);
-    let mut lanes = [[0.0f32; 16]; FB];
-    for side in 0..2 {
-        for col in (0..h).step_by(a.tf) {
-            if a.tf == TF {
-                fwd_cols::<V, EXACT, TF>(a, side, col, &mut lanes);
-            } else {
-                fwd_cols::<V, EXACT, TB>(a, side, col, &mut lanes);
-            }
+unsafe fn acc_impl<V: Simd>(a: &AccArgs) {
+    for col in (0..a.sh.h).step_by(a.tf) {
+        if a.tf == TF {
+            acc_cols::<V, TF>(a, col);
+        } else {
+            acc_cols::<V, TB>(a, col);
         }
     }
+}
+
+/// Output layer, loss and output gradient of a block of samples.
+#[inline(always)]
+unsafe fn out_impl<V: Simd, const EXACT: bool>(a: &OutArgs) {
+    let sh = a.sh;
+    let h = sh.h;
     for (j, s) in a.ss.iter().enumerate() {
         let acc = a.acc.add(j * 2 * h);
         let ow = a.p.as_ptr().add(sh.out_w() + s.bucket * 2 * h);
@@ -538,7 +624,18 @@ unsafe fn fwd_impl<V: Simd, const EXACT: bool>(a: &FwdArgs) {
             }
             sum
         } else {
-            let l = &mut lanes[j];
+            // 16 interleaved lanes, filled tile by tile (side 0 then 1).
+            let mut l = [0.0f32; 16];
+            for side in 0..2 {
+                for col in (0..h).step_by(a.tf) {
+                    let (x, w) = (acc.add(side * h + col), ow.add(side * h + col));
+                    if a.tf == TF {
+                        dot_tile::<V, TF>(x, w, l.as_mut_ptr());
+                    } else {
+                        dot_tile::<V, TB>(x, w, l.as_mut_ptr());
+                    }
+                }
+            }
             let mut w = 8;
             while w > 0 {
                 for i in 0..w {
@@ -557,6 +654,7 @@ unsafe fn fwd_impl<V: Simd, const EXACT: bool>(a: &FwdArgs) {
     }
 }
 
+/// Column tile `c` of the sub-batch's gradient, in sample order.
 #[inline(always)]
 unsafe fn bwd_impl<V: Simd>(a: &BwdArgs) {
     let sh = a.sh;
@@ -654,8 +752,39 @@ unsafe fn adam_run(c: &AdamC, decay: f32, p: *mut f32, m: *mut f32, v: *mut f32,
     }
 }
 
+/// `adam_run` on one `TB`-float line of the FT; returns the new params.
+/// `p`, `m`, `v` are written with non-temporal stores when 64-byte aligned:
+/// AdamW streams ~3x the FT through memory, and on CPUs whose L3 is a
+/// victim cache (AMD) this keeps those lines out of it, so the tile-major
+/// weights and the gradient that the next batch reads stay in L3.
 #[inline(always)]
-unsafe fn adam_impl(c: &AdamC, a: &AdamArgs) {
+unsafe fn adam_line<V: Simd>(c: &AdamC, decay: f32, p: *mut f32, m: *mut f32, v: *mut f32, g: *mut f32) -> [f32; TB] {
+    let mut l = [[0.0f32; TB]; 3];
+    for (k, src) in [p, m, v].into_iter().enumerate() {
+        std::ptr::copy_nonoverlapping(src, l[k].as_mut_ptr(), TB);
+    }
+    let [lp, lm, lv] = &mut l;
+    adam_run(c, decay, lp.as_mut_ptr(), lm.as_mut_ptr(), lv.as_mut_ptr(), g, TB);
+    for (k, dst) in [p, m, v].into_iter().enumerate() {
+        if dst as usize % 64 == 0 {
+            for i in (0..TB).step_by(V::W) {
+                V::load(l[k].as_ptr().add(i)).stream(dst.add(i));
+            }
+        } else {
+            std::ptr::copy_nonoverlapping(l[k].as_ptr(), dst, TB);
+        }
+    }
+    l[0]
+}
+
+#[inline(always)]
+unsafe fn adam_impl<V: Simd>(c: &AdamC, a: &AdamArgs) {
+    adam_rows::<V>(c, a);
+    V::fence();
+}
+
+#[inline(always)]
+unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
     if a.flat > 0 {
         return adam_run(c, c.decay, a.p, a.m, a.v, a.g, a.flat);
     }
@@ -673,8 +802,8 @@ unsafe fn adam_impl(c: &AdamC, a: &AdamArgs) {
             let decay = row_decay(f);
             for t in 0..a.tiles {
                 let i = f * a.h + t * TB;
-                adam_run(c, decay, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + f) * TB), TB);
-                std::ptr::copy_nonoverlapping(a.p.add(i), wt_at(f, t * TB), TB);
+                let w = adam_line::<V>(c, decay, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + f) * TB));
+                std::ptr::copy_nonoverlapping(w.as_ptr(), wt_at(f, t * TB), TB);
             }
         }
         return;
@@ -695,14 +824,14 @@ unsafe fn adam_impl(c: &AdamC, a: &AdamArgs) {
                 }
             }
             let fi = a.n + f * a.h + t * TB;
-            adam_run(c, c.decay, a.p.add(fi), a.m.add(fi), a.v.add(fi), gf.as_mut_ptr(), TB);
+            let fp = adam_line::<V>(c, c.decay, a.p.add(fi), a.m.add(fi), a.v.add(fi), gf.as_mut_ptr());
             for (b, &d) in decay[..a.kb].iter().enumerate() {
                 let r = b * INPUTS + f;
                 let i = r * a.h + t * TB;
-                adam_run(c, d, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB), TB);
+                let wp = adam_line::<V>(c, d, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB));
                 let w = wt_at(r, t * TB);
                 for k in 0..TB {
-                    *w.add(k) = (*a.p.add(i + k) + *a.p.add(fi + k)).clamp(-CLIP, CLIP);
+                    *w.add(k) = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
                 }
             }
         }
@@ -717,11 +846,15 @@ macro_rules! entry {
         mod $name {
             use super::*;
             #[target_feature(enable = $feat)]
-            pub unsafe fn fwd(a: &FwdArgs, exact: bool) {
+            pub unsafe fn acc(a: &AccArgs) {
+                acc_impl::<$v>(a)
+            }
+            #[target_feature(enable = $feat)]
+            pub unsafe fn out(a: &OutArgs, exact: bool) {
                 if exact {
-                    fwd_impl::<$v, true>(a)
+                    out_impl::<$v, true>(a)
                 } else {
-                    fwd_impl::<$v, false>(a)
+                    out_impl::<$v, false>(a)
                 }
             }
             #[target_feature(enable = $feat)]
@@ -730,7 +863,7 @@ macro_rules! entry {
             }
             #[target_feature(enable = $feat)]
             pub unsafe fn adam(c: &AdamC, a: &AdamArgs) {
-                adam_impl(c, a)
+                adam_impl::<$v>(c, a)
             }
         }
     };
@@ -738,18 +871,21 @@ macro_rules! entry {
 
 mod portable {
     use super::*;
-    pub unsafe fn fwd(a: &FwdArgs, exact: bool) {
+    pub unsafe fn acc(a: &AccArgs) {
+        acc_impl::<Portable>(a)
+    }
+    pub unsafe fn out(a: &OutArgs, exact: bool) {
         if exact {
-            fwd_impl::<Portable, true>(a)
+            out_impl::<Portable, true>(a)
         } else {
-            fwd_impl::<Portable, false>(a)
+            out_impl::<Portable, false>(a)
         }
     }
     pub unsafe fn bwd(a: &BwdArgs) {
         bwd_impl::<Portable>(a)
     }
     pub unsafe fn adam(c: &AdamC, a: &AdamArgs) {
-        adam_impl(c, a)
+        adam_impl::<Portable>(c, a)
     }
 }
 
@@ -764,15 +900,27 @@ use crate::simd::Neon;
 #[cfg(target_arch = "aarch64")]
 entry!(neon, "neon", Neon);
 
-unsafe fn fwd_dispatch(isa: Isa, exact: bool, a: &FwdArgs) {
+unsafe fn acc_dispatch(isa: Isa, a: &AccArgs) {
     match isa {
-        Isa::Portable => portable::fwd(a, exact),
+        Isa::Portable => portable::acc(a),
         #[cfg(target_arch = "x86_64")]
-        Isa::Avx2 => avx2::fwd(a, exact),
+        Isa::Avx2 => avx2::acc(a),
         #[cfg(target_arch = "x86_64")]
-        Isa::Avx512 => avx512::fwd(a, exact),
+        Isa::Avx512 => avx512::acc(a),
         #[cfg(target_arch = "aarch64")]
-        Isa::Neon => neon::fwd(a, exact),
+        Isa::Neon => neon::acc(a),
+    }
+}
+
+unsafe fn out_dispatch(isa: Isa, exact: bool, a: &OutArgs) {
+    match isa {
+        Isa::Portable => portable::out(a, exact),
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx2 => avx2::out(a, exact),
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx512 => avx512::out(a, exact),
+        #[cfg(target_arch = "aarch64")]
+        Isa::Neon => neon::out(a, exact),
     }
 }
 

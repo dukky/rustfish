@@ -80,6 +80,16 @@ pub trait Simd: Copy {
     unsafe fn clamp01(self) -> Self;
     /// Lane-wise `if 0 < x < 1 { v } else { +0 }`.
     unsafe fn select_in01(x: Self, v: Self) -> Self;
+    /// Non-temporal store (`p` aligned to the vector size): the line is not
+    /// kept in the caches. Plain store where there is none.
+    #[inline(always)]
+    unsafe fn stream(self, p: *mut f32) {
+        self.store(p)
+    }
+    /// Orders earlier `stream`s before later stores (before handing the
+    /// data to other threads).
+    #[inline(always)]
+    unsafe fn fence() {}
 }
 
 /// Plain Rust lanes; LLVM vectorises these for whatever the build targets.
@@ -195,6 +205,16 @@ mod x86 {
             let lt = _mm256_cmp_ps::<_CMP_LT_OQ>(x.0, _mm256_set1_ps(1.0));
             Avx2(_mm256_and_ps(_mm256_and_ps(gt, lt), v.0))
         }
+        #[inline]
+        #[target_feature(enable = "avx2,fma")]
+        unsafe fn stream(self, p: *mut f32) {
+            _mm256_stream_ps(p, self.0)
+        }
+        #[inline]
+        #[target_feature(enable = "avx2,fma")]
+        unsafe fn fence() {
+            _mm_sfence()
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -243,6 +263,16 @@ mod x86 {
             let gt = _mm512_cmp_ps_mask::<_CMP_GT_OQ>(x.0, _mm512_setzero_ps());
             let lt = _mm512_cmp_ps_mask::<_CMP_LT_OQ>(x.0, _mm512_set1_ps(1.0));
             Avx512(_mm512_maskz_mov_ps(gt & lt, v.0))
+        }
+        #[inline]
+        #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma")]
+        unsafe fn stream(self, p: *mut f32) {
+            _mm512_stream_ps(p, self.0)
+        }
+        #[inline]
+        #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma")]
+        unsafe fn fence() {
+            _mm_sfence()
         }
     }
 }
