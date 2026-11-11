@@ -79,6 +79,11 @@ for i in 1 2 3; do
   printf 'bench\nquit\n' | ./target/release/rustfish | grep Nodes/second
 done
 ```
+`scripts/pgo-compare.sh <base> <candidate>` does this properly (bench and
+`evalhash` identity check, alternating order, bench NPS and datagen games/s
+means). `scripts/build-pgo.sh` makes a profile-guided build in
+`target/release-pgo/` (same moves; ~5% faster on the M3, no measurable gain
+on GitHub's x86 runners, so CI builds stay plain; see plan.md).
 
 ### 3. Optional disaster check (laptop, a few minutes)
 Only to catch crashes, illegal moves or an obviously broken idea before

@@ -140,6 +140,13 @@ Dated log, newest last; superseded detail is in the commit history and
 - Ladder cost: a 120+1 ladder is ~10 SPRTs of runner time; run it only after
   real gains. A 10+0.1 ladder is ~12x cheaper and comparable with other
   short-TC claims (e.g. the 3463 "24h" engine, which was rated at 10+0.1).
+- PGO (2026-11-11, `scripts/build-pgo.sh`, branch `pgo-build`): identical
+  bench/evalhash everywhere. M3: +4.8% bench NPS, +4.5% fewer cycles, +6%
+  datagen games/s. GitHub x86-64-v3 runners (EPYC 7763/9V45/9V74, Xeon
+  8573C): -4..+2% NPS, -0.5..+3.6% datagen, inside the A/A noise (+-2%);
+  ext-TSP block placement on top did not help. So CI stays plain; the
+  datagen/ladder/release integration is parked on `pgo-ci-integration`.
+  `freeze.py --pgo` is opt-in for M3 freezes.
 
 ## Known problems
 
