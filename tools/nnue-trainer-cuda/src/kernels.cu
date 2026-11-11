@@ -35,13 +35,31 @@ extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, con
     const GSample &s = ss[sample];
     int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
     const float *ftb = rest, *ow = rest + H, *ob = rest + H + buckets * 2 * H;
+    // The sample's feature indices once into shared memory (a global index
+    // load before every row load made the loop latency-bound).
+    __shared__ uint32_t fs[32];
+    __shared__ int ns;
+    if (t < 32) fs[t] = ((const uint32_t *)s.f)[t];
+    if (t == 0) ns = s.n;
+    __syncthreads();
+    const uint16_t *feats = (const uint16_t *)fs + side * 32;
+    int n = ns;
     float4 a = *(const float4 *)(ftb + c);
-    for (int i = 0; i < s.n; i++) {
-        float4 w = __ldg((const float4 *)(wt + (size_t)s.f[side][i] * H + c));
-        a.x += w.x;
-        a.y += w.y;
-        a.z += w.z;
-        a.w += w.w;
+    // Four row loads in flight, added in feature order.
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float4 w0 = __ldg((const float4 *)(wt + (size_t)feats[i] * H + c));
+        float4 w1 = __ldg((const float4 *)(wt + (size_t)feats[i + 1] * H + c));
+        float4 w2 = __ldg((const float4 *)(wt + (size_t)feats[i + 2] * H + c));
+        float4 w3 = __ldg((const float4 *)(wt + (size_t)feats[i + 3] * H + c));
+        a.x += w0.x; a.y += w0.y; a.z += w0.z; a.w += w0.w;
+        a.x += w1.x; a.y += w1.y; a.z += w1.z; a.w += w1.w;
+        a.x += w2.x; a.y += w2.y; a.z += w2.z; a.w += w2.w;
+        a.x += w3.x; a.y += w3.y; a.z += w3.z; a.w += w3.w;
+    }
+    for (; i < n; i++) {
+        float4 w = __ldg((const float4 *)(wt + (size_t)feats[i] * H + c));
+        a.x += w.x; a.y += w.y; a.z += w.z; a.w += w.w;
     }
     *(float4 *)(acc + ((size_t)sample * 2 + side) * H + c) = a;
     const float *w = ow + s.bucket * 2 * H + side * H + c;
