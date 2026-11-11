@@ -18,7 +18,7 @@ struct GSample {
 };
 
 struct Item {
-    int bucket, start, end;
+    int bucket, start, end, range;
 };
 
 struct AdamC {
@@ -74,12 +74,33 @@ extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, con
 #define R 128
 #define FPW (INPUTS / 32)
 
-extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss, const uint32_t *pairs,
-                                                              const Item *items, const float *acc,
-                                                              const float *gout, const float *rest, float *part,
-                                                              int H, int buckets) {
-    __shared__ float sd[R][32];
+// Per range of R pairs (ranges never cross a work item: items start at
+// multiples of R within their bucket's run): the bitmask of the range's
+// pairs that contain each of the bucket's features, `masks[range][768][R/32]`,
+// built once per batch for every column tile.
+extern "C" __global__ void plan_masks(const GSample *ss, const uint32_t *pairs, const int *range_start,
+                                      const int *range_bucket, uint32_t *masks, int nranges) {
     __shared__ uint32_t mask[INPUTS][R / 32];
+    int rg = blockIdx.x;
+    for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) (&mask[0][0])[i] = 0u;
+    __syncthreads();
+    int r0 = range_start[rg], nr = range_start[rg + 1] - r0, b = range_bucket[rg];
+    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    for (int r = warp; r < nr; r += nw) {
+        uint32_t pr = pairs[r0 + r];
+        const GSample &s = ss[pr >> 1];
+        if (lane < s.n) atomicOr(&mask[s.f[pr & 1][lane] - b * INPUTS][r >> 5], 1u << (r & 31));
+    }
+    __syncthreads();
+    uint32_t *out = masks + (size_t)rg * INPUTS * (R / 32);
+    for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) out[i] = (&mask[0][0])[i];
+}
+
+extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss, const uint32_t *pairs,
+                                                              const Item *items, const uint32_t *masks,
+                                                              const float *acc, const float *gout,
+                                                              const float *rest, float *part, int H) {
+    __shared__ float sd[2][R][32];
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int col = blockIdx.x * 32 + lane;
     const float *ow = rest + H;
@@ -87,10 +108,11 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
     float g[FPW];
 #pragma unroll
     for (int i = 0; i < FPW; i++) g[i] = 0.0f;
-    for (int r0 = it.start; r0 < it.end; r0 += R) {
+    // Item.start/end are pair offsets; ranges of R pairs from it.start, the
+    // global range index from it.range.
+    int buf = 0;
+    for (int r0 = it.start, rg = it.range; r0 < it.end; r0 += R, rg++, buf ^= 1) {
         int nr = min(R, it.end - r0);
-        for (int i = threadIdx.x; i < INPUTS * (R / 32); i += 1024) (&mask[0][0])[i] = 0u;
-        __syncthreads();
         for (int r = warp; r < nr; r += 32) {
             uint32_t pr = pairs[r0 + r];
             int j = pr >> 1, side = pr & 1;
@@ -98,27 +120,25 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
             float x = acc[((size_t)j * 2 + side) * H + col];
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[s.bucket * 2 * H + side * H + col];
-            sd[r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
-            if (lane < s.n) {
-                int f = s.f[side][lane] - it.bucket * INPUTS;
-                atomicOr(&mask[f][r >> 5], 1u << (r & 31));  // bit set: order-free
-            }
+            sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
         }
+        // Double-buffered staging: one barrier per range.
         __syncthreads();
+        const uint32_t *mk = masks + (size_t)rg * INPUTS * (R / 32);
 #pragma unroll
         for (int i = 0; i < FPW; i++) {
-            int f = warp + 32 * i;
+            const uint4 m4 = __ldg((const uint4 *)(mk + (warp + 32 * i) * (R / 32)));
+            uint32_t ms[4] = {m4.x, m4.y, m4.z, m4.w};
 #pragma unroll
             for (int q = 0; q < R / 32; q++) {
-                uint32_t m = mask[f][q];
+                uint32_t m = ms[q];
                 while (m) {
                     int b = __ffs(m) - 1;
                     m &= m - 1;
-                    g[i] += sd[q * 32 + b][lane];
+                    g[i] += sd[buf][q * 32 + b][lane];
                 }
             }
         }
-        __syncthreads();
     }
     float *out = part + (size_t)blockIdx.y * INPUTS * H;
 #pragma unroll

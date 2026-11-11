@@ -34,11 +34,13 @@ s45): CPU 0.049903 / 0.039111 / 0.037563, GPU 0.049905 / 0.039107 /
 
 1. `forward`: a block per sample (bucket-pair order), H/2 threads, float4
    columns; accumulators, output gradient, loss.
-2. `backward_ft`: the Metal trainer's `grad_fused`. Block = (32-column tile,
+2. `plan_masks` (once per batch, for every column tile): per range of 128
+   pairs, per feature of its bucket, the bitmask of the pairs containing it.
+   `backward_ft`: the Metal trainer's `grad_fused`. Block = (32-column tile,
    work item = up to 2048 pairs of one king bucket), 1024 threads (lane =
    column, warp w owns features w + 32i of the bucket in registers). Per
-   128 pairs: dacc staged in shared memory, per-feature bitmasks of the
-   pairs containing it, each warp sums its features' rows in pair order.
+   128 pairs: dacc staged in shared memory (double-buffered, one barrier
+   per range), each warp sums its features' rows in pair order.
    Writes per-item partial gradients.
 3. `backward_rest` + `reduce_rest`: output-weight, FT-bias and output-bias
    gradients over 256-sample chunks, summed in chunk order.
@@ -59,12 +61,16 @@ for a CPU trainer run next to it.
 
 | net | 1080 Ti | 9600X CPU trainer |
 |---|---|---|
-| H 256 plain | 6.4M | 7.7M |
+| H 256 plain | 6.8M | 7.7M |
 | H 256 kb8m `--factorise` | 5.9M | 4.6M |
-| H 512 plain | 3.8M | 4.1M |
-| H 512 kb8m `--factorise` | 3.2-3.3M | 2.2M |
+| H 512 plain | 4.2M | 4.1M |
+| H 512 kb8m `--factorise` | 3.5M | 2.2M |
 | H 1024 plain | 2.1M | 1.8M |
-| H 1024 kb8m `--factorise` | 1.8M | 0.73M |
+| H 1024 kb8m `--factorise` | 1.9M | 0.73M |
+
+Per batch at kb8m H 512 (in the trainer): forward 1.75 ms (~2 GB of FT row
+reads, about the 1080 Ti's L2 bandwidth), FT backward ~1.9 ms, output-layer
+gradients 0.34 ms, AdamW 0.47 ms. Uploads run on a second stream.
 
 Kernels alone (`bench.cu`, kb8m H 512): forward 1.6 ms, FT backward 2.2
 ms, AdamW 0.4 ms per batch (3.9M pos/s). Checked: CPU checkpoint resumed on
