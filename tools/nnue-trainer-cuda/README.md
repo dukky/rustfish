@@ -46,8 +46,26 @@ s45): CPU 0.049903 / 0.039111 / 0.037563, GPU 0.049905 / 0.039107 /
    factoriser F (bucket order), W, merged rows; `--wd-active-only` flags
    from the CPU decode. `adam_flat` for the rest.
 
-## Speed (GTX 1080 Ti, batch 16384, B 8)
+## Pipeline
 
-kb8m H 512 `--factorise --mirror`: 2.5M pos/s end to end (kernels alone
-3.9M: forward 1.6 ms, backward 2.2 ms, AdamW 0.4 ms); 9600X CPU trainer
-~2.2M. `bench.cu` (standalone kernel bench) for the other shapes.
+Batch k is decoded and bucket-sorted on the CPU (pinned, double-buffered
+inputs, async copies on one stream) while the GPU runs batch k-1; `step`
+returns the previous batch's loss and `flush` (epoch ends) the last one,
+so epoch losses are unchanged. 2 CPU threads are enough at kb8m H 512
+(`--threads 2`: same speed as 12), which leaves the rest of the CPU free
+for a CPU trainer run next to it.
+
+## Speed (GTX 1080 Ti, batch 16384, B 8, `--mirror`, steady state)
+
+| net | 1080 Ti | 9600X CPU trainer |
+|---|---|---|
+| H 256 plain | 6.4M | 7.7M |
+| H 256 kb8m `--factorise` | 5.9M | 4.6M |
+| H 512 plain | 3.8M | 4.1M |
+| H 512 kb8m `--factorise` | 3.2-3.3M | 2.2M |
+| H 1024 plain | 2.1M | 1.8M |
+| H 1024 kb8m `--factorise` | 1.8M | 0.73M |
+
+Kernels alone (`bench.cu`, kb8m H 512): forward 1.6 ms, FT backward 2.2
+ms, AdamW 0.4 ms per batch (3.9M pos/s). Checked: CPU checkpoint resumed on
+the GPU and back, `--init` warm start, `--keep-best`, `--wd`.

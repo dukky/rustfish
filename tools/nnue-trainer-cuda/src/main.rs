@@ -45,7 +45,14 @@ extern "C" {
         params: *mut *mut c_void,
         extra: *mut *mut c_void,
     ) -> CuResult;
-    fn cuCtxSynchronize() -> CuResult;
+    fn cuStreamCreate(stream: *mut Handle, flags: u32) -> CuResult;
+    fn cuStreamSynchronize(stream: Handle) -> CuResult;
+    fn cuMemcpyHtoDAsync_v2(dst: CuPtr, src: *const c_void, bytes: usize, stream: Handle) -> CuResult;
+    fn cuMemcpyDtoHAsync_v2(dst: *mut c_void, src: CuPtr, bytes: usize, stream: Handle) -> CuResult;
+    fn cuMemAllocHost_v2(p: *mut *mut c_void, bytes: usize) -> CuResult;
+    fn cuEventCreate(ev: *mut Handle, flags: u32) -> CuResult;
+    fn cuEventRecord(ev: Handle, stream: Handle) -> CuResult;
+    fn cuEventSynchronize(ev: Handle) -> CuResult;
     fn cuGetErrorString(e: CuResult, s: *mut *const i8) -> CuResult;
 }
 
@@ -84,6 +91,78 @@ impl<T: Copy> DBuf<T> {
     }
 }
 
+impl<T: Copy> DBuf<T> {
+    /// Async upload from pinned memory on `stream`.
+    fn up_async(&self, src: &HBuf<T>, n: usize, stream: Handle) {
+        assert!(n <= self.n && n <= src.n);
+        let bytes = n * std::mem::size_of::<T>();
+        ck(unsafe { cuMemcpyHtoDAsync_v2(self.ptr, src.ptr as *const c_void, bytes, stream) }, "async upload");
+    }
+}
+
+/// Pinned (page-locked) host buffer for async copies.
+struct HBuf<T> {
+    ptr: *mut T,
+    n: usize,
+}
+
+impl<T: Copy> HBuf<T> {
+    fn new(n: usize) -> Self {
+        let mut p = std::ptr::null_mut();
+        ck(unsafe { cuMemAllocHost_v2(&mut p, (n * std::mem::size_of::<T>()).max(16)) }, "pinned alloc");
+        HBuf { ptr: p as *mut T, n }
+    }
+    fn slice(&mut self) -> &mut [T] {
+        // SAFETY: allocated for n elements; pinned memory is zero-initialised
+        // by nobody, so callers write before they read.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.n) }
+    }
+}
+
+/// One batch's inputs: pinned host staging and the device copies (two of
+/// these alternate, so batch k is prepared while batch k-1 runs).
+struct Slot {
+    hs: HBuf<GSample>,
+    horder: HBuf<u32>,
+    hpairs: HBuf<u32>,
+    hitems: HBuf<Item>,
+    hilo: HBuf<i32>,
+    hact: HBuf<u8>,
+    hloss: HBuf<f32>,
+    ss: DBuf<GSample>,
+    order: DBuf<u32>,
+    pairs: DBuf<u32>,
+    items: DBuf<Item>,
+    ilo: DBuf<i32>,
+    active: DBuf<u8>,
+    loss: DBuf<f32>,
+    done: Handle,
+}
+
+impl Slot {
+    fn new(b: usize, max_items: usize, kb: usize, rows: usize) -> Self {
+        let mut done = std::ptr::null_mut();
+        ck(unsafe { cuEventCreate(&mut done, 0) }, "event");
+        Slot {
+            hs: HBuf::new(b),
+            horder: HBuf::new(b),
+            hpairs: HBuf::new(2 * b),
+            hitems: HBuf::new(max_items),
+            hilo: HBuf::new(kb + 1),
+            hact: HBuf::new(rows),
+            hloss: HBuf::new(b),
+            ss: DBuf::new(b),
+            order: DBuf::new(b),
+            pairs: DBuf::new(2 * b),
+            items: DBuf::new(max_items),
+            ilo: DBuf::new(kb + 1),
+            active: DBuf::new(rows),
+            loss: DBuf::new(b),
+            done,
+        }
+    }
+}
+
 /// Kernel argument (passed by address to cuLaunchKernel).
 enum Arg {
     P(CuPtr),
@@ -91,7 +170,7 @@ enum Arg {
     C(AdamC),
 }
 
-fn launch(f: Handle, grid: (u32, u32), block: u32, args: &[Arg]) {
+fn launch(f: Handle, grid: (u32, u32), block: u32, stream: Handle, args: &[Arg]) {
     let mut vals: Vec<*mut c_void> = args
         .iter()
         .map(|a| match a {
@@ -100,7 +179,7 @@ fn launch(f: Handle, grid: (u32, u32), block: u32, args: &[Arg]) {
             Arg::C(c) => c as *const AdamC as *mut c_void,
         })
         .collect();
-    let r = unsafe { cuLaunchKernel(f, grid.0, grid.1, 1, block, 1, 1, 0, std::ptr::null_mut(), vals.as_mut_ptr(), std::ptr::null_mut()) };
+    let r = unsafe { cuLaunchKernel(f, grid.0, grid.1, 1, block, 1, 1, 0, stream, vals.as_mut_ptr(), std::ptr::null_mut()) };
     ck(r, "launch");
 }
 
@@ -172,19 +251,18 @@ struct GpuTrainer {
     prest: DBuf<f32>,
     acc: DBuf<f32>,
     gout: DBuf<f32>,
-    loss: DBuf<f32>,
-    ss: DBuf<GSample>,
-    order: DBuf<u32>,
-    pairs: DBuf<u32>,
-    items: DBuf<Item>,
-    ilo: DBuf<i32>,
-    active: DBuf<u8>,
-    // Host staging.
-    hs: Vec<GSample>,
-    hact: Vec<AtomicU8>,
+    slots: [Slot; 2],
+    slot: usize,
+    /// The last batch launched whose loss `step` has not returned yet:
+    /// (slot, positions).
+    pending: Option<(usize, usize)>,
+    stream: Handle,
+    /// `--wd-active-only` row flags set by the decode.
+    act: Vec<AtomicU8>,
 }
 
 unsafe impl Send for GpuTrainer {}
+unsafe impl Send for Slot {}
 
 impl GpuTrainer {
     fn new(cfg: &BackendCfg) -> Self {
@@ -222,7 +300,8 @@ impl GpuTrainer {
         let chunks = b.div_ceil(CH);
         let prest_stride = sh.buckets * 2 * h + 2 * h + sh.buckets;
         let nf = INPUTS * h;
-        let blank = GSample { f: [[0; 32]; 2], n: 0, bucket: 0, pad: 0, target: 0.0 };
+        let mut stream = std::ptr::null_mut();
+        ck(unsafe { cuStreamCreate(&mut stream, 0) }, "stream");
         GpuTrainer {
             sh,
             fl: cfg.fl,
@@ -245,16 +324,19 @@ impl GpuTrainer {
             prest: DBuf::new(chunks * prest_stride),
             acc: DBuf::new(b * 2 * h),
             gout: DBuf::new(b),
-            loss: DBuf::new(b),
-            ss: DBuf::new(b),
-            order: DBuf::new(b),
-            pairs: DBuf::new(2 * b),
-            items: DBuf::new(max_items),
-            ilo: DBuf::new(sh.kb + 1),
-            active: DBuf::new(rows),
-            hs: vec![blank; b],
-            hact: (0..rows).map(|_| AtomicU8::new(0)).collect(),
+            slots: [Slot::new(b, max_items, sh.kb, rows), Slot::new(b, max_items, sh.kb, rows)],
+            slot: 0,
+            pending: None,
+            stream,
+            act: (0..rows).map(|_| AtomicU8::new(0)).collect(),
         }
+    }
+
+    /// Waits for slot `si`'s batch and sums its `n` losses (sample order).
+    fn loss_of(&mut self, si: usize, n: usize) -> f64 {
+        let sl = &mut self.slots[si];
+        ck(unsafe { cuEventSynchronize(sl.done) }, "wait");
+        sl.hloss.slice()[..n].iter().map(|&l| l as f64).sum()
     }
 
     /// Uploads the training state from the host vectors.
@@ -290,13 +372,18 @@ impl Backend for GpuTrainer {
             self.import(p, opt);
         }
         let (sh, n) = (self.sh, recs.len());
-        assert!(n <= self.hs.len(), "batch larger than --batch");
         let (h, kb) = (sh.h, sh.kb);
-        // Decode on the CPU pool (and the --wd-active-only row flags).
+        let si = self.slot;
+        self.slot ^= 1;
+        let wd_active = self.wd_active;
+        // Prepare this batch on the CPU while the GPU runs the previous one
+        // (this slot's last batch, two steps ago, finished: `step` waited
+        // for the batch after it).
+        let sl = &mut self.slots[si];
+        assert!(n <= sl.hs.n, "batch larger than --batch");
         {
-            let hs = SyncPtr(self.hs.as_mut_ptr());
-            let act = &self.hact;
-            let wd_active = self.wd_active;
+            let hs = SyncPtr(sl.hs.ptr);
+            let act = &self.act;
             const DB: usize = 512;
             par_units(pool, n.div_ceil(DB), &|u| {
                 for i in u * DB..((u + 1) * DB).min(n) {
@@ -316,7 +403,7 @@ impl Backend for GpuTrainer {
                 }
             });
         }
-        let hs = &self.hs[..n];
+        let hs = &sl.hs.slice()[..n];
         let kbk = |s: &GSample, side: usize| if s.n == 0 { 0 } else { s.f[side][0] as usize / INPUTS };
         // Forward order: by (side-to-move bucket, other bucket); pairs and
         // work items by king bucket (stable counting sorts).
@@ -327,7 +414,7 @@ impl Backend for GpuTrainer {
         for i in 0..kb * kb {
             cnt[i + 1] += cnt[i];
         }
-        let mut order = vec![0u32; n];
+        let order = sl.horder.slice();
         for (i, s) in hs.iter().enumerate() {
             let c = &mut cnt[kbk(s, 0) * kb + kbk(s, 1)];
             order[*c] = i as u32;
@@ -343,7 +430,7 @@ impl Backend for GpuTrainer {
             bc[b + 1] += bc[b];
         }
         let mut pos = bc[..kb].to_vec();
-        let mut pairs = vec![0u32; 2 * n];
+        let pairs = sl.hpairs.slice();
         for (i, s) in hs.iter().enumerate() {
             for side in 0..2 {
                 let b = kbk(s, side);
@@ -351,26 +438,32 @@ impl Backend for GpuTrainer {
                 pos[b] += 1;
             }
         }
-        let mut items = Vec::new();
-        let mut ilo = vec![0i32; kb + 1];
+        let (items, ilo) = (sl.hitems.slice(), sl.hilo.slice());
+        let mut ni = 0;
         for b in 0..kb {
-            ilo[b] = items.len() as i32;
+            ilo[b] = ni as i32;
             let mut a = bc[b];
             while a < bc[b + 1] {
                 let e = (a + WI).min(bc[b + 1]);
-                items.push(Item { bucket: b as i32, start: a as i32, end: e as i32 });
+                items[ni] = Item { bucket: b as i32, start: a as i32, end: e as i32 };
+                ni += 1;
                 a = e;
             }
         }
-        ilo[kb] = items.len() as i32;
-        self.ss.up(hs);
-        self.order.up(&order);
-        self.pairs.up(&pairs);
-        self.items.up(&items);
-        self.ilo.up(&ilo);
-        if self.wd_active {
-            let flags: Vec<u8> = self.hact.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
-            self.active.up(&flags);
+        ilo[kb] = ni as i32;
+        if wd_active {
+            for (d, a) in sl.hact.slice().iter_mut().zip(&self.act) {
+                *d = a.swap(0, Ordering::Relaxed);
+            }
+        }
+        let st = self.stream;
+        sl.ss.up_async(&sl.hs, n, st);
+        sl.order.up_async(&sl.horder, n, st);
+        sl.pairs.up_async(&sl.hpairs, 2 * n, st);
+        sl.items.up_async(&sl.hitems, ni, st);
+        sl.ilo.up_async(&sl.hilo, kb + 1, st);
+        if wd_active {
+            sl.active.up_async(&sl.hact, sl.hact.n, st);
         }
 
         opt.step += 1;
@@ -382,38 +475,46 @@ impl Backend for GpuTrainer {
             decay: 1.0 - lr * wd,
             inv_batch: 1.0 / n as f32,
         };
-        let (hi, bi, ni) = (h as i32, sh.buckets as i32, n as i32);
+        let (hi, bi, nn) = (h as i32, sh.buckets as i32, n as i32);
         let nrest = sh.len() - sh.ft_b();
         use Arg::*;
         let k = &self.k;
-        launch(k.forward, (n as u32, 1), (h / 2) as u32, &[P(self.ss.ptr), P(self.order.ptr), P(self.wt.ptr), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.loss.ptr), I(hi), I(bi)]);
+        launch(k.forward, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(self.wt.ptr), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi)]);
         launch(
             k.backward_ft,
-            ((h / 32) as u32, items.len() as u32),
+            ((h / 32) as u32, ni as u32),
             1024,
-            &[P(self.ss.ptr), P(self.pairs.ptr), P(self.items.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), I(bi)],
+            st,
+            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), I(bi)],
         );
         let chunks = n.div_ceil(CH);
-        launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, &[P(self.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(ni)]);
-        launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
-        let act = if self.wd_active { self.active.ptr } else { 0 };
+        launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn)]);
+        launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+        let act = if wd_active { sl.active.ptr } else { 0 };
         launch(
             k.adam_ft,
             ((INPUTS * h).div_ceil(256) as u32, 1),
             256,
-            &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(self.part.ptr), P(self.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32)],
+            st,
+            &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32)],
         );
-        launch(k.adam_flat, (nrest.div_ceil(256) as u32, 1), 256, &[C(c), P(self.pr.ptr), P(self.mr.ptr), P(self.vr.ptr), P(self.gr.ptr), I(nrest as i32)]);
-        ck(unsafe { cuCtxSynchronize() }, "step");
-        let mut loss = vec![0.0f32; n];
-        self.loss.down_at(0, &mut loss);
-        loss.iter().map(|&l| l as f64).sum()
+        launch(k.adam_flat, (nrest.div_ceil(256) as u32, 1), 256, st, &[C(c), P(self.pr.ptr), P(self.mr.ptr), P(self.vr.ptr), P(self.gr.ptr), I(nrest as i32)]);
+        ck(unsafe { cuMemcpyDtoHAsync_v2(sl.hloss.ptr as *mut c_void, sl.loss.ptr, n * 4, st) }, "loss download");
+        ck(unsafe { cuEventRecord(sl.done, st) }, "event record");
+        // Return the previous batch's loss (it runs ahead of this one).
+        let prev = self.pending.replace((si, n));
+        prev.map_or(0.0, |(ps, pn)| self.loss_of(ps, pn))
+    }
+
+    fn flush(&mut self) -> f64 {
+        self.pending.take().map_or(0.0, |(ps, pn)| self.loss_of(ps, pn))
     }
 
     fn export(&mut self, p: &mut [f32], opt: &mut Adam) {
         if !self.live {
             return;
         }
+        ck(unsafe { cuStreamSynchronize(self.stream) }, "sync");
         let (ftb, n) = (self.sh.ft_b(), self.sh.len());
         self.pw.down_at(0, &mut p[..ftb]);
         self.mw.down_at(0, &mut opt.m[..ftb]);
