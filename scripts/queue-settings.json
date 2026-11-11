@@ -2,7 +2,7 @@
   "check_every": 5,
   "ladder_every": 5,
   "burst": {
-    "enabled": true,
+    "enabled": false,
     "below_score": 0.1,
     "max_consecutive": 2,
     "when_idle": true,
@@ -23,9 +23,9 @@
       "hash": 16,
       "elo0": 0,
       "elo1": 5,
-      "shards": 6,
+      "shards": 18,
       "rounds_per_shard": 16,
-      "max_rounds_per_shard": 208,
+      "max_rounds_per_shard": 64,
       "max_waves": 10
     },
     "nonreg": {
@@ -33,9 +33,9 @@
       "hash": 16,
       "elo0": -5,
       "elo1": 0,
-      "shards": 6,
+      "shards": 18,
       "rounds_per_shard": 16,
-      "max_rounds_per_shard": 208,
+      "max_rounds_per_shard": 64,
       "max_waves": 10
     },
     "ltc-gainer": {
@@ -43,9 +43,9 @@
       "hash": 64,
       "elo0": 0,
       "elo1": 10,
-      "shards": 6,
+      "shards": 18,
       "rounds_per_shard": 6,
-      "max_rounds_per_shard": 64,
+      "max_rounds_per_shard": 24,
       "max_waves": 8
     },
     "ltc-check": {
@@ -53,9 +53,9 @@
       "hash": 64,
       "elo0": -5,
       "elo1": 0,
-      "shards": 6,
+      "shards": 18,
       "rounds_per_shard": 6,
-      "max_rounds_per_shard": 64,
+      "max_rounds_per_shard": 24,
       "max_waves": 8
     },
     "net-gate": {
@@ -63,15 +63,15 @@
       "hash": 16,
       "elo0": 0,
       "elo1": 10,
-      "shards": 6,
+      "shards": 18,
       "rounds_per_shard": 8,
-      "max_rounds_per_shard": 48,
-      "max_waves": 5
+      "max_rounds_per_shard": 16,
+      "max_waves": 4
     }
   },
   "lanes": {
-    "background_parallel": 13,
-    "background_shards": 26,
-    "note": "Data-heavy split since 2026-11-07 10:40 (g4 +26.7 from +35% data). Revert to 6/18 with foreground shards 13 if gen 5 gains < +8 at its gate."
+    "background_parallel": 1,
+    "background_shards": 1,
+    "note": "2026-11-11: CI datagen stopped (GitHub-hosted runners are for testing; see docs/research-2026-11-11-coda-lc0-compute.md). Background lane minimal; the datagen workflow is disabled. Foreground 18 shards = 20 - 1 queue job - 1 (minimum) background slot; the background lane is idle while datagen is disabled."
   }
 }

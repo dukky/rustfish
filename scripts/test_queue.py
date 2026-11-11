@@ -575,7 +575,7 @@ class Burst(unittest.TestCase):
         base = {"modes": {"stc": {"shards": q.MAX_FOREGROUND_SHARDS}}}
         q.validate_settings(dict(base, burst=BURST_ON))
         q.validate_settings(dict(base, burst=dict(BURST_ON, enabled=False, shards=5)))
-        for bad in ({"shards": q.MAX_FOREGROUND_SHARDS + 1}, {"max_parallel": 17, "shards": 17}, {"max_parallel": 8, "shards": 12}):
+        for bad in ({"shards": q.MAX_FOREGROUND_SHARDS + 1}, {"max_parallel": q.MAX_FOREGROUND_SHARDS + 1, "shards": q.MAX_FOREGROUND_SHARDS + 1}, {"max_parallel": 8, "shards": 12}):
             with self.assertRaises(SystemExit):
                 q.validate_settings(dict(base, burst=dict(BURST_ON, **bad)))
 
