@@ -24,8 +24,11 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# Paths given by the caller are relative to the caller's directory.
+abspath() { case "$1" in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
+OUT=$(abspath "${1:-$ROOT/target/release-pgo/rustfish}")
+if [ -n "${PGO_REFERENCE:-}" ]; then PGO_REFERENCE=$(abspath "$PGO_REFERENCE"); fi
 cd "$ROOT"
-OUT=${1:-target/release-pgo/rustfish}
 BENCH_DEPTH=${PGO_BENCH_DEPTH:-12}
 DG_GAMES=${PGO_DATAGEN_GAMES:-40}
 BASE_FLAGS=${RUSTFLAGS:-}
