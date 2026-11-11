@@ -168,7 +168,7 @@ impl Pool {
 }
 
 /// `units` work items pulled dynamically by every worker.
-fn par_units(pool: &Pool, units: usize, f: &(dyn Fn(usize) + Sync)) {
+pub fn par_units(pool: &Pool, units: usize, f: &(dyn Fn(usize) + Sync)) {
     let next = AtomicUsize::new(0);
     pool.run(&|_| loop {
         let u = next.fetch_add(1, Ordering::Relaxed);
