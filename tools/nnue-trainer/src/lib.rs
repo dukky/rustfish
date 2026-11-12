@@ -51,6 +51,7 @@
 //! `target = lambda * wdl + (1 - lambda) * sigmoid(score_cp / SCALE)`.
 
 pub mod batch;
+pub mod binpack;
 mod simd;
 
 use std::fs::File;
@@ -1642,10 +1643,11 @@ impl Backend for batch::BatchTrainer {
 /// The command line; `train` uses `gpu` instead of the CPU kernels if given.
 pub fn cli(gpu: Option<&MakeBackend>) {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck|rescale> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|binpack|shuffle|train|eval|scalecheck|rescale> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
+        "binpack" => binpack::cmd_binpack(rest),
         "shuffle" => cmd_shuffle(rest),
         "train" => cmd_train(rest, gpu),
         "eval" => cmd_eval(rest),

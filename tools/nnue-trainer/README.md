@@ -8,6 +8,7 @@ See the module docs in `src/main.rs` for the maths and quantisation.
 cargo build --release
 T=target/release/nnue-trainer
 gunzip -c datagen-s9-n8000.gz | $T convert - s9.bin   # text -> 32-byte records
+zstd -dc t80.binpack.zst | $T binpack - t80.bin       # Stockfish binpack (Lc0 T80) -> records, docs/t80-data.md
 $T shuffle --out pool.bin s4.bin s5.bin s8.bin s9.bin  # optional global shuffle
 $T train --data pool.bin --val val.bin --out net.bin --hidden 256 --epochs 20
 $T eval --net ../../net/nnue.bin --val val.bin          # same metric for any i16 net

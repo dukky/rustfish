@@ -5,6 +5,9 @@ experiment, validation loss recorded before any CI games are spent. Results
 that did not follow this protocol are listed separately and are **not
 evidence** for or against an idea.
 
+External data (Lc0 T80 binpacks: reader, filters, score calibration,
+licence, cost): `docs/t80-data.md`.
+
 ## Protocol
 
 1. **Hypothesis and one variable.** Write down what changes (data, epochs,
