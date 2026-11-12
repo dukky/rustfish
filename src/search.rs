@@ -1324,10 +1324,14 @@ fn negamax(
     };
     let static_eval = raw_static_eval;
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
-    // Improving: our static eval beats the one from our previous move (two plies up).
+    // Improving: our static eval beats the one from our previous move (two plies
+    // up), or from the move before that (four plies up) if we were in check then.
     let improving = match static_eval {
         Some(se) if ply >= 2 && search.static_evals[ply - 2] != NO_EVAL => {
             se > search.static_evals[ply - 2]
+        }
+        Some(se) if ply >= 4 && search.static_evals[ply - 4] != NO_EVAL => {
+            se > search.static_evals[ply - 4]
         }
         _ => false,
     };
