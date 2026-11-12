@@ -51,7 +51,9 @@
 //! `target = lambda * wdl + (1 - lambda) * sigmoid(score_cp / SCALE)`.
 
 pub mod batch;
+pub mod packed;
 mod simd;
+pub mod stream;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -796,6 +798,17 @@ fn load_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac) -> (Vec<f32>, Ad
 // ---------------------------------------------------------------- data feed
 
 /// Streams records from files in order, shuffling within 1M-record chunks.
+/// A batch feed for `train`: the pool feed below or `stream::Stream`.
+pub trait Feeder: Send {
+    fn batch(&mut self, out: &mut Vec<Rec>, n: usize);
+}
+
+impl Feeder for Feed {
+    fn batch(&mut self, out: &mut Vec<Rec>, n: usize) {
+        Feed::batch(self, out, n)
+    }
+}
+
 struct Feed {
     files: Vec<PathBuf>,
     idx: usize,
@@ -1397,6 +1410,9 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let (mut exact, mut sub_batch, mut max_batches) = (false, 0usize, u64::MAX);
     let (mut factorise, mut wd_active, mut keep_best) = (false, None::<bool>, false);
     let mut half = false;
+    // Streaming loader (`stream.rs`): packed files, directories, manifests,
+    // or any data with `--shuffle-buffer`.
+    let (mut shuffle_buffer, mut loader_threads) = (None::<usize>, 1usize);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -1428,6 +1444,8 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--no-wd-active-only" => wd_active = Some(false),
             "--keep-best" => keep_best = true,
             "--half" => half = true,
+            "--shuffle-buffer" => shuffle_buffer = Some(v().parse().unwrap()),
+            "--loader-threads" => loader_threads = v().parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
     }
@@ -1436,8 +1454,14 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     assert!(!factorise || sh.kb > 1, "--factorise needs a king-bucket layout with KB > 1");
     let fac = Fac::new(sh, factorise);
     let wd_active = wd_active.unwrap_or(sh.kb > 1);
+    let streaming = shuffle_buffer.is_some() || stream::wanted(&data);
+    let sources = if streaming { stream::open_sources(&data) } else { Vec::new() };
     if epoch_size == 0 {
-        epoch_size = data.iter().map(|p| std::fs::metadata(p).unwrap().len() / REC as u64).sum();
+        epoch_size = if streaming {
+            sources.iter().map(|s| s.positions()).sum()
+        } else {
+            data.iter().map(|p| std::fs::metadata(p).unwrap().len() / REC as u64).sum()
+        };
     }
     let total = epochs * epoch_size;
     let ckpt = ckpt.unwrap_or_else(|| out.with_extension("ckpt"));
@@ -1507,7 +1531,13 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     // chunk), a few batches ahead of the trainer.
     let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<Rec>, Vec<bool>)>(4);
     let loader = {
-        let mut feed = Feed::new(data, seed ^ 0xF00D ^ seen);
+        let mut feed: Box<dyn Feeder> = if streaming {
+            let cap = shuffle_buffer.unwrap_or(stream::DEFAULT_BUFFER);
+            println!("streaming {} sources, shuffle buffer {cap}, {loader_threads} decoder threads", sources.len());
+            Box::new(stream::Stream::new(sources, cap, loader_threads, seed ^ 0xF00D ^ seen))
+        } else {
+            Box::new(Feed::new(data, seed ^ 0xF00D ^ seen))
+        };
         let mut rng = Rng(rng.0);
         std::thread::spawn(move || loop {
             let mut recs = Vec::with_capacity(batch);
@@ -1642,7 +1672,7 @@ impl Backend for batch::BatchTrainer {
 /// The command line; `train` uses `gpu` instead of the CPU kernels if given.
 pub fn cli(gpu: Option<&MakeBackend>) {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck|rescale> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck|rescale|pack|unpack|stream|shuffle-check> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
@@ -1651,6 +1681,10 @@ pub fn cli(gpu: Option<&MakeBackend>) {
         "eval" => cmd_eval(rest),
         "scalecheck" => cmd_scalecheck(rest),
         "rescale" => cmd_rescale(rest),
+        "pack" => packed::cmd_pack(rest),
+        "unpack" => packed::cmd_unpack(rest),
+        "shuffle-check" => stream::cmd_shuffle_check(rest),
+        "stream" => stream::cmd_stream(rest),
         _ => panic!("{usage}"),
     }
 }
