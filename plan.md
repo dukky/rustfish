@@ -12,7 +12,7 @@ results, strength chart) is on the dashboard, **https://rustfish-dash.dev.duk.im
 
 | | |
 |---|---|
-| Strength | **~3508 CCRL Blitz**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
+| Strength | **3547 CCRL Blitz** (ladder 2026-11-12 20:07, CI 3528-3567, `419d29b`, g8h1024kb8m): **top 100 cleared** (3506). Before: **~3508**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
 | Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ (2026-11-06); **mid term top 100 = 3506**: at the line (~3508), needs a clear margin; **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
 | Eval | NNUE **g7kb8m** (merged +30.6, 2026-11-08): (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. g7 from scratch on pool7 (1.72B positions), m1 copy, kb8m factoriser warm start. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR (cut-node, not-improving, quiet checks reduced one ply less, root moves), IIR, SEE, killers, counter-moves, history + threat-aware history with escape bonus, 1-ply continuation history, ProbCut, singular extensions + multi-cut + negative extension, check extension; node-fraction time management. |
@@ -83,6 +83,16 @@ round 6 (its rounds were pinned to the 512 engine). Tonight on the
 1080 Ti: threat control fine-tune (no threats, ~19:00), then kb8m from
 scratch on pool8 (tests the "KB from scratch needs 3-4B" estimate), then
 the ep-threat fine-tune once threat-inputs-v2's lib lands.
+**Evening:** ladder **3547.4** [3528, 3567] (g8h1024kb8m, +40 over
+3508). **Threat inputs (ep)**: g8h1024kb8m + ep rows, 3 epochs on pool8
+(1080 Ti, branch threat-inputs-v2 incl. cuda-threats): best-scale
+0.025346 / 0.024097, -2.3e-4 / -2.7e-4 vs g8 (its no-threat control did
+not improve on g8). M3 NPS -24.9%. **Queued `stc` --front** (branch
+nnue-g8h1024kb8m-ep, Bench 356168). Desktop deeper-head step 1 (branch
+head-v1, FT -> 16 -> 32 -> 1, 3 x 200M pool8, raw val): H512+head
+0.027596 beats plain H1024 0.027683; needs CUDA/speed work for full size.
+SPSA on the 512 engine: 400 iterations moved nothing beyond ~6% of
+range; restarted on the 1024 main (22:41).
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
