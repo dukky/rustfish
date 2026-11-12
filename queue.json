@@ -1,6 +1,16 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "feat-lmr-deeper-only",
+    "mode": "stc",
+    "expect": 1.5,
+    "test_id": "q-feat-lmr-deeper-only-1112-0849",
+    "sha": "32a9e1029080214b029310d8c162fa5586c2ea71",
+    "base_sha": "1af0e3970e98344ed9e959249a3a39b3a2eaf1d5",
+    "started": "2026-11-12T08:49:42Z",
+    "bench": 401728,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
