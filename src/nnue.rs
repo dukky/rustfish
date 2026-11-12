@@ -397,13 +397,19 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
         let ks = (ns - j).min(4);
         let ar: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(adds[(i + x.min(ka.saturating_sub(1))).min(31)]));
         let sr: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(subs[(j + x.min(ks.saturating_sub(1))).min(31)]));
-        let src = e.acc;
-        update(&mut e.acc, &src, &ar[..ka], &sr[..ks]);
+        // In place on the entry, every chunk also stored to `out` (the last
+        // one's stores leave it final), so neither side needs a copy.
+        let acc = e.acc.as_mut_ptr();
+        // SAFETY: both outputs and the source cover H i16s; the kernel
+        // reads each lane of `acc` before storing it.
+        unsafe { simd::update_dual(acc, out.as_mut_ptr(), acc, &ar[..ka], &sr[..ks]) };
         i += ka;
         j += ks;
     }
+    if na == 0 && ns == 0 {
+        *out = e.acc;
+    }
     e.bb = *bb;
-    *out = e.acc;
 }
 
 /// Feature changes of one move: at most two additions and two removals
@@ -786,6 +792,25 @@ pub(crate) mod scalar {
         sum
     }
 
+    /// `out = out2 = src + Σ adds - Σ subs`; `src` may alias either output.
+    ///
+    /// # Safety
+    /// `out`, `out2` and `src` must each cover H i16s.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn update_dual(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        for i in 0..H {
+            let mut v = *src.add(i);
+            for a in adds {
+                v = v.wrapping_add(a[i]);
+            }
+            for s in subs {
+                v = v.wrapping_sub(s[i]);
+            }
+            *out.add(i) = v;
+            *out2.add(i) = v;
+        }
+    }
+
     /// `update` followed by `screlu_dot(out, w)`; requires |w| <= 127.
     #[allow(dead_code)]
     pub(crate) fn update_dot(
@@ -834,6 +859,27 @@ pub(crate) mod simd {
                 vst1q_s16(out.as_mut_ptr().add(i), v);
                 i += 8;
             }
+        }
+    }
+
+    /// `out = out2 = src + Σ adds - Σ subs`; `src` may alias either output.
+    ///
+    /// # Safety
+    /// `out`, `out2` and `src` must each cover H i16s.
+    #[inline(always)]
+    pub(crate) unsafe fn update_dual(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        let mut i = 0;
+        while i < H {
+            let mut v = vld1q_s16(src.add(i));
+            for a in adds {
+                v = vaddq_s16(v, vld1q_s16(a.as_ptr().add(i)));
+            }
+            for s in subs {
+                v = vsubq_s16(v, vld1q_s16(s.as_ptr().add(i)));
+            }
+            vst1q_s16(out.add(i), v);
+            vst1q_s16(out2.add(i), v);
+            i += 8;
         }
     }
 
@@ -927,6 +973,15 @@ pub(crate) mod simd {
         }
     }
 
+    /// `out = out2 = src + Σ adds - Σ subs`; `src` may alias either output.
+    ///
+    /// # Safety
+    /// `out`, `out2` and `src` must each cover H i16s.
+    #[inline(always)]
+    pub(crate) unsafe fn update_dual(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        super::avx2_kernels::update_dual(out, out2, src, adds, subs)
+    }
+
     /// `update` and `screlu_dot(out, w)` in one pass (|w| <= 127).
     #[inline(always)]
     pub(crate) fn update_dot(
@@ -1013,6 +1068,27 @@ mod avx2_kernels {
     use super::{H, QA};
     use std::arch::x86_64::*;
 
+    /// `out = out2 = src + Σ adds - Σ subs`; `src` may alias either output.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2; `out`, `out2` and `src` must each cover H i16s.
+    #[inline(always)]
+    pub(super) unsafe fn update_dual(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        let mut i = 0;
+        while i < H {
+            let mut v = _mm256_loadu_si256(src.add(i) as *const __m256i);
+            for a in adds {
+                v = _mm256_add_epi16(v, _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i));
+            }
+            for s in subs {
+                v = _mm256_sub_epi16(v, _mm256_loadu_si256(s.as_ptr().add(i) as *const __m256i));
+            }
+            _mm256_storeu_si256(out.add(i) as *mut __m256i, v);
+            _mm256_storeu_si256(out2.add(i) as *mut __m256i, v);
+            i += 16;
+        }
+    }
+
     /// `update` then `screlu_dot(out, w)` in one pass; |w| <= 127.
     ///
     /// # Safety
@@ -1058,7 +1134,7 @@ mod avx2_kernels {
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) mod simd {
-    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update, update_dot};
+    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update, update_dot, update_dual};
 }
 
 /// x86-64 builds without AVX2 enabled at compile time (the default
@@ -1116,6 +1192,22 @@ pub(crate) mod simd {
         } else {
             super::scalar::update_dot(out, src, adds, subs, w)
         }
+    }
+
+    /// # Safety
+    /// `out`, `out2` and `src` must each cover H i16s.
+    #[inline(always)]
+    pub(crate) unsafe fn update_dual(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        if avx2() {
+            update_dual_avx2(out, out2, src, adds, subs)
+        } else {
+            super::scalar::update_dual(out, out2, src, adds, subs)
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn update_dual_avx2(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
+        super::avx2_kernels::update_dual(out, out2, src, adds, subs)
     }
 
     #[target_feature(enable = "avx2")]
@@ -1526,6 +1618,18 @@ mod tests {
                 simd::update(&mut o1, &src, &adds, &subs);
                 scalar::update(&mut o2, &src, &adds, &subs);
                 assert_eq!(o1, o2);
+                // Fused update + output sum (output weights |w| <= 127).
+                let w = rand_vec(127);
+                let mut o3 = [0i16; H];
+                let d = simd::update_dot(&mut o3, &src, &adds, &subs, &w);
+                assert_eq!(o3, o2);
+                assert_eq!(d, scalar::screlu_dot_wide(&o2, &w));
+                // Dual-output update, in place on the first output.
+                let (mut o4, mut o5) = (src, [0i16; H]);
+                let p = o4.as_mut_ptr();
+                // SAFETY: all three pointers cover H i16s.
+                unsafe { simd::update_dual(p, o5.as_mut_ptr(), p, &adds, &subs) };
+                assert!(o4 == o2 && o5 == o2);
             }
             // Accumulator values around and beyond the clamp range.
             let acc = rand_vec(400);
