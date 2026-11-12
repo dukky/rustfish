@@ -516,3 +516,4 @@
 {"branch": "main", "elo": 78.52, "elo_ci95": [59.2, 98.33], "games": 360, "llr": 4.436, "logged_at": "2026-11-12T18:35:50Z", "mode": "ltc-check", "outcome": "check-passed", "sha": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda", "test_id": "q-main-ltc-check-1112-1758", "verdict": "H1"}
 {"branch": "main", "logged_at": "2026-11-12T18:35:55Z", "mode": "ladder", "outcome": "dispatched", "priority": {"rule": "scheduled"}, "sha": "419d29b165d1d88f95d48068cf67d1bb550c08b0", "test_id": "q-ladder-1112-1835"}
 {"branch": "main", "ci": [3528.0, 3566.8], "elo": null, "elo_ci95": null, "games": 440, "llr": null, "logged_at": "2026-11-12T20:07:39Z", "mode": "ladder", "outcome": "ladder-logged", "rating": 3547.4, "sha": "419d29b165d1d88f95d48068cf67d1bb550c08b0", "test_id": "q-ladder-1112-1835", "verdict": "ladder"}
+{"branch": "nnue-g8h1024kb8m-ep", "logged_at": "2026-11-12T22:42:53Z", "mode": "stc", "outcome": "needs-human", "reason": "cargo test failed"}
