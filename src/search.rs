@@ -270,6 +270,13 @@ const HISTORY_MAX: i32 = 16_384;
 /// Cap on a single history bonus/malus. 16 * d^2 reaches it at depth 10, so
 /// one deep cutoff moves an entry at most ~9% of the way to the bound.
 const HISTORY_BONUS_MAX: i32 = 1_536;
+/// LMR re-search depth: a reduced move that fails high by more than
+/// `LMR_DEEPER_MARGIN + 2 * depth` over the best score is re-searched one ply
+/// deeper; one that beats the best score by less than `LMR_SHALLOWER_MARGIN`,
+/// one ply shallower.
+const LMR_DEEPER_MARGIN: i32 = 43;
+const LMR_SHALLOWER_MARGIN: i32 = 9;
+
 /// LMR adjusts the reduction for quiets whose history passes +/- this value.
 /// The old threshold was 2000 under linear `d^2` accumulation; with a 16x
 /// bonus and gravity, the same number of net same-depth cutoffs lands at
@@ -1732,10 +1739,22 @@ fn negamax(
                 reduced || !cut_node,
             );
 
-            if reduced && score > alpha {
+            // A reduced move that beats alpha is re-searched; how deep depends
+            // on how convincingly it did: well above the best score so far,
+            // one ply deeper than normal; barely, one ply shallower.
+            let mut new_depth = depth - 1;
+            if reduced && score > alpha && best > -INF {
+                if score > best + LMR_DEEPER_MARGIN + 2 * new_depth {
+                    new_depth += 1;
+                } else if score < best + LMR_SHALLOWER_MARGIN {
+                    new_depth -= 1;
+                }
+            }
+
+            if reduced && score > alpha && new_depth > reduced_depth {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    new_depth,
                     -alpha - 1,
                     -alpha,
                     ply + 1,
