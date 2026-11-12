@@ -46,10 +46,12 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   beats main's king-bucket net by 9e-5 / 1.1e-4 (g7kb8m's gate win of
   +30.6 came with ~1e-5 / 1.1e-4 over g6kb8m). Engine cost: -20% NPS on
   the M3 (bench 13 interleaved, 4.27M -> 3.39M; LAYOUT_NONE, H=1024).
-  Next: **g7h1024kb8m** (chain16: m1 copy -> kb8m factoriser, 4 epochs,
-  ~5-6 h on the M3 GPU from 05:30); at 512 that step gave -2.5e-4 /
-  -3.5e-4. Gate the kb8m version via `stc` (shape change), and measure NPS
-  on x86 (AVX2/AVX-512) too.
+  **g7h1024kb8m** (chain16, done 09:20): best-scale **0.025637 / 0.024590**
+  (-1.8e-4 / -2.2e-4 vs main; the kb8m step gave -1e-4 / -1.1e-4 over plain
+  1024, half its 512 gain: train/val gap 0.0240 vs 0.0262, data-hungry).
+  M3 NPS -28% vs main (2.89M vs 4.04M). **Queued `stc` at the front**
+  (branch nnue-g7h1024kb8m). Gen 8 on the 1080 Ti is 1024 by the >= 1e-4
+  rule; the desktop's CUDA g7h1024kb8m is the trainer cross-check.
 - Queue: **feat-cuckoo merged +5.5** [1.1, 9.9] (2026-11-12 01:54);
   feat-conthist-rekey rejected (-0.2, 10.9k games: the [piece][to] re-key
   alone is neutral, so the 2/4-ply retry loses its premise; deprioritised);
