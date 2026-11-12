@@ -25,6 +25,21 @@ Rules that the v1 history taught us (see `docs/nnue-experiments.md`):
 - Every weight is clipped to +-1.98 while training, so output weights export
   to |w| <= 127 (the engine's fast path) with no post-hoc clipping.
 
+## Packed data and the streaming shuffle (`src/packed.rs`, `src/stream.rs`)
+
+Game-ordered data packs losslessly to ~3.4 bytes/position (`.rfp`, chained
+board diffs) and trains without a shuffled pool: the loader interleaves
+all chunks of all files in random order and keeps a shuffle buffer. Format,
+measurements and the parity test: `docs/data-format.md`.
+
+```bash
+gunzip -c datagen-s119-n5000.txt.gz | $T pack s119.rfp -   # or: $T pack s4.rfp s4.bin
+$T train --data packed/ --shuffle-buffer 67108864 --val val.bin ...  # dir, manifest (.list) or files
+$T shuffle-check --data packed/ --shuffle-buffer 16777216           # loader speed, batch i.i.d. check
+```
+
+Plain `.bin` files without `--shuffle-buffer` still use the old pool feed.
+
 ## Speed (batch kernels, `src/batch.rs`)
 
 The forward pass runs by samples over 64-float column tiles of a tile-major
