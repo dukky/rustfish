@@ -5,15 +5,7 @@
       "mode": "ladder"
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "ltc-check",
-    "base": "88e13a1894334b0ee2c31279e085f05534144d13",
-    "test_id": "q-main-ltc-check-1112-1758",
-    "sha": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
-    "base_sha": "88e13a1894334b0ee2c31279e085f05534144d13",
-    "started": "2026-11-12T17:58:31Z"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
