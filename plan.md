@@ -28,10 +28,18 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
 ## Plan
 
 **Short term (next ~24-48 h): gen 8 on the desktop, 1024-wide test.**
-- pool7 (54.9 GB) copying laptop -> desktop over Tailscale (LAN, ~12.5 MB/s
-  powerline, done ~00:15 2026-11-12). Gen 8 = pool7 + the CI seeds generated since +
-  the desktop's 3 x 1M-game runs; same recipe (g8 -> g8m1 -> g8kb8m),
-  gate vs g7kb8m.
+- **pool8 (desktop, building 2026-11-12, `~/rustfish-data/pool8.sh`)**, ~3.2B
+  positions: pool7 (1.72B, read not consumed: the desktop's 1024 kb8m run
+  trains from it) + CI seeds **119-167** (~1.1B, newest engine) + CI seeds
+  **52-55, 57, 58, 61** (~187M) and local L1007 chunks c2/3/5/7/9/10/14 (~20M),
+  all wrongly quarantined from pool7 by the scale check at slope 1.250-1.255
+  (drift, not the half-scale bug: on g6kb8m, which saw none of s56-s61, their
+  loss interleaves with accepted neighbours'; band widened to 1.40, e45b9b7)
+  + desktop **D2000 + D2001** (163M). D2002/D2003 were copies of D2001 (seed
+  2001 reused; deleted; next desktop seed 2004). CI seeds **62-118** (~1.6B,
+  minus those above) are held back for pool9 (artifacts kept to ~Feb 2026).
+  Shuffle starts after the desktop's pair experiment, then gen 8
+  (g8 -> g8m1 -> g8kb8m, or 1024 if g7h1024kb8m wins) on the 1080 Ti.
 - **g7h1024 done (2026-11-12 04:55)**, 10 epochs on pool7, no king buckets.
   Best-scale val.bin / val17x2: g7 0.026073 / 0.025162; **g7h1024
   0.025733 / 0.024701**; main g7kb8m 0.025821 / 0.024812. So plain 1024
