@@ -81,3 +81,14 @@ gradients 0.34 ms, AdamW 0.47 ms. Uploads run on a second stream.
 Kernels alone (`bench.cu`, kb8m H 512): forward 1.6 ms, FT backward 2.2
 ms, AdamW 0.4 ms per batch (3.9M pos/s). Checked: CPU checkpoint resumed on
 the GPU and back, `--init` warm start, `--keep-best`, `--wd`.
+
+Approaches that lost (1080 Ti, kb8m):
+- Smaller output-gradient chunks (`CH` 64 / 32 instead of 256): no gain.
+- A per-pair record (accumulator row, output-weight offset, gradient)
+  written by `plan_masks` so `backward_ft`'s staging skips the sample load:
+  -8% at H 1024 `--half` (byte-identical, just slower).
+- Larger work items (`WI` 1024 / 4096): no change.
+- Bigger redesigns of `backward_ft` (64-column tiles, register prefetch of
+  the next range) run out of registers: the bucket's 768 x 32 gradient
+  slice already takes 24 of the 64 registers per thread at 1024 threads.
+
