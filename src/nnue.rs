@@ -142,34 +142,176 @@ pub(crate) const fn layout_buckets(l: &KingLayout) -> usize {
     m + 1
 }
 
+// ------------------------------------------------------------ threat inputs
+
+/// Optional threat input features (`tools/nnue-trainer --threats <name>`).
+/// Each mode adds `blocks()` blocks of 768 feature rows after the king
+/// buckets' FT rows, indexed exactly like the base features
+/// (`side*384 + kind*64 + (o(sq) ^ m)`, same orientation and mirror flip as
+/// the perspective, but not king-bucketed). A row is active when the piece
+/// on that square has the mode's property; kings never do.
+///
+/// - `EnPrise` (1 block): the piece is attacked by an enemy piece of lower
+///   value (P < N = B < R < Q), or attacked and not defended by its own side.
+///   This is the first-order static-exchange signal ("this piece can be
+///   won"), at most 30 active rows per perspective.
+/// - `AttDef` (2 blocks): block 0 = attacked by any enemy piece, block 1 =
+///   defended by an own piece (both from plain attack sets, no x-rays).
+///
+/// The property of a piece does not depend on the perspective, so both
+/// perspectives activate the same pieces (in their own orientation).
+/// Threats change non-locally, but few of them per move (about 1 row per
+/// ply for `EnPrise`, 3.5 for `AttDef`), so they ride in the normal lazy
+/// accumulator stack: `push_move` saves the post-move piece bitboards, and
+/// materialising a ply computes its threat bitboards and adds the changed
+/// threat rows in the same fused update pass as the move's piece rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub(crate) enum ThreatMode {
+    None,
+    EnPrise,
+    AttDef,
+}
+
+impl ThreatMode {
+    pub(crate) const fn blocks(self) -> usize {
+        match self {
+            ThreatMode::None => 0,
+            ThreatMode::EnPrise => 1,
+            ThreatMode::AttDef => 2,
+        }
+    }
+}
+
+/// The threat inputs the engine runs. Switching it changes the net format
+/// (`blocks()` x 768 extra FT rows after the king buckets' rows): embed a
+/// net trained with the same `--threats`.
+pub(crate) const THREATS: ThreatMode = ThreatMode::None;
+
+/// Threat bitboards per block, `[block][colour][kind]`: the pieces whose
+/// threat row of that block is active.
+pub(crate) type ThreatBBs = [[[u64; 6]; 2]; 2];
+
+const FILE_A: u64 = 0x0101_0101_0101_0101;
+const FILE_H: u64 = FILE_A << 7;
+
+/// Squares attacked by colour `c`'s pieces, per attacker kind.
+#[inline(always)]
+fn attacks_by_kind(bb: &PieceBBs, c: usize, occ: u64) -> [u64; 6] {
+    use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
+    let p = &bb[c];
+    let pawns = if c == 0 {
+        ((p[0] & !FILE_A) << 7) | ((p[0] & !FILE_H) << 9)
+    } else {
+        ((p[0] & !FILE_A) >> 9) | ((p[0] & !FILE_H) >> 7)
+    };
+    let mut a = [pawns, 0, 0, 0, 0, 0];
+    let mut x = p[1];
+    while x != 0 {
+        a[1] |= KNIGHT_ATTACKS[x.trailing_zeros() as usize];
+        x &= x - 1;
+    }
+    let mut x = p[2];
+    while x != 0 {
+        a[2] |= bishop_attacks(x.trailing_zeros() as usize, occ);
+        x &= x - 1;
+    }
+    let mut x = p[3];
+    while x != 0 {
+        a[3] |= rook_attacks(x.trailing_zeros() as usize, occ);
+        x &= x - 1;
+    }
+    let mut x = p[4];
+    while x != 0 {
+        let s = x.trailing_zeros() as usize;
+        a[4] |= bishop_attacks(s, occ) | rook_attacks(s, occ);
+        x &= x - 1;
+    }
+    let mut x = p[5];
+    while x != 0 {
+        a[5] |= KING_ATTACKS[x.trailing_zeros() as usize];
+        x &= x - 1;
+    }
+    a
+}
+
+/// The threat bitboards of a position (only the first `mode.blocks()` are
+/// meaningful). The same definition as `threat_masks` in the trainers.
+#[inline]
+pub(crate) fn threat_bbs(bb: &PieceBBs, mode: ThreatMode) -> ThreatBBs {
+    let mut t = [[[0u64; 6]; 2]; 2];
+    if mode == ThreatMode::None {
+        return t;
+    }
+    let mut occ = 0;
+    for c in 0..2 {
+        for k in 0..6 {
+            occ |= bb[c][k];
+        }
+    }
+    let att = [attacks_by_kind(bb, 0, occ), attacks_by_kind(bb, 1, occ)];
+    let all = |a: &[u64; 6]| a[0] | a[1] | a[2] | a[3] | a[4] | a[5];
+    let any = [all(&att[0]), all(&att[1])];
+    for c in 0..2 {
+        let (e, by, def) = (&att[1 - c], any[1 - c], any[c]);
+        match mode {
+            ThreatMode::EnPrise => {
+                let hanging = by & !def;
+                let minor = e[0];
+                let rook = minor | e[1] | e[2];
+                let queen = rook | e[3];
+                let lower = [0, minor, minor, rook, queen];
+                for k in 0..5 {
+                    t[0][c][k] = bb[c][k] & (lower[k] | hanging);
+                }
+            }
+            ThreatMode::AttDef => {
+                for k in 0..5 {
+                    t[0][c][k] = bb[c][k] & by;
+                    t[1][c][k] = bb[c][k] & def;
+                }
+            }
+            ThreatMode::None => {}
+        }
+    }
+    t
+}
+
 /// A king layout as a type, so the accumulator code is monomorphised per
 /// layout: the active one compiles to exactly the old code when it has one
-/// unmirrored bucket, and tests can drive other layouts side by side.
+/// unmirrored bucket, and tests can drive other layouts side by side. The
+/// threat mode rides along (`TH`, off unless a type sets it).
 pub(crate) trait Layout: Clone {
     const L: KingLayout;
     const KB: usize = layout_buckets(&Self::L);
     /// Whether a king move can change its perspective's feature block.
     const REFRESH: bool = Self::KB > 1 || Self::L.mirror;
+    const TH: ThreatMode = ThreatMode::None;
+    /// Threat blocks of 768 rows after the `KB * 768` king-bucket rows.
+    const TB: usize = Self::TH.blocks();
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct Active;
 impl Layout for Active {
     const L: KingLayout = KING_LAYOUT;
+    const TH: ThreatMode = THREATS;
 }
 
 /// Input buckets of the active layout.
 pub(crate) const KB: usize = layout_buckets(&KING_LAYOUT);
+/// Threat blocks of the active net.
+pub(crate) const TB: usize = THREATS.blocks();
 
-/// Bytes in a net file with `kb` king buckets:
-/// (kb*768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
-pub(crate) const fn net_bytes(kb: usize) -> usize {
-    (kb * INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2
+/// Bytes in a net file with `blocks` blocks of 768 FT rows (king buckets
+/// plus threat blocks): (blocks*768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
+pub(crate) const fn net_bytes(blocks: usize) -> usize {
+    (blocks * INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2
 }
 
 /// Bytes in a net file for the active layout.
 #[allow(dead_code)]
-pub(crate) const NET_BYTES: usize = net_bytes(KB);
+pub(crate) const NET_BYTES: usize = net_bytes(KB + TB);
 
 /// A perspective's king context: feature block offset (`bucket * 768`) and
 /// the square xor (7 when mirrored).
@@ -212,7 +354,7 @@ const EVAL_LIMIT: i32 = 20_000;
 #[derive(Clone)]
 pub(crate) struct Network {
     /// Feature-major: weights of feature f are `ft_w[f*H .. (f+1)*H]`,
-    /// `kb * 768` features.
+    /// `kb * 768` features (`blocks = kb + threat blocks`, threat rows last).
     ft_w: Vec<i16>,
     kb: usize,
     ft_b: [i16; H],
@@ -225,15 +367,15 @@ pub(crate) struct Network {
 }
 
 impl Network {
-    /// A net for the active king layout.
+    /// A net for the active king layout (and threat inputs).
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        Self::from_bytes_kb(bytes, KB)
+        Self::from_bytes_kb(bytes, KB + TB)
     }
 
     pub(crate) fn from_bytes_kb(bytes: &[u8], kb: usize) -> Result<Self, String> {
         if bytes.len() != net_bytes(kb) {
             return Err(format!(
-                "net is {} bytes, expected {} (H={H}, {kb} king bucket(s), {BUCKETS} output bucket(s))",
+                "net is {} bytes, expected {} (H={H}, {kb} block(s) of 768 FT rows = {KB} king bucket(s) + {TB} threat block(s), {BUCKETS} output bucket(s))",
                 bytes.len(),
                 net_bytes(kb)
             ));
@@ -337,8 +479,9 @@ impl Accumulator {
         Self::refresh_with::<Active>(net, board)
     }
 
+    /// From scratch: piece rows, and threat rows when `L::TB > 0`.
     pub(crate) fn refresh_with<L: Layout>(net: &Network, board: &Board) -> Self {
-        debug_assert_eq!(net.kb, L::KB);
+        debug_assert_eq!(net.kb, L::KB + L::TB);
         let ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
         let mut acc = Self { v: [net.ft_b; 2] };
         for sq in 0..64u8 {
@@ -349,6 +492,12 @@ impl Accumulator {
                         *a = a.wrapping_add(*w);
                     }
                 }
+            }
+        }
+        if L::TB > 0 {
+            let tb = threat_bbs(&board.bb.pieces, L::TH);
+            for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+                add_threat_rows::<L>(net, &mut acc.v[pi], persp, ctx[pi].flip, &tb);
             }
         }
         acc
@@ -404,6 +553,115 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
     }
     e.bb = *bb;
     *out = e.acc;
+}
+
+/// `out = src + Σ rows(adds) - Σ rows(subs)`: up to two adds and two subs
+/// per pass through the SIMD `update` with fixed-length row lists (dynamic
+/// lists compile to a much slower inner loop); further passes run in place.
+fn update_rows(net: &Network, out: &mut [i16; H], src: &[i16; H], adds: &[u16], subs: &[u16]) {
+    let (mut i, mut j) = (0, 0);
+    let mut first = true;
+    loop {
+        let (ka, ks) = ((adds.len() - i).min(2), (subs.len() - j).min(2));
+        if !first && ka == 0 && ks == 0 {
+            return;
+        }
+        let a = |k: usize| net.row(adds[i + k] as usize);
+        let s = |k: usize| net.row(subs[j + k] as usize);
+        let tmp;
+        let from: &[i16; H] = if first {
+            src
+        } else {
+            tmp = *out;
+            &tmp
+        };
+        match (ka, ks) {
+            (0, 0) => *out = *from,
+            (1, 0) => update(out, from, &[a(0)], &[]),
+            (0, 1) => update(out, from, &[], &[s(0)]),
+            (1, 1) => update(out, from, &[a(0)], &[s(0)]),
+            (2, 0) => update(out, from, &[a(0), a(1)], &[]),
+            (0, 2) => update(out, from, &[], &[s(0), s(1)]),
+            (2, 1) => update(out, from, &[a(0), a(1)], &[s(0)]),
+            (1, 2) => update(out, from, &[a(0)], &[s(0), s(1)]),
+            _ => update(out, from, &[a(0), a(1)], &[s(0), s(1)]),
+        }
+        first = false;
+        i += ka;
+        j += ks;
+    }
+}
+
+/// Threat feature of block `t` for piece (colour index `c`, kind) on `sq`,
+/// perspective `persp` with square xor `flip`: after the king-bucket rows,
+/// not bucketed.
+#[inline(always)]
+fn threat_feature<L: Layout>(persp: Color, t: usize, c: usize, kind: usize, sq: u8, flip: u8) -> usize {
+    (L::KB + t) * INPUTS + feature_ck(persp, c, kind, sq, KingCtx { base: 0, flip })
+}
+
+/// Indices of the threat rows of perspective `persp` (square xor `flip`)
+/// that are set in `new` but not in `old` (into `adds`) and the reverse
+/// (into `subs`); returns the counts. Kings have no threat rows.
+#[inline(always)]
+fn threat_diff<L: Layout>(persp: Color, flip: u8, old: &ThreatBBs, new: &ThreatBBs, adds: &mut [u16], subs: &mut [u16]) -> (usize, usize) {
+    let (mut na, mut ns) = (0, 0);
+    for t in 0..L::TB {
+        for c in 0..2 {
+            for k in 0..5 {
+                let (n, o) = (new[t][c][k], old[t][c][k]);
+                if n == o {
+                    continue;
+                }
+                let (mut a, mut r) = (n & !o, o & !n);
+                while a != 0 && na < adds.len() {
+                    adds[na] = threat_feature::<L>(persp, t, c, k, a.trailing_zeros() as u8, flip) as u16;
+                    na += 1;
+                    a &= a - 1;
+                }
+                while r != 0 && ns < subs.len() {
+                    subs[ns] = threat_feature::<L>(persp, t, c, k, r.trailing_zeros() as u8, flip) as u16;
+                    ns += 1;
+                    r &= r - 1;
+                }
+                debug_assert!(a == 0 && r == 0, "too many threat rows");
+            }
+        }
+    }
+    (na, ns)
+}
+
+/// `acc += ` every threat row of `tb` for perspective `persp`.
+fn add_threat_rows<L: Layout>(net: &Network, acc: &mut [i16; H], persp: Color, flip: u8, tb: &ThreatBBs) {
+    let mut adds = [0u16; 64];
+    let (na, _) = threat_diff::<L>(persp, flip, &[[[0; 6]; 2]; 2], tb, &mut adds, &mut []);
+    let src = *acc;
+    update_rows(net, acc, &src, &adds[..na], &[]);
+}
+
+/// Threat accumulators of `board` from scratch (tests).
+#[cfg(test)]
+fn threat_scratch<L: Layout>(net: &Network, board: &Board) -> [[i16; H]; 2] {
+    let bbs = threat_bbs(&board.bb.pieces, L::TH);
+    let mut out = [[0i16; H]; 2];
+    for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+        let flip = board_ctx::<L>(board, persp).flip;
+        for t in 0..L::TB {
+            for c in 0..2 {
+                for k in 0..6 {
+                    let mut x = bbs[t][c][k];
+                    while x != 0 {
+                        let row = net.row(threat_feature::<L>(persp, t, c, k, x.trailing_zeros() as u8, flip));
+                        for (a, w) in out[pi].iter_mut().zip(row.iter()) {
+                            *a = a.wrapping_add(*w);
+                        }
+                        x &= x - 1;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Feature changes of one move: at most two additions and two removals
@@ -517,6 +775,9 @@ pub(crate) struct NnueState<L: Layout = Active> {
     /// Finny table, `[perspective][bucket * 2 + mirrored]`; empty unless
     /// `L::REFRESH`.
     cache: RefCell<Vec<CacheEntry>>,
+    /// Threat bitboards of `stack[..=computed]`'s positions (`L::TB > 0`
+    /// only, else empty; see `ThreatMode`).
+    tbbs: RefCell<Vec<ThreatBBs>>,
     _layout: PhantomData<L>,
 }
 
@@ -530,7 +791,7 @@ impl<L: Layout> Eq for NnueState<L> {}
 
 impl<L: Layout> NnueState<L> {
     pub(crate) fn new(net: Arc<Network>, board: &Board) -> Self {
-        assert_eq!(net.kb, L::KB, "net has {} king buckets, layout needs {}", net.kb, L::KB);
+        assert_eq!(net.kb, L::KB + L::TB, "net has {} FT blocks, layout needs {} + {} threat", net.kb, L::KB, L::TB);
         let cache = if L::REFRESH {
             vec![CacheEntry { acc: net.ft_b, bb: [[0; 6]; 2] }; 2 * L::KB * 2]
         } else {
@@ -544,6 +805,7 @@ impl<L: Layout> NnueState<L> {
             computed: Cell::new(0),
             top: 0,
             cache: RefCell::new(cache),
+            tbbs: RefCell::new(if L::TB > 0 { Vec::with_capacity(256) } else { Vec::new() }),
             _layout: PhantomData,
         };
         s.refresh(board);
@@ -556,6 +818,11 @@ impl<L: Layout> NnueState<L> {
         self.computed.set(0);
         let stack = self.stack.get_mut();
         stack[0].acc = Accumulator::refresh_with::<L>(&self.net, board);
+        if L::TB > 0 {
+            let t = self.tbbs.get_mut();
+            t.clear();
+            t.push(threat_bbs(&board.bb.pieces, L::TH));
+        }
         if L::REFRESH {
             stack[0].ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
         }
@@ -579,6 +846,10 @@ impl<L: Layout> NnueState<L> {
         } else {
             stack[self.top].delta = delta;
         }
+        if L::TB > 0 {
+            // Materialising this ply needs its piece bitboards (threats).
+            stack[self.top].bb = bb_after(board, &delta);
+        }
         if L::REFRESH {
             let prev = stack[self.top - 1].ctx;
             let slot = &mut stack[self.top];
@@ -591,7 +862,9 @@ impl<L: Layout> NnueState<L> {
                 if k != prev[pi] {
                     slot.ctx[pi] = k;
                     slot.refresh[pi] = true;
-                    slot.bb = bb_after(board, &delta);
+                    if L::TB == 0 {
+                        slot.bb = bb_after(board, &delta);
+                    }
                 }
             }
         }
@@ -614,10 +887,19 @@ impl<L: Layout> NnueState<L> {
             return;
         }
         let mut stack = self.stack.borrow_mut();
+        let mut tbbs = self.tbbs.borrow_mut();
         let net = &*self.net;
         while k < self.top {
             let (lo, hi) = stack.split_at_mut(k + 1);
-            apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache);
+            if L::TB > 0 {
+                // tbbs[k] is ply k's; compute ply k + 1's.
+                tbbs.truncate(k + 1);
+                let next = threat_bbs(&hi[0].bb, L::TH);
+                apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache, (&tbbs[k], &next));
+                tbbs.push(next);
+            } else {
+                apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache, (&[[[0; 6]; 2]; 2], &[[[0; 6]; 2]; 2]));
+            }
             k += 1;
         }
         self.computed.set(k);
@@ -635,8 +917,11 @@ impl<L: Layout> NnueState<L> {
 
 /// `dst.acc = src + dst.delta`, both perspectives in one copy-and-update
 /// pass; a perspective marked for refresh is rebuilt from the finny table.
+/// With threat inputs, `thr` = (threat bitboards of `src`'s position, of
+/// `dst`'s): the changed threat rows join the same pass (a refreshed
+/// perspective gets all of `dst`'s threat rows after the finny refresh).
 #[inline(always)]
-fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
+fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>, thr: (&ThreatBBs, &ThreatBBs)) {
     let d = dst.delta;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
         let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
@@ -644,6 +929,26 @@ fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cach
             let mut c = cache.borrow_mut();
             let bb = dst.bb;
             refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
+            if L::TB > 0 {
+                add_threat_rows::<L>(net, &mut dst.acc.v[pi], persp, k.flip, thr.1);
+            }
+            continue;
+        }
+        // Threat rows unchanged (about half the plies with `EnPrise`): the
+        // plain piece-row pass below.
+        if L::TB > 0 && thr.0[..L::TB] != thr.1[..L::TB] {
+            // Piece rows (at most 2 + 2), then the changed threat rows.
+            let mut adds = [0u16; 64 + 2];
+            let mut subs = [0u16; 64 + 2];
+            for x in 0..d.n_add {
+                adds[x] = feature(persp, d.add[x].1.unwrap(), d.add[x].0, k) as u16;
+            }
+            for x in 0..d.n_sub {
+                subs[x] = feature(persp, d.sub[x].1.unwrap(), d.sub[x].0, k) as u16;
+            }
+            let (ta, ts) = threat_diff::<L>(persp, k.flip, thr.0, thr.1, &mut adds[d.n_add..], &mut subs[d.n_sub..]);
+            let (na, ns) = (d.n_add + ta, d.n_sub + ts);
+            update_rows(net, &mut dst.acc.v[pi], &src.v[pi], &adds[..na], &subs[..ns]);
             continue;
         }
         let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
@@ -1118,12 +1423,25 @@ mod tests {
                 const L: KingLayout = $l;
             }
         };
+        ($name:ident, $l:expr, $th:expr) => {
+            #[derive(Clone, Copy)]
+            struct $name;
+            impl Layout for $name {
+                const L: KingLayout = $l;
+                const TH: ThreatMode = $th;
+            }
+        };
     }
     layout!(None1, LAYOUT_NONE);
     layout!(M1, LAYOUT_M1);
     layout!(Kb4, LAYOUT_KB4);
     layout!(Kb4m, LAYOUT_KB4M);
     layout!(Kb8m, LAYOUT_KB8M);
+    layout!(None1Ep, LAYOUT_NONE, ThreatMode::EnPrise);
+    layout!(None1Ad, LAYOUT_NONE, ThreatMode::AttDef);
+    layout!(M1Ep, LAYOUT_M1, ThreatMode::EnPrise);
+    layout!(Kb8mAd, LAYOUT_KB8M, ThreatMode::AttDef);
+    layout!(Kb4Ep, LAYOUT_KB4, ThreatMode::EnPrise);
 
     #[test]
     fn layouts_are_well_formed() {
@@ -1149,7 +1467,7 @@ mod tests {
     #[test]
     fn kb1_matches_legacy_layout() {
         // Only meaningful while main embeds a KB=1 net; a king-bucket net on main skips it.
-        if KING_LAYOUT != LAYOUT_NONE {
+        if KING_LAYOUT != LAYOUT_NONE || THREATS != ThreatMode::None {
             return;
         }
         assert_eq!(NET_BYTES, (768 * H + H + BUCKETS * (2 * H + 1)) * 2);
@@ -1207,10 +1525,30 @@ mod tests {
     /// across buckets and the mirror line) match a from-scratch refresh
     /// over random games, for every layout.
     fn incremental_matches_refresh_for<L: Layout>(seed: u64) {
-        let net = Arc::new(Network::random_kb(seed, 64, 100, L::KB));
+        let net = Arc::new(Network::random_kb(seed, 64, 100, L::KB + L::TB));
         let mut next = rng(seed * 31 + 5);
         let mut legal = Vec::new();
         let (mut king_moves, mut refreshes, mut flips) = (0, 0, 0);
+        // Piece + threat rows of `board`, independently of `refresh_with`.
+        let scratch = |board: &Board| {
+            let ctx = [board_ctx::<L>(board, Color::White), board_ctx::<L>(board, Color::Black)];
+            let mut a = Accumulator { v: [net.ft_b; 2] };
+            let t = threat_scratch::<L>(&net, board);
+            for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+                for sq in 0..64u8 {
+                    if let Some(p) = board.squares[sq as usize] {
+                        for (x, w) in a.v[pi].iter_mut().zip(net.row(feature(persp, p, sq, ctx[pi])).iter()) {
+                            *x = x.wrapping_add(*w);
+                        }
+                    }
+                }
+                for (x, y) in a.v[pi].iter_mut().zip(t[pi].iter()) {
+                    *x = x.wrapping_add(*y);
+                }
+            }
+            a
+        };
+        let mut threat_rows = 0usize;
         let fens = [
             FENS[0],
             FENS[2],
@@ -1250,14 +1588,35 @@ mod tests {
                 st.push_move(&board, mv);
                 let undo = board.make_move(mv);
                 history.push((mv, undo));
-                let full = Accumulator::refresh_with::<L>(&net, &board);
-                assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                // With threats, materialise only sometimes, so several
+                // plies (and their threat diffs) are applied in one go.
+                if L::TB == 0 || next() % 3 == 0 {
+                    let full = Accumulator::refresh_with::<L>(&net, &board);
+                    assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                }
+                if L::TB > 0 && next() % 3 == 0 {
+                    let want = scratch(&board);
+                    assert!(st.current().v == want.v, "threats after {}", move_to_uci(mv));
+                    assert!(Accumulator::refresh_with::<L>(&net, &board).v == want.v);
+                    let n = board.bb.occ_all().count_ones();
+                    assert_eq!(st.evaluate(board.side_to_move, n), evaluate_acc(&net, &want, board.side_to_move, n));
+                    let tb = threat_bbs(&board.bb.pieces, L::TH);
+                    threat_rows += tb[..L::TB].iter().flatten().flatten().map(|x| x.count_ones() as usize).sum::<usize>();
+                }
             }
             while let Some((mv, undo)) = history.pop() {
                 board.undo_move(mv, undo);
                 st.pop();
-                assert!(st.current().v == Accumulator::refresh_with::<L>(&net, &board).v);
+                if L::TB == 0 || next() % 2 == 0 {
+                    assert!(st.current().v == Accumulator::refresh_with::<L>(&net, &board).v);
+                }
+                if L::TB > 0 && next() % 4 == 0 {
+                    assert!(st.current().v == scratch(&board).v);
+                }
             }
+        }
+        if L::TB > 0 {
+            assert!(threat_rows > 2_000, "{threat_rows}");
         }
         assert!(king_moves > 1000, "{king_moves}");
         if L::REFRESH {
@@ -1276,6 +1635,147 @@ mod tests {
         incremental_matches_refresh_for::<Kb4>(6);
         incremental_matches_refresh_for::<Kb4m>(7);
         incremental_matches_refresh_for::<Kb8m>(8);
+    }
+
+    /// Threat accumulators (diffed per eval, rebuilt on mirror flips) match
+    /// a from-scratch build, with and without king buckets and mirroring.
+    #[test]
+    fn threat_inputs_incremental_matches_scratch() {
+        incremental_matches_refresh_for::<None1Ep>(21);
+        incremental_matches_refresh_for::<None1Ad>(22);
+        incremental_matches_refresh_for::<M1Ep>(23);
+        incremental_matches_refresh_for::<Kb8mAd>(24);
+        incremental_matches_refresh_for::<Kb4Ep>(25);
+    }
+
+    /// Hand-checked threat bitboards; `tools/nnue-trainer` has the same cases.
+    #[test]
+    fn threat_bbs_hand_checked() {
+        let bit = |s: u32| 1u64 << s;
+        let mut b = Board::new();
+        // W Ke1 Rh1 Ne4 Pc4, B Ke8 Pd5 Bc6 Rf6.
+        b.set_fen("4k3/8/2b2r2/3p4/2P1N3/8/8/4K2R w - - 0 1");
+        let (c4, e4, f6, d5, c6) = (26, 28, 45, 35, 42);
+        let ep = threat_bbs(&b.bb.pieces, ThreatMode::EnPrise);
+        // White: c4 pawn attacked by d5 and undefended; e4 knight attacked by a pawn.
+        assert_eq!(ep[0][0], [bit(c4), bit(e4), 0, 0, 0, 0]);
+        // Black: f6 rook attacked by a knight; d5 pawn attacked by a pawn but defended by c6.
+        assert_eq!(ep[0][1], [0, 0, 0, bit(f6), 0, 0]);
+        assert_eq!(ep[1], [[0; 6]; 2]);
+        let ad = threat_bbs(&b.bb.pieces, ThreatMode::AttDef);
+        assert_eq!(ad[0][0], [bit(c4), bit(e4), 0, 0, 0, 0]);
+        assert_eq!(ad[0][1], [bit(d5), 0, 0, bit(f6), 0, 0]);
+        // Defended: no White piece; Black d5 (by c6) and c6 (by f6).
+        assert_eq!(ad[1][0], [0; 6]);
+        assert_eq!(ad[1][1], [bit(d5), 0, bit(c6), 0, 0, 0]);
+        assert_eq!(threat_bbs(&b.bb.pieces, ThreatMode::None), [[[0; 6]; 2]; 2]);
+        // Feature indices (as the trainer's `threat_masks_hand_checked`):
+        // block 0 follows the king buckets; same orientation and flip as pieces.
+        let (w, bl) = (Color::White, Color::Black);
+        assert_eq!(threat_feature::<None1Ep>(w, 0, 0, 0, c4 as u8, 0), 768 + 26);
+        assert_eq!(threat_feature::<None1Ep>(w, 0, 1, 3, f6 as u8, 0), 768 + 384 + 192 + 45);
+        assert_eq!(threat_feature::<None1Ep>(bl, 0, 1, 3, f6 as u8, 0), 768 + 192 + 21);
+        assert_eq!(threat_feature::<None1Ep>(bl, 0, 0, 1, e4 as u8, 0), 768 + 384 + 64 + 36);
+        // kb8m (kings e1 / e8 -> flip 7): rows 8*768 + block*768 + ...
+        assert_eq!(threat_feature::<Kb8mAd>(w, 0, 1, 3, f6 as u8, 7), 8 * 768 + 618);
+        assert_eq!(threat_feature::<Kb8mAd>(w, 1, 1, 2, c6 as u8, 7), 9 * 768 + 557);
+        assert_eq!(threat_feature::<Kb8mAd>(bl, 1, 1, 0, d5 as u8, 7), 9 * 768 + 28);
+        // W Kg1 Pc3 Nd4 Qh5 Ra1, B Ra8 Rd8 Ke8 Bb6 Rh8.
+        b.set_fen("r2rk2r/8/1b6/7Q/3N4/2P5/8/R5K1 w - - 0 1");
+        let ep = threat_bbs(&b.bb.pieces, ThreatMode::EnPrise);
+        // Nd4: attackers Bb6 (equal) and Rd8 (higher), defended by c3 -> no.
+        // Qh5: attacked by Rh8 (lower) -> yes. Ra1: attacked by Ra8 (equal),
+        // undefended -> yes. Kings never.
+        assert_eq!(ep[0][0], [0, 0, 0, bit(0), bit(39), 0]);
+        // Ra8: attacked by Ra1 (equal) but defended by Rd8 -> no. Rh8:
+        // attacked by the queen (higher), undefended -> yes.
+        assert_eq!(ep[0][1], [0, 0, 0, bit(63), 0, 0]);
+        let ad = threat_bbs(&b.bb.pieces, ThreatMode::AttDef);
+        assert_eq!(ad[0][0], [0, bit(27), 0, bit(0), bit(39), 0]);
+        assert_eq!(ad[0][1], [0, 0, 0, bit(56) | bit(63), 0, 0]);
+        assert_eq!(ad[1][0], [0, bit(27), 0, 0, 0, 0]);
+        assert_eq!(ad[1][1], [0, 0, 0, bit(56) | bit(59), 0, 0]);
+    }
+
+    /// `threat_bbs` against a naive definition (attacker lists from ray
+    /// walks over the mailbox) over random game positions.
+    #[test]
+    fn threat_bbs_match_naive() {
+        // Kinds of colour `by`'s pieces attacking `sq` (no x-rays).
+        fn attackers(board: &Board, sq: i32, by: Color) -> Vec<usize> {
+            let mut out = Vec::new();
+            for from in 0..64i32 {
+                let Some(p) = board.squares[from as usize] else { continue };
+                if p.color != by || from == sq {
+                    continue;
+                }
+                let (df, dr) = (sq % 8 - from % 8, sq / 8 - from / 8);
+                let hit = match p.kind {
+                    PieceType::Pawn => df.abs() == 1 && dr == if by == Color::White { 1 } else { -1 },
+                    PieceType::Knight => (df.abs(), dr.abs()) == (1, 2) || (df.abs(), dr.abs()) == (2, 1),
+                    PieceType::King => df.abs() <= 1 && dr.abs() <= 1,
+                    _ => {
+                        let diag = df.abs() == dr.abs();
+                        let ortho = df == 0 || dr == 0;
+                        let ok = match p.kind {
+                            PieceType::Bishop => diag,
+                            PieceType::Rook => ortho,
+                            _ => diag || ortho,
+                        };
+                        ok && {
+                            let step = df.signum() + 8 * dr.signum();
+                            let mut s = from + step;
+                            let mut clear = true;
+                            while s != sq {
+                                clear &= board.squares[s as usize].is_none();
+                                s += step;
+                            }
+                            clear
+                        }
+                    }
+                };
+                if hit {
+                    out.push(p.kind as usize);
+                }
+            }
+            out
+        }
+        let value = [1, 3, 3, 5, 9, 100];
+        let mut next = rng(77);
+        let mut legal = Vec::new();
+        let mut set = [0usize; 3];
+        for game in 0..40 {
+            let mut board = Board::new();
+            board.set_fen(FENS[game % FENS.len()]);
+            for _ in 0..80 {
+                board.generate_legal_moves(false, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                board.make_move(legal[(next() as usize) % legal.len()]);
+                let ep = threat_bbs(&board.bb.pieces, ThreatMode::EnPrise);
+                let ad = threat_bbs(&board.bb.pieces, ThreatMode::AttDef);
+                for sq in 0..64 {
+                    let Some(p) = board.squares[sq as usize] else { continue };
+                    let (c, k) = (p.color as usize, p.kind as usize);
+                    let by = attackers(&board, sq, p.color.opposite());
+                    let def = attackers(&board, sq, p.color);
+                    let king = p.kind == PieceType::King;
+                    let att = !king && !by.is_empty();
+                    let dfd = !king && !def.is_empty();
+                    let lower = by.iter().any(|&a| value[a] < value[k]);
+                    let want_ep = !king && (lower || (att && !dfd));
+                    let got = |t: &ThreatBBs, b: usize| t[b][c][k] >> sq & 1 == 1;
+                    assert_eq!(got(&ep, 0), want_ep, "en prise sq {sq} game {game}");
+                    assert_eq!(got(&ad, 0), att, "attacked sq {sq} game {game}");
+                    assert_eq!(got(&ad, 1), dfd, "defended sq {sq} game {game}");
+                    set[0] += want_ep as usize;
+                    set[1] += att as usize;
+                    set[2] += dfd as usize;
+                }
+            }
+        }
+        assert!(set.iter().all(|&n| n > 1000), "{set:?}");
     }
 
     #[test]
@@ -1331,6 +1831,105 @@ mod tests {
     fn rejects_wrong_size() {
         assert!(Network::from_bytes(&[0u8; 10]).is_err());
         assert!(Network::from_bytes(&vec![0u8; NET_BYTES]).is_ok());
+    }
+
+    /// End-to-end check against the trainers: evals of the FENs in
+    /// `$THREAT_FENS` (one per line) with the net `$THREAT_NET` trained with
+    /// `--threats $THREAT_MODE` (ep|ad, no king buckets), printed as
+    /// `|cp|<TAB>fen` for comparison with `nnue-trainer eval` on the same
+    /// positions. `cargo test --release threat_net_eval_dump -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn threat_net_eval_dump() {
+        fn dump<L: Layout>(bytes: &[u8], fens: &str) {
+            let net = Arc::new(Network::from_bytes_kb(bytes, L::KB + L::TB).unwrap());
+            for fen in fens.lines().filter(|l| !l.trim().is_empty()) {
+                let mut b = Board::new();
+                b.set_fen(fen);
+                let st = NnueState::<L>::new(net.clone(), &b);
+                println!("{}\t{fen}", st.evaluate(b.side_to_move, b.bb.occ_all().count_ones()).abs());
+            }
+        }
+        let net = std::fs::read(std::env::var("THREAT_NET").unwrap()).unwrap();
+        let fens = std::fs::read_to_string(std::env::var("THREAT_FENS").unwrap()).unwrap();
+        match std::env::var("THREAT_MODE").unwrap().as_str() {
+            "ep" => dump::<None1Ep>(&net, &fens),
+            "ad" => dump::<None1Ad>(&net, &fens),
+            m => panic!("unknown THREAT_MODE {m}"),
+        }
+    }
+
+    /// Threat-input cost: `cargo test --release threat_throughput -- --ignored --nocapture`.
+    /// Walks random games, evaluating each position (threat diff of one ply).
+    #[test]
+    #[ignore]
+    fn threat_throughput() {
+        use std::time::Instant;
+        fn run<L: Layout>(name: &str) {
+            let net = Arc::new(Network::random_kb(42, 64, 100, L::KB + L::TB));
+            let mut next = rng(5);
+            let mut legal = Vec::new();
+            // A fixed list of positions along random games.
+            let mut boards = Vec::new();
+            for g in 0..20 {
+                let mut b = Board::new();
+                b.set_fen(FENS[g % FENS.len()]);
+                for _ in 0..60 {
+                    b.generate_legal_moves(false, &mut legal);
+                    if legal.is_empty() {
+                        break;
+                    }
+                    b.make_move(legal[(next() as usize) % legal.len()]);
+                    boards.push(b.clone());
+                }
+            }
+            let reps = 2000;
+            let t = Instant::now();
+            let mut x = 0u64;
+            for _ in 0..reps {
+                for b in &boards {
+                    let bb = threat_bbs(&std::hint::black_box(b).bb.pieces, L::TH);
+                    x = x.wrapping_add(bb[0][0][1] ^ bb[1][1][3]);
+                }
+            }
+            let n = (reps * boards.len()) as f64;
+            let masks = t.elapsed().as_secs_f64() * 1e9 / n;
+            // One ply: push a move and materialise, vs the same layout's
+            // piece rows only (L::TB = 0 twin) for the plain cost.
+            let mut st = NnueState::<L>::new(net.clone(), &boards[0]);
+            let mut b0 = boards[0].clone();
+            b0.generate_legal_moves(false, &mut legal);
+            let t = Instant::now();
+            for i in 0..reps * boards.len() {
+                let mv = legal[i % legal.len()];
+                st.push_move(&b0, mv);
+                st.materialise();
+                st.pop();
+            }
+            let upd = t.elapsed().as_secs_f64() * 1e9 / n;
+            x = x.wrapping_add(st.current().v[0][1] as u64);
+            // Rows changed per step (per perspective) and active rows.
+            let (mut changed, mut active) = (0usize, 0usize);
+            for w in boards.windows(2) {
+                let (a, b) = (threat_bbs(&w[0].bb.pieces, L::TH), threat_bbs(&w[1].bb.pieces, L::TH));
+                for t in 0..L::TB {
+                    for c in 0..2 {
+                        for k in 0..6 {
+                            changed += (a[t][c][k] ^ b[t][c][k]).count_ones() as usize;
+                            active += b[t][c][k].count_ones() as usize;
+                        }
+                    }
+                }
+            }
+            let m = (boards.len() - 1) as f64;
+            println!(
+                "{name}: threat_bbs {masks:.0} ns, push+materialise (one ply) {upd:.0} ns; {:.1} rows changed, {:.1} active ({x})",
+                changed as f64 / m,
+                active as f64 / m
+            );
+        }
+        run::<None1Ep>("ep");
+        run::<None1Ad>("ad");
     }
 
     /// Throughput report: `cargo test --release nnue_throughput -- --ignored --nocapture`.
