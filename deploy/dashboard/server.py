@@ -3,9 +3,11 @@
 
 Serves index.html and /api/status, a JSON digest of the public repo
 dukky/rustfish built from raw.githubusercontent.com files and the
-unauthenticated GitHub REST API, plus /api/lichess for the Lichess bot card. Every upstream fetch is cached in memory
-and only refreshed when a page asks for data, so an idle dashboard makes no
-requests and a busy one stays well inside the 60 requests/hour API limit.
+unauthenticated GitHub REST API, plus /api/lichess for the Lichess bot card.
+Every upstream fetch is cached in memory and only refreshed when a page asks
+for data, so an idle dashboard makes no requests and a busy one stays well
+inside the 60 requests/hour API limit. Training machines push their status to
+POST /api/machine (scripts/machine_status.py).
 """
 import datetime
 import hmac
@@ -33,41 +35,184 @@ CCRL_TARGETS_FALLBACK = {
                 {"name": "Top 10 (long term)", "rating": 3751, "rank": 10}],
     "reference": [{"rank": 1, "name": "Stockfish 19", "rating": 3792}]}
 
-# Seconds each source stays fresh. API calls: ~20/h runs + ~20/h jobs of the
-# foreground run (SPRT wave or ladder) + ~12/h background datagen jobs + 6/h
-# commits at worst, i.e. under the 60/h unauthenticated limit even with someone
-# watching all day (ETag 304s do not count). The runner-usage indicator reuses
-# these same fetches and costs no extra requests.
+# Seconds each source stays fresh. Worst-case API calls per hour: 20 for the
+# in-progress runs list + 10 for the recent runs list + 3 for commits + at most
+# JOBS_PER_HOUR job-list fetches shared by the live runs (each live run's jobs
+# TTL stretches with the number of live runs), i.e. ~53/h, under the 60/h
+# unauthenticated limit even with the page open all day. ETag 304s do not count.
 TTL_RAW = 120
-TTL_RUNS = 180
-TTL_JOBS = 180
-TTL_DATAGEN_JOBS = 300
-TTL_COMMITS = 600
+TTL_RUNS_ACTIVE = 180
+TTL_RUNS_RECENT = 360
+TTL_JOBS_MIN = 180
+TTL_COMMITS = 1200
+JOBS_PER_HOUR = 20
 
 # Fallback rounds per shard per wave, used only if scripts/queue-settings.json
 # can't be fetched (waves start at rounds_per_shard and double up to
 # max_rounds_per_shard). Used only to estimate games played in the in-flight SPRT.
 ROUNDS = {"stc": (16, 64), "nonreg": (16, 64), "ltc-gainer": (6, 24), "ltc-check": (6, 24)}
 
-# Positions per game in the net3 datagen set (measured, not a guess).
-POSITIONS_PER_GAME = 79
-
-# GitHub's concurrent-job cap and the queue's two lanes (scripts/queue.py).
+# GitHub's concurrent-job cap for the account (all workflows share it).
 RUNNER_CAP = 20
-# Defaults only; the live split comes from queue-settings.json "lanes"
-# (background datagen, 1 runner for the queue's own job, foreground = the rest).
-FOREGROUND_RUNNERS = 16
-BACKGROUND_RUNNERS = 4
-# Matrix max-parallel per workflow name, used to estimate the in-progress jobs
-# of runs whose job list is not fetched (keeps the API budget fixed).
-# Keyed by workflow file: a dispatched run's "name" is its run-name title.
-MAX_PARALLEL = {"sprt.yml": 16, "ccrl-ladder.yml": 16, "spsa.yml": 16, "datagen.yml": 4,
-                "train-sweep.yml": 4}
-BACKGROUND_WORKFLOWS = ("datagen.yml", "spsa.yml", "train-sweep.yml")
+# The live CI view: in-progress jobs of every live run, grouped by workflow file.
+RUNNER_GROUPS = (("sprt", "SPRT / queue", ("sprt.yml", "queue.yml")),
+                 ("spsa", "SPSA", ("spsa.yml",)),
+                 ("ladder", "CCRL ladder", ("ccrl-ladder.yml",)),
+                 ("other", "Other", None))
+# Workflows with exactly one job: counted without fetching their job list.
+SINGLE_JOB_WORKFLOWS = ("queue.yml", "ci.yml")
+LIVE_STATUSES = ("in_progress", "queued", "waiting", "pending", "requested")
 
 
 def workflow_file(run):
     return os.path.basename((run.get("path") or "").split("@")[0])
+
+
+def jobs_ttl(n_live):
+    """Per-run job-list TTL: the live runs share JOBS_PER_HOUR fetches."""
+    return max(TTL_JOBS_MIN, int(3600 * max(1, n_live) / JOBS_PER_HOUR))
+
+
+def runner_group(wf):
+    for key, label, files in RUNNER_GROUPS:
+        if files is None or wf in files:
+            return key, label
+    return "other", "Other"
+
+
+def build_runner_usage(runs, jobs_by_run, cap=RUNNER_CAP):
+    """What is actually running on GitHub Actions right now.
+
+    runs: the live workflow runs (any of LIVE_STATUSES); jobs_by_run: run id ->
+    that run's job list, or None when it could not be fetched. Single-job
+    workflows (SINGLE_JOB_WORKFLOWS) need no job list. Counts in-progress jobs
+    (each holds one of the account's `cap` concurrent runners) and queued jobs
+    (waiting for one), grouped as in RUNNER_GROUPS. A run whose job list is
+    unknown is listed with jobs None and makes the total a lower bound.
+    """
+    groups = {key: {"key": key, "label": label, "running": 0, "queued": 0, "runs": []}
+              for key, label, _ in RUNNER_GROUPS}
+    unknown = 0
+    for r in runs:
+        status = r.get("status")
+        if status not in LIVE_STATUSES:
+            continue
+        wf = workflow_file(r)
+        jobs = jobs_by_run.get(r.get("id"))
+        if wf in SINGLE_JOB_WORKFLOWS and jobs is None:
+            running, queued = (1, 0) if status == "in_progress" else (0, 1)
+        elif jobs is None:
+            running = queued = None
+        else:
+            running = sum(1 for j in jobs if j.get("status") == "in_progress")
+            queued = sum(1 for j in jobs if j.get("status") in ("queued", "waiting", "pending"))
+            if not running and not queued:
+                continue  # all jobs finished, the run is wrapping up
+        key, _ = runner_group(wf)
+        g = groups[key]
+        if running is None:
+            unknown += 1
+        else:
+            g["running"] += running
+            g["queued"] += queued
+        g["runs"].append({"id": r.get("id"), "workflow": wf, "title": r.get("display_title") or r.get("name"),
+                          "url": r.get("html_url"), "status": status, "running": running, "queued": queued,
+                          "started": r.get("run_started_at") or r.get("created_at")})
+    out = [g for g in groups.values()]
+    in_use = sum(g["running"] for g in out)
+    return {"cap": cap, "in_use": in_use, "idle": max(0, cap - in_use),
+            "queued": sum(g["queued"] for g in out), "unknown_runs": unknown,
+            "groups": out}
+
+
+# Net generations: one row per net, newest first, with its shape read from the
+# training record or, failing that, from the branch name (g8h1024kb8m-ep:
+# gen 8, H 1024, king buckets kb8m, threat inputs ep).
+GEN_RE = re.compile(r"^(?:nnue-|local-)?g(\d+)", re.I)
+NAME_H_RE = re.compile(r"h(\d{3,4})(?=kb|-|$)", re.I)
+NAME_KB_RE = re.compile(r"(kb\d+m?)", re.I)
+NAME_THREATS_RE = re.compile(r"-(ep|threats?)(?:-|$)", re.I)
+BEST_SCALE_PAIR_RE = re.compile(r"best-scale[^.;]*?val\.bin\s*/\s*val17x2[:\s]*([0-9.]+)\s*/\s*([0-9.]+)", re.I)
+BEST_SCALE_VAL_RE = re.compile(r"best-scale.*?val\.bin\s*([0-9.]+)", re.I | re.S)
+BEST_SCALE_17_RE = re.compile(r"best-scale.*?val17x2\s*([0-9.]+)", re.I | re.S)
+
+
+def parse_best_scale(notes):
+    """(val.bin, val17x2) best-scale losses quoted in a netloop notes string."""
+    if not notes:
+        return None, None
+    def num(s):
+        try:
+            return float(s.rstrip("."))
+        except (AttributeError, ValueError):
+            return None
+    m = BEST_SCALE_PAIR_RE.search(notes)
+    if m:
+        return num(m.group(1)), num(m.group(2))
+    a, b = BEST_SCALE_VAL_RE.search(notes), BEST_SCALE_17_RE.search(notes)
+    return num(a.group(1)) if a else None, num(b.group(1)) if b else None
+
+
+def net_shape_from_name(name):
+    """Shape hints in a net/branch name: {gen, hidden, king_buckets, threats}."""
+    base = re.sub(r"^(nnue-|local-)", "", name or "")
+    m = GEN_RE.match(base)
+    h, kb, th = NAME_H_RE.search(base), NAME_KB_RE.search(base), NAME_THREATS_RE.search(base)
+    return {"gen": int(m.group(1)) if m else None, "hidden": int(h.group(1)) if h else None,
+            "king_buckets": kb.group(1).lower() if kb else None,
+            "threats": th.group(1).lower() if th else None}
+
+
+def build_generations(nets):
+    """Rows of the generation table from net_gates["v2"] (newest first).
+
+    Each row: gen, name, shape (hidden, output buckets, king buckets, threats),
+    pool size, best-scale val losses (record fields best_scale_val /
+    best_scale_val17x2, else parsed from notes), gate result, and which fields
+    were inferred from the name because the training record is missing.
+    """
+    rows = []
+    for g in nets:
+        name = g.get("id") or re.sub(r"^nnue-", "", g.get("branch") or "")
+        hint = net_shape_from_name(g.get("id") or g.get("branch"))
+        if hint["gen"] is None:
+            hint = net_shape_from_name(g.get("branch"))
+        rec = bool(g.get("training_record"))
+        shape = {"hidden": g.get("hidden"), "king_buckets": g.get("king_buckets"),
+                 "threats": g.get("threats") or g.get("inputs")}
+        inferred = []
+        for k in shape:
+            if shape[k] is None and hint[k]:
+                shape[k] = hint[k]
+                inferred.append(k)
+        hidden, kb, threats = shape["hidden"], shape["king_buckets"], shape["threats"]
+        bs_val, bs_17 = g.get("best_scale_val"), g.get("best_scale_val17x2")
+        if bs_val is None and bs_17 is None:
+            bs_val, bs_17 = parse_best_scale(g.get("notes"))
+        gen = hint["gen"]
+        label = f"g{gen}" if gen is not None else ("E" if re.match(r"^E\d", name or "") else None)
+        rows.append({
+            "gen": gen, "gen_label": label, "name": name, "branch": g.get("branch"),
+            "training_record": rec, "local": bool(g.get("local")), "inferred": inferred,
+            "hidden": hidden, "buckets": g.get("buckets") if rec else None,
+            "king_buckets": kb, "threats": threats,
+            "pool": g.get("positions_per_epoch"), "train_data": g.get("train_data"),
+            "epochs": g.get("epochs"), "val_loss": g.get("val_loss"),
+            "val_loss_quantized": g.get("val_loss_quantized"),
+            "best_scale_val": bs_val, "best_scale_val17x2": bs_17, "baseline": g.get("baseline"),
+            "notes": g.get("notes"), "mode": g.get("mode"), "tc": g.get("tc"), "status": g.get("status"),
+            "elo": g.get("elo"), "ci": g.get("ci"), "games": g.get("games"), "games_est": g.get("games_est"),
+            "reason": g.get("reason"), "when": g.get("when") or g.get("first_at"), "run_url": g.get("run_url"),
+            "current": False})
+    # Grouped by generation (newest generation first; the E series before gen
+    # 2 counts as gen 1, unnumbered local experiments last), newest net first.
+    rank = lambda r: r["gen"] if r["gen"] is not None else (1 if r["gen_label"] == "E" else -1)
+    rows.sort(key=lambda r: (rank(r), r["when"] or "9999"), reverse=True)
+    # The net on main now: the most recently merged one.
+    merged = [r for r in rows if r["status"] == "merged"]
+    if merged:
+        max(merged, key=lambda r: r["when"] or "")["current"] = True
+    return rows
 
 # NNUE nets: the v1 chain (net1..net13, net/chain.json) ran until the trainer-v2
 # pivot; since then each net is an experiment (E0, E1, ..., generations g2a, ...)
@@ -78,8 +223,8 @@ NET_V1_AUDIT = "docs/nnue-experiments.md#audit-of-the-v1-chain-2026-11-06"
 # Where net/experiments.jsonl lives: main once merged, else the netloop branch.
 EXPERIMENT_REFS = ("main", "netloop")
 # Optional experiments.jsonl fields passed through when a row has them.
-NET_EXTRA_FIELDS = ("king_buckets", "mean_abs_eval", "best_scale_val", "best_scale_factor",
-                    "output_scale", "init")
+NET_EXTRA_FIELDS = ("king_buckets", "mean_abs_eval", "best_scale_val", "best_scale_val17x2",
+                    "best_scale_factor", "output_scale", "init", "train_data", "threats", "inputs")
 
 
 class Cache:
@@ -272,9 +417,31 @@ def build_status():
     plan = fetch("plan", f"{RAW}/main/plan.md", TTL_RAW, lambda b: b)
     m = re.search(r"Last updated:\s*([0-9][0-9 :T-]*[0-9](?: UTC)?)", plan or "")
     plan_updated = m.group(1).strip() if m else None
-    runs = (fetch("runs", f"{API}/actions/runs?per_page=50", TTL_RUNS, json.loads) or {}) \
-        .get("workflow_runs", [])
+    # Two run lists: every in-progress run however old (a long SPSA round falls
+    # out of a recent-runs page), and the latest runs (queued runs, the last
+    # completed SPRT wave). Merged by id, the fresher in-progress copy wins.
+    active_runs = (fetch("runs", f"{API}/actions/runs?status=in_progress&per_page=100",
+                         TTL_RUNS_ACTIVE, json.loads) or {}).get("workflow_runs", [])
+    recent_runs = (fetch("runs_recent", f"{API}/actions/runs?per_page=30", TTL_RUNS_RECENT,
+                         json.loads) or {}).get("workflow_runs", [])
+    by_id = {r.get("id"): r for r in recent_runs}
+    by_id.update({r.get("id"): r for r in active_runs})
+    runs = sorted(by_id.values(), key=lambda r: r.get("created_at") or "", reverse=True)
     commits = fetch("commits", f"{API}/commits?sha=main&per_page=25", TTL_COMMITS, json.loads) or []
+
+    # Job lists of the live runs (single-job workflows need none). They share
+    # JOBS_PER_HOUR fetches, so each run's TTL grows with the number of runs.
+    live = [r for r in runs if r.get("status") in LIVE_STATUSES]
+    need_jobs = [r for r in live if workflow_file(r) not in SINGLE_JOB_WORKFLOWS]
+    live_ttl = jobs_ttl(len(need_jobs))
+    jobs_by_run, jobs_errors = {}, []
+    for r in need_jobs:
+        data, at, err = CACHE.get(f"{API}/actions/runs/{r['id']}/jobs?per_page=100", live_ttl, json.loads)
+        jobs_by_run[r["id"]] = data.get("jobs", []) if isinstance(data, dict) else None
+        if err:
+            jobs_errors.append(err)
+    sources["ci_jobs"] = {"fetched_at": iso(time.time()) if not jobs_errors else None,
+                          "error": jobs_errors[0] if jobs_errors else None}
     # Wave sizes per queue mode, from the file scripts/queue.py itself reads.
     qcfg = fetch("queue_settings", f"{RAW}/main/scripts/queue-settings.json", TTL_RAW, json.loads) or {}
     ccrl = fetch("ccrl_targets", f"{RAW}/main/scripts/ccrl-targets.json", TTL_RAW, json.loads)
@@ -404,7 +571,6 @@ def build_status():
     # queue ladders "CCRL ladder <test_id>" (one run, 2 shard jobs per anchor).
     current = queue.get("current")
     inflight = None
-    exact_jobs = {}  # run id -> in-progress job count, from job lists we fetched anyway
     if current:
         inflight = dict(current)
         tid = re.escape(current.get("test_id", ""))
@@ -420,10 +586,13 @@ def build_status():
             inflight.update(wave=None if is_ladder else wave, run_url=run.get("html_url"),
                             run_status=run.get("status"),
                             run_started=run.get("run_started_at") or run.get("created_at"))
-            ttl = TTL_JOBS if run.get("status") != "completed" else 3600
-            jobs = (fetch("jobs", f"{API}/actions/runs/{run['id']}/jobs?per_page=100", ttl,
-                          json.loads) or {}).get("jobs", [])
-            exact_jobs[run["id"]] = sum(1 for j in jobs if j.get("status") == "in_progress")
+            if run.get("id") in jobs_by_run:  # live: fetched above
+                jobs = jobs_by_run[run["id"]] or []
+            else:  # the last wave has finished: its job list no longer changes. A
+                # separate cache key (filter=latest is the API default) so a copy
+                # cached while the run was live is not reused.
+                jobs = (fetch("jobs", f"{API}/actions/runs/{run['id']}/jobs?per_page=100&filter=latest",
+                              3600, json.loads) or {}).get("jobs", [])
             shard_re = r".+ / shard \d+" if is_ladder else r"shard \d+"
             shards = [j for j in jobs if re.fullmatch(shard_re, j.get("name", ""))]
             done = sum(1 for j in shards if j.get("status") == "completed")
@@ -443,108 +612,10 @@ def build_status():
                 inflight.update(games_prior=prior, games_wave_total=len(shards) * rpw[-1] * 2,
                                 games_est=prior + done * rpw[-1] * 2)
 
-    active = [{"name": r.get("name"), "workflow": workflow_file(r), "title": r.get("display_title"),
-               "status": r.get("status"),
-               "url": r.get("html_url"), "started": r.get("run_started_at") or r.get("created_at")}
-              for r in runs if r.get("status") in ("in_progress", "queued", "waiting", "pending")
-              and workflow_file(r) != "ci.yml"]
-
-    # Live datagen wave for the next net: shard progress and positions produced.
-    datagen = None
-    dg = next((r for r in runs
-               if ((r.get("name") or "").startswith("Datagen")
-                   or (r.get("display_title") or "").startswith("Datagen"))
-               and r.get("status") in ("in_progress", "queued", "waiting", "pending")), None)
-    if dg:
-        title = dg.get("display_title") or dg.get("name") or ""
-        jobs_doc = fetch("datagen_jobs", f"{API}/actions/runs/{dg['id']}/jobs?per_page=100",
-                         TTL_DATAGEN_JOBS, json.loads)
-        jobs = (jobs_doc if isinstance(jobs_doc, dict) else {}).get("jobs", [])
-        shards = [j for j in jobs if re.fullmatch(r"shard \d+", j.get("name", ""))]
-        done = sum(1 for j in shards if j.get("status") == "completed")
-        running = sum(1 for j in shards if j.get("status") == "in_progress")
-        queued = sum(1 for j in shards if j.get("status") == "queued")
-        m = re.search(r"\((\d+)x(\d+)\s+games?,\s*(\d+)\s+nodes\)", title, re.I)
-        planned = games = nodes = None
-        if m:
-            planned, games, nodes = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        else:
-            mm = re.search(r"([\d,]+)\s+games?", title, re.I)
-            games = int(mm.group(1).replace(",", "")) if mm else None
-            mm = re.search(r"(\d+)\s+nodes?", title, re.I)
-            nodes = int(mm.group(1)) if mm else None
-        mm = re.search(r"Datagen\s+(\S+)\s+seed\s+(\d+)", title, re.I)
-        total = len(shards) or planned or 0
-        exact_jobs[dg["id"]] = sum(1 for j in jobs if j.get("status") == "in_progress") if jobs else None
-        datagen = {"title": title, "ref": mm.group(1) if mm else None,
-                   "seed": int(mm.group(2)) if mm else None,
-                   "run_url": dg.get("html_url"),
-                   # GitHub reports the run "queued" while later shards wait for
-                   # the max_parallel slots, even with shards running.
-                   "status": "in_progress" if running else dg.get("status"),
-                   "started": dg.get("run_started_at") or dg.get("created_at"),
-                   "shards_total": total, "shards_done": done, "shards_running": running,
-                   "shards_queued": queued, "games_per_shard": games, "nodes": nodes,
-                   "estimated_positions": done * games * POSITIONS_PER_GAME if games else None}
-
-    lanes = qcfg.get("lanes") or {}
-    bg_runners = lanes.get("background_parallel", BACKGROUND_RUNNERS)
-    fg_runners = RUNNER_CAP - 1 - bg_runners if "background_parallel" in lanes else FOREGROUND_RUNNERS
-    # Background lane (lanes.background_parallel runners): the queue dispatches datagen from main
-    # whenever no datagen/SPSA run is active ("dispatched" rows, mode datagen).
-    dg_runs = {}
-    for r in runs:
-        m = re.match(r"Datagen\s+(\S+)\s+seed\s+(\d+)", r.get("display_title") or "")
-        if m:
-            dg_runs.setdefault(int(m.group(2)), r)  # newest first
-    dispatches = []
-    for r in reversed(qlog):
-        if r.get("mode") != "datagen":
-            continue
-        run = dict(dg_runs.get(r.get("seed")) or {})
-        if datagen and run.get("html_url") == datagen["run_url"]:
-            run["status"] = datagen["status"]
-        dispatches.append({"seed": r.get("seed"), "sha": (r.get("sha") or "")[:7],
-                           "when": parse_when(r.get("logged_at")), "reason": r.get("reason"),
-                           "status": run.get("status"), "conclusion": run.get("conclusion"),
-                           "run_url": run.get("html_url")})
-        if len(dispatches) >= 8:
-            break
-    background = {
-        "runners": bg_runners, "current": datagen, "dispatches": dispatches,
-        "next_seed": queue.get("next_seed"),
-        "other": [{"name": r.get("name"), "title": r.get("display_title"), "status": r.get("status"),
-                   "url": r.get("html_url"), "started": r.get("run_started_at") or r.get("created_at")}
-                  for r in runs if workflow_file(r) in ("spsa.yml", "train-sweep.yml")
-                  and r.get("status") in ("in_progress", "queued", "waiting", "pending")],
-    }
-
-    # Runner usage vs the account's concurrent-job cap. Exact for runs whose job
-    # list was fetched above; otherwise estimated from the workflow's max-parallel.
-    usage_rows = []
-    for r in runs:
-        # A run reads "queued" while some of its jobs wait, even with others running.
-        if r.get("status") not in ("in_progress", "queued", "waiting", "pending") :
-            continue
-        n = exact_jobs.get(r.get("id"))
-        exact = n is not None
-        if not exact:
-            if r.get("status") != "in_progress":
-                continue
-            n = MAX_PARALLEL.get(workflow_file(r), 1)
-        if not n:
-            continue
-        lane = "background" if workflow_file(r) in BACKGROUND_WORKFLOWS else "foreground"
-        usage_rows.append({"name": r.get("name"), "workflow": workflow_file(r), "title": r.get("display_title"), "jobs": n,
-                           "exact": exact, "lane": lane, "url": r.get("html_url")})
-    runner_usage = {
-        "cap": RUNNER_CAP, "foreground_cap": fg_runners, "background_cap": bg_runners,
-        "in_use": min(RUNNER_CAP, sum(u["jobs"] for u in usage_rows)),
-        "foreground": sum(u["jobs"] for u in usage_rows if u["lane"] == "foreground"),
-        "background": sum(u["jobs"] for u in usage_rows if u["lane"] == "background"),
-        "estimated": any(not u["exact"] for u in usage_rows), "runs": usage_rows,
-        "as_of": sources.get("runs", {}).get("fetched_at"),
-    }
+    runner_usage = build_runner_usage(live, jobs_by_run)
+    runner_usage["as_of"] = sources.get("runs", {}).get("fetched_at")
+    # Configured shards per SPRT wave (queue-settings.json), shown as context only.
+    runner_usage["test_shards"] = (qcfg.get("modes", {}).get("stc") or {}).get("shards")
 
     recent_commits = []
     for c in commits if isinstance(commits, list) else []:
@@ -599,8 +670,7 @@ def build_status():
         "strength": strength,
         "net_chain": {"nets": nets, "ref": chain_ref, "audit_doc": NET_V1_AUDIT},
         "net_gates": net_gates,
-        "datagen": datagen,
-        "background": background,
+        "generations": build_generations(net_gates["v2"]),
         "runner_usage": runner_usage,
         "roadmap": {"source": "plan.md", "ref": "main", "last_updated": plan_updated},
         "current": latest and {k: latest[k] for k in ("rating", "ci", "ci_method", "sha", "when", "url", "games")},
@@ -610,7 +680,6 @@ def build_status():
         "queue_events": events[-40:][::-1],
         "sprt": sorted(tests, key=lambda t: t["when"] or "", reverse=True)[:40],
         "merged": merged,
-        "active_runs": active,
         "commits": recent_commits,
         "plan": plan,
         "sources": sources,
@@ -618,51 +687,78 @@ def build_status():
     }
 
 
-# Laptop reporter (scripts/laptop_status.py) POSTs its latest snapshot here.
-# Kept in memory, and in $DATA_DIR/laptop.json when DATA_DIR is configured.
-LAPTOP_MAX_BODY = 16 * 1024
-LAPTOP_LOCK = threading.Lock()
-LAPTOP = {"payload": None, "received": None}
+# Machine status push: a training box (scripts/machine_status.py) POSTs its
+# latest snapshot to /api/machine; the old laptop reporter
+# (scripts/laptop_status.py) still posts to /api/laptop and is stored as
+# machine "laptop". Latest payload per machine, in memory and in
+# $DATA_DIR/machines.json when DATA_DIR is configured. Accepted only with
+# `Authorization: Bearer $MACHINE_TOKEN` (or the legacy LAPTOP_TOKEN).
+MACHINE_MAX_BODY = 16 * 1024
+MACHINE_MAX = 8  # machines kept; the longest-silent one is dropped beyond this
+MACHINE_SCHEMA = "machine-status/1"
+MACHINE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
+MACHINE_LOCK = threading.Lock()
+MACHINES = {}  # name -> {"payload": {...}, "received": epoch seconds}
 DATA_DIR = os.environ.get("DATA_DIR")
 
 
-def laptop_load():
+def machines_load():
     if not DATA_DIR:
         return
     try:
+        with open(os.path.join(DATA_DIR, "machines.json")) as fh:
+            d = json.load(fh)
+        for name, ent in d.items():
+            MACHINES[name] = {"payload": ent["payload"], "received": float(ent["received"])}
+        return
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    try:  # before the rename: one laptop.json
         with open(os.path.join(DATA_DIR, "laptop.json")) as fh:
             d = json.load(fh)
-        LAPTOP.update(payload=d["payload"], received=float(d["received"]))
+        MACHINES["laptop"] = {"payload": d["payload"], "received": float(d["received"])}
     except (OSError, ValueError, KeyError, TypeError):
         pass
 
 
-def laptop_store(payload):
-    with LAPTOP_LOCK:
-        LAPTOP.update(payload=payload, received=time.time())
+def machine_name(payload, default):
+    name = payload.get("machine")
+    return name if isinstance(name, str) and MACHINE_NAME_RE.fullmatch(name) else default
+
+
+def machine_store(name, payload, now=None):
+    with MACHINE_LOCK:
+        MACHINES[name] = {"payload": payload, "received": now or time.time()}
+        while len(MACHINES) > MACHINE_MAX:
+            del MACHINES[min(MACHINES, key=lambda k: MACHINES[k]["received"])]
         if DATA_DIR:
             try:
-                tmp = os.path.join(DATA_DIR, "laptop.json.tmp")
+                tmp = os.path.join(DATA_DIR, "machines.json.tmp")
                 with open(tmp, "w") as fh:
-                    json.dump(LAPTOP, fh)
-                os.replace(tmp, os.path.join(DATA_DIR, "laptop.json"))
+                    json.dump(MACHINES, fh)
+                os.replace(tmp, os.path.join(DATA_DIR, "machines.json"))
             except OSError:
                 pass
 
 
-def laptop_status():
-    with LAPTOP_LOCK:
-        if LAPTOP["payload"] is None:
-            return None
-        return {"payload": LAPTOP["payload"], "received": iso(LAPTOP["received"]),
-                "age_s": int(time.time() - LAPTOP["received"])}
+def machines_status():
+    """[{name, schema, payload, received, age_s}], most recently heard first."""
+    now = time.time()
+    with MACHINE_LOCK:
+        out = [{"name": k, "schema": v["payload"].get("schema"), "payload": v["payload"],
+                "received": iso(v["received"]), "age_s": int(now - v["received"])}
+               for k, v in MACHINES.items()]
+    return sorted(out, key=lambda m: m["age_s"])
 
 
-def laptop_authorized(header):
-    expected = os.environ.get("LAPTOP_TOKEN", "")
-    if not expected or not header or not header.startswith("Bearer "):
+def machine_authorized(header):
+    if not header or not header.startswith("Bearer "):
         return False
-    return hmac.compare_digest(header[7:].strip().encode(), expected.encode())
+    got = header[7:].strip().encode()
+    tokens = [t for t in (os.environ.get("MACHINE_TOKEN", ""), os.environ.get("LAPTOP_TOKEN", "")) if t]
+    # Compare against every configured token so the timing does not tell which matched.
+    ok = [hmac.compare_digest(got, t.encode()) for t in tokens]
+    return any(ok)
 
 
 # Lichess bot card: the bot account's public profile, recent games and rating
@@ -803,7 +899,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with BUILD_LOCK:
                     status = build_status()
-                status["laptop"] = laptop_status()
+                status["machines"] = machines_status()
                 body = json.dumps(status).encode()
                 self._send(200, "application/json", body)
             except Exception as exc:
@@ -824,15 +920,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/api/laptop":
+        path = self.path.split("?", 1)[0]
+        # /api/laptop is the old name, kept for scripts/laptop_status.py.
+        if path not in ("/api/machine", "/api/laptop"):
             return self._send(404, "text/plain", b"not found")
-        if not laptop_authorized(self.headers.get("Authorization")):
+        if not machine_authorized(self.headers.get("Authorization")):
             return self._send(401, "text/plain", b"unauthorized")
         try:
             n = int(self.headers.get("Content-Length", ""))
         except ValueError:
             return self._send(411, "text/plain", b"length required")
-        if n < 0 or n > LAPTOP_MAX_BODY:
+        if n < 0 or n > MACHINE_MAX_BODY:
             return self._send(413, "text/plain", b"too large")
         try:
             payload = json.loads(self.rfile.read(n))
@@ -840,7 +938,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, "text/plain", b"bad json")
         if not isinstance(payload, dict):
             return self._send(400, "text/plain", b"expected an object")
-        laptop_store(payload)
+        name = machine_name(payload, "laptop" if path == "/api/laptop" else "default")
+        machine_store(name, payload)
         self._send(204, "text/plain", b"")
 
     def _send(self, code, ctype, body):
@@ -857,6 +956,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
-    laptop_load()
+    machines_load()
     print(f"rustfish dashboard on :{port}", flush=True)
     ThreadingHTTPServer(("", port), Handler).serve_forever()

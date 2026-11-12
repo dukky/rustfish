@@ -93,10 +93,25 @@ svg text { font-family: inherit; }
 .legend .l-partial::before { width: 8px; height: 8px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
 .runbar { display: flex; height: 14px; background: var(--neutral-bg); border-radius: 99px; overflow: hidden; margin: 6px 0; }
 .runbar > div { height: 100%; }
-.runbar .fg { background: var(--accent); }
-.runbar .bg { background: var(--good); }
-.legend .l-fg::before { width: 10px; height: 10px; border: 0; background: var(--accent); }
-.legend .l-bg::before { width: 10px; height: 10px; border: 0; background: var(--good); }
+.runbar .g-sprt, .legend .l-sprt::before { background: var(--accent); }
+.runbar .g-spsa, .legend .l-spsa::before { background: var(--good); }
+.runbar .g-ladder, .legend .l-ladder::before { background: var(--warn); }
+.runbar .g-other, .legend .l-other::before { background: var(--muted); }
+.legend .l-sprt::before, .legend .l-spsa::before, .legend .l-ladder::before, .legend .l-other::before { width: 10px; height: 10px; border: 0; }
+.rgroups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 18px; margin-top: 8px; font-size: 13.5px; }
+.rgroups .rg { min-width: 0; }
+.rgroups .rg b { font-variant-numeric: tabular-nums; }
+.rgroups .rg div { overflow-wrap: anywhere; }
+.collapsed .extra { display: none !important; }
+.more-btn { margin-top: 8px; font: inherit; font-size: 13px; color: var(--accent); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+.more-btn:hover { background: var(--accent-soft); }
+.clamp { max-height: 420px; overflow: hidden; position: relative; }
+.clamp::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 80px; background: linear-gradient(transparent, var(--surface)); }
+tr.gen-first td { border-top: 1px solid var(--border); }
+tr.current td { background: var(--accent-soft); }
+.section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 28px 0 0; font-weight: 600; }
+.machine + .machine { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid); }
+@media (max-width: 640px) { td, th { padding: 6px 5px; } table { font-size: 13.5px; } }
 .legend .l-change::before { width: 8px; height: 8px; border: 0; background: var(--good); transform: rotate(45deg); }
 .bars .bar-row { display: grid; grid-template-columns: minmax(90px, 160px) 1fr 76px; align-items: center; gap: 10px; font-size: 13px; padding: 3px 0; }
 .bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -119,7 +134,7 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 .empty { color: var(--muted); font-size: 14px; }
 @media (max-width: 640px) { .hide-sm { display: none; } }
 .show-sm { display: none; }
-@media (max-width: 640px) { .show-sm { display: inline; } }
+@media (max-width: 640px) { .show-sm { display: inline; } div.show-sm { display: block; } }
 .note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
 .lperfs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 4px 0 14px; }
 .lperf { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; min-width: 0; }
@@ -139,42 +154,33 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
   <section class="tiles" id="tiles"></section>
   <section class="targets" id="targets"></section>
 
-  <section class="card" id="runners-card">
-    <h2>CI runners in use</h2>
-    <div id="runners" class="empty">loading...</div>
-  </section>
-
-  <div class="grid row2">
-    <section class="card" id="inflight"><h2>Foreground lane: now testing</h2><div class="empty">loading...</div></section>
-    <section class="card"><h2>Up next (merge queue)</h2><div id="pending" class="empty">loading...</div></section>
-  </div>
-
-  <section class="card">
-    <h2>Background lane: datagen from main</h2>
-    <div id="background" class="empty">loading...</div>
-  </section>
-
-  <section class="card">
-    <h2>Laptop (M3): local training and datagen</h2>
-    <div id="laptop" class="empty">loading...</div>
-  </section>
-
-  <section class="card">
-    <h2>Lichess bot</h2>
-    <div id="lichess" class="empty">loading...</div>
-  </section>
-
   <section class="card">
     <h2>Strength over time (CCRL Blitz, 120+1)</h2>
+    <div id="estimate"></div>
     <div class="legend"><span>rating</span><span class="l-ci">95% CI</span><span class="l-partial">partial run (hollow, CI bar)</span><span class="l-target">CCRL goals</span><span class="l-change">change merged</span></div>
     <div class="chart-wrap" id="chart"></div>
     <details style="margin-top:10px"><summary>Ladder runs as a table</summary><div class="scroll" id="ladder-table"></div></details>
   </section>
 
+  <h3 class="section-title">In flight</h3>
+  <div class="grid row2">
+    <section class="card" id="inflight"><h2>Now testing</h2><div class="empty">loading...</div></section>
+    <section class="card"><h2>Up next (merge queue)</h2><div id="pending" class="empty">loading...</div></section>
+  </div>
+  <section class="card" id="runners-card">
+    <h2>CI runners</h2>
+    <div id="runners" class="empty">loading...</div>
+  </section>
+  <section class="card" id="machines-card" style="display:none">
+    <h2>Training machines</h2>
+    <div id="machines"></div>
+  </section>
+
+  <h3 class="section-title">Nets</h3>
   <section class="card">
-    <h2>NNUE nets (trainer v2 experiments)</h2>
-    <div class="scroll" id="net-gates"></div>
-    <div class="note" id="net-gates-note"></div>
+    <h2>NNUE generations</h2>
+    <div class="scroll" id="generations"></div>
+    <div class="note" id="generations-note"></div>
     <details style="margin-top:12px"><summary>v1 history (superseded, see <a id="v1-audit" href="https://github.com/dukky/rustfish/blob/main/docs/nnue-experiments.md#audit-of-the-v1-chain-2026-11-06">audit</a>)</summary>
       <div class="scroll" id="nets" style="margin-top:8px"></div>
       <div class="note" id="nets-note"></div>
@@ -182,14 +188,21 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
     </details>
   </section>
 
+  <h3 class="section-title">Results</h3>
   <section class="card"><h2>Recent outcomes</h2><div class="scroll" id="outcomes"></div></section>
-  <section class="card"><h2>Gate Elo from accepted changes</h2><div id="estimate"></div><div id="gains"></div></section>
-
+  <section class="card"><h2>Gate Elo from accepted changes</h2><div id="gains"></div></section>
   <section class="card"><h2>Recent commits on main</h2><div class="scroll" id="commits"></div></section>
+
+  <h3 class="section-title">Elsewhere</h3>
+  <section class="card">
+    <h2>Lichess bot</h2>
+    <div id="lichess" class="empty">loading...</div>
+  </section>
   <section class="card">
     <h2>Roadmap</h2>
     <div class="meta" id="plan-meta" style="margin-bottom:8px"></div>
-    <div class="md" id="plan"><span class="empty">loading plan.md...</span></div>
+    <div id="plan-wrap" class="clamp"><div class="md" id="plan"><span class="empty">loading plan.md...</span></div></div>
+    <button class="more-btn" id="plan-more" type="button">Show the full plan</button>
   </section>
   <p class="note" id="footer"></p>
 </main>
@@ -227,6 +240,23 @@ const MODE = {stc: "STC gainer (10+0.1)", nonreg: "non-regression (10+0.1)", "lt
   "ltc-check": "LTC check (60+0.6)", speedup: "speedup (bench identical)", "net-gate": "net gate (5+0.05)",
   ladder: "CCRL ladder (120+1)", datagen: "datagen (background lane)", "datagen-burst": "datagen burst (foreground)"};
 const modeName = (m) => MODE[m] || m || "–";
+
+// Long lists show their first rows; the rest carry class "extra" and stay
+// hidden until "Show all" is pressed. The choice survives the minute refresh.
+const EXPANDED = {};
+const extra = (i, n) => i >= n ? ' class="extra"' : "";
+const wrapClass = (key) => EXPANDED[key] ? "" : "collapsed";
+function moreButton(key, total, n, noun = "rows") {
+  if (total <= n) return "";
+  return `<button class="more-btn" type="button" data-more="${esc(key)}">${EXPANDED[key] ? "Show fewer" : `Show all ${fmt(total)} ${esc(noun)}`}</button>`;
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-more]");
+  if (!b) return;
+  const key = b.dataset.more;
+  EXPANDED[key] = !EXPANDED[key];
+  if (window.STATUS) renderLists(window.STATUS);
+});
 
 function renderTiles(s) {
   const st = s.strength;
@@ -285,10 +315,12 @@ function renderEstimate(s) {
   if (!est || !m) { $("estimate").innerHTML = ""; return; }
   const rows = est.components.slice().reverse().map((c) =>
     `<tr><td class="mono">${esc(c.branch)}</td><td class="num">${signed(c.elo)}</td><td class="num">${fmt(c.games)}</td><td class="meta">${shortDate(c.when)}</td></tr>`).join("");
-  $("estimate").innerHTML = (est.components.length
-    ? `<div class="meta" style="margin-bottom:8px">Estimated <b>${fmt(est.rating)}</b> = measured <b>${fmt(m.rating)}</b> ${signed(est.delta)} gate Elo from ${est.components.length} queue merge${est.components.length === 1 ? "" : "s"} after ${shortDate(m.when)}. <span class="badge b-warn">not an official rating</span></div>`
-    : `<div class="meta" style="margin-bottom:8px">No Elo-gated merges since the last ladder (${shortDate(m.when)}), so the estimate equals the measured ${fmt(m.rating)}.</div>`) +
-    (rows ? `<div class="scroll" style="margin-bottom:14px"><table><thead><tr><th>Merged after the ladder</th><th class="num">Gate Elo</th><th class="num">Games</th><th>When</th></tr></thead><tbody>${rows}</tbody></table></div>` : "");
+  const pts = s.ladder || [], prev = pts.length > 1 ? pts[pts.length - 2] : null;
+  $("estimate").innerHTML = `<div style="margin-bottom:10px">Last ladder <b>${fmt(m.rating)}</b> <span class="meta">[${fmt(m.ci?.[0])}, ${fmt(m.ci?.[1])}] on <span class="mono">${esc(m.sha)}</span>, ${ago(m.when)}${prev ? `; ${signed(m.rating - prev.rating, 0)} vs the run before` : ""}</span>. ` +
+    (est.components.length
+      ? `Estimated <b>${fmt(est.rating)}</b> <span class="meta">(${signed(est.delta)} gate Elo from ${est.components.length} queue merge${est.components.length === 1 ? "" : "s"} since; not an official rating)</span>.`
+      : `<span class="meta">No Elo-gated merges since, so the estimate equals the measured rating.</span>`) + `</div>` +
+    (rows ? `<details style="margin-bottom:10px"><summary>Merged since the last ladder (${est.components.length})</summary><div class="scroll"><table><thead><tr><th>Branch</th><th class="num">Gate Elo</th><th class="num">Games</th><th>When</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : "");
 }
 
 const NET_BADGE = {merged: "b-good", "in queue": "b-accent", datagen: "b-warn", rejected: "b-bad", "check-failed": "b-bad"};
@@ -337,101 +369,128 @@ function gateCells(g) {
 }
 function renderNetGates(s) {
   const ng = s.net_gates || {v2: [], v1: []};
-  const branchLink = (b) => b.startsWith("local-")
-    ? `<span class="meta" title="Trained and scored on the laptop; never pushed as a branch">no branch (local)</span>`
-    : `<a class="mono" href="${ghRepo()}/tree/${esc(b)}">${esc(b)}</a>`;
-  const num = (x, d) => Number(x).toFixed(d);
-  $("net-gates").innerHTML = ng.v2.length ? `<table><thead><tr><th>Experiment</th><th class="num">Shape H×B</th><th class="num">Data / positions</th><th class="num">Epochs</th><th class="num">Val loss</th><th>Gate mode</th><th class="num">Gate Elo ± CI</th><th class="num">Games</th><th>Status</th></tr></thead><tbody>` +
-    ng.v2.map((g) => {
-      const rec = g.training_record;
-      const name = rec
-        ? `<b>${esc(g.id)}</b><div>${branchLink(g.branch)}</div>${g.baseline ? `<div class="meta">vs ${esc(g.baseline)}</div>` : ""}` +
-          (g.notes ? `<div class="meta" style="max-width:320px">${esc(g.notes.length > 90 ? g.notes.slice(0, 88) + "…" : g.notes)}</div>` : "")
-        : `<div>${branchLink(g.branch)}</div><span class="badge b-warn" title="No row for this branch in net/experiments.jsonl">no training record</span>`;
-      const data = rec ? `${g.seeds ? `<div>seeds ${esc(g.seeds.join(", "))}</div>` : ""}<div class="meta">${shortNum(g.positions_per_epoch)} pos/epoch</div>` : "–";
-      const loss = rec && g.val_loss != null
-        ? `${num(g.val_loss, 5)}${g.val_loss_quantized != null ? `<div class="meta">q ${num(g.val_loss_quantized, 5)}</div>` : ""}` +
-          (g.best_scale_val != null ? `<div class="meta" title="Loss at the loss-optimal output scale (nnue-trainer eval --best-scale)">best-scale ${num(g.best_scale_val, 5)}${g.best_scale_factor != null ? ` @×${num(g.best_scale_factor, 3)}` : ""}</div>` : "") +
-          (g.mean_abs_eval != null ? `<div class="meta" title="Mean |eval| on the validation set after the last epoch">|eval| ${num(g.mean_abs_eval, 0)}cp</div>` : "") +
-          (g.output_scale != null ? `<div class="meta" title="Output layer rescaled before embedding">out ×${num(g.output_scale, 3)}</div>` : "") : "–";
-      return `<tr title="${esc(g.notes || "")}"><td>${name}</td>
-        <td class="num mono">${rec && g.hidden != null ? `${fmt(g.hidden)}×${fmt(g.buckets ?? 1)}` : "–"}${g.king_buckets ? `<div class="meta">${esc(g.king_buckets)}</div>` : ""}</td>
-        <td class="num">${data}</td><td class="num">${rec ? fmt(g.epochs) : "–"}</td><td class="num">${loss}</td>${gateCells(g)}</tr>`;
-    }).join("") + `</tbody></table>`
-    : `<div class="empty">No v2 nets gated yet.</div>`;
-  const missing = ng.v2.filter((g) => !g.training_record).length;
-  $("net-gates-note").innerHTML = `Gate status from the merge-queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>), updated automatically; training data from <span class="mono">net/experiments.jsonl</span> on <span class="mono">${esc(ng.experiments_ref || "?")}</span>.` +
-    (missing ? ` <b>${missing} gated net${missing === 1 ? " has" : "s have"} no training record</b> (run <span class="mono">scripts/netloop.py record</span>).` : "") +
-    (ng.v2.some((g) => g.status === "local only") ? ` <i>local only</i>: trained and scored on the laptop, never pushed or gated.` : "") +
-    ` Gate Elo is the queue SPRT against the main of its day, not a CCRL rating.`;
   $("net-gates-v1").innerHTML = ng.v1.length ? `<div class="meta" style="margin-bottom:6px">All v1 net gates in the queue log</div><table><thead><tr><th>Branch</th><th>Gate mode</th><th class="num">Gate Elo ± CI</th><th class="num">Games</th><th>Status</th></tr></thead><tbody>` +
-    ng.v1.map((g) => `<tr><td>${branchLink(g.branch)}</td>${gateCells(g)}</tr>`).join("") + `</tbody></table>` : "";
+    ng.v1.map((g) => `<tr><td>${netBranchLink(g.branch)}</td>${gateCells(g)}</tr>`).join("") + `</tbody></table>` : "";
   if (s.net_chain && s.net_chain.audit_doc) $("v1-audit").href = `${ghRepo()}/blob/main/${s.net_chain.audit_doc}`;
 }
+const netBranchLink = (b) => !b ? "–" : b.startsWith("local-")
+  ? `<span class="meta" title="Trained and scored on the laptop; never pushed as a branch">local only</span>`
+  : `<a class="mono" href="${ghRepo()}/tree/${esc(b)}">${esc(b)}</a>`;
 
-const RUN_STATUS = {in_progress: ["running", "b-accent"], queued: ["queued", "b-neutral"], waiting: ["waiting", "b-neutral"],
-  pending: ["pending", "b-neutral"], success: ["done", "b-good"], failure: ["failed", "b-bad"], cancelled: ["cancelled", "b-neutral"]};
-const runBadge = (status, conclusion) => {
-  const k = status === "completed" ? (conclusion || "completed") : status;
-  if (!k) return `<span class="badge b-neutral" title="Not in the last 50 Actions runs">older run</span>`;
-  const [t, c] = RUN_STATUS[k] || [String(k).replace("_", " "), "b-neutral"];
-  return `<span class="badge ${c}">${esc(t)}</span>`;
-};
-function renderBackground(s) {
-  const bg = s.background || {}, d = bg.current;
-  let h = `<div class="meta" style="margin-bottom:10px">The merge queue keeps ${fmt(bg.runners || 4)} runners busy outside the SPRT lane: whenever no datagen or SPSA run is active it dispatches the next datagen seed from <span class="mono">main</span> (only merged nets generate data)${bg.next_seed != null ? `; next seed <b>${fmt(bg.next_seed)}</b>` : ""}.</div>`;
-  if (d) {
-    const pct = d.shards_total ? Math.round(100 * d.shards_done / d.shards_total) : 0;
-    h += `<div class="inflight-name">seed ${esc(d.seed ?? "?")} from ${esc(d.ref || "?")}</div>
-    <div style="margin-bottom:10px">${runBadge(d.status)}
-      ${d.nodes ? `<span class="badge b-neutral">${fmt(d.nodes)} nodes</span>` : ""}
-      ${d.games_per_shard ? `<span class="badge b-neutral">${fmt(d.shards_total)} × ${fmt(d.games_per_shard)} games</span>` : ""}</div>
-    <div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><div style="width:${pct}%"></div></div>
-    <div class="meta">${d.shards_done}/${d.shards_total} shards done · ${d.shards_running} running · ${d.shards_queued} queued</div>
-    <dl class="kv" style="margin-top:12px">
-      <dt>Positions so far</dt><dd>≈ ${fmt(d.estimated_positions)} <span class="meta">(finished shards × games × ~79 positions/game)</span></dd>
-      <dt>Started</dt><dd>${shortDate(d.started)} (${ago(d.started)})</dd>
-      <dt>Run</dt><dd><a href="${esc(d.run_url)}">${esc(d.title)}</a></dd>
-    </dl>`;
-  } else {
-    h += `<div class="empty">No datagen run active right now.</div>`;
-  }
-  for (const r of bg.other || [])
-    h += `<div style="margin-top:8px">${runBadge(r.status)} <a href="${esc(r.url)}">${esc(r.title)}</a> <span class="meta">${ago(r.started)}</span></div>`;
-  const ds = bg.dispatches || [];
-  if (ds.length) {
-    h += `<div class="scroll" style="margin-top:14px"><table><thead><tr><th>Seed</th><th>From main</th><th>Dispatched</th><th>Run</th></tr></thead><tbody>` +
-      ds.map((x) => `<tr><td class="num" style="text-align:left"><b>${esc(x.seed ?? "–")}</b></td><td><a class="mono" href="${ghRepo()}/commit/${esc(x.sha)}">${esc(x.sha)}</a></td>
-        <td class="meta" style="white-space:nowrap">${shortDate(x.when)}<div>${esc(x.reason || "")}</div></td>
-        <td>${x.run_url ? `<a href="${esc(x.run_url)}">${runBadge(x.status, x.conclusion)}</a>` : runBadge(x.status, x.conclusion)}</td></tr>`).join("") + `</tbody></table></div>`;
-  }
-  h += `<div class="note">The laptop also generates data locally (CPU) and trains every net on its GPU (Metal trainer); its live state is in the Laptop card below; nets appear in the NNUE panel once a net branch is recorded and gated.</div>`;
-  $("background").className = "";
-  $("background").innerHTML = h;
+// NNUE generations (trainer v2): every net, grouped by generation, newest
+// first. Collapsed view: the nets that reached main, anything testing or
+// queued, the newest row of a generation that never merged, and the last 2 days.
+const GEN_SHOWN = 2 * 86400e3;
+function shapeText(r) {
+  const inf = (k) => (r.inferred || []).includes(k) ? `<span title="From the branch name: no training record">*</span>` : "";
+  const parts = [];
+  if (r.hidden != null) parts.push(`H${esc(r.hidden)}${inf("hidden")}`);
+  if (r.buckets != null && r.buckets > 1) parts.push(`${fmt(r.buckets)} out`);
+  if (r.king_buckets) parts.push(`${esc(r.king_buckets)}${inf("king_buckets")}`);
+  if (r.threats) parts.push(`threats ${esc(r.threats)}${inf("threats")}`);
+  return parts.length ? parts.join(" · ") : "–";
+}
+function renderGenerations(s) {
+  const rows = s.generations || [];
+  const el = $("generations");
+  if (!rows.length) { el.innerHTML = `<div class="empty">No v2 nets recorded or gated yet.</div>`; $("generations-note").innerHTML = ""; return; }
+  const genKey = (r) => r.gen_label || "other";
+  const mergedGens = new Set(rows.filter((r) => r.status === "merged").map(genKey));
+  const seenGen = new Set();
+  const now = Date.now();
+  const keyRow = rows.map((r) => {
+    const k = genKey(r);
+    const firstOfGen = !seenGen.has(k);
+    seenGen.add(k);
+    return r.status === "merged" || ["testing", "queued"].includes(r.status) ||
+      (r.when && now - Date.parse(r.when) < GEN_SHOWN) || (firstOfGen && !mergedGens.has(k) && k !== "other");
+  });
+  // Shown rows first (in table order), then the rest; the rest is the "extra".
+  const order = rows.map((r, i) => i).sort((a, b) => (keyRow[b] - keyRow[a]) || (a - b));
+  const nShown = keyRow.filter(Boolean).length;
+  const shown = EXPANDED.gens ? rows.map((r, i) => i) : order;
+  let lastGen = null;
+  const body = shown.map((i, pos) => {
+    const r = rows[i], k = genKey(r);
+    const cls = [pos >= nShown && !EXPANDED.gens ? "extra" : "", k !== lastGen ? "gen-first" : "", r.current ? "current" : ""].filter(Boolean).join(" ");
+    const genCell = k !== lastGen ? `<b>${esc(k === "other" ? "–" : k)}</b>` : "";
+    lastGen = k;
+    const name = `<b class="mono">${esc(r.name)}</b>${r.current ? ` <span class="badge b-good">on main</span>` : ""}` +
+      `<div class="meta hide-sm">${r.branch && !r.local ? netBranchLink(r.branch) : r.local ? "local only" : ""}</div>` +
+      (r.training_record ? "" : `<span class="badge b-warn" title="No row for this branch in net/experiments.jsonl">no training record</span>`) +
+      `<div class="meta show-sm">${k !== "other" ? esc(k) + " · " : ""}${shapeText(r)}</div>`;
+    const pool = r.pool != null ? `${shortNum(r.pool)}${r.train_data ? `<div class="meta">${esc(r.train_data.replace(/\.bin$/, ""))}</div>` : ""}` : "–";
+    const bs = r.best_scale_val != null || r.best_scale_val17x2 != null
+      ? `${r.best_scale_val != null ? Number(r.best_scale_val).toFixed(6) : "–"}<div class="meta">${r.best_scale_val17x2 != null ? Number(r.best_scale_val17x2).toFixed(6) : "–"}</div>`
+      : r.val_loss != null ? `<span class="meta" title="Raw val loss (no best-scale figure recorded)">raw ${Number(r.val_loss).toFixed(6)}</span>` : "–";
+    const elo = r.elo != null ? `${signed(r.elo)}${r.ci ? `<div class="meta">±${fmt((r.ci[1] - r.ci[0]) / 2, 1)}</div>` : ""}`
+      : r.status === "testing" ? `<span class="meta">${r.run_url ? `<a href="${esc(r.run_url)}">running</a>` : "running"}</span>` : "–";
+    const games = r.games != null ? fmt(r.games) : r.games_est != null ? `≈ ${fmt(r.games_est)}` : "";
+    const gate = `${elo}<div class="meta hide-sm">${r.mode ? esc(r.mode) : ""}${games ? ` · ${games} g` : ""}</div><div class="show-sm">${gateBadge(r.status)}</div>`;
+    const status = gateBadge(r.status) + (r.when ? `<div class="meta">${shortDate(r.when)}</div>` : "");
+    return `<tr${cls ? ` class="${cls}"` : ""} title="${esc(r.notes || "")}"><td class="hide-sm">${genCell}</td><td>${name}</td>
+      <td class="hide-sm mono" style="font-size:12.5px">${shapeText(r)}</td><td class="num hide-sm">${pool}</td>
+      <td class="num">${bs}</td><td class="num">${gate}</td><td class="hide-sm">${status}</td></tr>`;
+  }).join("");
+  el.innerHTML = `<div class="${wrapClass("gens")}"><table><thead><tr><th class="hide-sm">Gen</th><th>Net</th><th class="hide-sm">Shape</th><th class="num hide-sm">Pool</th>
+    <th class="num" title="Loss at the loss-optimal output scale, on val.bin (top) and val17x2 (below)">Best-scale val<div class="meta">val.bin / val17x2</div></th>
+    <th class="num">Gate Elo</th><th class="hide-sm">Status</th></tr></thead><tbody>${body}</tbody></table></div>` +
+    moreButton("gens", rows.length, nShown, "nets");
+  const ng = s.net_gates || {};
+  const missing = rows.filter((r) => !r.training_record && !r.local).map((r) => r.name);
+  $("generations-note").innerHTML = `Shape: H = hidden width, out = output buckets, kb = king-bucket layout, threats = threat inputs. Pool = positions per epoch. ` +
+    `Gate status from the queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>), training data from <span class="mono">net/experiments.jsonl</span> on <span class="mono">${esc(ng.experiments_ref || "?")}</span>; hover a row for its notes.` +
+    (missing.length ? ` <b>No training record for ${missing.map(esc).join(", ")}</b> (add with <span class="mono">scripts/netloop.py record</span>); <span class="mono">*</span> marks shape read from the branch name.` : "") +
+    ` Gate Elo is the queue SPRT against the main of its day, not a CCRL rating.`;
 }
 
 const dur = (sec) => sec == null ? "–" : sec < 90 ? Math.round(sec) + " s" : sec < 5400 ? Math.round(sec / 60) + " min" : (sec / 3600).toFixed(1) + " h";
-function renderLaptop(s) {
-  const el = $("laptop"), L = s.laptop;
-  if (!L || !L.payload) { el.className = "empty"; el.textContent = "No report yet from the laptop."; return; }
-  const p = L.payload, stale = L.age_s > 600;
-  let h = `<div style="margin-bottom:10px">${stale ? `<span class="badge b-warn">stale</span> ` : ""}<span class="meta">reported ${dur(L.age_s)} ago${p.load ? ` · load ${p.load.map((x) => fmt(x, 2)).join(" ")}` : ""}${p.disk_free_gb != null ? ` · ${fmt(p.disk_free_gb, 1)} GB free` : ""}</span></div>`;
-  const tr = p.trainers || [];
-  if (tr.length) {
-    h += `<div class="scroll"><table><thead><tr><th>Net</th><th>Trainer</th><th>Epoch</th><th>Val (quantized)</th><th>pos/s</th><th>ETA</th></tr></thead><tbody>` +
-      tr.map((t) => `<tr><td class="mono"><b>${esc(t.net)}</b>${t.paused ? ` <span class="badge b-warn">paused</span>` : ""}</td><td>${esc(t.kind)}</td>
-        <td class="num">${fmt(t.epoch)}/${fmt(t.epochs)}</td><td class="num">${t.val != null ? fmt(t.val, 6) : "–"}${t.val_q != null ? ` <span class="meta">(${fmt(t.val_q, 6)})</span>` : ""}</td>
-        <td class="num">${t.pos_s ? fmt(t.pos_s) : "–"}</td><td class="num">${t.done ? "done" : dur(t.eta_s)}</td></tr>`).join("") + `</tbody></table></div>`;
-  } else h += `<div class="empty">No trainer running.</div>`;
-  const d = p.datagen || {}, nl = p.netloop || {};
-  const dg = d.running ? `<span class="badge ${d.state === "paused" ? "b-warn" : "b-good"}">${esc(d.state)}</span>` : `<span class="badge b-neutral">not running</span>`;
-  h += `<dl class="kv" style="margin-top:12px">
-    <dt>Chain</dt><dd>${(p.chains || []).length ? p.chains.map((c) => `<span class="mono">${esc(c.name)}</span> <span class="meta">(${esc(c.elapsed)})</span>: ${esc(c.last || "–")}`).join("<br>") : `<span class="meta">none running</span>`}</dd>
-    <dt>Local datagen</dt><dd>${dg}${d.file ? ` <span class="mono">${esc(d.file)}</span> ${fmt((d.bytes || 0) / 1e9, 2)} GB` : ""}${d.gate_last ? ` <span class="meta">· gate: ${esc(d.gate_last)}</span>` : ""}</dd>
-    <dt>Auto loop</dt><dd><span class="badge ${nl.running ? "b-good" : "b-neutral"}">${nl.running ? "running" : "stopped"}</span> <span class="meta">${esc(nl.last || "")}</span></dd>
-    <dt>Caffeinate</dt><dd>${(p.caffeinate || []).length ? p.caffeinate.map((c) => `<span class="mono">${esc(c.args)}</span>${c.remaining_s != null ? ` <span class="meta">(${dur(Math.max(0, c.remaining_s))} left)</span>` : ""}`).join("<br>") : `<span class="badge b-warn">not running</span>`}</dd>
-  </dl>`;
-  el.className = ""; el.innerHTML = h;
+const bar = (frac) => { const pct = Math.max(0, Math.min(100, Math.round(100 * (frac || 0))));
+  return `<div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><div style="width:${pct}%"></div></div>`; };
+
+// Training machines: snapshots pushed to /api/machine by scripts/machine_status.py
+// (schema machine-status/1). Older pushes in another shape (the retired
+// laptop reporter) are kept by the server but not shown.
+const MACHINE_STALE_S = 900;
+function renderMachines(s) {
+  const ms = (s.machines || []).filter((m) => m.schema === "machine-status/1");
+  $("machines-card").style.display = ms.length ? "" : "none";
+  if (!ms.length) return;
+  $("machines").innerHTML = ms.map((m) => {
+    const p = m.payload || {}, g = p.gpu, d = p.datagen;
+    let h = `<div class="machine"><div style="margin-bottom:6px"><b>${esc(m.name)}</b> ${m.age_s > MACHINE_STALE_S ? `<span class="badge b-warn">stale</span> ` : ""}<span class="meta">reported ${dur(m.age_s)} ago` +
+      `${(p.disk || []).map((x) => ` · <span class="mono">${esc(x.path)}</span> ${x.free_gb != null ? `${fmt(x.free_gb, 0)} GB free` : "?"}`).join("")}${p.load ? ` · load ${p.load.map((x) => fmt(x, 1)).join(" ")}` : ""}</span></div>`;
+    if (g) {
+      const shape = [g.hidden ? `H${g.hidden}` : "", g.king_buckets || "", g.threats ? `threats ${g.threats}` : ""].filter(Boolean).join(" · ");
+      h += `<div>GPU <b class="mono">${esc(g.name)}</b> ${g.done ? `<span class="badge b-good">done</span>` : g.idle ? `<span class="badge b-warn">idle</span>` : `<span class="badge b-accent">training</span>`}
+        <span class="meta">${shape ? esc(shape) + " · " : ""}epoch ${fmt(g.epoch)}/${fmt(g.epochs)}${g.val != null ? ` · val ${fmt(g.val, 6)}` : ""}${g.pos_s ? ` · ${shortNum(g.pos_s)} pos/s` : ""}${!g.done && g.eta_s != null ? ` · ETA ${dur(g.eta_s)}` : ""}</span></div>` +
+        (g.done ? "" : bar(g.progress));
+    } else h += `<div class="meta">GPU: no trainer log found.</div>`;
+    if (d) {
+      const frac = d.games_total ? d.games_done / d.games_total : 0;
+      h += `<div style="margin-top:6px">CPU datagen <b class="mono">${esc(d.name)}</b>${d.seed != null ? ` <span class="meta">seed ${esc(d.seed)}</span>` : ""} ${d.done ? `<span class="badge b-good">done</span>` : d.idle ? `<span class="badge b-warn">idle</span>` : `<span class="badge b-accent">running</span>`}
+        <span class="meta">${fmt(d.games_done)}/${fmt(d.games_total)} games · ${shortNum(d.positions)} positions${d.pos_s ? ` · ${fmt(d.pos_s)} pos/s` : ""}${!d.done && d.eta_s != null ? ` · ETA ${dur(d.eta_s)}` : ""}</span></div>` +
+        (d.done ? "" : bar(frac));
+    } else h += `<div class="meta" style="margin-top:6px">CPU datagen: no log found.</div>`;
+    return h + `</div>`;
+  }).join("");
+}
+
+// CI runners: in-progress jobs of every live Actions run, grouped by workflow,
+// against the account's concurrent-job cap.
+function renderRunners(s) {
+  const u = s.runner_usage;
+  const runsErr = s.sources.runs && s.sources.runs.error && !s.sources.runs.fetched_at;
+  if (!u || runsErr) { $("runners").className = "empty"; $("runners").innerHTML = "Actions API unavailable; runner usage unknown."; return; }
+  const gs = u.groups || [];
+  $("runners").className = "";
+  $("runners").innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><span style="font-size:24px;font-weight:650;font-variant-numeric:tabular-nums">${u.unknown_runs ? "≥ " : ""}${fmt(u.in_use)} / ${fmt(u.cap)}</span>
+      <span class="meta">jobs running${u.idle > 0 ? ` · <b style="color:var(--warn)">${fmt(u.idle)} idle</b>` : " · all busy"}${u.queued ? ` · ${fmt(u.queued)} waiting for a runner` : ""}</span></div>
+    <div class="runbar" role="img" aria-label="${gs.map((g) => `${g.running} ${g.label}`).join(", ")} of ${u.cap} runners">${gs.map((g) => g.running ? `<div class="g-${esc(g.key)}" style="width:${100 * Math.min(g.running, u.cap) / u.cap}%"></div>` : "").join("")}</div>
+    <div class="rgroups">${gs.map((g) => `<div class="rg"><span class="legend" style="display:inline;margin:0"><span class="l-${esc(g.key)}">${esc(g.label)}</span></span> <b>${fmt(g.running)}</b>${g.queued ? ` <span class="meta">+${fmt(g.queued)} waiting</span>` : ""}
+      ${g.runs.map((r) => `<div class="meta"><a href="${esc(r.url)}">${esc(r.title)}</a>: ${r.running == null ? "jobs unknown" : `${fmt(r.running)} running${r.queued ? `, ${fmt(r.queued)} waiting` : ""}`}</div>`).join("")}</div>`).join("")}</div>
+    <div class="note">Counted from the Actions jobs of each live run (cached ~3 min or longer when many runs are live${u.as_of ? `; runs as of ${ago(u.as_of)}` : ""}).${u.test_shards ? ` The queue's SPRT waves use ${fmt(u.test_shards)} shards.` : ""}${u.unknown_runs ? ` ${fmt(u.unknown_runs)} run${u.unknown_runs === 1 ? "'s" : "s'"} jobs could not be fetched, so the total is a lower bound.` : ""}</div>`;
 }
 
 // Lichess bot card, from /api/lichess (public Lichess API, cached ~5 min on
@@ -491,25 +550,9 @@ async function refreshLichess() {
   }
 }
 
-function renderRunners(s) {
-  const u = s.runner_usage;
-  if (!u) { $("runners").innerHTML = `<div class="empty">No runner data.</div>`; return; }
-  const runsErr = s.sources.runs && s.sources.runs.error && !s.sources.runs.fetched_at;
-  const fg = Math.min(u.foreground, u.cap), bg = Math.min(u.background, u.cap - fg);
-  const idle = u.cap - fg - bg;
-  $("runners").className = "";
-  $("runners").innerHTML = runsErr ? `<div class="empty">Actions API unavailable; runner usage unknown.</div>` : `
-    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><span style="font-size:24px;font-weight:650;font-variant-numeric:tabular-nums">${u.estimated ? "≈ " : ""}${fmt(u.in_use)} / ${fmt(u.cap)}</span>
-      <span class="meta">jobs in progress${idle > 0 ? ` · <b style="color:var(--warn)">${fmt(idle)} idle</b>` : " · all busy"}</span></div>
-    <div class="runbar" role="img" aria-label="${fg} foreground, ${bg} background of ${u.cap} runners"><div class="fg" style="width:${100 * fg / u.cap}%"></div><div class="bg" style="width:${100 * bg / u.cap}%"></div></div>
-    <div class="legend" style="margin:0"><span class="l-fg">foreground ${fmt(u.foreground)} / ${fmt(u.foreground_cap)} (SPRTs, CCRL ladders)</span><span class="l-bg">background ${fmt(u.background)} / ${fmt(u.background_cap)} (datagen, SPSA)</span></div>
-    ${u.runs.length ? `<div class="meta" style="margin-top:6px">${u.runs.map((r) => `<a href="${esc(r.url)}">${esc(r.title || r.name)}</a>: ${r.exact ? "" : "≈"}${fmt(r.jobs)}`).join(" · ")}</div>` : ""}
-    <div class="note">From the Actions runs list (cached ~3 min${u.as_of ? `, as of ${ago(u.as_of)}` : ""}). Exact job counts for the in-flight SPRT wave or ladder and the active datagen run; other runs (≈) are estimated at their workflow's max-parallel, so no extra API calls are spent.</div>`;
-}
-
 function renderInflight(s) {
   const q = s.queue, cur = q.current;
-  let h = "<h2>Foreground lane: now testing</h2>";
+  let h = "<h2>Now testing</h2>";
   if (q.paused) h += `<div class="banner on" style="margin:0 0 12px">Queue paused: ${esc(q.paused)}</div>`;
   if (!cur) {
     h += `<div class="empty">Queue idle${q.pending.length ? "" : " and empty"}.</div>`;
@@ -533,19 +576,15 @@ function renderInflight(s) {
       <dt>Test</dt><dd class="mono">${cur.run_url ? `<a href="${esc(cur.run_url)}">${esc(cur.test_id)}</a>` : esc(cur.test_id)}</dd>
     </dl>`;
   }
-  const others = s.active_runs.filter((r) => !["datagen.yml", "spsa.yml", "train-sweep.yml", "queue.yml"].includes(r.workflow) && (!cur || !(r.title || "").includes(cur.test_id)));
-  if (others.length) {
-    h += `<div style="margin-top:14px" class="meta">Other active workflow runs</div><ul style="margin:4px 0 0;padding-left:18px;font-size:14px">` +
-      others.map((r) => `<li><a href="${esc(r.url)}">${esc(r.title)}</a> <span class="meta">${esc(r.status.replace("_", " "))}, ${ago(r.started)}</span></li>`).join("") + "</ul>";
-  }
   $("inflight").innerHTML = h;
 }
 
 function renderPending(s) {
   const p = s.queue.pending;
+  const shards = s.runner_usage && s.runner_usage.test_shards;
   $("pending").className = p.length ? "" : "empty";
   $("pending").innerHTML = p.length
-    ? `<div class="meta" style="margin-bottom:8px">${p.length} waiting. The foreground lane runs one item at a time on up to 16 runners: SPRTs against the latest main, CCRL ladders on main; speedups merge on bench identity without games.</div><ol class="queue">` +
+    ? `<div class="meta" style="margin-bottom:8px">${p.length} waiting. The queue runs one item at a time${shards ? ` (SPRT waves of ${fmt(shards)} shards)` : ""}: SPRTs against the latest main, CCRL ladders on main; speedups merge on bench identity without games.</div><ol class="queue">` +
       p.map((i) => `<li><span class="mono">${esc(i.mode === "ladder" ? "CCRL ladder on main" : i.branch)}</span> <span class="badge b-neutral">${esc(modeName(i.mode))}</span>${i.retried ? ' <span class="badge b-warn">retry</span>' : ""}</li>`).join("") + "</ol>"
     : "Nothing queued.";
 }
@@ -572,10 +611,11 @@ function renderOutcomes(s) {
       detail: t.tc ? `${t.tc} [${t.bounds.join(", ")}]` : (t.note || ""), url: t.url});
   }
   rows.sort((a, b) => (b.when || "").localeCompare(a.when || ""));
-  $("outcomes").innerHTML = rows.length ? `<table><thead><tr><th>Change</th><th>Result</th><th class="num">Elo ± CI</th><th class="num hide-sm">Games</th><th class="hide-sm">When</th></tr></thead><tbody>` +
-    rows.slice(0, 25).map((r) => `<tr><td><span class="mono">${r.url ? `<a href="${esc(r.url)}">${esc(r.name)}</a>` : esc(r.name)}</span><div class="meta">${esc(r.detail).slice(0, 140)}<span class="show-sm"> · ${shortDate(r.when)}</span></div></td>
+  const all = rows.slice(0, 40), N = 8;
+  $("outcomes").innerHTML = rows.length ? `<div class="${wrapClass("outcomes")}"><table><thead><tr><th>Change</th><th>Result</th><th class="num">Elo ± CI</th><th class="num hide-sm">Games</th><th class="hide-sm">When</th></tr></thead><tbody>` +
+    all.map((r, i) => `<tr${extra(i, N)}><td><span class="mono">${r.url ? `<a href="${esc(r.url)}">${esc(r.name)}</a>` : esc(r.name)}</span><div class="meta">${esc(r.detail).slice(0, 140)}<span class="show-sm"> · ${shortDate(r.when)}</span></div></td>
       <td>${badge(r.kind)}</td><td class="num">${r.rating != null ? `<b>${fmt(r.rating)}</b> CCRL${r.rating_ci ? `<div class="meta">${fmt(r.rating_ci[0])}–${fmt(r.rating_ci[1])}</div>` : ""}` : eloCi(r.elo, r.ci)}</td><td class="num hide-sm">${fmt(r.games)}</td><td class="meta hide-sm" style="white-space:nowrap">${shortDate(r.when)}</td></tr>`).join("") +
-    `</tbody></table><div class="note">Merge-queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>) plus manual SPRTs from <span class="mono">tests/sprt-log.jsonl</span> (tests later marked invalid are hidden). Elo is gate Elo at the gate's own time control; only ladder rows are CCRL ratings.</div>`
+    `</tbody></table></div>${moreButton("outcomes", all.length, N, "results")}<div class="note">Merge-queue log (<span class="mono">log.jsonl</span> on <span class="mono">queue-state</span>) plus manual SPRTs from <span class="mono">tests/sprt-log.jsonl</span> (tests later marked invalid are hidden). Elo is gate Elo at the gate's own time control; only ladder rows are CCRL ratings.</div>`
     : `<div class="empty">No results yet.</div>`;
 }
 
@@ -585,15 +625,16 @@ function renderGains(s) {
   if (!m.length) { $("gains").innerHTML = `<div class="empty">No accepted changes yet.</div>`; return; }
   const max = Math.max(...m.map((x) => (x.ci ? x.ci[1] : x.elo) || 0), 10);
   const sure = m.filter((x) => x.certain).reduce((a, x) => a + (x.elo || 0), 0);
-  $("gains").innerHTML = `<div class="bars">` + m.slice().reverse().map((x) => {
+  const N = 10;
+  $("gains").innerHTML = `<div class="bars ${wrapClass("gains")}">` + m.slice().reverse().map((x, i) => {
     const w = Math.max(0, x.elo) / max * 100;
     const wl = x.ci ? Math.max(0, x.ci[0]) / max * 100 : w, wr = x.ci ? x.ci[1] / max * 100 : w;
-    return `<div class="bar-row" title="${esc(x.name)}: ${signed(x.elo)} Elo (${esc(x.how)}, ${fmt(x.games)} games${x.certain ? ", merged by the queue" : ""})">
+    return `<div class="bar-row${i >= N ? " extra" : ""}" title="${esc(x.name)}: ${signed(x.elo)} Elo (${esc(x.how)}, ${fmt(x.games)} games${x.certain ? ", merged by the queue" : ""})">
       <span class="name"><span class="mono">${esc(x.name)}</span><div class="meta" style="font-size:11.5px">${esc(x.how)}</div></span>
       <span class="track"><span class="fill${x.certain ? "" : " uncertain"}" style="width:${w}%"></span><span class="whisk" style="left:${wl}%;width:${Math.max(0, wr - wl)}%"></span></span>
       <span style="text-align:right;font-variant-numeric:tabular-nums">${signed(x.elo)}</span></div>`;
-  }).join("") + `</div>
-  <div class="note">Each bar is <b>gate Elo</b>, not CCRL: the SPRT against the main of its day at the gate's time control (<span class="mono">stc</span> 10+0.1, <span class="mono">net-gate</span> 5+0.05, <span class="mono">ltc-gainer</span> 60+0.6), with a 95% CI whisker. Gate Elo is inflated relative to CCRL and not additive. Solid bars were merged by the queue${sure ? ` (sum ${signed(sure)})` : ""}; faded bars passed before the queue existed and were merged by hand.${exact ? ` ${exact} speedup${exact === 1 ? "" : "s"} merged on bench identity (no Elo) are not shown.` : ""} The ladder chart is the real cumulative number.</div>`;
+  }).join("") + `</div>${moreButton("gains", m.length, N, "accepted changes")}
+  <div class="note">Newest first. Each bar is <b>gate Elo</b>, not CCRL: the SPRT against the main of its day at the gate's time control (<span class="mono">stc</span> 10+0.1, <span class="mono">net-gate</span> 5+0.05, <span class="mono">ltc-gainer</span> 60+0.6), with a 95% CI whisker. Gate Elo is inflated relative to CCRL and not additive. Solid bars were merged by the queue${sure ? ` (sum ${signed(sure)})` : ""}; faded bars passed before the queue existed and were merged by hand.${exact ? ` ${exact} speedup${exact === 1 ? "" : "s"} merged on bench identity (no Elo) are not shown.` : ""} The ladder chart is the real cumulative number.</div>`;
 }
 
 function renderChart(s) {
@@ -697,10 +738,13 @@ function renderChart(s) {
 document.addEventListener("click", (e) => { if (!e.target.closest("[data-tip]")) $("tip").style.display = "none"; });
 
 function renderCommits(s) {
-  $("commits").innerHTML = s.commits.length ? `<table><thead><tr><th>Commit</th><th>Message</th><th class="num">Bench</th><th>When</th></tr></thead><tbody>` +
-    s.commits.slice(0, 12).map((c) => `<tr><td><a class="mono" href="${esc(c.url)}">${esc(c.sha)}</a></td><td>${esc(c.title)}</td><td class="num mono">${c.bench ? fmt(c.bench) : ""}</td><td class="meta" style="white-space:nowrap">${ago(c.when)}</td></tr>`).join("") + "</tbody></table>"
+  const N = 5, all = s.commits.slice(0, 15);
+  $("commits").innerHTML = all.length ? `<div class="${wrapClass("commits")}"><table><thead><tr><th>Commit</th><th>Message</th><th class="num hide-sm">Bench</th><th>When</th></tr></thead><tbody>` +
+    all.map((c, i) => `<tr${extra(i, N)}><td><a class="mono" href="${esc(c.url)}">${esc(c.sha)}</a></td><td>${esc(c.title)}</td><td class="num mono hide-sm">${c.bench ? fmt(c.bench) : ""}</td><td class="meta" style="white-space:nowrap">${ago(c.when)}</td></tr>`).join("") + "</tbody></table></div>" +
+    moreButton("commits", all.length, N, "commits")
     : `<div class="empty">Commit list unavailable.</div>`;
 }
+function renderLists(s) { renderGenerations(s); renderOutcomes(s); renderGains(s); renderCommits(s); }
 
 // Small markdown renderer for plan.md: headings, paragraphs, lists, tables, code, emphasis, links.
 function inline(t) {
@@ -772,19 +816,25 @@ async function refresh() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const s = await r.json();
     window.STATUS = s;
-    renderBanner(s); renderTiles(s); renderTargets(s); renderRunners(s); renderBackground(s); renderLaptop(s); renderInflight(s); renderPending(s);
-    renderChart(s); renderNetGates(s); renderNets(s); renderOutcomes(s); renderEstimate(s); renderGains(s); renderCommits(s);
+    // In page order: headline, strength, in flight, nets, results (Lichess and the plan follow).
+    renderBanner(s); renderTiles(s); renderTargets(s); renderEstimate(s); renderChart(s);
+    renderInflight(s); renderPending(s); renderRunners(s); renderMachines(s);
+    renderNetGates(s); renderNets(s); renderLists(s);
     if (s.plan) $("plan").innerHTML = markdown(s.plan);
     const rm = s.roadmap || {};
     $("plan-meta").innerHTML = `<a class="mono" href="${ghRepo()}/blob/main/plan.md">plan.md</a> on main, the maintained roadmap${rm.last_updated ? ` · last updated <b>${esc(rm.last_updated)}</b>` : ""}${s.sources.plan && s.sources.plan.fetched_at ? ` · fetched ${ago(s.sources.plan.fetched_at)}` : ""}`;
     const oldest = Object.values(s.sources).map((v) => v.fetched_at).filter(Boolean).sort()[0];
     $("updated").textContent = `updated ${new Date(s.generated_at).toLocaleTimeString()} · GitHub data from ${ago(oldest) || "never"}`;
-    $("footer").innerHTML = `Data: <a href="${ghRepo()}">${esc(s.repo)}</a> (main, queue-state branch, Actions API), cached on the server for 2–10 minutes. Page refreshes every minute.${s.api_rate?.remaining != null ? ` Unauthenticated GitHub API quota left this hour: ${s.api_rate.remaining}/60.` : ""}`;
+    $("footer").innerHTML = `Data: <a href="${ghRepo()}">${esc(s.repo)}</a> (main, queue-state branch, Actions API), cached on the server for 2–20 minutes. Page refreshes every minute.${s.api_rate?.remaining != null ? ` Unauthenticated GitHub API quota left this hour: ${s.api_rate.remaining}/60.` : ""}`;
   } catch (e) {
     $("banner").className = "banner on";
     $("banner").textContent = `Dashboard server unreachable (${e.message}); showing the last data loaded.`;
   }
 }
+$("plan-more").addEventListener("click", () => {
+  const open = $("plan-wrap").classList.toggle("clamp");
+  $("plan-more").textContent = open ? "Show the full plan" : "Collapse the plan";
+});
 refresh(); refreshLichess();
 setInterval(() => { refresh(); refreshLichess(); }, REFRESH_MS);
 let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => window.STATUS && renderChart(window.STATUS), 150); });
