@@ -103,6 +103,16 @@ Desktop findings not recorded before: `--half` from scratch matches f32
 throughout (~40 min/gen saved); batch 32768 is worse at equal positions
 and no faster. Next desktop datagen seed: 2006. Gen 9 waits on three
 results: from-scratch vs chain, the threat stc, the packed A/B.
+**Threats ep rejected in games: -23.2** [-35.2, -11.2] (stc, 960 games,
+23:03) despite the loss gain. Diagnosis so far: eval is fine (fixed depth 9
+on the desktop, 240 games: **+58** [34, 84] vs main); same output scale as
+g8 (best scale x0.7918 vs x0.7963, mean|eval| 468 vs 464); cost: **-21% NPS
+on x86 AVX2** (1.70M -> 1.33M) and +18% nodes at bench 13 (one tree, not
+conclusive). Plan (owner, 2026-11-12): fix and experiment during gen 9,
+bake into gen 10: (1) time-odds stc (ep at ~1.3x time) to confirm cost is
+the whole story; (2) profile and make threat inputs incremental (per-move
+attack-map updates instead of recomputing); (3) ltc test (CCRL is 2+1).
+Gen 9 trains without threats.
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
