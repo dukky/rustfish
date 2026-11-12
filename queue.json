@@ -11,20 +11,10 @@
       "expect": 2.0
     }
   ],
-  "current": {
-    "branch": "feat-cuckoo",
-    "mode": "stc",
-    "expect": 3.0,
-    "test_id": "q-feat-cuckoo-1111-2244",
-    "sha": "9b130008e0aace5de25258780af893199449d85b",
-    "base_sha": "614ea1b084ff8b18f726946771f7d1bb58d14563",
-    "started": "2026-11-11T22:44:22Z",
-    "bench": 401313,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 185,
   "consecutive_bursts": 0,
   "identical_merges": [
