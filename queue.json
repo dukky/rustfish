@@ -1,5 +1,12 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "nnue-g7h1024kb8m",
+      "mode": "stc",
+      "expect": 8.0,
+      "front": true
+    }
+  ],
   "current": {
     "branch": "feat-lmr-deeper-only",
     "mode": "stc",
