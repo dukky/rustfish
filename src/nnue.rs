@@ -209,15 +209,51 @@ fn board_ctx<L: Layout>(board: &Board, persp: Color) -> KingCtx {
 /// NNUE scores are clamped well inside the mate range.
 const EVAL_LIMIT: i32 = 20_000;
 
+/// One 64-byte cache line of i16 weights.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+struct Line([i16; 32]);
+
+/// i16 weights stored 64-byte aligned, so every H-row (H * 2 bytes, a
+/// multiple of 64) starts on a cache line and no SIMD load of a row splits
+/// one. A plain `Vec<i16>` of this size is mmapped by glibc 16 bytes past a
+/// page boundary, which made half of the 256-bit row loads on Linux x86
+/// straddle two lines (macOS happens to page-align it).
+#[derive(Clone)]
+struct AlignedI16 {
+    lines: Vec<Line>,
+    len: usize,
+}
+
+impl AlignedI16 {
+    fn new(v: &[i16]) -> Self {
+        let mut lines = vec![Line([0; 32]); v.len().div_ceil(32)];
+        for (l, c) in lines.iter_mut().zip(v.chunks(32)) {
+            l.0[..c.len()].copy_from_slice(c);
+        }
+        Self { lines, len: v.len() }
+    }
+}
+
+impl std::ops::Deref for AlignedI16 {
+    type Target = [i16];
+    #[inline(always)]
+    fn deref(&self) -> &[i16] {
+        // SAFETY: `Line` is repr(C) [i16; 32] with no padding, so `lines` is
+        // `32 * lines.len() >= len` contiguous, initialised i16s.
+        unsafe { std::slice::from_raw_parts(self.lines.as_ptr() as *const i16, self.len) }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Network {
     /// Feature-major: weights of feature f are `ft_w[f*H .. (f+1)*H]`,
     /// `kb * 768` features.
-    ft_w: Vec<i16>,
+    ft_w: AlignedI16,
     kb: usize,
     ft_b: [i16; H],
     /// Bucket-major: bucket b's weights are `out_w[b*2H .. (b+1)*2H]`, stm half first.
-    out_w: Vec<i16>,
+    out_w: AlignedI16,
     out_b: [i16; BUCKETS],
     /// All |out_w| <= 127: the SIMD output kernel's i16 products and i32
     /// per-perspective sums cannot overflow (256 * 255^2 * 127 < 2^31).
@@ -257,7 +293,7 @@ impl Network {
         assert_eq!(out_w.len(), BUCKETS * 2 * H);
         let kb = ft_w.len() / (INPUTS * H);
         let small_out = out_w.iter().all(|w| (-127..=127).contains(w));
-        Self { ft_w, kb, ft_b, out_w, out_b, small_out }
+        Self { ft_w: AlignedI16::new(&ft_w), kb, ft_b, out_w: AlignedI16::new(&out_w), out_b, small_out }
     }
 
     pub(crate) fn load(path: &str) -> Result<Self, String> {
@@ -362,6 +398,7 @@ type PieceBBs = [[u64; 6]; 2];
 /// context for the pieces in `bb`. Refreshing applies only the difference
 /// between `bb` and the new position, then stores the result back.
 #[derive(Clone)]
+#[repr(C, align(64))]
 struct CacheEntry {
     acc: [i16; H],
     bb: PieceBBs,
