@@ -443,6 +443,14 @@ impl BatchTrainer {
         self.ft_live = true;
     }
 
+    /// Forgets the FT state of `step` (and the forward's FT copy): the next
+    /// `step` re-imports `p` and `opt` (after they were changed outside,
+    /// e.g. averaged with another trainer's).
+    pub fn invalidate(&mut self) {
+        self.ft_live = false;
+        self.wt_ok = false;
+    }
+
     /// Writes the FT state of `step` back to `p` and `opt` (call before
     /// reading `p`'s FT, e.g. to validate or checkpoint). `step` can go on.
     pub fn export(&mut self, p: &mut [f32], opt: &mut Adam) {

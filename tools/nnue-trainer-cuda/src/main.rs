@@ -7,7 +7,8 @@
 //! on the CPU pool (`--threads`). Std only: the driver API is called
 //! through the small FFI below.
 
-use nnue_trainer::batch::{par_units, Pool};
+use nnue_trainer::batch::{par_units, BatchTrainer, Pool};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use nnue_trainer::{decode, Adam, Backend, BackendCfg, KingLayout, Rec, Shape, CLIP, INPUTS};
 use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -371,6 +372,12 @@ impl GpuTrainer {
         }
     }
 
+    /// Forgets the device state: the next `step` re-imports `p` and `opt`
+    /// (call `flush` first).
+    fn invalidate(&mut self) {
+        self.live = false;
+    }
+
     /// Waits for slot `si`'s batch and sums its `n` losses (sample order).
     fn loss_of(&mut self, si: usize, n: usize) -> f64 {
         let sl = &mut self.slots[si];
@@ -566,7 +573,7 @@ impl Backend for GpuTrainer {
         prev.map_or(0.0, |(ps, pn)| self.loss_of(ps, pn))
     }
 
-    fn flush(&mut self) -> f64 {
+    fn flush(&mut self, _p: &mut [f32], _opt: &mut Adam) -> f64 {
         self.pending.take().map_or(0.0, |(ps, pn)| self.loss_of(ps, pn))
     }
 
@@ -600,6 +607,174 @@ impl SyncPtr {
     }
 }
 
+// ---------------------------------------------------------------- GPU + CPU pair (experiment)
+
+/// `NNUE_PAIR=K,cpu_threads,gpu_share`: train one net on the GPU and the CPU
+/// at once (local SGD / periodic averaging). Each device keeps its own copy
+/// of the net and the Adam moments; batch i of every round of K goes to the
+/// GPU for a fixed `gpu_share` of them (the pattern depends only on i, so
+/// runs are deterministic), the rest to a CPU worker thread with its own
+/// pool. After every K batches (and at every epoch end) both wait, average
+/// params and moments (equal weights), and continue from the average. Each
+/// keeps its own AdamW step count.
+struct PairBackend {
+    gpu: GpuTrainer,
+    k: usize,
+    share: usize,
+    n: usize,
+    jobs: SyncSender<Job>,
+    replies: Receiver<Reply>,
+    cpu_out: usize,
+    cpu_started: bool,
+    rounds: u64,
+}
+
+enum Job {
+    State(Vec<f32>, Adam),
+    Batch { recs: Vec<Rec>, mirror: Vec<bool>, lambda: f32, kl: KingLayout, lr: f32, wd: f32 },
+    Export,
+}
+
+enum Reply {
+    Loss(f64),
+    State(Vec<f32>, Adam),
+}
+
+unsafe impl Send for PairBackend {}
+
+impl PairBackend {
+    fn new(cfg: &BackendCfg, spec: &str) -> Self {
+        let v: Vec<&str> = spec.split(',').collect();
+        assert!(v.len() == 3, "NNUE_PAIR=K,cpu_threads,gpu_share (e.g. 64,10,0.62)");
+        let k: usize = v[0].parse().unwrap();
+        let cpu_threads: usize = v[1].parse().unwrap();
+        let g: f64 = v[2].parse().unwrap();
+        let share = ((g * k as f64).round() as usize).clamp(1, k - 1);
+        let (jobs, job_rx) = sync_channel::<Job>(8);
+        let (reply_tx, replies) = sync_channel::<Reply>(64);
+        let (sh, fl, wd_active, half) = (cfg.sh, cfg.fl, cfg.wd_active, cfg.half);
+        std::thread::spawn(move || {
+            Pool::with(cpu_threads, |pool| {
+                let mut bt = BatchTrainer::with_half(sh, 0, false, fl, wd_active, half);
+                let mut st: Option<(Vec<f32>, Adam)> = None;
+                for job in job_rx {
+                    match job {
+                        Job::State(p, o) => {
+                            st = Some((p, o));
+                            bt.invalidate();
+                        }
+                        Job::Batch { recs, mirror, lambda, kl, lr, wd } => {
+                            let (p, o) = st.as_mut().unwrap();
+                            let l = bt.step(pool, p, o, &recs, &mirror, lambda, &kl, lr, wd);
+                            reply_tx.send(Reply::Loss(l)).unwrap();
+                        }
+                        Job::Export => {
+                            let (mut p, mut o) = st.take().unwrap();
+                            bt.export(&mut p, &mut o);
+                            reply_tx.send(Reply::State(p, o)).unwrap();
+                        }
+                    }
+                }
+            })
+        });
+        eprintln!("pair: rounds of {k} batches, {share} on the GPU, {} on the CPU ({cpu_threads} threads)", k - share);
+        PairBackend { gpu: GpuTrainer::new(cfg), k, share, n: 0, jobs, replies, cpu_out: 0, cpu_started: false, rounds: 0 }
+    }
+
+    fn to_gpu(&self, i: usize) -> bool {
+        (i + 1) * self.share / self.k > i * self.share / self.k
+    }
+
+    fn drain(&mut self, block: bool) -> f64 {
+        let mut l = 0.0;
+        while self.cpu_out > 0 {
+            let r = if block { self.replies.recv().ok() } else { self.replies.try_recv().ok() };
+            match r {
+                Some(Reply::Loss(x)) => {
+                    l += x;
+                    self.cpu_out -= 1;
+                }
+                Some(Reply::State(..)) => unreachable!(),
+                None => break,
+            }
+        }
+        l
+    }
+
+    /// Waits for both, averages into `p` / `opt` and hands both the result.
+    fn sync(&mut self, p: &mut [f32], opt: &mut Adam) -> f64 {
+        let mut loss = self.gpu.flush(p, opt);
+        self.gpu.export(p, opt);
+        loss += self.drain(true);
+        if !self.cpu_started {
+            return loss;
+        }
+        self.jobs.send(Job::Export).unwrap();
+        let (mut pc, mut oc) = match self.replies.recv().unwrap() {
+            Reply::State(pc, oc) => (pc, oc),
+            Reply::Loss(_) => unreachable!(),
+        };
+        for (a, b) in p.iter_mut().zip(pc.iter_mut()) {
+            *a = 0.5 * (*a + *b);
+            *b = *a;
+        }
+        for (a, b) in opt.m.iter_mut().zip(oc.m.iter_mut()) {
+            *a = 0.5 * (*a + *b);
+            *b = *a;
+        }
+        for (a, b) in opt.v.iter_mut().zip(oc.v.iter_mut()) {
+            *a = 0.5 * (*a + *b);
+            *b = *a;
+        }
+        self.gpu.invalidate();
+        self.jobs.send(Job::State(pc, oc)).unwrap();
+        self.rounds += 1;
+        loss
+    }
+}
+
+impl Backend for PairBackend {
+    fn describe(&self) -> String {
+        format!("{}; pair with the CPU: average every {} batches ({} GPU / {} CPU)", self.gpu.describe(), self.k, self.share, self.k - self.share)
+    }
+
+    fn step(&mut self, pool: &Pool, p: &mut [f32], opt: &mut Adam, recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout, lr: f32, wd: f32) -> f64 {
+        if !self.cpu_started {
+            let o = Adam { m: opt.m.clone(), v: opt.v.clone(), step: opt.step };
+            self.jobs.send(Job::State(p.to_vec(), o)).unwrap();
+            self.cpu_started = true;
+        }
+        let i = self.n % self.k;
+        self.n += 1;
+        let mut loss = 0.0;
+        if self.to_gpu(i) {
+            loss += self.gpu.step(pool, p, opt, recs, mirror, lambda, kl, lr, wd);
+        } else {
+            self.jobs.send(Job::Batch { recs: recs.to_vec(), mirror: mirror.to_vec(), lambda, kl: *kl, lr, wd }).unwrap();
+            self.cpu_out += 1;
+        }
+        loss += self.drain(false);
+        if self.n % self.k == 0 {
+            loss += self.sync(p, opt);
+        }
+        loss
+    }
+
+    fn export(&mut self, p: &mut [f32], opt: &mut Adam) {
+        // After `flush` (epoch ends) p / opt hold the average already.
+        self.gpu.export(p, opt);
+    }
+
+    fn flush(&mut self, p: &mut [f32], opt: &mut Adam) -> f64 {
+        // Epoch end: average now, so the exported / validated net is the average.
+        self.sync(p, opt)
+    }
+}
+
 fn main() {
-    nnue_trainer::cli(Some(&|cfg: &BackendCfg| Box::new(GpuTrainer::new(cfg)) as Box<dyn Backend>));
+    if let Ok(spec) = std::env::var("NNUE_PAIR") {
+        nnue_trainer::cli(Some(&move |cfg: &BackendCfg| Box::new(PairBackend::new(cfg, &spec)) as Box<dyn Backend>));
+    } else {
+        nnue_trainer::cli(Some(&|cfg: &BackendCfg| Box::new(GpuTrainer::new(cfg)) as Box<dyn Backend>));
+    }
 }

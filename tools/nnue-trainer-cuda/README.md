@@ -29,6 +29,17 @@ mantissa bits, finer than the engine's 1/255 FT quantisation; kb8m H 512,
 (0.037754). Not bit-identical to f32 runs, so A/B it before relying on it
 for a generation.
 
+## GPU + CPU on one net (`NNUE_PAIR`, experiment)
+
+`NNUE_PAIR=K,cpu_threads,gpu_share nnue-trainer-cuda train ...` trains one
+net on both: the GPU and a CPU worker (its own pool of `cpu_threads`, the
+CPU batch kernels) each keep a copy of the net and the Adam moments; in
+every round of K batches a fixed `gpu_share` of them (by batch index) go to
+the GPU, the rest to the CPU; after each round and at every epoch end both
+wait and average params and moments, and go on from the average (local SGD).
+Deterministic (reruns byte-identical). Give the GPU decode `--threads 2`
+and set `gpu_share` near the speed ratio (kb8m H 512 `--half` ~0.63).
+
 ## Deterministic, not bit-identical to the CPU
 
 No float atomics: every sum has a fixed order, so reruns (any `--threads`)

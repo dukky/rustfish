@@ -1546,7 +1546,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
 
             if seen / epoch_size != (seen - recs.len() as u64) / epoch_size || seen >= total || batches == max_batches {
                 ep += 1;
-                epoch_loss += bt.flush();
+                epoch_loss += bt.flush(&mut p, &mut opt);
                 let secs = started.elapsed().as_secs_f64();
                 bt.export(&mut p, &mut opt);
                 if fac.on() {
@@ -1599,8 +1599,10 @@ pub trait Backend {
     fn step(&mut self, pool: &batch::Pool, p: &mut [f32], opt: &mut Adam, recs: &[Rec], mirror: &[bool], lambda: f32, kl: &KingLayout, lr: f32, wd: f32) -> f64;
     fn export(&mut self, p: &mut [f32], opt: &mut Adam);
     /// A pipelined backend's `step` may return the loss of the batch
-    /// before; `flush` waits for the last batch and returns its loss.
-    fn flush(&mut self) -> f64 {
+    /// before; `flush` (epoch ends, before `export`) waits for the last
+    /// batch and returns its loss. It may also update the state (`p`,
+    /// `opt`: a paired backend averages its devices' copies here).
+    fn flush(&mut self, _p: &mut [f32], _opt: &mut Adam) -> f64 {
         0.0
     }
 }
