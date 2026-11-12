@@ -421,7 +421,7 @@ impl Network {
     /// `out_range` bounds |out_w|; > 127 exercises the wide (i64) output path.
     #[cfg(test)]
     pub(crate) fn random(seed: u64, ft_range: i16, out_range: i16) -> Self {
-        Self::random_kb(seed, ft_range, out_range, KB)
+        Self::random_kb(seed, ft_range, out_range, KB + TB)
     }
 
     #[cfg(test)]
