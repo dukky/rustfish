@@ -34,7 +34,7 @@ use std::sync::Arc;
 use crate::{Board, Color, Move, Piece, PieceType};
 
 pub(crate) const INPUTS: usize = 768;
-pub(crate) const H: usize = 512;
+pub(crate) const H: usize = 1024;
 pub(crate) const QA: i32 = 255;
 pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
