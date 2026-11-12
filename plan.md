@@ -64,7 +64,7 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   10 rounds; queue on 10 test shards meanwhile, e97a6dc). Pause it between
   rounds for the gen-8 gate (state = last `spsa-result` artifact), restore
   18 test shards, resume after.
-- **Datagen: the user restarted desktop datagen (D2004 on the gen-8
+- **Datagen: desktop datagen restarted by the user (laptop L1008/L1009 too) (D2004 on the gen-8
   engine, then D2005 overnight; 9 threads).** Data decision still pending. CI
   datagen stopped means new data is ~350M/day (desktop) vs ~1.4B/day
   before, so data, not training, is the bottleneck now; that raises T80's
@@ -119,12 +119,12 @@ on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 for packed-data.
 
 **Mid term (days-weeks): clear top 100, start on bigger nets.**
-- Data decision (Hermes notes `docs/research-2026-11-11-coda-lc0-compute.md`,
-  critique `docs/research-2026-11-11-critique.md`): own self-play still gains
-  +17-31 per generation, so keep it as arm A; arm B = the same positions
-  rescored by g7kb8m at higher nodes (cheap, best-evidenced: Viridithas
-  +50/+25/+24); arm C = Lc0 T80 subset (binpack reader, Q -> cp calibration,
-  ODbL check first). One variable each, current net shape, gated in games.
+- **Data decision (2026-11-12, owner): no T80 for now.** The goal is a
+  stable release as a true from-scratch engine (own self-play only). Not
+  closed: revisit at a real data-scale wall, or for a later version. Data
+  grows from desktop + laptop datagen; get more Elo per position from net
+  architecture (1024 done; threats after the speed fix; deeper head next).
+  T80 reader parked on `t80-reader` (docs/t80-data.md).
 - Net-shape experiments on the laptop GPU against fixed pool7 (results
   compare with g7/g7m1/g7kb8m directly): 1024-wide (running), threat
   inputs (parked at -22% NPS; re-check with AVX-512 at 1024), other
