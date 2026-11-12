@@ -38,6 +38,25 @@ impl EvalCache {
         self.pawns.clear();
     }
 
+    /// Start loading `key`'s slot (issued with the TT prefetch when a child
+    /// is made, so the child's probe does not stall). A pure hint.
+    #[inline(always)]
+    pub(crate) fn prefetch(&self, key: u64) {
+        let ptr = &self.entries[key as usize & EVAL_CACHE_MASK] as *const Entry;
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: PRFM is a hint; it never faults or writes memory.
+        unsafe {
+            std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, readonly, preserves_flags));
+        }
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: PREFETCHT0 is a hint (SSE, part of the x86-64 baseline).
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(ptr as *const i8);
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let _ = ptr;
+    }
+
     /// `key` must be the zobrist key of `board` (as maintained by search).
     #[inline]
     pub(crate) fn eval(&mut self, board: &Board, key: u64) -> i32 {
