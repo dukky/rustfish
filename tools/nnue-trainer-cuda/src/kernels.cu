@@ -11,10 +11,12 @@
 #define INPUTS 768
 #define CLIP 1.98f
 
+// Up to MAXF features per perspective: `np` piece features, then (with
+// threat inputs) `n - np` threat features (docs/nnue.md, threat layout spec).
+#define MAXF 64
 struct GSample {
-    uint16_t f[2][32];
-    uint8_t n, bucket;
-    uint16_t pad;
+    uint16_t f[2][MAXF];
+    uint8_t n, np, bucket, pad;
     float target;
 };
 
@@ -46,12 +48,12 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
     const float *ftb = rest, *ow = rest + H, *ob = rest + H + buckets * 2 * H;
     // The sample's feature indices once into shared memory (a global index
     // load before every row load made the loop latency-bound).
-    __shared__ uint32_t fs[32];
+    __shared__ uint32_t fs[MAXF];
     __shared__ int ns;
-    if (t < 32) fs[t] = ((const uint32_t *)s.f)[t];
+    for (int i = t; i < MAXF; i += blockDim.x) fs[i] = ((const uint32_t *)s.f)[i];
     if (t == 0) ns = s.n;
     __syncthreads();
-    const uint16_t *feats = (const uint16_t *)fs + side * 32;
+    const uint16_t *feats = (const uint16_t *)fs + side * MAXF;
     int n = ns;
     float4 a = *(const float4 *)(ftb + c);
     // Four row loads in flight, added in feature order.
@@ -116,8 +118,11 @@ extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order
 // multiples of R within their bucket's run): the bitmask of the range's
 // pairs that contain each of the bucket's features, `masks[range][768][R/32]`,
 // built once per batch for every column tile.
+// Block b < kb: a king bucket, its pairs' piece features (f[..np]); block
+// b == kb: the threat block (rows kb*768..), every pair's threat features
+// (f[np..n]).
 extern "C" __global__ void plan_masks(const GSample *ss, const uint32_t *pairs, const int *range_start,
-                                      const int *range_bucket, uint32_t *masks, int nranges) {
+                                      const int *range_bucket, uint32_t *masks, int kb) {
     __shared__ uint32_t mask[INPUTS][R / 32];
     int rg = blockIdx.x;
     for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) (&mask[0][0])[i] = 0u;
@@ -127,7 +132,8 @@ extern "C" __global__ void plan_masks(const GSample *ss, const uint32_t *pairs, 
     for (int r = warp; r < nr; r += nw) {
         uint32_t pr = pairs[r0 + r];
         const GSample &s = ss[pr >> 1];
-        if (lane < s.n) atomicOr(&mask[s.f[pr & 1][lane] - b * INPUTS][r >> 5], 1u << (r & 31));
+        int lo = b < kb ? 0 : s.np, cnt = b < kb ? s.np : s.n - s.np;
+        if (lane < cnt) atomicOr(&mask[s.f[pr & 1][lo + lane] - b * INPUTS][r >> 5], 1u << (r & 31));
     }
     __syncthreads();
     uint32_t *out = masks + (size_t)rg * INPUTS * (R / 32);
@@ -270,9 +276,11 @@ extern "C" __global__ void adam_flat(AdamC c, float *p, float *m, float *v, cons
 // (fac): F first from every bucket's gradient (bucket order), then each
 // bucket's W, then the merged rows into wt. Without: each bucket's row.
 // `active` (null = plain decay): rows without the batch's flag skip decay.
+// `tb` threat blocks (0/1) after the kb bucket blocks: plain AdamW (no
+// factoriser merge), gradient = their work items' partials (ilo[kb]..).
 extern "C" __global__ void adam_ft(AdamC c, float *pw, float *mw, float *vw, float *pf, float *mf, float *vf,
                                    float *wt, __half *wth, const float *part, const int *ilo,
-                                   const uint8_t *active, int H, int kb, int fac) {
+                                   const uint8_t *active, int H, int kb, int fac, int tb) {
     size_t e = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     size_t nf = (size_t)INPUTS * H;
     if (e >= nf) return;
@@ -307,6 +315,22 @@ extern "C" __global__ void adam_ft(AdamC c, float *pw, float *mw, float *vw, flo
             wth[i] = __float2half_rn(w);
         else
             wt[i] = w;
+    }
+    for (int t = 0; t < tb; t++) {
+        int b = kb + t;
+        float g = 0.0f;
+        for (int k = ilo[b]; k < ilo[b + 1]; k++) g += part[(size_t)k * nf + e];
+        size_t i = b * nf + e;
+        float decay = (active && !active[b * INPUTS + f]) ? 1.0f : c.decay;
+        float pp = pw[i], mm = mw[i], vv = vw[i];
+        adam1(c, decay, pp, mm, vv, g);
+        pw[i] = pp;
+        mw[i] = mm;
+        vw[i] = vv;
+        if (wth)
+            wth[i] = __float2half_rn(pp);
+        else
+            wt[i] = pp;
     }
 }
 
