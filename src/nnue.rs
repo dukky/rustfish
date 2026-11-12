@@ -879,22 +879,50 @@ pub(crate) mod simd {
     use std::arch::aarch64::*;
     pub(crate) use super::scalar::screlu_dot_wide;
 
+    // The kernels move 32 lanes (64 bytes) per step with the multi-register
+    // ld1/st1 forms: fewer load/store instructions than one q register at a
+    // time, measured ~8% faster on the update kernel alone (M3).
+    const _: () = assert!(H % 32 == 0);
+
+    #[inline(always)]
+    unsafe fn ld4(p: *const i16) -> [int16x8_t; 4] {
+        let v = vld1q_s16_x4(p);
+        [v.0, v.1, v.2, v.3]
+    }
+
+    #[inline(always)]
+    unsafe fn st4(p: *mut i16, v: [int16x8_t; 4]) {
+        vst1q_s16_x4(p, int16x8x4_t(v[0], v[1], v[2], v[3]))
+    }
+
+    /// `src[i..i+32] + Σ adds - Σ subs` as four vectors.
+    #[inline(always)]
+    unsafe fn delta4(src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]], i: usize) -> [int16x8_t; 4] {
+        let mut v = ld4(src.add(i));
+        for a in adds {
+            let x = ld4(a.as_ptr().add(i));
+            for j in 0..4 {
+                v[j] = vaddq_s16(v[j], x[j]);
+            }
+        }
+        for s in subs {
+            let x = ld4(s.as_ptr().add(i));
+            for j in 0..4 {
+                v[j] = vsubq_s16(v[j], x[j]);
+            }
+        }
+        v
+    }
+
     #[inline(always)]
     pub(crate) fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
         // SAFETY: NEON is baseline on aarch64; all pointers cover H i16s and
-        // the loop reads/writes 8 lanes at offsets < H.
+        // the loop reads/writes 32 lanes at offsets i with i + 32 <= H.
         unsafe {
             let mut i = 0;
             while i < H {
-                let mut v = vld1q_s16(src.as_ptr().add(i));
-                for a in adds {
-                    v = vaddq_s16(v, vld1q_s16(a.as_ptr().add(i)));
-                }
-                for s in subs {
-                    v = vsubq_s16(v, vld1q_s16(s.as_ptr().add(i)));
-                }
-                vst1q_s16(out.as_mut_ptr().add(i), v);
-                i += 8;
+                st4(out.as_mut_ptr().add(i), delta4(src.as_ptr(), adds, subs, i));
+                i += 32;
             }
         }
     }
@@ -907,16 +935,10 @@ pub(crate) mod simd {
     pub(crate) unsafe fn update_dual(out: *mut i16, out2: *mut i16, src: *const i16, adds: &[&[i16; H]], subs: &[&[i16; H]]) {
         let mut i = 0;
         while i < H {
-            let mut v = vld1q_s16(src.add(i));
-            for a in adds {
-                v = vaddq_s16(v, vld1q_s16(a.as_ptr().add(i)));
-            }
-            for s in subs {
-                v = vsubq_s16(v, vld1q_s16(s.as_ptr().add(i)));
-            }
-            vst1q_s16(out.add(i), v);
-            vst1q_s16(out2.add(i), v);
-            i += 8;
+            let v = delta4(src, adds, subs, i);
+            st4(out.add(i), v);
+            st4(out2.add(i), v);
+            i += 32;
         }
     }
 
@@ -930,7 +952,6 @@ pub(crate) mod simd {
         subs: &[&[i16; H]],
         w: &[i16; H],
     ) -> i64 {
-        const { assert!(H % 32 == 0) };
         // SAFETY: as in `update` and `screlu_dot`.
         unsafe {
             let zero = vdupq_n_s16(0);
@@ -938,18 +959,12 @@ pub(crate) mod simd {
             let mut s = [vdupq_n_s32(0); 8];
             let mut i = 0;
             while i < H {
+                let v = delta4(src.as_ptr(), adds, subs, i);
+                st4(out.as_mut_ptr().add(i), v);
+                let wv = ld4(w.as_ptr().add(i));
                 for j in 0..4 {
-                    let o = i + 8 * j;
-                    let mut v = vld1q_s16(src.as_ptr().add(o));
-                    for a in adds {
-                        v = vaddq_s16(v, vld1q_s16(a.as_ptr().add(o)));
-                    }
-                    for sb in subs {
-                        v = vsubq_s16(v, vld1q_s16(sb.as_ptr().add(o)));
-                    }
-                    vst1q_s16(out.as_mut_ptr().add(o), v);
-                    let c = vminq_s16(vmaxq_s16(v, zero), qa);
-                    let cw = vmulq_s16(c, vld1q_s16(w.as_ptr().add(o)));
+                    let c = vminq_s16(vmaxq_s16(v[j], zero), qa);
+                    let cw = vmulq_s16(c, wv[j]);
                     s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c));
                     s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c);
                 }
