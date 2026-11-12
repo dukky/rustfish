@@ -37,7 +37,7 @@
 //! interleaved partial sums (float reassociation only).
 
 use crate::simd::{Isa, Portable, Simd};
-use crate::{decode, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, INPUTS};
+use crate::{decode_sh, sigmoid, Adam, KingLayout, Rec, Sample, Shape, BLANK, CLIP, INPUTS};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::Thread;
 
@@ -322,8 +322,9 @@ impl BatchTrainer {
         assert!(sh.h % TB == 0 && sh.h > 0, "--hidden must be a multiple of {TB}");
         let sb = if sb == 0 { ((2 << 20) / (8 * sh.h)).clamp(128, 2048) } else { sb };
         let sb = sb.div_ceil(FB) * FB;
-        let rows = sh.kb * INPUTS;
-        let blank = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
+        // King-bucket rows, then the threat rows (plain, never factorised).
+        let rows = sh.ft_rows();
+        let blank = BLANK;
         assert!(sh.kb <= MAX_KB);
         BatchTrainer {
             sh,
@@ -480,7 +481,7 @@ impl BatchTrainer {
         assert_eq!(p.len(), self.sh.len() + self.fl);
         self.grad.resize(n, 0.0);
         self.loss.resize(n, 0.0);
-        let blank = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
+        let blank = BLANK;
         self.samples.resize(n, blank);
         if !self.wt_ok {
             self.sync_weights(p);
@@ -504,7 +505,7 @@ impl BatchTrainer {
         let (fl, kb) = (self.fl > 0, sh.kb);
         let act = APtr(if active.is_empty() { std::ptr::null() } else { active.as_ptr() });
         let decode_one = |r: usize, s: &mut Sample| {
-            *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
+            *s = decode_sh(&recs[r], lambda, sh, mirror[r], kl);
             if !active.is_empty() {
                 // Store only if unset: every thread writing the same hot
                 // flags makes their lines bounce between cores.
@@ -582,7 +583,9 @@ impl BatchTrainer {
                 }
             }
         };
-        let ft_lines = if fl { INPUTS } else { rows };
+        // With the factoriser: 768 features (every bucket's row + F), then
+        // the plain threat rows.
+        let ft_lines = if fl { INPUTS + rows - kb * INPUTS } else { rows };
         {
             par_units(pool, starts[nsb + 2], &|g| unsafe {
                 let q = starts.partition_point(|&x| x <= g) - 1;
@@ -679,7 +682,7 @@ impl BatchTrainer {
         for r in 0..rows {
             for j in 0..h {
                 let mut x = p[r * h + j];
-                if self.fl > 0 {
+                if self.fl > 0 && r < self.sh.kb * INPUTS {
                     x = (x + p[n + (r % INPUTS) * h + j]).clamp(-CLIP, CLIP);
                 }
                 let at = (j / tf * rows + r) * tf + j % tf;
@@ -714,7 +717,7 @@ impl BatchTrainer {
         let (fl, kb) = (self.fl, self.sh.kb);
         // With the factoriser a unit takes features (all buckets' rows of
         // each, plus its F row); without it, plain FT rows.
-        let units_rows = if fl > 0 { INPUTS } else { rows };
+        let units_rows = if fl > 0 { INPUTS + rows - kb * INPUTS } else { rows };
         let ft_units = units_rows.div_ceil(AB);
         let isa = self.isa;
         let active = if self.active.is_empty() { std::ptr::null() } else { self.active.as_ptr() };
@@ -1041,6 +1044,13 @@ unsafe fn tile_adam<V: Simd>(c: &AdamC, a: &TileAdamArgs) {
         }
     } else {
         for f in a.r0..a.r1 {
+            if f >= INPUTS {
+                // Threat row: plain update.
+                let r = a.kb * INPUTS + f - INPUTS;
+                let w = line(r, decay(r), a.g.add(r * TB));
+                put_wt::<V>(a.wt, a.half, wt_at(r), &w);
+                continue;
+            }
             let mut gf = [0.0f32; TB];
             for b in 0..a.kb {
                 let g = a.g.add((b * INPUTS + f) * TB);
@@ -1149,6 +1159,17 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
         return;
     }
     for f in a.f0..a.f1 {
+        if f >= INPUTS {
+            // Threat row: plain update.
+            let r = a.kb * INPUTS + f - INPUTS;
+            let decay = row_decay(r);
+            for t in 0..a.tiles {
+                let i = r * a.h + t * TB;
+                let w = adam_line::<V>(c, decay, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB));
+                put_wt::<V>(a.wt, a.half, wt_at(r, t * TB), &w);
+            }
+            continue;
+        }
         let mut decay = [0.0f32; 8];
         for (b, d) in decay[..a.kb].iter_mut().enumerate() {
             *d = row_decay(b * INPUTS + f);
