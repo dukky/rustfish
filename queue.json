@@ -1,12 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "feat-improving-ply4",
-      "mode": "stc",
-      "expect": 1.5
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "feat-improving-ply4",
+    "mode": "stc",
+    "expect": 1.5,
+    "test_id": "q-feat-improving-ply4-1112-0446",
+    "sha": "513c6c96a490e18e13c597d0c89f5ee3166973d7",
+    "base_sha": "893ccd43bae3716522e1231488df7f1e64ce4fb6",
+    "started": "2026-11-12T04:46:44Z",
+    "bench": 408274,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
