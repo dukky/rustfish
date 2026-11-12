@@ -694,7 +694,7 @@ SCALE_RE = re.compile(r"slope (\S+) r (\S+) mean\|score\| (\S+)cp mean\|eval\| (
 LOSS_RE = re.compile(r" loss (\S+) ")
 TRAINER_BUSY_RE = r"nnue-trainer[-a-z]* train "
 SCALE_HALF = (0.40, 0.65)  # data written at the engine's net/2 scale
-SCALE_OK = (0.80, 1.25)
+SCALE_OK = (0.80, 1.40)  # the data/eval slope drifts up as the engine gets stronger: ~1.19 (gen 4), ~1.25 (gen 7), ~1.29 (g7kb8m)
 REC = 32
 
 
