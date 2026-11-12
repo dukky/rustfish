@@ -37,7 +37,7 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   loss interleaves with accepted neighbours'; band widened to 1.40, e45b9b7)
   + desktop **D2000 + D2001** (163M). D2002/D2003 were copies of D2001 (seed
   2001 reused; deleted; next desktop seed 2004). CI seeds **62-118** (~1.6B,
-  minus those above) are held back for pool9 (artifacts kept to ~Feb 2026).
+  minus those above) are held back for pool9 (artifacts kept to ~early Feb 2027).
   Shuffle starts after the desktop's pair experiment, then gen 8
   (g8 -> g8m1 -> g8kb8m, or 1024 if g7h1024kb8m wins) on the 1080 Ti.
 - **g7h1024 done (2026-11-12 04:55)**, 10 epochs on pool7, no king buckets.
