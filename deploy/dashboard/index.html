@@ -121,6 +121,11 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 .show-sm { display: none; }
 @media (max-width: 640px) { .show-sm { display: inline; } }
 .note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+.lperfs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 4px 0 14px; }
+.lperf { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; min-width: 0; }
+.lperf .label { font-size: 12.5px; color: var(--text-2); text-transform: capitalize; }
+.lperf .big { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.lperf svg { display: block; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -152,6 +157,11 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
   <section class="card">
     <h2>Laptop (M3): local training and datagen</h2>
     <div id="laptop" class="empty">loading...</div>
+  </section>
+
+  <section class="card">
+    <h2>Lichess bot</h2>
+    <div id="lichess" class="empty">loading...</div>
   </section>
 
   <section class="card">
@@ -422,6 +432,63 @@ function renderLaptop(s) {
     <dt>Caffeinate</dt><dd>${(p.caffeinate || []).length ? p.caffeinate.map((c) => `<span class="mono">${esc(c.args)}</span>${c.remaining_s != null ? ` <span class="meta">(${dur(Math.max(0, c.remaining_s))} left)</span>` : ""}`).join("<br>") : `<span class="badge b-warn">not running</span>`}</dd>
   </dl>`;
   el.className = ""; el.innerHTML = h;
+}
+
+// Lichess bot card, from /api/lichess (public Lichess API, cached ~5 min on
+// the server). Fetched apart from /api/status: if Lichess is down only this card says so.
+const RESULT = {win: ["won", "b-good"], loss: ["lost", "b-bad"], draw: ["draw", "b-neutral"],
+  aborted: ["aborted", "b-neutral"], playing: ["playing", "b-accent"]};
+function spark(pts) {
+  if (!pts || pts.length < 2) return "";
+  const W = 140, H = 28, v = pts.map((p) => p[1]);
+  const lo = Math.min(...v), hi = Math.max(...v), span = Math.max(hi - lo, 20);
+  const path = v.map((r, i) => `${(i / (v.length - 1) * (W - 4) + 2).toFixed(1)},${(H - 3 - (r - lo) / span * (H - 6)).toFixed(1)}`).join("L");
+  const [lx, ly] = path.split("L").pop().split(",");
+  return `<svg width="${W}" height="${H}" role="img" aria-label="rating from ${fmt(v[0])} to ${fmt(v[v.length - 1])} over ${v.length} days played"><title>${esc(pts[0][0])}: ${fmt(v[0])} → ${esc(pts[pts.length - 1][0])}: ${fmt(v[v.length - 1])}</title>
+    <path d="M${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/><circle cx="${lx}" cy="${ly}" r="2.5" fill="var(--accent)"/></svg>`;
+}
+function renderLichess(L) {
+  const el = $("lichess");
+  if (!L || !L.available) {
+    el.className = "empty";
+    el.innerHTML = L && L.configured === false
+      ? "Lichess account not configured (set <span class=\"mono\">LICHESS_USER</span> on the server)."
+      : `Lichess data unavailable${L && L.error ? ` <span class="meta">(${esc(L.error).slice(0, 120)})</span>` : ""}.`;
+    return;
+  }
+  const p = L.profile, c = p.count || {};
+  const st = p.disabled ? `<span class="badge b-bad">account closed</span>`
+    : L.playing ? `<span class="badge b-good">playing</span>${p.playing_url ? ` <a href="${esc(p.playing_url)}">watch</a>` : ""}`
+    : L.online ? `<span class="badge b-accent">online</span>`
+    : L.online === false ? `<span class="badge b-neutral">offline</span>` : "";
+  let h = `<div style="margin-bottom:10px"><a href="${esc(p.url)}"><b>${p.title ? `<span style="color:var(--warn)">${esc(p.title)}</span> ` : ""}${esc(p.username)}</b></a> ${st}
+    <span class="meta">${c.all != null ? `${fmt(c.all)} games · +${fmt(c.win)} −${fmt(c.loss)} =${fmt(c.draw)}` : ""}${p.seen_at && !L.online ? ` · last seen ${ago(p.seen_at)}` : ""}</span></div>`;
+  h += p.perfs.length ? `<div class="lperfs">` + p.perfs.map((r) => `<div class="lperf"><div class="label">${esc(r.speed)}</div>
+      <div class="big">${fmt(r.rating)}${r.prov ? "?" : ""}</div>
+      <div class="meta">${fmt(r.games)} games${r.prog ? ` · ${signed(r.prog, 0)} recent` : ""}${r.rd != null ? ` · RD ${fmt(r.rd)}` : ""}</div>
+      ${spark((L.history || {})[r.speed])}</div>`).join("") + `</div>`
+    : `<div class="empty" style="margin-bottom:12px">No rated games yet.</div>`;
+  const g = L.games || [];
+  h += g.length ? `<div class="scroll"><table><thead><tr><th>Opponent</th><th class="num">Opp. rating</th><th>Result</th><th class="hide-sm">Speed</th><th class="num hide-sm">Bot rating</th><th class="hide-sm">When</th></tr></thead><tbody>` +
+    g.map((x) => { const [t, cl] = RESULT[x.result] || [x.result, "b-neutral"];
+      return `<tr><td>${x.opponent_title ? `<span style="color:var(--warn);font-weight:600">${esc(x.opponent_title)}</span> ` : ""}${esc(x.opponent)}<span class="meta"> · ${esc(x.color)}</span><span class="show-sm meta"> · ${esc(x.speed)}</span></td>
+        <td class="num">${fmt(x.opponent_rating)}</td>
+        <td><a href="${esc(x.url)}"><span class="badge ${cl}">${esc(t)}</span></a>${x.status && !["mate", "resign", "draw", "aborted"].includes(x.status) ? ` <span class="meta">${esc(x.status)}</span>` : ""}</td>
+        <td class="hide-sm">${esc(x.speed)}${x.clock ? ` <span class="meta">${esc(x.clock)}</span>` : ""}${x.rated ? "" : ` <span class="meta">casual</span>`}</td>
+        <td class="num hide-sm">${fmt(x.rating)}${x.rating_diff ? ` <span class="meta">${signed(x.rating_diff, 0)}</span>` : ""}</td>
+        <td class="meta hide-sm" style="white-space:nowrap">${ago(x.when)}</td></tr>`; }).join("") + `</tbody></table></div>`
+    : L.games == null ? `<div class="empty">Recent games unavailable.</div>` : `<div class="empty">No games yet.</div>`;
+  const errs = Object.entries(L.sources || {}).filter(([, v]) => v.error).map(([k]) => k);
+  h += `<div class="note">Public <a href="https://lichess.org/api">Lichess API</a>, cached on the server for ~5 minutes${errs.length ? `; <span style="color:var(--warn)">${esc(errs.join(", "))} unavailable</span>` : ""}. Lichess bot-pool ratings do not convert to CCRL; the CCRL ladder is the real strength number.</div>`;
+  el.className = ""; el.innerHTML = h;
+}
+async function refreshLichess() {
+  try {
+    const r = await fetch("/api/lichess", {cache: "no-store"});
+    renderLichess(await r.json());
+  } catch (e) {
+    renderLichess({available: false, error: e.message});
+  }
 }
 
 function renderRunners(s) {
@@ -718,8 +785,8 @@ async function refresh() {
     $("banner").textContent = `Dashboard server unreachable (${e.message}); showing the last data loaded.`;
   }
 }
-refresh();
-setInterval(refresh, REFRESH_MS);
+refresh(); refreshLichess();
+setInterval(() => { refresh(); refreshLichess(); }, REFRESH_MS);
 let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => window.STATUS && renderChart(window.STATUS), 150); });
 </script>
 </body>

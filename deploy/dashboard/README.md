@@ -5,7 +5,8 @@ and the CCRL Blitz targets (3400 short term, top 100, top 10), CI runner usage
 across both queue lanes, the foreground lane (the in-flight SPRT or CCRL ladder
 and the pending merge queue), the background lane (datagen from main), the
 ladder rating over time, NNUE experiments, recent queue outcomes, gate Elo of
-accepted changes, recent commits and `plan.md` (the maintained roadmap) rendered.
+accepted changes, the Lichess bot (status, ratings, recent games), recent
+commits and `plan.md` (the maintained roadmap) rendered.
 
 `server.py` is Python stdlib only. It reads public data (no token):
 
@@ -21,6 +22,19 @@ accepted changes, recent commits and `plan.md` (the maintained roadmap) rendered
 - `api.github.com` (unauthenticated, 60 req/h): recent Actions runs, the jobs
   of the in-flight foreground run (SPRT wave or ladder) and of the active
   datagen run, and recent `main` commits.
+- `lichess.org` (public API, no token) for the Lichess bot card, served
+  separately as `/api/lichess`: `/api/user/{name}` (ratings and game counts per
+  speed), `/api/users/status?ids={name}` (online / playing),
+  `/api/games/user/{name}?max=10` (NDJSON, recent games) and
+  `/api/user/{name}/rating-history` (sparklines, last 60 days played). Each is
+  cached 5 minutes (at most 4 requests per 5 minutes) with a descriptive
+  User-Agent; a failure is remembered for a minute before retrying. The page
+  fetches it on its own, so if Lichess is down only that card says
+  "unavailable". The account is bound to the bot's token, not named in
+  `deploy/lichess-bot/config.yml`, so set it once:
+  `ssh dokku@dev.duk.im config:set rustfish-dash LICHESS_USER=<bot account>`
+  (unset: the card says "not configured" and makes no requests).
+  Tests: `python3 deploy/dashboard/test_lichess.py` (no network).
 
 Each upstream URL is cached in memory (raw files 2 min, runs/jobs 3 min,
 datagen jobs 5 min, commits 10 min) and refreshed only when a page asks, with

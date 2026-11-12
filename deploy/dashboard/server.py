@@ -3,7 +3,7 @@
 
 Serves index.html and /api/status, a JSON digest of the public repo
 dukky/rustfish built from raw.githubusercontent.com files and the
-unauthenticated GitHub REST API. Every upstream fetch is cached in memory
+unauthenticated GitHub REST API, plus /api/lichess for the Lichess bot card. Every upstream fetch is cached in memory
 and only refreshed when a page asks for data, so an idle dashboard makes no
 requests and a busy one stays well inside the 60 requests/hour API limit.
 """
@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -89,13 +90,14 @@ class Cache:
         self.entries = {}
         self.rate = {}
 
-    def get(self, url, ttl, parse):
+    def get(self, url, ttl, parse, headers=None):
         now = time.time()
         with self.lock:
             ent = self.entries.get(url)
         if ent and now - ent["at"] < ttl:
-            return ent["data"], ent["at"], ent.get("error")
-        headers = {"User-Agent": "rustfish-dashboard", "Accept": "application/vnd.github+json"}
+            return ent["data"], ent["at"] if ent["data"] is not None else None, ent.get("error")
+        headers = dict(headers or {"User-Agent": "rustfish-dashboard",
+                                   "Accept": "application/vnd.github+json"})
         if ent and ent.get("etag"):
             headers["If-None-Match"] = ent["etag"]
         # Back off from the API if the unauthenticated quota is nearly used up.
@@ -124,10 +126,12 @@ class Cache:
         return ent["data"], ent["at"], None
 
     def _fail(self, url, ent, msg):
-        if ent:
-            # Keep stale data but retry after a minute rather than every request.
-            with self.lock:
-                self.entries[url] = dict(ent, at=time.time() - max(0, TTL_RAW - 60), error=msg)
+        # Keep stale data (or remember the failure when there is none) and retry
+        # after a minute rather than on every request.
+        with self.lock:
+            self.entries[url] = dict(ent or {"data": None}, at=time.time() - max(0, TTL_RAW - 60),
+                                     error=msg)
+        if ent and ent["data"] is not None:
             return ent["data"], ent["at"], msg
         return None, None, msg
 
@@ -661,6 +665,135 @@ def laptop_authorized(header):
     return hmac.compare_digest(header[7:].strip().encode(), expected.encode())
 
 
+# Lichess bot card: the bot account's public profile, recent games and rating
+# history from the public Lichess API (no token). Served by /api/lichess, apart
+# from /api/status, so a Lichess outage never delays or breaks the rest of the
+# page. Each URL is cached TTL_LICHESS and refetched only when a page asks: at
+# most 4 requests per 5 minutes however many pages are open, and a failure is
+# remembered for a minute before retrying (Lichess asks clients to wait a full
+# minute after a 429). The account is token-bound in lichess-bot, so its name
+# is not in deploy/lichess-bot/config.yml: set LICHESS_USER (dokku config:set).
+LICHESS = "https://lichess.org"
+LICHESS_USER = os.environ.get("LICHESS_USER", "").strip()
+TTL_LICHESS = 300
+LICHESS_SPEEDS = ("bullet", "blitz", "rapid", "classical")
+LICHESS_GAMES = 10
+LICHESS_HISTORY_POINTS = 60  # last N rating-history points per speed, for the sparklines
+LICHESS_UA = "rustfish-dashboard/1.0 (+https://github.com/dukky/rustfish; status page for the rustfish bot)"
+LICHESS_LOCK = threading.Lock()  # one refresh at a time, so requests share fetches
+
+
+def lichess_headers(accept="application/json"):
+    return {"User-Agent": LICHESS_UA, "Accept": accept}
+
+
+def parse_lichess_user(d):
+    """/api/user/{name} -> profile with ratings per speed (only speeds played)."""
+    if not isinstance(d, dict) or not d.get("id"):
+        raise ValueError("no user in response")
+    perfs = []
+    for speed in LICHESS_SPEEDS:
+        p = (d.get("perfs") or {}).get(speed) or {}
+        if p.get("games"):
+            perfs.append({"speed": speed, "rating": p.get("rating"), "rd": p.get("rd"),
+                          "prog": p.get("prog"), "prov": bool(p.get("prov")), "games": p["games"]})
+    count = d.get("count") or {}
+    return {"id": d["id"], "username": d.get("username") or d["id"], "title": d.get("title"),
+            "url": d.get("url") or f"{LICHESS}/@/{d['id']}",
+            "disabled": bool(d.get("disabled")), "tos_violation": bool(d.get("tosViolation")),
+            "seen_at": iso(d["seenAt"] / 1000) if d.get("seenAt") else None,
+            "created_at": iso(d["createdAt"] / 1000) if d.get("createdAt") else None,
+            "playing_url": d.get("playing"),
+            "perfs": perfs,
+            "count": {k: count.get(k) for k in ("all", "rated", "win", "loss", "draw")}}
+
+
+def parse_lichess_online(rows):
+    """/api/users/status?ids=... -> {online, playing, playing_id} for the one user."""
+    r = rows[0] if isinstance(rows, list) and rows else {}
+    return {"online": bool(r.get("online")), "playing": bool(r.get("playing")),
+            "playing_id": r.get("playingId")}
+
+
+def lichess_result(g, color):
+    if g.get("status") in ("aborted", "noStart", "created", "started"):
+        return "aborted" if g.get("status") in ("aborted", "noStart") else "playing"
+    w = g.get("winner")
+    return "draw" if not w else "win" if w == color else "loss"
+
+
+def parse_lichess_games(rows, user_id):
+    """NDJSON rows of /api/games/user -> newest-first list from the bot's side."""
+    out = []
+    uid = (user_id or "").lower()
+    for g in rows:
+        players = g.get("players") or {}
+        white = (players.get("white") or {}).get("user") or {}
+        color = "white" if white.get("id", "").lower() == uid else "black"
+        me, opp = players.get(color) or {}, players.get("black" if color == "white" else "white") or {}
+        ou = opp.get("user") or {}
+        out.append({
+            "id": g.get("id"), "url": f"{LICHESS}/{g.get('id')}" + ("/black" if color == "black" else ""),
+            "speed": g.get("speed"), "rated": bool(g.get("rated")), "variant": g.get("variant"),
+            "color": color, "result": lichess_result(g, color), "status": g.get("status"),
+            "opponent": ou.get("name") or (f"Stockfish level {opp['aiLevel']}" if opp.get("aiLevel") else "anonymous"),
+            "opponent_title": ou.get("title"), "opponent_rating": opp.get("rating"),
+            "rating": me.get("rating"), "rating_diff": me.get("ratingDiff"),
+            "clock": f"{g['clock'].get('initial', 0) / 60:g}+{g['clock'].get('increment', 0)}"
+                     if isinstance(g.get("clock"), dict) else None,
+            "when": iso((g.get("lastMoveAt") or g.get("createdAt") or 0) / 1000)})
+    out.sort(key=lambda x: x["when"] or "", reverse=True)
+    return out
+
+
+def parse_lichess_history(rows):
+    """/api/user/{name}/rating-history -> {speed: [[YYYY-MM-DD, rating], ...]}.
+    Lichess points are [year, month (0-based), day, rating], one per day played."""
+    out = {}
+    for r in rows if isinstance(rows, list) else []:
+        speed = str(r.get("name", "")).lower()
+        if speed not in LICHESS_SPEEDS:
+            continue
+        pts = [[f"{p[0]:04d}-{p[1] + 1:02d}-{p[2]:02d}", p[3]] for p in r.get("points") or []
+               if isinstance(p, list) and len(p) == 4]
+        if pts:
+            out[speed] = pts[-LICHESS_HISTORY_POINTS:]
+    return out
+
+
+def build_lichess(user=None, cache=None):
+    """The Lichess card. Never raises: an unreachable Lichess gives available False."""
+    user = LICHESS_USER if user is None else user
+    cache = cache or CACHE
+    if not user:
+        return {"available": False, "configured": False, "error": "LICHESS_USER not set"}
+    q = urllib.parse.quote(user)
+    sources = {}
+
+    def fetch(name, url, parse, accept="application/json"):
+        data, at, err = cache.get(url, TTL_LICHESS, parse, headers=lichess_headers(accept))
+        sources[name] = {"fetched_at": iso(at), "error": err}
+        return data
+
+    profile = fetch("user", f"{LICHESS}/api/user/{q}", lambda b: parse_lichess_user(json.loads(b)))
+    if profile is None:
+        return {"available": False, "configured": True, "user": user, "sources": sources,
+                "error": sources["user"]["error"] or "no data"}
+    status = fetch("status", f"{LICHESS}/api/users/status?ids={q}&withGameIds=true",
+                   lambda b: parse_lichess_online(json.loads(b)))
+    games = fetch("games", f"{LICHESS}/api/games/user/{q}?max={LICHESS_GAMES}&moves=false&opening=false",
+                  lambda b: parse_lichess_games(jsonl(b), profile["id"]), accept="application/x-ndjson")
+    history = fetch("history", f"{LICHESS}/api/user/{q}/rating-history",
+                    lambda b: parse_lichess_history(json.loads(b)))
+    online = status or {"online": None, "playing": bool(profile["playing_url"]), "playing_id": None}
+    if online.get("playing_id") and not profile["playing_url"]:
+        profile["playing_url"] = f"{LICHESS}/{online['playing_id']}"
+    return {"available": True, "configured": True, "user": user, "profile": profile,
+            "online": online["online"], "playing": online["playing"] or bool(profile["playing_url"]),
+            "games": games, "history": history, "sources": sources,
+            "generated_at": iso(time.time())}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "rustfish-dash"
 
@@ -675,6 +808,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, "application/json", body)
             except Exception as exc:
                 self._send(500, "application/json", json.dumps({"error": str(exc)}).encode())
+        elif path == "/api/lichess":
+            try:
+                with LICHESS_LOCK:
+                    body = json.dumps(build_lichess()).encode()
+                self._send(200, "application/json", body)
+            except Exception as exc:
+                self._send(500, "application/json", json.dumps({"available": False, "error": str(exc)}).encode())
         elif path in ("/", "/index.html"):
             with open(os.path.join(HERE, "index.html"), "rb") as fh:
                 self._send(200, "text/html; charset=utf-8", fh.read())
