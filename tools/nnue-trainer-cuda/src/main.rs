@@ -9,7 +9,7 @@
 
 use nnue_trainer::batch::{par_units, BatchTrainer, Pool};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use nnue_trainer::{decode, Adam, Backend, BackendCfg, KingLayout, Rec, Shape, CLIP, INPUTS};
+use nnue_trainer::{decode_sh, Adam, Backend, BackendCfg, KingLayout, Rec, Shape, CLIP, INPUTS};
 use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -158,7 +158,7 @@ impl Slot {
         Slot {
             hs: HBuf::new(b),
             horder: HBuf::new(b),
-            hpairs: HBuf::new(2 * b),
+            hpairs: HBuf::new(4 * b),
             hitems: HBuf::new(max_items),
             hilo: HBuf::new(kb + 1),
             hrs: HBuf::new(max_ranges + 1),
@@ -167,7 +167,7 @@ impl Slot {
             hloss: HBuf::new(b),
             ss: DBuf::new(b),
             order: DBuf::new(b),
-            pairs: DBuf::new(2 * b),
+            pairs: DBuf::new(4 * b),
             items: DBuf::new(max_items),
             ilo: DBuf::new(kb + 1),
             rs: DBuf::new(max_ranges + 1),
@@ -205,10 +205,12 @@ fn launch(f: Handle, grid: (u32, u32), block: u32, stream: Handle, args: &[Arg])
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct GSample {
-    f: [[u16; 32]; 2],
+    /// `np` piece features, then `n - np` threat features (kernels.cu MAXF).
+    f: [[u16; 64]; 2],
     n: u8,
+    np: u8,
     bucket: u8,
-    pad: u16,
+    pad: u8,
     target: f32,
 }
 
@@ -299,8 +301,9 @@ impl GpuTrainer {
         let sh = cfg.sh;
         assert!(sh.h % 64 == 0 && sh.h <= 2048, "nnue-trainer-cuda: --hidden must be a multiple of 64, at most 2048");
         assert!(sh.buckets <= 8 && sh.kb <= 64, "nnue-trainer-cuda: at most 8 output buckets, 64 king buckets");
-        assert!(sh.th == 0, "nnue-trainer-cuda: no --threats support yet (see docs/nnue.md \"Threat inputs\")");
-        let (h, rows, b) = (sh.h, sh.kb * INPUTS, cfg.batch);
+        // FT rows: kb king-bucket blocks, then tb threat blocks (docs/nnue.md).
+        let (h, tb, b) = (sh.h, sh.tb(), cfg.batch);
+        let rows = (sh.kb + tb) * INPUTS;
         let nrest = sh.len() - sh.ft_b();
         ck(unsafe { cuInit(0) }, "init");
         let mut dev = 0;
@@ -330,8 +333,10 @@ impl GpuTrainer {
             adam_flat: get("adam_flat"),
             adam_ft: get("adam_ft"),
         };
-        let max_items = (2 * b).div_ceil(WI) + sh.kb;
-        let max_ranges = (2 * b).div_ceil(R) + max_items;
+        // Work items / ranges: every pair once per king bucket, and once more
+        // per threat block.
+        let max_items = (1 + tb) * ((2 * b).div_ceil(WI) + 1) + sh.kb;
+        let max_ranges = (1 + tb) * (2 * b).div_ceil(R) + max_items;
         let chunks = b.div_ceil(CH);
         let prest_stride = sh.buckets * 2 * h + 2 * h + sh.buckets;
         let nf = INPUTS * h;
@@ -363,7 +368,7 @@ impl GpuTrainer {
             prest: DBuf::new(chunks * prest_stride),
             acc: DBuf::new(b * 2 * h),
             gout: DBuf::new(b),
-            slots: [Slot::new(b, max_items, max_ranges, sh.kb, rows), Slot::new(b, max_items, max_ranges, sh.kb, rows)],
+            slots: [Slot::new(b, max_items, max_ranges, sh.kb + tb, rows), Slot::new(b, max_items, max_ranges, sh.kb + tb, rows)],
             masks: DBuf::new(max_ranges * INPUTS * (R / 32)),
             slot: 0,
             pending: None,
@@ -401,8 +406,10 @@ impl GpuTrainer {
             }
         }
         let h = self.sh.h;
+        // The factoriser merges into the bucket rows only, not the threat rows.
+        let fkb = self.sh.kb * INPUTS * h;
         let wt: Vec<f32> = (0..ftb)
-            .map(|i| if self.fl > 0 { (p[i] + p[n + (i / h % INPUTS) * h + i % h]).clamp(-CLIP, CLIP) } else { p[i] })
+            .map(|i| if self.fl > 0 && i < fkb { (p[i] + p[n + (i / h % INPUTS) * h + i % h]).clamp(-CLIP, CLIP) } else { p[i] })
             .collect();
         self.wt.up(&wt);
         if self.half {
@@ -439,7 +446,7 @@ impl Backend for GpuTrainer {
             const DB: usize = 512;
             par_units(pool, n.div_ceil(DB), &|u| {
                 for i in u * DB..((u + 1) * DB).min(n) {
-                    let s = decode(&recs[i], lambda, sh.buckets, mirror[i], kl);
+                    let s = decode_sh(&recs[i], lambda, sh, mirror[i], kl);
                     if wd_active {
                         for side in 0..2 {
                             for &f in &s.f[side][..s.n] {
@@ -451,12 +458,12 @@ impl Backend for GpuTrainer {
                         }
                     }
                     // SAFETY: every unit writes its own samples.
-                    unsafe { *hs.get().add(i) = GSample { f: [s.f[0][..32].try_into().unwrap(), s.f[1][..32].try_into().unwrap()], n: s.n as u8, bucket: s.bucket as u8, pad: 0, target: s.target } };
+                    unsafe { *hs.get().add(i) = GSample { f: s.f, n: s.n as u8, np: s.np as u8, bucket: s.bucket as u8, pad: 0, target: s.target } };
                 }
             });
         }
         let hs = &sl.hs.slice()[..n];
-        let kbk = |s: &GSample, side: usize| if s.n == 0 { 0 } else { s.f[side][0] as usize / INPUTS };
+        let kbk = |s: &GSample, side: usize| if s.np == 0 { 0 } else { s.f[side][0] as usize / INPUTS };
         // Forward order: by (side-to-move bucket, other bucket); pairs and
         // work items by king bucket (stable counting sorts).
         let mut cnt = vec![0usize; kb * kb + 1];
@@ -509,8 +516,31 @@ impl Backend for GpuTrainer {
             }
         }
         ilo[kb] = ni as i32;
-        // Ranges tile 0..2n in order, so range r ends where r + 1 starts.
-        rs[nr] = (2 * n) as i32;
+        // Threat block(s): every pair, in sample order, after the bucket-sorted
+        // pairs (block index kb + t; plan_masks reads their threat features).
+        let tb = sh.tb();
+        for t in 0..tb {
+            let base = (2 + 2 * t) * n;
+            for i in 0..2 * n {
+                pairs[base + i] = i as u32;
+            }
+            let mut a = base;
+            while a < base + 2 * n {
+                let e = (a + WI).min(base + 2 * n);
+                items[ni] = Item { bucket: (kb + t) as i32, start: a as i32, end: e as i32, range: nr as i32 };
+                ni += 1;
+                let mut r = a;
+                while r < e {
+                    (rs[nr], rb[nr]) = (r as i32, (kb + t) as i32);
+                    nr += 1;
+                    r = (r + R).min(e);
+                }
+                a = e;
+            }
+            ilo[kb + t + 1] = ni as i32;
+        }
+        // Ranges tile 0..2n(1 + tb) in order, so range r ends where r + 1 starts.
+        rs[nr] = (2 * n * (1 + tb)) as i32;
         if wd_active {
             for (d, a) in sl.hact.slice().iter_mut().zip(&self.act) {
                 *d = a.swap(0, Ordering::Relaxed);
@@ -521,9 +551,9 @@ impl Backend for GpuTrainer {
         ck(unsafe { cuStreamWaitEvent(cs, sl.done, 0) }, "wait event");
         sl.ss.up_async(&sl.hs, n, cs);
         sl.order.up_async(&sl.horder, n, cs);
-        sl.pairs.up_async(&sl.hpairs, 2 * n, cs);
+        sl.pairs.up_async(&sl.hpairs, 2 * n * (1 + sh.tb()), cs);
         sl.items.up_async(&sl.hitems, ni, cs);
-        sl.ilo.up_async(&sl.hilo, kb + 1, cs);
+        sl.ilo.up_async(&sl.hilo, kb + sh.tb() + 1, cs);
         sl.rs.up_async(&sl.hrs, nr + 1, cs);
         sl.rb.up_async(&sl.hrb, nr, cs);
         if wd_active {
@@ -547,7 +577,7 @@ impl Backend for GpuTrainer {
         let k = &self.k;
         let (fwd, wt) = if self.half { (k.forward_half, self.wth.ptr) } else { (k.forward, self.wt.ptr) };
         launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi)]);
-        launch(k.plan_masks, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.masks.ptr), I(nr as i32)]);
+        launch(k.plan_masks, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.masks.ptr), I(kb as i32)]);
         launch(
             k.backward_ft,
             ((h / 32) as u32, ni as u32),
@@ -564,7 +594,7 @@ impl Backend for GpuTrainer {
             ((INPUTS * h).div_ceil(256) as u32, 1),
             256,
             st,
-            &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(if self.half { self.wth.ptr } else { 0 }), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32)],
+            &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(if self.half { self.wth.ptr } else { 0 }), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32), I(sh.tb() as i32)],
         );
         launch(k.adam_flat, (nrest.div_ceil(256) as u32, 1), 256, st, &[C(c), P(self.pr.ptr), P(self.mr.ptr), P(self.vr.ptr), P(self.gr.ptr), I(nrest as i32)]);
         ck(unsafe { cuMemcpyDtoHAsync_v2(sl.hloss.ptr as *mut c_void, sl.loss.ptr, n * 4, st) }, "loss download");
