@@ -6,17 +6,7 @@
       "expect": 1.5
     }
   ],
-  "current": {
-    "branch": "feat-lmr-deeper",
-    "mode": "stc",
-    "expect": 3.0,
-    "test_id": "q-feat-lmr-deeper-1112-0410",
-    "sha": "7acdfa4ea8cd387107508cfceb88591c75ea8dbb",
-    "base_sha": "893ccd43bae3716522e1231488df7f1e64ce4fb6",
-    "started": "2026-11-12T04:10:09Z",
-    "bench": 378865,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
