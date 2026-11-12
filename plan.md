@@ -93,6 +93,16 @@ head-v1, FT -> 16 -> 32 -> 1, 3 x 200M pool8, raw val): H512+head
 0.027596 beats plain H1024 0.027683; needs CUDA/speed work for full size.
 SPSA on the 512 engine: 400 iterations moved nothing beyond ~6% of
 range; restarted on the 1024 main (22:41).
+**Desktop handed over (23:00)**: one Claude session (the laptop's) now
+drives the desktop over ssh; the desktop session is idle. Its handoff:
+`~/rustfish-data/HANDOFF-desktop.md`. Tonight, detached: GPU kb8m-from-
+scratch (~00:45, `gpu-tonight.log`) -> packed-data A/B (~01:45,
+`packed-ab.log`); CPU D2005 (~05:00) -> convert (`convert-d2005.sh`).
+Desktop findings not recorded before: `--half` from scratch matches f32
+(plain H512, 3 x 400M: 0.027702 vs 0.027704), so future gens can use it
+throughout (~40 min/gen saved); batch 32768 is worse at equal positions
+and no faster. Next desktop datagen seed: 2006. Gen 9 waits on three
+results: from-scratch vs chain, the threat stc, the packed A/B.
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
