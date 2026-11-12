@@ -154,13 +154,22 @@ fn pass_order(sources: &[Arc<dyn ChunkSource>], seed: u64, pass: u64) -> Vec<(u3
 /// the order does not depend on timing) or the consumer itself.
 enum Chunks {
     Threads { rxs: Vec<Receiver<Vec<Rec>>>, next: usize },
-    Inline { sources: Arc<Vec<Arc<dyn ChunkSource>>>, seed: u64, pass: u64, order: Vec<(u32, u32)>, pos: usize },
+    Inline { sources: Arc<Vec<Arc<dyn ChunkSource>>>, seed: u64, stride: u64, pass: u64, order: Vec<(u32, u32)>, pos: usize },
 }
 
-fn read(sources: &[Arc<dyn ChunkSource>], (s, c): (u32, u32)) -> Vec<Rec> {
+/// Chunk `(s, c)` as read in pass `pass`: with `stride` k > 1 only every
+/// k-th record, at an offset that runs through all residues in k
+/// consecutive passes (so k passes emit every record exactly once, and a
+/// game's positions are spread over k passes instead of one buffer window).
+fn read(sources: &[Arc<dyn ChunkSource>], (s, c): (u32, u32), pass: u64, stride: u64) -> Vec<Rec> {
     let src = &sources[s as usize];
     let mut out = Vec::with_capacity(src.chunk_len(c as usize) as usize);
     src.read_chunk(c as usize, &mut out).unwrap_or_else(|e| panic!("{e}"));
+    if stride > 1 {
+        let mix = (s as u64).wrapping_mul(0x9E37_79B9) ^ (c as u64).wrapping_mul(0x85EB_CA6B);
+        let off = ((pass + mix) % stride) as usize;
+        out = out.into_iter().skip(off).step_by(stride as usize).collect();
+    }
     out
 }
 
@@ -179,11 +188,17 @@ impl Stream {
     /// only); `threads` decoder threads, 0 = decode in the caller's thread.
     /// The stream is the same for any `threads`.
     pub fn new(sources: Vec<Arc<dyn ChunkSource>>, cap: usize, threads: usize, seed: u64) -> Self {
+        Self::with_stride(sources, cap, threads, seed, 1)
+    }
+
+    /// `stride`: see `read` (1 = every record in every pass).
+    pub fn with_stride(sources: Vec<Arc<dyn ChunkSource>>, cap: usize, threads: usize, seed: u64, stride: u64) -> Self {
         let positions: u64 = sources.iter().map(|s| s.positions()).sum();
         assert!(positions > 0, "no training positions");
+        let stride = stride.max(1);
         let sources = Arc::new(sources);
         if threads == 0 {
-            let chunks = Chunks::Inline { sources, seed, pass: 0, order: Vec::new(), pos: 0 };
+            let chunks = Chunks::Inline { sources, seed, stride, pass: 0, order: Vec::new(), pos: 0 };
             return Self { chunks, cur: Vec::new(), cur_pos: 0, buf: Vec::with_capacity(cap), cap, rng: Rng::new(seed ^ 0x5EED_B0F), positions };
         }
         let rxs = (0..threads)
@@ -200,7 +215,7 @@ impl Stream {
                             pass = g / per_pass;
                             order = pass_order(&sources, seed, pass);
                         }
-                        if tx.send(read(&sources, order[(g % per_pass) as usize])).is_err() {
+                        if tx.send(read(&sources, order[(g % per_pass) as usize], pass, stride)).is_err() {
                             return;
                         }
                     }
@@ -224,14 +239,14 @@ impl Stream {
                     *next = (*next + 1) % rxs.len();
                     c
                 }
-                Chunks::Inline { sources, seed, pass, order, pos } => {
+                Chunks::Inline { sources, seed, stride, pass, order, pos } => {
                     if *pos == order.len() {
                         *order = pass_order(sources, *seed, *pass);
                         *pass += 1;
                         *pos = 0;
                     }
                     *pos += 1;
-                    read(sources, order[*pos - 1])
+                    read(sources, order[*pos - 1], *pass - 1, *stride)
                 }
             };
             self.cur_pos = 0;
@@ -448,6 +463,20 @@ mod tests {
             let mut s3 = Stream::new(src(), cap, threads, 10);
             s3.batch(&mut out, 100);
             assert_ne!(&got[..100], &out.iter().map(|r| u32::from_le_bytes(r[..4].try_into().unwrap())).collect::<Vec<_>>()[..]);
+        }
+    }
+
+    #[test]
+    fn stride_emits_every_record_once_per_stride_passes() {
+        let total = 9_990u32;
+        let chunks: Vec<Vec<Rec>> = (0..total).collect::<Vec<_>>().chunks(333).map(|c| c.iter().map(|&i| rec(i)).collect()).collect();
+        for threads in [0, 2] {
+            let mut s = Stream::with_stride(vec![Arc::new(Mem(chunks.clone()))], 0, threads, 5, 4);
+            let mut out = Vec::new();
+            s.batch(&mut out, total as usize);
+            let mut ids: Vec<u32> = out.iter().map(|r| u32::from_le_bytes(r[..4].try_into().unwrap())).collect();
+            ids.sort();
+            assert_eq!(ids, (0..total).collect::<Vec<_>>(), "threads {threads}");
         }
     }
 

@@ -1412,7 +1412,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let mut half = false;
     // Streaming loader (`stream.rs`): packed files, directories, manifests,
     // or any data with `--shuffle-buffer`.
-    let (mut shuffle_buffer, mut loader_threads) = (None::<usize>, 1usize);
+    let (mut shuffle_buffer, mut loader_threads, mut stride) = (None::<usize>, 1usize, 1u64);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -1446,6 +1446,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--half" => half = true,
             "--shuffle-buffer" => shuffle_buffer = Some(v().parse().unwrap()),
             "--loader-threads" => loader_threads = v().parse().unwrap(),
+            "--stream-stride" => stride = v().parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
     }
@@ -1454,7 +1455,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     assert!(!factorise || sh.kb > 1, "--factorise needs a king-bucket layout with KB > 1");
     let fac = Fac::new(sh, factorise);
     let wd_active = wd_active.unwrap_or(sh.kb > 1);
-    let streaming = shuffle_buffer.is_some() || stream::wanted(&data);
+    let streaming = shuffle_buffer.is_some() || stride > 1 || stream::wanted(&data);
     let sources = if streaming { stream::open_sources(&data) } else { Vec::new() };
     if epoch_size == 0 {
         epoch_size = if streaming {
@@ -1533,8 +1534,8 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let loader = {
         let mut feed: Box<dyn Feeder> = if streaming {
             let cap = shuffle_buffer.unwrap_or(stream::DEFAULT_BUFFER);
-            println!("streaming {} sources, shuffle buffer {cap}, {loader_threads} decoder threads", sources.len());
-            Box::new(stream::Stream::new(sources, cap, loader_threads, seed ^ 0xF00D ^ seen))
+            println!("streaming {} sources, shuffle buffer {cap}, stride {stride}, {loader_threads} decoder threads", sources.len());
+            Box::new(stream::Stream::with_stride(sources, cap, loader_threads, seed ^ 0xF00D ^ seen, stride))
         } else {
             Box::new(Feed::new(data, seed ^ 0xF00D ^ seen))
         };
