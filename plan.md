@@ -112,8 +112,14 @@ for packed-data.
   9600X (datagen games/s) before using it there.
 
 **Long term: top 10 (3751).**
-- Bigger nets (1024+ wide, king buckets, possibly a second hidden layer);
-  AVX-512 inference paths for them (`nnue-avx512`).
+- Bigger nets (1024+ wide, king buckets); AVX-512 inference paths for
+  them (`nnue-avx512`).
+- **Deeper head** (design: `docs/nnue-deeper-head.md`): FT -> 16 -> 32 -> 1
+  per output bucket instead of width, cheaper in the engine (~5-10% NPS vs
+  H 1024's 20-28%) and keeps the FT CPU-trainable. Step 1: CPU-trainer
+  `--head` + small CPU signal tests (H 256/512, ~300M positions, head vs
+  none); step 2: full-size H 512 kb8m + head vs main's H 1024 on the 1080
+  Ti (needs the CUDA port); engine work only if step 2 reaches H 1024's loss.
 - Multi-billion-position pools with opening diversity; better data
   (deeper/softnode search, rescoring, filtering).
 - Novel ideas only offline and cheap until a clear wall: uncertainty head,
