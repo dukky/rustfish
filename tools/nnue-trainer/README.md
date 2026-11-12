@@ -198,6 +198,31 @@ before; `--no-wd-active-only` restores plain decay. It only matters with
 `--wd > 0` (the default is 0). KB=1 nets keep plain decay and train
 bit-for-bit as before.
 
+## Threat inputs (`--threats ep`)
+
+One extra block of 768 FT rows after the king buckets' rows: the row of a
+non-king piece is active when the piece is en prise (attacked by a
+lower-value enemy piece, or attacked and undefended). Exact layout, index
+formula and factoriser / weight-decay rules: `docs/nnue.md` "Threat
+inputs". `train`, `eval`, `scalecheck` and `rescale` take `--threats ep`
+(a threat net file is `768 * H * 2` bytes larger, so it needs the flag to
+be read). The CUDA trainer supports it too; the Metal trainer does not
+(it rejects the option).
+
+Fine-tune a threat net from a net without threat rows: `--init` zero-fills
+the threat rows (with `--factorise`: W = the net's bucket rows, F = 0), so
+the start val loss equals the source's exactly:
+
+```bash
+nnue-trainer train --data pool8.bin --val val.bin --init g8h1024kb8m.bin \
+  --hidden 1024 --buckets 8 --king-buckets kb8m --factorise --threats ep \
+  --epochs 3 --lr 2e-4 --lr-end 1e-6 --keep-best --out g8h1024kb8m-ep.bin
+nnue-trainer eval --net g8h1024kb8m-ep.bin --val val.bin --buckets 8 \
+  --king-buckets kb8m --threats ep --best-scale
+```
+
+The engine reads it with `THREATS = ThreatMode::EnPrise` in `src/nnue.rs`.
+
 ## Score-scale check
 
 ```bash
