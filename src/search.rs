@@ -275,6 +275,10 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// bonus and gravity, the same number of net same-depth cutoffs lands at
 /// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
 const LMR_HISTORY_THRESHOLD: i32 = 14_000;
+/// History pruning: quiets at depth <= HISTORY_PRUNE_MAX_DEPTH whose butterfly +
+/// continuation history is below -HISTORY_PRUNE_MARGIN * depth are skipped.
+const HISTORY_PRUNE_MAX_DEPTH: i32 = 4;
+const HISTORY_PRUNE_MARGIN: i32 = 2_000;
 
 fn history_bonus(depth: i32) -> i32 {
     (16 * depth * depth).min(HISTORY_BONUS_MAX)
@@ -1619,6 +1623,20 @@ fn negamax(
             if idx >= limit {
                 continue;
             }
+        }
+
+        // History pruning: at shallow depth, skip late quiets whose butterfly plus
+        // continuation history says they rarely work here.
+        if quiet
+            && !priority_quiet
+            && !in_check
+            && beta - alpha <= 1
+            && idx > 0
+            && depth <= HISTORY_PRUNE_MAX_DEPTH
+            && best > -(MATE_SCORE - 1000)
+            && quiet_history + quiet_continuation < -HISTORY_PRUNE_MARGIN * depth
+        {
+            continue;
         }
 
         // Quiet SEE pruning: skip late, unremarkable quiets that hang material
