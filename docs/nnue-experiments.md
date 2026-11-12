@@ -280,3 +280,30 @@ gh workflow run train-sweep.yml -f name=kb-warm -f seeds='["8-29"]' -f positions
   {"name":"kb8mf","args":"--hidden 512 --buckets 8 --king-buckets kb8m --factorise --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"},
   {"name":"kb8mf-wd","args":"--hidden 512 --buckets 8 --king-buckets kb8m --factorise --wd 0.01 --epochs 4 --lr 2e-4 --lr-end 1e-5 --mirror"}]'
 ```
+
+## Threat inputs v2 (`--threats ep` on kb8m H=1024), 2026-11-12
+
+Branch `threat-inputs-v2` (engine `THREATS`, CPU + CUDA trainers; spec in
+docs/nnue.md "Threat inputs"). A first version (branch `threat-inputs`,
+2026-11-07, H128) measured `ep` -1.0% val loss and `ad` no gain.
+
+- Exact warm start: g7h1024kb8m with zero threat rows, val.bin loss
+  0.026203 / best-scale 0.025637, identical to the source to every printed
+  digit (unit test: bit-identical forwards).
+- Engine NPS on the M3 (bench 13, interleaved x3, same nodes 4746772):
+  none 1.926M, ep 1.447M nps = **-24.9%**. The threat rows go through the
+  same `update` (NEON here, AVX2 on x86); the cost is the per-ply threat
+  bitboards (attack sets of both sides) plus extra row passes.
+- Laptop sanity fine-tune (CPU, 4 threads, ~100k pos/s): from g7h1024kb8m,
+  first 30M of pool7 (3 x 10M), lr 2e-4 -> 1e-6, `--factorise`, val.bin:
+
+  | run | e1 | e2 | e3 | e3 best-scale |
+  |---|---|---|---|---|
+  | start (both) | 0.026203 | | | 0.025637 |
+  | no threats (control) | 0.026266 | 0.026259 | 0.026246 | 0.025673 |
+  | `--threats ep` | 0.026228 | 0.026212 | 0.026198 | 0.025618 |
+
+  The restart (fresh Adam moments, lr 2e-4) costs the control ~4e-5;
+  `ep` beats the control by 4.8e-5 (best scale 5.5e-5) and ends just below
+  the start. A plumbing check on a small slice of the net's own training
+  data, not a result.
