@@ -58,6 +58,17 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   [-13.7, -1.4] (one run; the shallower branch also skips re-searches, a
   deeper-only variant is untested); feat-improving-ply4 queued.
 - Ladder after the next net merge.
+- **SPSA between gates** (2026-11-12 08:59, spsa.yml, 8 shards, 50 it/round,
+  10 rounds; queue on 10 test shards meanwhile, e97a6dc). Pause it between
+  rounds for the gen-8 gate (state = last `spsa-result` artifact), restore
+  18 test shards, resume after.
+- **Data decision pending; desktop datagen on hold until then.** CI
+  datagen stopped means new data is ~350M/day (desktop) vs ~1.4B/day
+  before, so data, not training, is the bottleneck now; that raises T80's
+  value. In progress (subagents, branches): `t80-reader` (binpack decoder,
+  filters, score calibration, licence notes) and `packed-data` (compact
+  on-disk format + streaming shuffle loader, parity-tested against a
+  shuffled pool).
 
 **Mid term (days-weeks): clear top 100, start on bigger nets.**
 - Data decision (Hermes notes `docs/research-2026-11-11-coda-lc0-compute.md`,
