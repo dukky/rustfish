@@ -627,9 +627,21 @@ impl<L: Layout> NnueState<L> {
     /// position with `pieces` pieces on the board (selects the output bucket).
     #[inline]
     pub(crate) fn evaluate(&self, stm: Color, pieces: u32) -> i32 {
+        let k = self.computed.get();
+        let net = &*self.net;
+        if k + 1 == self.top && net.small_out {
+            // One pending ply (the common case): update both perspectives
+            // and take their output sums in the same pass over the lanes.
+            let b = bucket(pieces);
+            let mut stack = self.stack.borrow_mut();
+            let (lo, hi) = stack.split_at_mut(self.top);
+            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b);
+            self.computed.set(self.top);
+            return finish(net, b, sum);
+        }
         self.materialise();
         let stack = self.stack.borrow();
-        evaluate_acc(&self.net, &stack[self.top].acc, stm, pieces)
+        evaluate_acc(net, &stack[self.top].acc, stm, pieces)
     }
 }
 
@@ -637,26 +649,69 @@ impl<L: Layout> NnueState<L> {
 /// pass; a perspective marked for refresh is rebuilt from the finny table.
 #[inline(always)]
 fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
+    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0);
+}
+
+/// `apply_delta`, and with `EVAL` also the output sum of the result for
+/// side to move `stm` and output bucket `b` (requires `net.small_out`),
+/// fused into the update pass. Without `EVAL` it returns 0.
+#[inline(always)]
+fn apply_delta_with<L: Layout, const EVAL: bool>(
+    net: &Network,
+    src: &Accumulator,
+    dst: &mut Slot,
+    cache: &RefCell<Vec<CacheEntry>>,
+    stm: Color,
+    b: usize,
+) -> i64 {
     let d = dst.delta;
+    let mut sum = 0i64;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+        let w = if EVAL { out_half(net, b, persp == stm) } else { &net.ft_b };
         let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
         if L::REFRESH && dst.refresh[pi] {
             let mut c = cache.borrow_mut();
             let bb = dst.bb;
             refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
+            if EVAL {
+                sum += simd::screlu_dot(&dst.acc.v[pi], w);
+            }
             continue;
         }
         let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
         let a0 = f(d.add[0]);
         let s0 = f(d.sub[0]);
         let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
-        match (d.n_add, d.n_sub) {
-            (1, 1) => update(o, s, &[a0], &[s0]),
-            (1, 2) => update(o, s, &[a0], &[s0, f(d.sub[1])]),
-            (2, 2) => update(o, s, &[a0, f(d.add[1])], &[s0, f(d.sub[1])]),
+        let run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
+            if EVAL {
+                simd::update_dot(o, s, adds, subs, w)
+            } else {
+                update(o, s, adds, subs);
+                0
+            }
+        };
+        sum += match (d.n_add, d.n_sub) {
+            (1, 1) => run(o, &[a0], &[s0]),
+            (1, 2) => run(o, &[a0], &[s0, f(d.sub[1])]),
+            (2, 2) => run(o, &[a0, f(d.add[1])], &[s0, f(d.sub[1])]),
             _ => unreachable!(),
-        }
+        };
     }
+    sum
+}
+
+/// Output weights of bucket `b` for the side to move's half (`us`) or the other.
+#[inline(always)]
+fn out_half(net: &Network, b: usize, us: bool) -> &[i16; H] {
+    let o = b * 2 * H + if us { 0 } else { H };
+    net.out_w[o..o + H].try_into().unwrap()
+}
+
+/// Output sum -> clamped centipawn score for output bucket `b`.
+#[inline(always)]
+fn finish(net: &Network, b: usize, sum: i64) -> i32 {
+    let raw = (sum / QA as i64 + net.out_b[b] as i64) * SCALE as i64 / (QA as i64 * QB as i64);
+    raw.clamp(-EVAL_LIMIT as i64, EVAL_LIMIT as i64) as i32
 }
 
 #[inline(always)]
@@ -674,9 +729,7 @@ pub(crate) fn evaluate_acc(net: &Network, acc: &Accumulator, stm: Color, pieces:
         Color::Black => (&acc.v[1], &acc.v[0]),
     };
     let b = bucket(pieces);
-    let sum = output_sum(net, b, us, them);
-    let raw = (sum / QA as i64 + net.out_b[b] as i64) * SCALE as i64 / (QA as i64 * QB as i64);
-    raw.clamp(-EVAL_LIMIT as i64, EVAL_LIMIT as i64) as i32
+    finish(net, b, output_sum(net, b, us, them))
 }
 
 #[inline(always)]
@@ -725,6 +778,19 @@ pub(crate) mod scalar {
         sum
     }
 
+    /// `update` followed by `screlu_dot(out, w)`; requires |w| <= 127.
+    #[allow(dead_code)]
+    pub(crate) fn update_dot(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+    ) -> i64 {
+        update(out, src, adds, subs);
+        screlu_dot(out, w)
+    }
+
     /// Requires |w| <= 127 (see `Network::small_out`): each product fits i32.
     #[allow(dead_code)]
     pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
@@ -760,6 +826,45 @@ pub(crate) mod simd {
                 vst1q_s16(out.as_mut_ptr().add(i), v);
                 i += 8;
             }
+        }
+    }
+
+    /// `update` and `screlu_dot(out, w)` in one pass (|w| <= 127): the
+    /// output arithmetic overlaps the update's loads and stores.
+    #[inline(always)]
+    pub(crate) fn update_dot(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+    ) -> i64 {
+        const { assert!(H % 32 == 0) };
+        // SAFETY: as in `update` and `screlu_dot`.
+        unsafe {
+            let zero = vdupq_n_s16(0);
+            let qa = vdupq_n_s16(QA as i16);
+            let mut s = [vdupq_n_s32(0); 8];
+            let mut i = 0;
+            while i < H {
+                for j in 0..4 {
+                    let o = i + 8 * j;
+                    let mut v = vld1q_s16(src.as_ptr().add(o));
+                    for a in adds {
+                        v = vaddq_s16(v, vld1q_s16(a.as_ptr().add(o)));
+                    }
+                    for sb in subs {
+                        v = vsubq_s16(v, vld1q_s16(sb.as_ptr().add(o)));
+                    }
+                    vst1q_s16(out.as_mut_ptr().add(o), v);
+                    let c = vminq_s16(vmaxq_s16(v, zero), qa);
+                    let cw = vmulq_s16(c, vld1q_s16(w.as_ptr().add(o)));
+                    s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c));
+                    s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c);
+                }
+                i += 32;
+            }
+            s.iter().map(|&x| vaddlvq_s32(x)).sum()
         }
     }
 
@@ -812,6 +917,19 @@ pub(crate) mod simd {
                 i += 16;
             }
         }
+    }
+
+    /// `update` and `screlu_dot(out, w)` in one pass (|w| <= 127).
+    #[inline(always)]
+    pub(crate) fn update_dot(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+    ) -> i64 {
+        // SAFETY: AVX2 is enabled at compile time (cfg).
+        unsafe { super::avx2_kernels::update_dot(out, src, adds, subs, w) }
     }
 
     #[inline(always)]
@@ -881,9 +999,58 @@ pub(crate) mod simd {
     }
 }
 
+/// AVX2 kernels shared by the compile-time and the runtime-detected x86 paths.
+#[cfg(target_arch = "x86_64")]
+mod avx2_kernels {
+    use super::{H, QA};
+    use std::arch::x86_64::*;
+
+    /// `update` then `screlu_dot(out, w)` in one pass; |w| <= 127.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2.
+    #[inline(always)]
+    pub(super) unsafe fn update_dot(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+    ) -> i64 {
+        const { assert!(H % 32 == 0) };
+        let zero = _mm256_setzero_si256();
+        let qa = _mm256_set1_epi16(QA as i16);
+        let mut sum = [_mm256_setzero_si256(); 2];
+        let mut i = 0;
+        while i < H {
+            for j in 0..2 {
+                let o = i + 16 * j;
+                let mut v = _mm256_loadu_si256(src.as_ptr().add(o) as *const __m256i);
+                for a in adds {
+                    v = _mm256_add_epi16(v, _mm256_loadu_si256(a.as_ptr().add(o) as *const __m256i));
+                }
+                for s in subs {
+                    v = _mm256_sub_epi16(v, _mm256_loadu_si256(s.as_ptr().add(o) as *const __m256i));
+                }
+                _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
+                let c = _mm256_min_epi16(_mm256_max_epi16(v, zero), qa);
+                let wv = _mm256_loadu_si256(w.as_ptr().add(o) as *const __m256i);
+                let cw = _mm256_mullo_epi16(c, wv);
+                sum[j] = _mm256_add_epi32(sum[j], _mm256_madd_epi16(cw, c));
+            }
+            i += 32;
+        }
+        // Each i32 lane holds H/16 products (exact for H <= 4096); reduce in i64.
+        let mut lanes = [0i32; 16];
+        _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, sum[0]);
+        _mm256_storeu_si256(lanes.as_mut_ptr().add(8) as *mut __m256i, sum[1]);
+        lanes.iter().map(|&x| x as i64).sum()
+    }
+}
+
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) mod simd {
-    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update};
+    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update, update_dot};
 }
 
 /// x86-64 builds without AVX2 enabled at compile time (the default
@@ -925,6 +1092,33 @@ pub(crate) mod simd {
         } else {
             super::scalar::update(out, src, adds, subs)
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn update_dot(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+    ) -> i64 {
+        if avx2() {
+            // SAFETY: detected above; |w| <= 127 bound as in the scalar path.
+            unsafe { update_dot_avx2(out, src, adds, subs, w) }
+        } else {
+            super::scalar::update_dot(out, src, adds, subs, w)
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn update_dot_avx2(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+    ) -> i64 {
+        super::avx2_kernels::update_dot(out, src, adds, subs, w)
     }
 
     #[target_feature(enable = "avx2")]
@@ -1250,8 +1444,22 @@ mod tests {
                 st.push_move(&board, mv);
                 let undo = board.make_move(mv);
                 history.push((mv, undo));
-                let full = Accumulator::refresh_with::<L>(&net, &board);
-                assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                // Leave some plies pending (multi-ply materialisation), and
+                // evaluate before reading the accumulator on others (the
+                // fused update + output path, refreshes included).
+                match next() % 3 {
+                    0 => continue,
+                    1 => {
+                        let full = Accumulator::refresh_with::<L>(&net, &board);
+                        let (stm, n) = (board.side_to_move, board.bb.occ_all().count_ones());
+                        assert_eq!(st.evaluate(stm, n), evaluate_acc(&net, &full, stm, n), "after {}", move_to_uci(mv));
+                        assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                    }
+                    _ => {
+                        let full = Accumulator::refresh_with::<L>(&net, &board);
+                        assert!(st.current().v == full.v, "after {}", move_to_uci(mv));
+                    }
+                }
             }
             while let Some((mv, undo)) = history.pop() {
                 board.undo_move(mv, undo);
