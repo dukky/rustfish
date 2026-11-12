@@ -1462,6 +1462,7 @@ fn negamax(
                 let undo = board.make_move(mv);
                 let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
                 engine.tt.prefetch(child_key);
+                engine.eval_cache.prefetch(child_key);
                 rep_stack.push(child_key);
                 let mut score = -quiescence(
                     board,
@@ -1653,6 +1654,7 @@ fn negamax(
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
+        engine.eval_cache.prefetch(child_key);
         rep_stack.push(child_key);
         let gives_check = board.is_in_check(board.side_to_move);
 
@@ -1951,6 +1953,7 @@ fn quiescence(
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
+        engine.eval_cache.prefetch(child_key);
         rep_stack.push(child_key);
         let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None);
         rep_stack.pop();
