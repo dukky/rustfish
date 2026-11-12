@@ -32,15 +32,23 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   powerline, done ~00:15 2026-11-12). Gen 8 = pool7 + the CI seeds generated since +
   the desktop's 3 x 1M-game runs; same recipe (g8 -> g8m1 -> g8kb8m),
   gate vs g7kb8m.
-- **g7h1024** (Metal, laptop, pool7, 10 epochs, done ~05:45 2026-11-12):
-  epoch 1 val 0.026793 vs g7's 0.027082 at 2.45x the training cost. Compare
-  best-scale on val.bin + val17x2 at the end; if it wins clearly, measure
-  NPS cost and gate a 1024 net in games (stc, shape change).
+- **g7h1024 done (2026-11-12 04:55)**, 10 epochs on pool7, no king buckets.
+  Best-scale val.bin / val17x2: g7 0.026073 / 0.025162; **g7h1024
+  0.025733 / 0.024701**; main g7kb8m 0.025821 / 0.024812. So plain 1024
+  beats main's king-bucket net by 9e-5 / 1.1e-4 (g7kb8m's gate win of
+  +30.6 came with ~1e-5 / 1.1e-4 over g6kb8m). Engine cost: -20% NPS on
+  the M3 (bench 13 interleaved, 4.27M -> 3.39M; LAYOUT_NONE, H=1024).
+  Next: **g7h1024kb8m** (chain16: m1 copy -> kb8m factoriser, 4 epochs,
+  ~5-6 h on the M3 GPU from 05:30); at 512 that step gave -2.5e-4 /
+  -3.5e-4. Gate the kb8m version via `stc` (shape change), and measure NPS
+  on x86 (AVX2/AVX-512) too.
 - Queue: **feat-cuckoo merged +5.5** [1.1, 9.9] (2026-11-12 01:54);
   feat-conthist-rekey rejected (-0.2, 10.9k games: the [piece][to] re-key
   alone is neutral, so the 2/4-ply retry loses its premise; deprioritised);
-  feat-qs-evasion-prune (+2 exp; if merged add `QsQuietEvasions` to
-  docs/ccrl-submission.md and tune/spsa-params.json).
+  feat-qs-evasion-prune rejected (-3.5); feat-lmr-deeper (SF-style
+  deeper/shallower LMR re-search, margins 43 + 2d / 9) rejected -7.6
+  [-13.7, -1.4] (one run; the shallower branch also skips re-searches, a
+  deeper-only variant is untested); feat-improving-ply4 queued.
 - Ladder after the next net merge.
 
 **Mid term (days-weeks): clear top 100, start on bigger nets.**
