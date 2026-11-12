@@ -1,21 +1,22 @@
 {
   "pending": [
     {
-      "branch": "nnue-g7h1024kb8m",
+      "branch": "feat-lmr-deeper-only",
       "mode": "stc",
-      "expect": 8.0,
+      "expect": 1.5,
       "front": true
     }
   ],
   "current": {
-    "branch": "feat-lmr-deeper-only",
+    "branch": "nnue-g7h1024kb8m",
     "mode": "stc",
-    "expect": 1.5,
-    "test_id": "q-feat-lmr-deeper-only-1112-0849",
-    "sha": "32a9e1029080214b029310d8c162fa5586c2ea71",
-    "base_sha": "1af0e3970e98344ed9e959249a3a39b3a2eaf1d5",
-    "started": "2026-11-12T08:49:42Z",
-    "bench": 401728,
+    "expect": 8.0,
+    "front": true,
+    "test_id": "q-nnue-g7h1024kb8m-1112-1337",
+    "sha": "01972ea16987a7ea5e46b9080cd7c4df72706c98",
+    "base_sha": "43b6cd2d69b3cbe093f6435bf740489b7937c999",
+    "started": "2026-11-12T13:38:01Z",
+    "bench": 404697,
     "evalhash": "248c85c4a1cc6558"
   },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
@@ -26,5 +27,11 @@
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
     "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9"
+  ],
+  "cancel_sweep": [
+    {
+      "prefix": "SPRT q-feat-lmr-deeper-only-1112-0849 ",
+      "until": "2026-11-13T01:37:13Z"
+    }
   ]
 }
