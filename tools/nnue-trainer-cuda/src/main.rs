@@ -627,6 +627,10 @@ struct PairBackend {
     cpu_out: usize,
     cpu_started: bool,
     rounds: u64,
+    /// `sum`: merge by adding both devices' parameter changes since the
+    /// last merge (`base`), instead of averaging the parameters.
+    sum: bool,
+    base: Vec<f32>,
 }
 
 enum Job {
@@ -645,7 +649,12 @@ unsafe impl Send for PairBackend {}
 impl PairBackend {
     fn new(cfg: &BackendCfg, spec: &str) -> Self {
         let v: Vec<&str> = spec.split(',').collect();
-        assert!(v.len() == 3, "NNUE_PAIR=K,cpu_threads,gpu_share (e.g. 64,10,0.62)");
+        assert!(v.len() == 3 || v.len() == 4, "NNUE_PAIR=K,cpu_threads,gpu_share[,avg|sum] (e.g. 64,10,0.62)");
+        let sum = match v.get(3).copied().unwrap_or("avg") {
+            "avg" => false,
+            "sum" => true,
+            o => panic!("NNUE_PAIR merge mode {o}: avg or sum"),
+        };
         let k: usize = v[0].parse().unwrap();
         let cpu_threads: usize = v[1].parse().unwrap();
         let g: f64 = v[2].parse().unwrap();
@@ -677,8 +686,8 @@ impl PairBackend {
                 }
             })
         });
-        eprintln!("pair: rounds of {k} batches, {share} on the GPU, {} on the CPU ({cpu_threads} threads)", k - share);
-        PairBackend { gpu: GpuTrainer::new(cfg), k, share, n: 0, jobs, replies, cpu_out: 0, cpu_started: false, rounds: 0 }
+        eprintln!("pair: rounds of {k} batches, {share} on the GPU, {} on the CPU ({cpu_threads} threads), merge {}", k - share, if sum { "sum of changes" } else { "average" });
+        PairBackend { gpu: GpuTrainer::new(cfg), k, share, n: 0, jobs, replies, cpu_out: 0, cpu_started: false, rounds: 0, sum, base: Vec::new() }
     }
 
     fn to_gpu(&self, i: usize) -> bool {
@@ -714,9 +723,18 @@ impl PairBackend {
             Reply::State(pc, oc) => (pc, oc),
             Reply::Loss(_) => unreachable!(),
         };
-        for (a, b) in p.iter_mut().zip(pc.iter_mut()) {
-            *a = 0.5 * (*a + *b);
-            *b = *a;
+        if self.sum {
+            // p0 + (pg - p0) + (pc - p0), clipped as AdamW clips.
+            for ((a, b), &z) in p.iter_mut().zip(pc.iter_mut()).zip(&self.base) {
+                *a = (*a + *b - z).clamp(-CLIP, CLIP);
+                *b = *a;
+            }
+            self.base.copy_from_slice(p);
+        } else {
+            for (a, b) in p.iter_mut().zip(pc.iter_mut()) {
+                *a = 0.5 * (*a + *b);
+                *b = *a;
+            }
         }
         for (a, b) in opt.m.iter_mut().zip(oc.m.iter_mut()) {
             *a = 0.5 * (*a + *b);
@@ -742,6 +760,7 @@ impl Backend for PairBackend {
         if !self.cpu_started {
             let o = Adam { m: opt.m.clone(), v: opt.v.clone(), step: opt.step };
             self.jobs.send(Job::State(p.to_vec(), o)).unwrap();
+            self.base = p.to_vec();
             self.cpu_started = true;
         }
         let i = self.n % self.k;

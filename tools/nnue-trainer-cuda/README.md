@@ -40,6 +40,18 @@ wait and average params and moments, and go on from the average (local SGD).
 Deterministic (reruns byte-identical). Give the GPU decode `--threads 2`
 and set `gpu_share` near the speed ratio (kb8m H 512 `--half` ~0.63).
 
+Result (2026-11-12, plain H 512 B 8 from scratch, pool7, 3 epochs, `--half`
+`--mirror`, val.bin): **it loses, also at equal wall time.** GPU only 3 x 300M:
+0.027242; GPU only 3 x 210M (the pair runs' wall time): 0.027386; pair
+3 x 300M with averaging, K = 16 / 64 / 256: 0.027490 / 0.027474 / 0.027473
+(6.0-6.6M pos/s vs 4.55M); with `sum` merging (`NNUE_PAIR=...,sum`: add both
+devices' changes since the last merge, which keeps the update count) K = 64
+/ 256: 0.027596 / 0.027499, unstable early (epoch 1 val 0.032-0.035: the two
+sets of Adam steps overshoot when added). Averaging two models is ~one step
+at twice the batch, so the pair makes about half the updates per position;
+the extra 43% throughput does not make up for it. Kept for reference; use the
+two devices for separate runs instead.
+
 ## Deterministic, not bit-identical to the CPU
 
 No float atomics: every sum has a fixed order, so reruns (any `--threads`)
