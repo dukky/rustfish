@@ -51,7 +51,7 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 - `scripts/openings.txt` — reusable opening suite for diversified gauntlets
 - `scripts/queue.py` + `scripts/queue-settings.json` — the GitHub merge queue (modes, lanes, bursts, ladder)
 - `scripts/netloop.py` — net pipeline: ingest data, train, screen, embed, queue a net gate (`docs/nnue-experiments.md`)
-- `tools/nnue-trainer` (CPU, Rust) and `tools/nnue-trainer-metal` (M3 GPU) — NNUE trainers
+- `tools/nnue-trainer` (CPU, Rust), `tools/nnue-trainer-cuda` (NVIDIA GPU: the CPU trainer's CLI with a CUDA backend; needs nvcc, see its README) and `tools/nnue-trainer-metal` (M3 GPU) — NNUE trainers
 - `plan.md` — the roadmap: current status, what is running, short/medium/long-term plans, known problems and the process audit; read this before picking new work and update it when work starts, lands or dies
 - `docs/archive/` — superseded planning/review notes kept for history (including the July 2026 plan and `post-2100-revised.md`); do **not** treat their recommendations as current
 
