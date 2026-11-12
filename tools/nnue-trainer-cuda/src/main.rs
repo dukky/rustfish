@@ -299,6 +299,7 @@ impl GpuTrainer {
         let sh = cfg.sh;
         assert!(sh.h % 64 == 0 && sh.h <= 2048, "nnue-trainer-cuda: --hidden must be a multiple of 64, at most 2048");
         assert!(sh.buckets <= 8 && sh.kb <= 64, "nnue-trainer-cuda: at most 8 output buckets, 64 king buckets");
+        assert!(sh.th == 0, "nnue-trainer-cuda: no --threats support yet (see docs/nnue.md \"Threat inputs\")");
         let (h, rows, b) = (sh.h, sh.kb * INPUTS, cfg.batch);
         let nrest = sh.len() - sh.ft_b();
         ck(unsafe { cuInit(0) }, "init");
@@ -450,7 +451,7 @@ impl Backend for GpuTrainer {
                         }
                     }
                     // SAFETY: every unit writes its own samples.
-                    unsafe { *hs.get().add(i) = GSample { f: s.f, n: s.n as u8, bucket: s.bucket as u8, pad: 0, target: s.target } };
+                    unsafe { *hs.get().add(i) = GSample { f: [s.f[0][..32].try_into().unwrap(), s.f[1][..32].try_into().unwrap()], n: s.n as u8, bucket: s.bucket as u8, pad: 0, target: s.target } };
                 }
             });
         }

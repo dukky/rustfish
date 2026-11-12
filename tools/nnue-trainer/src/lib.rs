@@ -22,6 +22,23 @@
 //! net); `--init` from a one-bucket net sets `F` = its rows, `W = 0`, so
 //! the start is exactly that net (mirrored layouts: only for an m1 net).
 //!
+//! Threat inputs (`--threats <none|ep>`, default `none`): `TB` extra blocks
+//! of 768 FT rows after the king buckets' rows (`(KB + TB) * 768` rows in
+//! all, so in the file the threat rows sit between the bucketed rows and
+//! the FT bias). `ep` (TB = 1): a non-king piece's threat row is active
+//! when it is attacked by a lower-value enemy piece (P < N = B < R < Q), or
+//! attacked and not defended; same definition as `ThreatMode::EnPrise` in
+//! `src/nnue.rs`. Threat row = the piece's own feature with the king
+//! bucket's offset replaced by the threat block's: `(KB + t) * 768 +
+//! side * 384 + kind * 64 + (sq_rel ^ flip)`, the same orientation and
+//! mirror flip as the perspective's piece rows, not bucketed, never
+//! factorised. In `Sample::f[side]` the piece features come first (`np` of
+//! them), then the threat features (at most 30, kings never), `n` in all.
+//! `--init` from a net without threat rows starts them at 0, so the start
+//! evaluates exactly like the source net. (The engine also has `AttDef`;
+//! the trainers do not: it needs up to 92 features per perspective, and it
+//! gave no gain on a small test.) Spec: docs/nnue.md "Threat inputs".
+//!
 //! `--keep-best` (needs `--val`): `<out>` is the epoch with the lowest
 //! quantised val loss, the start net included, instead of the last one.
 //!
@@ -168,6 +185,147 @@ impl KingLayout {
 
 const NO_BUCKETS: &KingLayout = &LAYOUTS[0];
 
+// ---------------------------------------------------------------- threat inputs
+
+/// A threat-input mode (`--threats`): `blocks` blocks of 768 FT rows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Threats {
+    pub name: &'static str,
+    pub blocks: usize,
+}
+
+/// Index = threat id (`Shape::th`, checkpoint header bits 48..; 0 = none).
+pub const THREATS: [Threats; 2] = [
+    Threats { name: "none", blocks: 0 },
+    // En prise: attacked by a lower-value enemy piece, or attacked and undefended.
+    Threats { name: "ep", blocks: 1 },
+];
+
+impl Threats {
+    pub fn by_name(name: &str) -> &'static Threats {
+        if name == "ad" {
+            panic!("--threats ad is engine-only (up to 92 features per perspective; the trainers' Sample holds {MAXF})");
+        }
+        THREATS.iter().find(|t| t.name == name).unwrap_or_else(|| {
+            let names: Vec<_> = THREATS.iter().map(|t| t.name).collect();
+            panic!("unknown --threats {name} (one of {})", names.join(", "))
+        })
+    }
+    pub fn id(&self) -> usize {
+        THREATS.iter().position(|t| t == self).unwrap()
+    }
+}
+
+const fn leaper_table(d: [(i32, i32); 8]) -> [u64; 64] {
+    let mut t = [0u64; 64];
+    let mut sq = 0;
+    while sq < 64 {
+        let (f, r) = ((sq % 8) as i32, (sq / 8) as i32);
+        let mut i = 0;
+        while i < 8 {
+            let (nf, nr) = (f + d[i].0, r + d[i].1);
+            if nf >= 0 && nf < 8 && nr >= 0 && nr < 8 {
+                t[sq] |= 1 << (nr * 8 + nf);
+            }
+            i += 1;
+        }
+        sq += 1;
+    }
+    t
+}
+
+static KNIGHT_ATT: [u64; 64] = leaper_table([(1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)]);
+static KING_ATT: [u64; 64] = leaper_table([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]);
+const DIAG: [(i32, i32); 4] = [(1, 1), (-1, 1), (1, -1), (-1, -1)];
+const ORTHO: [(i32, i32); 4] = [(0, 1), (1, 0), (0, -1), (-1, 0)];
+
+/// Sliding attacks by ray walks (the first blocker is attacked).
+fn slide(sq: usize, occ: u64, dirs: &[(i32, i32); 4]) -> u64 {
+    let (f0, r0) = ((sq % 8) as i32, (sq / 8) as i32);
+    let mut a = 0u64;
+    for &(df, dr) in dirs {
+        let (mut f, mut r) = (f0 + df, r0 + dr);
+        while (0..8).contains(&f) && (0..8).contains(&r) {
+            let b = 1u64 << (r * 8 + f);
+            a |= b;
+            if occ & b != 0 {
+                break;
+            }
+            f += df;
+            r += dr;
+        }
+    }
+    a
+}
+
+/// Squares attacked by colour `c`'s pieces, per attacker kind.
+fn attacks_by_kind(bb: &[[u64; 6]; 2], c: usize, occ: u64) -> [u64; 6] {
+    const FILE_A: u64 = 0x0101_0101_0101_0101;
+    const FILE_H: u64 = FILE_A << 7;
+    let p = &bb[c];
+    let pawns = if c == 0 {
+        ((p[0] & !FILE_A) << 7) | ((p[0] & !FILE_H) << 9)
+    } else {
+        ((p[0] & !FILE_A) >> 9) | ((p[0] & !FILE_H) >> 7)
+    };
+    let mut a = [pawns, 0, 0, 0, 0, 0];
+    for k in 1..6 {
+        let mut x = p[k];
+        while x != 0 {
+            let s = x.trailing_zeros() as usize;
+            x &= x - 1;
+            a[k] |= match k {
+                1 => KNIGHT_ATT[s],
+                2 => slide(s, occ, &DIAG),
+                3 => slide(s, occ, &ORTHO),
+                4 => slide(s, occ, &DIAG) | slide(s, occ, &ORTHO),
+                _ => KING_ATT[s],
+            };
+        }
+    }
+    a
+}
+
+/// Threat bits of a record's pieces: bit `n` = the record's `n`-th piece
+/// (square order, as the nibbles) is active in threat block 0. A property
+/// of the position (not of a perspective, and unchanged by `--mirror`).
+pub fn threat_mask(r: &Rec, th: &Threats) -> u32 {
+    if th.blocks == 0 {
+        return 0;
+    }
+    let occ = u64::from_le_bytes(r[..8].try_into().unwrap());
+    let mut bb = [[0u64; 6]; 2];
+    let (mut sqs, mut nibs) = ([0u8; 32], [0u8; 32]);
+    let (mut o, mut n) = (occ, 0usize);
+    while o != 0 && n < 32 {
+        let sq = o.trailing_zeros() as u8;
+        o &= o - 1;
+        let nib = r[8 + n / 2] >> (4 * (n & 1)) & 0xF;
+        bb[(nib >> 3) as usize][(nib & 7) as usize] |= 1 << sq;
+        sqs[n] = sq;
+        nibs[n] = nib;
+        n += 1;
+    }
+    let att = [attacks_by_kind(&bb, 0, occ), attacks_by_kind(&bb, 1, occ)];
+    let all = |a: &[u64; 6]| a[0] | a[1] | a[2] | a[3] | a[4] | a[5];
+    let any = [all(&att[0]), all(&att[1])];
+    let mut m = 0u32;
+    for i in 0..n {
+        let (c, k) = ((nibs[i] >> 3) as usize, (nibs[i] & 7) as usize);
+        if k >= 5 {
+            continue;
+        }
+        let b = 1u64 << sqs[i];
+        let (e, by, def) = (&att[1 - c], any[1 - c], any[c]);
+        let minor = e[0];
+        let lower = [0, minor, minor, minor | e[1] | e[2], minor | e[1] | e[2] | e[3]][k];
+        if b & (lower | (by & !def)) != 0 {
+            m |= 1 << i;
+        }
+    }
+    m
+}
+
 // ---------------------------------------------------------------- utilities
 
 struct Rng(u64);
@@ -278,25 +436,48 @@ fn encode(line: &str) -> Option<Rec> {
     Some(rec)
 }
 
+/// Most active features per perspective: 32 pieces + 30 `ep` threat rows
+/// (kings have none), rounded up.
+pub const MAXF: usize = 64;
+
 /// Both perspectives' active features: index 0 = side to move.
 #[derive(Clone, Copy)]
 pub struct Sample {
-    /// Feature indices per perspective (0 = side to move), `n` of each.
-    pub f: [[u16; 32]; 2],
+    /// Feature indices per perspective (0 = side to move), `n` of each:
+    /// `np` piece features (square order), then the threat features.
+    pub f: [[u16; MAXF]; 2],
     pub n: usize,
+    /// Piece features (= pieces on the board).
+    pub np: usize,
     /// Output bucket.
     pub bucket: usize,
     pub target: f32,
 }
 
-/// `mirror` is the `--mirror` data augmentation (flip the whole board's
-/// files), applied before anything else; `kl` the king-bucket layout.
+/// An empty sample.
+pub const BLANK: Sample = Sample { f: [[0; MAXF]; 2], n: 0, np: 0, bucket: 0, target: 0.0 };
+
+/// `decode_th` without threat inputs.
 #[inline]
 pub fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool, kl: &KingLayout) -> Sample {
+    decode_th(r, lambda, buckets, mirror, kl, &THREATS[0])
+}
+
+/// `decode_th` for a net of shape `sh` (its output and threat buckets).
+#[inline]
+pub fn decode_sh(r: &Rec, lambda: f32, sh: Shape, mirror: bool, kl: &KingLayout) -> Sample {
+    decode_th(r, lambda, sh.buckets, mirror, kl, &THREATS[sh.th])
+}
+
+/// `mirror` is the `--mirror` data augmentation (flip the whole board's
+/// files), applied before anything else; `kl` the king-bucket layout, `th`
+/// the threat inputs.
+#[inline]
+pub fn decode_th(r: &Rec, lambda: f32, buckets: usize, mirror: bool, kl: &KingLayout, th: &Threats) -> Sample {
     let occ0 = u64::from_le_bytes(r[..8].try_into().unwrap());
     let score = i16::from_le_bytes([r[24], r[25]]) as f32;
     let stm_black = r[27] == 1;
-    let mut s = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
+    let mut s = BLANK;
     let flip = if mirror { 7u16 } else { 0 };
     // King contexts of both perspectives (0 = side to move), from their own kings.
     let mut ctx = [(0u16, 0u16); 2];
@@ -332,7 +513,22 @@ pub fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool, kl: &KingLayou
         }
         s.n += 1;
     }
+    s.np = s.n;
     s.bucket = if buckets == 1 { 0 } else { ((s.n.saturating_sub(2)) * buckets / 32).min(buckets - 1) };
+    if th.blocks > 0 {
+        // Threat row of piece i = its piece row moved from the king bucket's
+        // block to the threat block (same side, kind, square and flip).
+        let base = (kl.kb() * INPUTS) as u16;
+        let mut m = threat_mask(r, th);
+        while m != 0 {
+            let i = m.trailing_zeros() as usize;
+            m &= m - 1;
+            for side in 0..2 {
+                s.f[side][s.n] = s.f[side][i] - ctx[side].0 + base;
+            }
+            s.n += 1;
+        }
+    }
     let mut wdl = r[26] as f32 / 2.0;
     let mut sc = score;
     if stm_black {
@@ -349,13 +545,27 @@ pub fn decode(r: &Rec, lambda: f32, buckets: usize, mirror: bool, kl: &KingLayou
 pub struct Shape {
     pub h: usize,
     pub buckets: usize,
-    /// King (input) buckets: the FT has `kb * 768` rows.
+    /// King (input) buckets: the FT has `kb * 768` bucketed rows,
     pub kb: usize,
+    /// then `THREATS[th].blocks * 768` threat rows.
+    pub th: usize,
 }
 
 impl Shape {
-    pub fn ft_b(&self) -> usize {
+    /// Threat blocks of 768 FT rows.
+    pub fn tb(&self) -> usize {
+        THREATS[self.th].blocks
+    }
+    /// All FT rows: `(kb + tb) * 768`.
+    pub fn ft_rows(&self) -> usize {
+        (self.kb + self.tb()) * INPUTS
+    }
+    /// End of the king-bucketed FT rows (start of the threat rows).
+    pub fn ft_kb(&self) -> usize {
         self.kb * INPUTS * self.h
+    }
+    pub fn ft_b(&self) -> usize {
+        self.ft_rows() * self.h
     }
     pub fn out_w(&self) -> usize {
         self.ft_b() + self.h
@@ -370,10 +580,11 @@ impl Shape {
     fn file_bytes(&self) -> usize {
         self.len() * 2
     }
-    fn from_file_bytes(bytes: usize, buckets: usize, kb: usize) -> Option<Self> {
+    fn from_file_bytes(bytes: usize, buckets: usize, kb: usize, th: usize) -> Option<Self> {
         let words = bytes / 2;
-        let h = words.checked_sub(buckets)? / (kb * INPUTS + 1 + 2 * buckets);
-        let s = Shape { h, buckets, kb };
+        let rows = (kb + THREATS[th].blocks) * INPUTS;
+        let h = words.checked_sub(buckets)? / (rows + 1 + 2 * buckets);
+        let s = Shape { h, buckets, kb, th };
         (s.file_bytes() == bytes).then_some(s)
     }
 }
@@ -395,13 +606,14 @@ impl Fac {
 }
 
 /// Effective net params from the training vector: FT row `f` of bucket `kb`
-/// = `clamp(W[kb][f] + F[f % 768])`, everything else copied.
+/// = `clamp(W[kb][f] + F[f % 768])`, everything else (threat rows too)
+/// copied.
 fn merge_factor(p: &[f32], sh: Shape, fac: Fac, out: &mut [f32]) {
     let n = sh.len();
-    let (w, f) = (&p[..sh.ft_b()], &p[n..n + fac.fl]);
+    let (w, f) = (&p[..sh.ft_kb()], &p[n..n + fac.fl]);
     std::thread::scope(|sc| {
-        let (ow, rest) = out.split_at_mut(sh.ft_b());
-        rest.copy_from_slice(&p[sh.ft_b()..n]);
+        let (ow, rest) = out.split_at_mut(sh.ft_kb());
+        rest.copy_from_slice(&p[sh.ft_kb()..n]);
         for (wb, ob) in w.chunks(fac.fl).zip(ow.chunks_mut(fac.fl)) {
             sc.spawn(move || {
                 for ((o, &a), &b) in ob.iter_mut().zip(wb).zip(f) {
@@ -420,7 +632,7 @@ fn factor_vector(p: Vec<f32>, sh: Shape, rows: Option<&[f32]>) -> Vec<f32> {
     let mut v = p;
     match rows {
         Some(r) => {
-            v[..sh.ft_b()].fill(0.0);
+            v[..sh.ft_kb()].fill(0.0);
             v.extend_from_slice(r);
         }
         None => v.resize(sh.len() + fl, 0.0),
@@ -543,36 +755,83 @@ fn dequantize(bytes: &[u8], sh: Shape) -> Vec<f32> {
         .collect()
 }
 
-fn load_net(path: &Path, buckets: usize, kb: usize) -> (Vec<f32>, Shape) {
+fn load_net(path: &Path, buckets: usize, kb: usize, th: usize) -> (Vec<f32>, Shape) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let sh = Shape::from_file_bytes(bytes.len(), buckets, kb).unwrap_or_else(|| {
-        panic!("{}: {} bytes is no ({kb}*768->H)x2->{buckets} net", path.display(), bytes.len())
+    let sh = Shape::from_file_bytes(bytes.len(), buckets, kb, th).unwrap_or_else(|| {
+        let tb = THREATS[th].blocks;
+        panic!("{}: {} bytes is no (({kb}+{tb})*768->H)x2->{buckets} net", path.display(), bytes.len())
     });
     (dequantize(&bytes, sh), sh)
 }
 
-/// Warm start: a net with `kb` king buckets from `path`, which may also be a
-/// one-bucket net; its 768 FT rows are then copied into every bucket.
-fn load_init(path: &Path, buckets: usize, kb: usize) -> (Vec<f32>, Shape) {
-    let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
-    if kb == 1 || Shape::from_file_bytes(bytes, buckets, kb).is_some() {
-        return load_net(path, buckets, kb);
+/// Params of shape `from` -> shape `to` (same H and output buckets): a
+/// one-bucket FT is copied into every king bucket, and threat rows the
+/// source lacks start at 0 (so the result evaluates exactly like the source).
+fn convert_net(p: &[f32], from: Shape, to: Shape) -> Vec<f32> {
+    assert!(from.h == to.h && from.buckets == to.buckets, "init net: H/buckets {from:?} -> {to:?}");
+    assert!(from.kb == to.kb || from.kb == 1, "king buckets {} -> {}", from.kb, to.kb);
+    assert!(from.th == to.th || from.th == 0, "threats {} -> {}", from.th, to.th);
+    let mut v = Vec::with_capacity(to.len());
+    for _ in 0..(if from.kb == to.kb { 1 } else { to.kb }) {
+        v.extend_from_slice(&p[..from.ft_kb()]);
     }
-    let (p1, s1) = load_net(path, buckets, 1);
-    println!("init: {} is a one-bucket net; copying its FT rows into all {kb} king buckets", path.display());
-    (expand_buckets(&p1, s1, kb), Shape { kb, ..s1 })
+    if from.th == to.th {
+        v.extend_from_slice(&p[from.ft_kb()..from.ft_b()]);
+    } else {
+        v.resize(v.len() + to.tb() * INPUTS * to.h, 0.0);
+    }
+    v.extend_from_slice(&p[from.ft_b()..]);
+    assert_eq!(v.len(), to.len());
+    v
+}
+
+/// The net file at `path` as one of the shapes `sh` can be converted from
+/// (`sh` itself, without its threat rows, one-bucket, both), in that order.
+fn load_any(path: &Path, sh: Shape) -> (Vec<f32>, Shape) {
+    let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
+    for (kb, th) in [(sh.kb, sh.th), (sh.kb, 0), (1, sh.th), (1, 0)] {
+        if Shape::from_file_bytes(bytes, sh.buckets, kb, th).is_some_and(|s| s.h == sh.h) {
+            return load_net(path, sh.buckets, kb, th);
+        }
+    }
+    panic!(
+        "{}: {bytes} bytes is no net of H={} buckets={} convertible to KB={} threats={}",
+        path.display(),
+        sh.h,
+        sh.buckets,
+        sh.kb,
+        THREATS[sh.th].name
+    );
+}
+
+/// Warm start: a net of shape `sh` from `path`, which may also be a
+/// one-bucket net (its 768 FT rows are copied into every bucket) and/or a
+/// net without threat rows (they start at 0).
+fn load_init(path: &Path, sh: Shape) -> Vec<f32> {
+    let (p, s) = load_any(path, sh);
+    if s.kb != sh.kb {
+        println!("init: {} is a one-bucket net; copying its FT rows into all {} king buckets", path.display(), sh.kb);
+    }
+    if s.th != sh.th {
+        println!("init: {} has no threat rows; they start at 0", path.display());
+    }
+    convert_net(&p, s, sh)
 }
 
 /// One-bucket params -> `kb` buckets, each a copy of the 768 FT rows.
+#[cfg_attr(not(test), allow(dead_code))]
 fn expand_buckets(p1: &[f32], s1: Shape, kb: usize) -> Vec<f32> {
     assert_eq!(s1.kb, 1);
-    let ft = &p1[..s1.ft_b()];
-    let mut p = Vec::with_capacity(p1.len() + (kb - 1) * ft.len());
-    for _ in 0..kb {
-        p.extend_from_slice(ft);
-    }
-    p.extend_from_slice(&p1[s1.ft_b()..]);
-    p
+    convert_net(p1, s1, Shape { kb, ..s1 })
+}
+
+/// Training vector for `--factorise` from one-bucket params `p1` (shape
+/// `s1`: KB 1, `sh`'s threats): F = its 768 FT rows, W = 0, the rest copied.
+fn factor_from_one(p1: &[f32], s1: Shape, sh: Shape) -> Vec<f32> {
+    assert_eq!(Shape { kb: sh.kb, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    let mut p = vec![0.0f32; sh.ft_kb()];
+    p.extend_from_slice(&p1[s1.ft_kb()..]);
+    factor_vector(p, sh, Some(&p1[..s1.ft_kb()]))
 }
 
 /// `--factorise` from scratch: `F` = the one-bucket init (the same RNG draws
@@ -580,28 +839,24 @@ fn expand_buckets(p1: &[f32], s1: Shape, kb: usize) -> Vec<f32> {
 fn init_factor(sh: Shape, rng: &mut Rng) -> Vec<f32> {
     let s1 = Shape { kb: 1, ..sh };
     let p1 = init_params(s1, rng);
-    let mut p = vec![0.0f32; sh.ft_b()];
-    p.extend_from_slice(&p1[s1.ft_b()..]);
-    factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
+    factor_from_one(&p1, s1, sh)
 }
 
 /// `--factorise --init`: a one-bucket net goes into `F` (`W = 0`, so every
 /// bucket starts as that net's rows); a net of the full bucketed shape goes
-/// into `W` with `F = 0`.
+/// into `W` with `F = 0`. Threat rows the net lacks start at 0.
 fn load_init_factor(path: &Path, sh: Shape) -> Vec<f32> {
-    let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
-    if Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some() {
-        let (p, s) = load_net(path, sh.buckets, sh.kb);
-        assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
-        println!("init: {} has all {} king buckets; factoriser starts at 0", path.display(), sh.kb);
-        return factor_vector(p, sh, None);
+    let (p, s) = load_any(path, sh);
+    if s.th != sh.th {
+        println!("init: {} has no threat rows; they start at 0", path.display());
     }
-    let (p1, s1) = load_net(path, sh.buckets, 1);
-    assert_eq!(Shape { kb: sh.kb, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    if s.kb == sh.kb {
+        println!("init: {} has all {} king buckets; factoriser starts at 0", path.display(), sh.kb);
+        return factor_vector(convert_net(&p, s, sh), sh, None);
+    }
     println!("init: {} is a one-bucket net; its FT rows become the factoriser, buckets start at 0", path.display());
-    let mut p = vec![0.0f32; sh.ft_b()];
-    p.extend_from_slice(&p1[s1.ft_b()..]);
-    factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
+    let s1 = Shape { kb: 1, ..sh };
+    factor_from_one(&convert_net(&p, s, s1), s1, sh)
 }
 
 /// A one-bucket `--init` net into a mirrored layout is exact only if that
@@ -610,8 +865,9 @@ fn load_init_factor(path: &Path, sh: Shape) -> Vec<f32> {
 /// so training starts from its mirrored reading instead.
 fn warn_mirrored_init(path: &Path, sh: Shape, kl: &KingLayout) {
     let bytes = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
-    let one_bucket = Shape::from_file_bytes(bytes, sh.buckets, 1).is_some();
-    let full = sh.kb > 1 && Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some();
+    let fits = |kb: usize| [sh.th, 0].iter().any(|&th| Shape::from_file_bytes(bytes, sh.buckets, kb, th).is_some());
+    let one_bucket = fits(1);
+    let full = sh.kb > 1 && fits(sh.kb);
     if kl.mirror && one_bucket && !full {
         println!(
             "init: note: {} is read with mirroring ({}); the start equals it exactly only if it is an m1 net, \
@@ -636,7 +892,7 @@ fn validate(p: &[f32], sh: Shape, kl: &KingLayout, val: &[Rec], lambda: f32, thr
                     let mut acc = vec![0.0f32; 2 * sh.h];
                     let (mut l, mut e) = (0.0f64, 0.0f64);
                     for r in part {
-                        let s = decode(r, lambda, sh.buckets, false, kl);
+                        let s = decode_sh(r, lambda, sh, false, kl);
                         let o = forward(p, sh, &s, &mut acc);
                         let d = sigmoid(o) - s.target;
                         l += (d * d) as f64;
@@ -758,10 +1014,11 @@ fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32
 }
 
 /// Header word 1 = output buckets | king layout id << 32 | factoriser << 40
-/// (0 for `none`, so one-bucket checkpoints are unchanged). With the
-/// factoriser, `p`, `m` and `v` are the training vector (net params + F).
+/// | threat id << 48 (0 for `none`, so older checkpoints are unchanged).
+/// With the factoriser, `p`, `m` and `v` are the training vector (net
+/// params + F).
 fn ckpt_word1(sh: Shape, kl: &KingLayout, fac: Fac) -> u64 {
-    sh.buckets as u64 | (kl.id() as u64) << 32 | (fac.on() as u64) << 40
+    sh.buckets as u64 | (kl.id() as u64) << 32 | (fac.on() as u64) << 40 | (sh.th as u64) << 48
 }
 
 fn save_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac, p: &[f32], opt: &Adam, seen: u64) {
@@ -785,7 +1042,7 @@ fn load_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac) -> (Vec<f32>, Ad
     assert_eq!(
         got,
         (sh.h, ckpt_word1(sh, kl, fac)),
-        "checkpoint shape (H, buckets | king layout id << 32 | factorise << 40) differs"
+        "checkpoint shape (H, buckets | king layout id << 32 | factorise << 40 | threats << 48) differs"
     );
     let floats: Vec<f32> = bytes[40..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
     let n = sh.len() + fac.fl;
@@ -939,9 +1196,11 @@ fn cmd_eval(args: &[String]) {
     let mut kl = NO_BUCKETS;
     let mut threads = threads_default();
     let mut best_scale = false;
+    let mut th = &THREATS[0];
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--threats" => th = Threats::by_name(it.next().unwrap()),
             "--net" => net = Some(PathBuf::from(it.next().unwrap())),
             "--val" => val = Some(PathBuf::from(it.next().unwrap())),
             "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
@@ -952,12 +1211,15 @@ fn cmd_eval(args: &[String]) {
             other => panic!("unknown option {other}"),
         }
     }
-    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb(), th.id());
     let val = read_recs(&val.expect("--val"));
     let (l, e) = validate(&p, sh, kl, &val, lambda, threads);
     print!("H={} buckets={} ", sh.h, sh.buckets);
     if kl.id() != 0 {
         print!("king-buckets={} ", kl.name);
+    }
+    if th.id() != 0 {
+        print!("threats={} ", th.name);
     }
     println!("val positions {} loss {:.6} mean|eval| {:.1}cp", val.len(), l, e);
     if best_scale {
@@ -979,7 +1241,7 @@ fn best_scale_loss(p: &[f32], sh: Shape, kl: &KingLayout, val: &[Rec], lambda: f
                     let mut acc = vec![0.0f32; 2 * sh.h];
                     part.iter()
                         .map(|r| {
-                            let s = decode(r, lambda, sh.buckets, false, kl);
+                            let s = decode_sh(r, lambda, sh, false, kl);
                             (forward(p, sh, &s, &mut acc), s.target)
                         })
                         .collect::<Vec<_>>()
@@ -1044,7 +1306,7 @@ fn score_eval_pairs(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], threads
                     let mut acc = vec![0.0f32; 2 * sh.h];
                     part.iter()
                         .map(|r| {
-                            let s = decode(r, 0.0, sh.buckets, false, kl);
+                            let s = decode_sh(r, 0.0, sh, false, kl);
                             let o = (forward(p, sh, &s, &mut acc) * SCALE) as f64; // side to move POV
                             let e = if r[27] == 1 { -o } else { o };
                             (i16::from_le_bytes([r[24], r[25]]) as f64, e)
@@ -1064,10 +1326,12 @@ fn score_eval_pairs(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], threads
 fn cmd_scalecheck(args: &[String]) {
     let (mut net, mut data, mut buckets, mut kl) = (None, None, 1usize, NO_BUCKETS);
     let (mut n, mut threads, mut max_score) = (200_000usize, 2usize, 10_000.0f64);
+    let mut th = 0usize;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("{a} needs a value")).clone();
         match a.as_str() {
+            "--threats" => th = Threats::by_name(&v()).id(),
             "--net" => net = Some(PathBuf::from(v())),
             "--data" => data = Some(PathBuf::from(v())),
             "--buckets" => buckets = v().parse().unwrap(),
@@ -1078,7 +1342,7 @@ fn cmd_scalecheck(args: &[String]) {
             other => panic!("unknown option {other}"),
         }
     }
-    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb(), th);
     let data = data.expect("--data");
     let mut bytes = Vec::new();
     File::open(&data)
@@ -1181,7 +1445,7 @@ fn output_gains(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], max_eval: f
                     let mut g = vec![0.0f64; n_out];
                     let mut acc = vec![0.0f32; h2];
                     for r in part {
-                        let s = decode(r, 0.0, sh.buckets, false, kl);
+                        let s = decode_sh(r, 0.0, sh, false, kl);
                         let c = (forward(p, sh, &s, &mut acc) * SCALE) as f64;
                         if max_eval > 0.0 && c.abs() > max_eval {
                             continue;
@@ -1269,10 +1533,13 @@ fn cmd_rescale(args: &[String]) {
     let (mut ref_buckets, mut ref_kl) = (None::<usize>, None::<&KingLayout>);
     let (mut norm, mut max_eval, mut n, mut threads, mut lambda) = (Norm::Slope, 1500.0f64, 0usize, 2usize, 0.5f32);
     let mut plain = false;
+    let (mut th, mut ref_th) = (0usize, None::<usize>);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("{a} needs a value")).clone();
         match a.as_str() {
+            "--threats" => th = Threats::by_name(&v()).id(),
+            "--ref-threats" => ref_th = Some(Threats::by_name(&v()).id()),
             "--net" => net = Some(PathBuf::from(v())),
             "--out" => out = Some(PathBuf::from(v())),
             "--buckets" => buckets = v().parse().unwrap(),
@@ -1301,7 +1568,7 @@ fn cmd_rescale(args: &[String]) {
     let out = out.expect("--out");
     assert!(factor.is_some() != reference.is_some(), "pass exactly one of --factor F, --match ref.bin");
     let mut bytes = std::fs::read(&net).unwrap_or_else(|e| panic!("{}: {e}", net.display()));
-    let sh = Shape::from_file_bytes(bytes.len(), buckets, kl.kb())
+    let sh = Shape::from_file_bytes(bytes.len(), buckets, kl.kb(), th)
         .unwrap_or_else(|| panic!("{}: {} bytes is no ({}*768->H)x2->{buckets} net", net.display(), bytes.len(), kl.kb()));
     let val = val.map(|path| {
         let mut recs = read_recs(&path);
@@ -1317,7 +1584,7 @@ fn cmd_rescale(args: &[String]) {
         (None, Some(rp)) => {
             let (path, recs) = val.as_ref().expect("--match needs --val");
             let rkl = ref_kl.unwrap_or(kl);
-            let (rp_, rsh) = load_net(rp, ref_buckets.unwrap_or(buckets), rkl.kb());
+            let (rp_, rsh) = load_net(rp, ref_buckets.unwrap_or(buckets), rkl.kb(), ref_th.unwrap_or(th));
             let r = score_eval_pairs(&rp_, rsh, rkl, recs, threads);
             let c = score_eval_pairs(&p, sh, kl, recs, threads);
             let pairs: Vec<(f64, f64)> = r.iter().zip(&c).map(|(r, c)| (r.1, c.1)).collect();
@@ -1388,7 +1655,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let mut data = Vec::new();
     let mut val_path = None;
     let mut out = PathBuf::from("net.bin");
-    let mut sh = Shape { h: 256, buckets: 1, kb: 1 };
+    let mut sh = Shape { h: 256, buckets: 1, kb: 1, th: 0 };
     let mut kl = NO_BUCKETS;
     let (mut epochs, mut epoch_size) = (10u64, 0u64);
     let (mut batch, mut lr, mut lr_end, mut wd, mut lambda) = (16384usize, 1e-3f32, 1e-5f32, 0.0f32, 0.5f32);
@@ -1407,6 +1674,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--hidden" => sh.h = v().parse().unwrap(),
             "--buckets" => sh.buckets = v().parse().unwrap(),
             "--king-buckets" => kl = KingLayout::by_name(&v()),
+            "--threats" => sh.th = Threats::by_name(&v()).id(),
             "--epochs" => epochs = v().parse().unwrap(),
             "--epoch-size" => epoch_size = v().parse().unwrap(),
             "--batch" => batch = v().parse().unwrap(),
@@ -1452,9 +1720,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             let p = if fac.on() {
                 load_init_factor(i, sh)
             } else {
-                let (p, s) = load_init(i, sh.buckets, sh.kb);
-                assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
-                p
+                load_init(i, sh)
             };
             let n = p.len();
             (p.into_iter().map(|x| x.clamp(-CLIP, CLIP)).collect(), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 }, 0)
@@ -1474,6 +1740,9 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let val = val_path.as_deref().map(read_recs).unwrap_or_default();
     assert!(!keep_best || !val.is_empty(), "--keep-best needs --val");
     let mut kb_note = if kl.id() != 0 { format!(" king-buckets={} (KB={})", kl.name, sh.kb) } else { String::new() };
+    if sh.th != 0 {
+        kb_note += &format!(" threats={} (TB={})", THREATS[sh.th].name, sh.tb());
+    }
     if fac.on() {
         kb_note += " factorised";
     }
@@ -1756,7 +2025,7 @@ mod tests {
 
     #[test]
     fn warm_start_copies_rows_into_every_bucket() {
-        let s1 = Shape { h: 8, buckets: 2, kb: 1 };
+        let s1 = Shape { h: 8, buckets: 2, kb: 1, th: 0 };
         let mut rng = Rng::new(5);
         let p1 = init_params(s1, &mut rng);
         let p = expand_buckets(&p1, s1, 8);
@@ -1774,8 +2043,8 @@ mod tests {
         assert_eq!(o1, o8);
         // File sizes: KB=1 unchanged, KB=8 has 8x the FT rows.
         assert_eq!(s1.file_bytes(), (768 * 8 + 8 + 2 * 17) * 2);
-        assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 8), Some(s8));
-        assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 1), None);
+        assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 8, 0), Some(s8));
+        assert_eq!(Shape::from_file_bytes(s8.file_bytes(), 2, 1, 0), None);
     }
 
     /// Factoriser: merged rows = W + F, F's gradient = the sum of every
@@ -1785,7 +2054,7 @@ mod tests {
     #[test]
     fn factoriser_merge_gradient_and_init() {
         let kl = KingLayout::by_name("kb4");
-        let sh = Shape { h: 8, buckets: 2, kb: kl.kb() };
+        let sh = Shape { h: 8, buckets: 2, kb: kl.kb(), th: 0 };
         let fac = Fac::new(sh, true);
         assert_eq!(fac.fl, 768 * 8);
         let mut rng = Rng::new(11);
@@ -1914,22 +2183,22 @@ mod tests {
 
     #[test]
     fn quantize_roundtrip_and_shape() {
-        let sh = Shape { h: 32, buckets: 8, kb: 1 };
+        let sh = Shape { h: 32, buckets: 8, kb: 1, th: 0 };
         let mut rng = Rng::new(3);
         let p = init_params(sh, &mut rng);
         let q = quantize(&p, sh);
-        assert_eq!(Shape::from_file_bytes(q.len(), 8, 1), Some(sh));
+        assert_eq!(Shape::from_file_bytes(q.len(), 8, 1, 0), Some(sh));
         let d = dequantize(&q, sh);
         for i in 0..p.len() {
             let tol = if i < sh.out_w() { 0.5 / QA } else { 0.5 / QB };
             assert!((p[i] - d[i]).abs() <= tol + 1e-6);
         }
-        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1, 1), Some(Shape { h: 512, buckets: 1, kb: 1 }));
+        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1, 1, 0), Some(Shape { h: 512, buckets: 1, kb: 1, th: 0 }));
     }
 
     #[test]
     fn scalecheck_slope_detects_halved_scores() {
-        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let sh = Shape { h: 32, buckets: 1, kb: 1, th: 0 };
         let mut rng = Rng::new(11);
         let mut p = init_params(sh, &mut rng);
         for x in &mut p[sh.out_w()..] {
@@ -1995,7 +2264,7 @@ mod tests {
 
     #[test]
     fn rescale_scales_evals_and_leaves_ft_alone() {
-        let sh = Shape { h: 32, buckets: 2, kb: 1 };
+        let sh = Shape { h: 32, buckets: 2, kb: 1, th: 0 };
         let net = rescale_test_net(sh, 1.0);
         let mut out = net.clone();
         let (cw, cb) = rescale_output(&mut out, sh, 0.9);
@@ -2011,7 +2280,7 @@ mod tests {
 
     #[test]
     fn rescale_match_recovers_the_scale() {
-        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let sh = Shape { h: 32, buckets: 1, kb: 1, th: 0 };
         let reference = rescale_test_net(sh, 1.0);
         let wide = rescale_test_net(sh, 1.25);
         let pairs: Vec<(f64, f64)> = evals(&reference, sh).into_iter().zip(evals(&wide, sh)).collect();
@@ -2064,7 +2333,7 @@ mod tests {
             assert!((*a as f64 * 0.92 - *b as f64).abs() < 1.0);
         }
         // Exact on a real net's evals: achieved factor == slope of new evals on old ones.
-        let sh = Shape { h: 32, buckets: 2, kb: 1 };
+        let sh = Shape { h: 32, buckets: 2, kb: 1, th: 0 };
         let net = rescale_test_net(sh, 1.0);
         let p = dequantize(&net, sh);
         let recs: Vec<Rec> = RESCALE_FENS.iter().map(|f| encode(&format!("{f} | 0 | 0.5")).unwrap()).collect();
@@ -2083,7 +2352,7 @@ mod tests {
 
     #[test]
     fn rescale_clips_output_weights_to_the_fast_path() {
-        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let sh = Shape { h: 32, buckets: 1, kb: 1, th: 0 };
         let mut net = rescale_test_net(sh, 1.0);
         net[2 * sh.out_w()..2 * sh.out_w() + 2].copy_from_slice(&120i16.to_le_bytes());
         net[2 * sh.out_w() + 2..2 * sh.out_w() + 4].copy_from_slice(&(-100i16).to_le_bytes());
@@ -2097,7 +2366,7 @@ mod tests {
 
     #[test]
     fn gradient_matches_finite_difference() {
-        let sh = Shape { h: 16, buckets: 2, kb: 1 };
+        let sh = Shape { h: 16, buckets: 2, kb: 1, th: 0 };
         let mut rng = Rng::new(7);
         let mut p = init_params(sh, &mut rng);
         for x in &mut p[sh.ft_b()..sh.out_w()] {
@@ -2147,6 +2416,9 @@ mod tests {
         let mut fens = RESCALE_FENS.to_vec();
         fens.push("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
         fens.push("8/8/8/4k3/8/8/2K5/8 w - - 0 1");
+        // Positions with en-prise pieces (threat features).
+        fens.push("r2rk2r/8/1b6/7Q/3N4/2P5/8/R5K1 b - - 0 1");
+        fens.push("4k3/8/2b2r2/3p4/2P1N3/8/8/4K2R w - - 0 1");
         let mut rng = Rng::new(17);
         let recs = (0..n)
             .map(|i| {
@@ -2179,10 +2451,10 @@ mod tests {
         }
         let mut g = vec![0.0f32; sh.len()];
         let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
-        let mut active = vec![0u8; sh.kb * INPUTS];
+        let mut active = vec![0u8; sh.ft_rows()];
         let mut loss = 0.0f64;
         for (r, &m) in recs.iter().zip(mirror) {
-            let s = decode(r, 0.5, sh.buckets, m, kl);
+            let s = decode_sh(r, 0.5, sh, m, kl);
             loss += train_sample(&merged, sh, &s, &mut g, &mut acc, &mut dacc) as f64;
             for side in 0..2 {
                 for &f in &s.f[side][..s.n] {
@@ -2204,14 +2476,18 @@ mod tests {
     #[test]
     fn batch_trainer_matches_reference() {
         let cases = [
-            (48, 8, NO_BUCKETS, false, false),
-            (128, 1, KingLayout::by_name("kb4m"), false, true),
-            (64, 8, KingLayout::by_name("kb8m"), false, false),
-            (64, 8, KingLayout::by_name("kb8m"), true, true),
-            (32, 1, KingLayout::by_name("kb4"), true, false),
+            (48, 8, NO_BUCKETS, false, false, 0),
+            (128, 1, KingLayout::by_name("kb4m"), false, true, 0),
+            (64, 8, KingLayout::by_name("kb8m"), false, false, 0),
+            (64, 8, KingLayout::by_name("kb8m"), true, true, 0),
+            (32, 1, KingLayout::by_name("kb4"), true, false, 0),
+            (48, 8, NO_BUCKETS, false, false, 1),
+            (64, 8, KingLayout::by_name("kb8m"), false, true, 1),
+            (64, 8, KingLayout::by_name("kb8m"), true, true, 1),
+            (32, 1, KingLayout::by_name("kb4"), true, false, 1),
         ];
-        for (h, buckets, kl, factorise, wd_active) in cases {
-            let sh = Shape { h, buckets, kb: kl.kb() };
+        for (h, buckets, kl, factorise, wd_active, th) in cases {
+            let sh = Shape { h, buckets, kb: kl.kb(), th };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(5);
             let mut p = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
@@ -2236,7 +2512,7 @@ mod tests {
                     batch::Pool::with(threads, |pool| {
                         let loss = bt.batch(pool, &p2, &recs, &mirror, 0.5, kl);
                         let g = bt.gradient();
-                        let what = format!("H={h} {} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
+                        let what = format!("H={h} {} th={th} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
                         if exact {
                             assert_eq!(loss, lref, "{what}");
                             assert!(g.iter().zip(&gref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: gradient differs");
@@ -2272,13 +2548,15 @@ mod tests {
     #[test]
     fn fused_step_matches_batch_then_adam() {
         let cases = [
-            (48, 8, NO_BUCKETS, false, false),
-            (128, 1, KingLayout::by_name("kb4m"), false, true),
-            (64, 8, KingLayout::by_name("kb8m"), true, true),
-            (32, 1, KingLayout::by_name("kb4"), true, false),
+            (48, 8, NO_BUCKETS, false, false, 0),
+            (128, 1, KingLayout::by_name("kb4m"), false, true, 0),
+            (64, 8, KingLayout::by_name("kb8m"), true, true, 0),
+            (32, 1, KingLayout::by_name("kb4"), true, false, 0),
+            (64, 8, KingLayout::by_name("kb8m"), true, true, 1),
+            (48, 1, NO_BUCKETS, false, true, 1),
         ];
-        for (h, buckets, kl, factorise, wd_active) in cases {
-            let sh = Shape { h, buckets, kb: kl.kb() };
+        for (h, buckets, kl, factorise, wd_active, th) in cases {
+            let sh = Shape { h, buckets, kb: kl.kb(), th };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(7);
             let p0 = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
@@ -2288,7 +2566,7 @@ mod tests {
             let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
             for isa in isas() {
                 for (threads, exact) in [(1, true), (3, false), (4, true)] {
-                    let what = format!("H={h} {} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
+                    let what = format!("H={h} {} th={th} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
                     let mut want = (AVec::from(p0.clone()), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 });
                     let mut got = (AVec::from(p0.clone()), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 });
                     let mut ra = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
@@ -2387,7 +2665,7 @@ mod tests {
     #[test]
     fn half_forward_is_deterministic_and_close() {
         let (h, buckets, kl) = (64, 8, KingLayout::by_name("kb8m"));
-        let sh = Shape { h, buckets, kb: kl.kb() };
+        let sh = Shape { h, buckets, kb: kl.kb(), th: 0 };
         let fac = Fac::new(sh, true);
         let mut rng = Rng::new(11);
         let p0 = init_factor(sh, &mut rng);
@@ -2424,7 +2702,7 @@ mod tests {
 
     #[test]
     fn batch_trainer_is_deterministic() {
-        let sh = Shape { h: 96, buckets: 8, kb: 1 };
+        let sh = Shape { h: 96, buckets: 8, kb: 1, th: 0 };
         let mut rng = Rng::new(9);
         let p = init_params(sh, &mut rng);
         let (recs, mirror) = test_recs(500);
@@ -2443,5 +2721,247 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Squares of a record's pieces whose `ep` threat bit is set, by (colour, kind).
+    fn threat_squares(r: &Rec) -> [[u64; 6]; 2] {
+        let m = threat_mask(r, &THREATS[1]);
+        let mut out = [[0u64; 6]; 2];
+        let (mut occ, mut n) = (u64::from_le_bytes(r[..8].try_into().unwrap()), 0);
+        while occ != 0 {
+            let sq = occ.trailing_zeros();
+            occ &= occ - 1;
+            let nib = r[8 + n / 2] >> (4 * (n & 1)) & 0xF;
+            if m >> n & 1 == 1 {
+                out[(nib >> 3) as usize][(nib & 7) as usize] |= 1 << sq;
+            }
+            n += 1;
+        }
+        out
+    }
+
+    /// Same cases as `threat_bbs_hand_checked` in `src/nnue.rs`.
+    #[test]
+    fn threat_mask_hand_checked() {
+        let bit = |s: u32| 1u64 << s;
+        let ep = Threats::by_name("ep");
+        let r = encode("4k3/8/2b2r2/3p4/2P1N3/8/8/4K2R w - - 0 1 | 0 | 0.5").unwrap();
+        let (c4, e4, f6) = (26, 28, 45);
+        assert_eq!(threat_squares(&r), [[bit(c4), bit(e4), 0, 0, 0, 0], [0, 0, 0, bit(f6), 0, 0]]);
+        assert_eq!(threat_mask(&r, &THREATS[0]), 0);
+        let r2 = encode("r2rk2r/8/1b6/7Q/3N4/2P5/8/R5K1 w - - 0 1 | 0 | 0.5").unwrap();
+        assert_eq!(threat_squares(&r2), [[0, 0, 0, bit(0), bit(39), 0], [0, 0, 0, bit(63), 0, 0]]);
+
+        // Feature indices, White to move (perspective 0 = White).
+        let s = decode_th(&r, 0.5, 1, false, NO_BUCKETS, ep);
+        assert_eq!((s.np, s.n), (8, 8 + 3));
+        let mut t0: Vec<u16> = s.f[0][8..s.n].to_vec();
+        t0.sort();
+        // Own c4 pawn, own e4 knight, enemy f6 rook, in block 1 (rows 768..1536).
+        assert_eq!(t0, [768 + 26, 768 + 64 + 28, 768 + 384 + 192 + 45]);
+        let mut t1: Vec<u16> = s.f[1][8..s.n].to_vec();
+        t1.sort();
+        // Black: own f6 rook (45 ^ 56 = 21), enemy c4 pawn (34), enemy e4 knight (36).
+        assert_eq!(t1, [768 + 192 + 21, 768 + 384 + 34, 768 + 384 + 64 + 36]);
+        // Piece features are unchanged and come first.
+        let plain = decode(&r, 0.5, 1, false, NO_BUCKETS);
+        assert_eq!(plain.n, 8);
+        assert_eq!(&s.f[0][..8], &plain.f[0][..8]);
+        // kb8m: the threat block follows the 8 buckets, unbucketed, with the
+        // perspective's mirror flip (kings e1 / e8 -> flip 7 for both).
+        let s = decode_th(&r, 0.5, 8, false, KingLayout::by_name("kb8m"), ep);
+        let mut t0: Vec<u16> = s.f[0][s.np..s.n].to_vec();
+        t0.sort();
+        assert_eq!(t0, [8 * 768 + (26 ^ 7), 8 * 768 + 64 + (28 ^ 7), 8 * 768 + 384 + 192 + (45 ^ 7)]);
+        let mut t1: Vec<u16> = s.f[1][s.np..s.n].to_vec();
+        t1.sort();
+        assert_eq!(t1, [8 * 768 + 192 + (21 ^ 7), 8 * 768 + 384 + (34 ^ 7), 8 * 768 + 384 + 64 + (36 ^ 7)]);
+        // Each threat feature = its piece feature with the bucket offset swapped.
+        for side in 0..2 {
+            let base = s.f[side][0] / 768 * 768;
+            for &t in &s.f[side][s.np..s.n] {
+                assert!(s.f[side][..s.np].contains(&(t - 8 * 768 + base)));
+            }
+        }
+        // The output bucket still counts pieces only.
+        assert_eq!(s.bucket, decode(&r, 0.5, 8, false, KingLayout::by_name("kb8m")).bucket);
+    }
+
+    /// `threat_mask` against a naive definition over random piece placements;
+    /// at most 30 threat features (kings never), so MAXF = 64 always fits.
+    #[test]
+    fn threat_mask_matches_naive() {
+        let mut rng = Rng::new(99);
+        let value = [1, 3, 3, 5, 9, 100];
+        let mut set = 0usize;
+        let mut most = 0usize;
+        for _ in 0..3000 {
+            let mut board = [None::<(usize, usize)>; 64];
+            for _ in 0..rng.below(28) + 4 {
+                let sq = rng.below(64);
+                board[sq] = Some((rng.below(2), rng.below(6)));
+            }
+            let mut fen = String::new();
+            for rank in (0..8).rev() {
+                let mut empty = 0;
+                for file in 0..8 {
+                    match board[rank * 8 + file] {
+                        None => empty += 1,
+                        Some((c, k)) => {
+                            if empty > 0 {
+                                fen.push_str(&empty.to_string());
+                                empty = 0;
+                            }
+                            let ch = "PNBRQK".as_bytes()[k] as char;
+                            fen.push(if c == 1 { ch.to_ascii_lowercase() } else { ch });
+                        }
+                    }
+                }
+                if empty > 0 {
+                    fen.push_str(&empty.to_string());
+                }
+                if rank > 0 {
+                    fen.push('/');
+                }
+            }
+            let r = encode(&format!("{fen} w - - 0 1 | 0 | 0.5")).unwrap();
+            let attackers = |sq: i32, by: usize| -> Vec<usize> {
+                let mut out = Vec::new();
+                for from in 0..64i32 {
+                    let Some((c, k)) = board[from as usize] else { continue };
+                    if c != by || from == sq {
+                        continue;
+                    }
+                    let (df, dr) = (sq % 8 - from % 8, sq / 8 - from / 8);
+                    let hit = match k {
+                        0 => df.abs() == 1 && dr == if by == 0 { 1 } else { -1 },
+                        1 => (df.abs(), dr.abs()) == (1, 2) || (df.abs(), dr.abs()) == (2, 1),
+                        5 => df.abs() <= 1 && dr.abs() <= 1,
+                        _ => {
+                            let (diag, ortho) = (df.abs() == dr.abs(), df == 0 || dr == 0);
+                            let ok = match k {
+                                2 => diag,
+                                3 => ortho,
+                                _ => diag || ortho,
+                            };
+                            ok && {
+                                let step = df.signum() + 8 * dr.signum();
+                                let mut s = from + step;
+                                let mut clear = true;
+                                while s != sq {
+                                    clear &= board[s as usize].is_none();
+                                    s += step;
+                                }
+                                clear
+                            }
+                        }
+                    };
+                    if hit {
+                        out.push(k);
+                    }
+                }
+                out
+            };
+            let got = threat_squares(&r);
+            for sq in 0..64 {
+                let Some((c, k)) = board[sq as usize] else { continue };
+                let (by, def) = (attackers(sq, 1 - c), attackers(sq, c));
+                let lower = by.iter().any(|&a| value[a] < value[k]);
+                let want = k != 5 && (lower || (!by.is_empty() && def.is_empty()));
+                assert_eq!(got[c][k] >> sq & 1 == 1, want, "{fen} sq {sq}");
+                set += want as usize;
+            }
+            let s = decode_th(&r, 0.5, 1, false, KingLayout::by_name("kb8m"), &THREATS[1]);
+            most = most.max(s.n);
+            assert!(s.n - s.np <= 30);
+        }
+        assert!(set > 1000, "{set}");
+        assert!(most <= MAXF, "{most}");
+    }
+
+    /// Threat features: gradients match finite differences (also on a threat
+    /// row), `--mirror` mirrors threat rows like piece rows, and a net warm
+    /// started without threat rows (zeros) evaluates exactly like its source,
+    /// with and without the factoriser.
+    #[test]
+    fn threat_gradient_mirror_and_warm_start() {
+        let th = Threats::by_name("ep");
+        let kl = KingLayout::by_name("kb4m");
+        let sh = Shape { h: 16, buckets: 2, kb: kl.kb(), th: th.id() };
+        assert_eq!(sh.ft_b(), (4 + 1) * 768 * 16);
+        let mut rng = Rng::new(9);
+        let mut p = init_params(sh, &mut rng);
+        for x in &mut p[sh.ft_b()..sh.out_w()] {
+            *x = 0.3;
+        }
+        let r = encode("r2rk2r/8/1b6/7Q/3N4/2P5/8/R5K1 b - - 0 1 | -35 | 0.0").unwrap();
+        let s = decode_sh(&r, 0.5, sh, false, kl);
+        assert_eq!((s.np, s.n), (10, 10 + 3));
+        let mut g = vec![0.0f32; sh.len()];
+        let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        train_sample(&p, sh, &s, &mut g, &mut acc, &mut dacc);
+        let loss = |p: &[f32]| {
+            let mut acc = vec![0.0; 2 * sh.h];
+            let d = sigmoid(forward(p, sh, &s, &mut acc)) - s.target;
+            (d * d) as f64
+        };
+        let (ft0, ft1) = (s.f[0][s.n - 1] as usize * sh.h, s.f[1][11] as usize * sh.h + 7);
+        assert!(ft0 >= sh.ft_kb() && ft1 >= sh.ft_kb());
+        assert!(g[ft0..ft0 + sh.h].iter().any(|&x| x != 0.0), "threat row gets a gradient");
+        for &i in &[ft0, ft0 + 3, ft1, s.f[0][0] as usize * sh.h, sh.ft_b() + 1] {
+            let eps = 1e-3;
+            let (mut a, mut b) = (p.clone(), p.clone());
+            a[i] += eps;
+            b[i] -= eps;
+            let num = (loss(&a) - loss(&b)) / (2.0 * eps as f64);
+            assert!((num - g[i] as f64).abs() < 1e-4 + 1e-2 * num.abs(), "param {i}: numeric {num} vs analytic {}", g[i]);
+        }
+        // --mirror: every feature of the mirrored record is the file-flipped one.
+        let m = decode_th(&r, 0.5, 2, true, NO_BUCKETS, th);
+        let u = decode_th(&r, 0.5, 2, false, NO_BUCKETS, th);
+        assert_eq!((m.n, m.np), (u.n, u.np));
+        for side in 0..2 {
+            for k in 0..u.n {
+                assert_eq!(m.f[side][k], u.f[side][k] ^ 7);
+            }
+        }
+        // Warm start: no-threat net -> threat shape with zero threat rows,
+        // through the files, exactly like `train --init`.
+        let s0 = Shape { th: 0, ..sh };
+        let p0 = dequantize(&quantize(&init_params(s0, &mut Rng::new(4)), s0), s0);
+        let dir = std::env::temp_dir().join(format!("nnue-threat-init-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("src.bin");
+        std::fs::write(&path, quantize(&p0, s0)).unwrap();
+        let pt = load_init(&path, sh);
+        assert_eq!(pt.len(), sh.len());
+        assert!(pt[sh.ft_kb()..sh.ft_b()].iter().all(|&x| x == 0.0));
+        let pf = load_init_factor(&path, sh);
+        let fac = Fac::new(sh, true);
+        assert_eq!(pf.len(), sh.len() + fac.fl);
+        let mut mg = vec![0.0f32; sh.len()];
+        merge_factor(&pf, sh, fac, &mut mg);
+        let (recs, _) = test_recs(64);
+        for r in &recs {
+            let (mut a0, mut a1, mut a2) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+            let o0 = forward(&p0, s0, &decode_sh(r, 0.5, s0, false, kl), &mut a0);
+            let o1 = forward(&pt, sh, &decode_sh(r, 0.5, sh, false, kl), &mut a1);
+            let o2 = forward(&mg, sh, &decode_sh(r, 0.5, sh, false, kl), &mut a2);
+            assert_eq!((o0.to_bits(), o0.to_bits()), (o1.to_bits(), o2.to_bits()));
+        }
+        assert_eq!(quantize(&pt, sh)[..sh.ft_kb() * 2], quantize(&p0, s0)[..s0.ft_kb() * 2]);
+        // One-bucket, no threats -> kb4m + ep, and the file size round trip.
+        let s1 = Shape { kb: 1, th: 0, ..sh };
+        let p1 = init_params(s1, &mut Rng::new(4));
+        assert_eq!(convert_net(&p1, s1, sh).len(), sh.len());
+        assert_eq!(Shape::from_file_bytes(sh.file_bytes(), 2, 4, th.id()), Some(sh));
+        assert_eq!(Shape::from_file_bytes(sh.file_bytes(), 2, 4, 0), None);
+        // Factoriser from scratch with threats: F covers the bucketed rows only.
+        let pf = init_factor(sh, &mut Rng::new(5));
+        merge_factor(&pf, sh, fac, &mut mg);
+        assert_eq!(&mg[sh.ft_kb()..], &pf[sh.ft_kb()..sh.len()]);
+        assert!(pf[sh.ft_kb()..sh.ft_b()].iter().any(|&x| x != 0.0), "threat rows initialised");
+        assert_eq!(ckpt_word1(sh, kl, fac) >> 48, 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
