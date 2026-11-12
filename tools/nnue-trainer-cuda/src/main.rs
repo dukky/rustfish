@@ -299,6 +299,7 @@ impl GpuTrainer {
         let sh = cfg.sh;
         assert!(sh.h % 64 == 0 && sh.h <= 2048, "nnue-trainer-cuda: --hidden must be a multiple of 64, at most 2048");
         assert!(sh.buckets <= 8 && sh.kb <= 64, "nnue-trainer-cuda: at most 8 output buckets, 64 king buckets");
+        assert!(sh.hd == 0, "nnue-trainer-cuda: no --head support yet (CPU trainer only, see docs/nnue-deeper-head.md)");
         let (h, rows, b) = (sh.h, sh.kb * INPUTS, cfg.batch);
         let nrest = sh.len() - sh.ft_b();
         ck(unsafe { cuInit(0) }, "init");
