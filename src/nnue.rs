@@ -186,7 +186,7 @@ impl ThreatMode {
 /// The threat inputs the engine runs. Switching it changes the net format
 /// (`blocks()` x 768 extra FT rows after the king buckets' rows): embed a
 /// net trained with the same `--threats`.
-pub(crate) const THREATS: ThreatMode = ThreatMode::None;
+pub(crate) const THREATS: ThreatMode = ThreatMode::EnPrise;
 
 /// Threat bitboards per block, `[block][colour][kind]`: the pieces whose
 /// threat row of that block is active.
