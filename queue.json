@@ -1,17 +1,22 @@
 {
   "pending": [
     {
-      "branch": "feat-conthist-rekey",
-      "mode": "stc",
-      "expect": 4.0
-    },
-    {
       "branch": "feat-qs-evasion-prune",
       "mode": "stc",
       "expect": 2.0
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-conthist-rekey",
+    "mode": "stc",
+    "expect": 4.0,
+    "test_id": "q-feat-conthist-rekey-1112-0155",
+    "sha": "9bf3616cbbbbded42c46052059395b65d3b90241",
+    "base_sha": "327bd6c3edb1323090d284896f6c0e4dded2bebc",
+    "started": "2026-11-12T01:55:25Z",
+    "bench": 441720,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
