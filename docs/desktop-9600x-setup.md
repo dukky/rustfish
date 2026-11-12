@@ -119,11 +119,15 @@ The queue (CI) then plays the net gate and merges on H1. Nothing else is needed 
 ## 7. Optional: local datagen when not training
 
 ```bash
-echo "datagen D2000.txt 1000000 5000 11 2000 0" | ./target/release/rustfish > D2000.log 2>&1 &
-$T convert D2000.txt D2000.bin       # when done (or in chunks)
+S=2004   # a NEW seed for every run: the file name and the seed both come from $S
+ls D$S.* 2>/dev/null && echo "seed $S already used" || \
+  { echo "datagen D$S.txt 1000000 5000 11 $S 0" | ./target/release/rustfish > D$S.log 2>&1 & }
+$T convert D$S.txt D$S.bin       # when done (or in chunks)
 ```
 
-Use seeds >= 2000 (CI uses < 1000, the laptop 1000s). Rebuild the binary and start a new
+Use seeds >= 2000 (CI uses < 1000, the laptop 1000s), and never reuse one: the same
+seed replays the same games. (D2002 and D2003 were run with seed 2001 by mistake and
+are copies of D2001; 2002 and 2003 count as used.) Rebuild the binary and start a new
 seed whenever main gets a new net. Don't run datagen and training together (they compete
 for the same cores).
 
