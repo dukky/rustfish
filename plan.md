@@ -64,13 +64,29 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   10 rounds; queue on 10 test shards meanwhile, e97a6dc). Pause it between
   rounds for the gen-8 gate (state = last `spsa-result` artifact), restore
   18 test shards, resume after.
-- **Data decision pending; desktop datagen on hold until then.** CI
+- **Datagen: the user restarted desktop datagen (D2004 on the gen-8
+  engine, then D2005 overnight; 9 threads).** Data decision still pending. CI
   datagen stopped means new data is ~350M/day (desktop) vs ~1.4B/day
   before, so data, not training, is the bottleneck now; that raises T80's
   value. In progress (subagents, branches): `t80-reader` (binpack decoder,
   filters, score calibration, licence notes) and `packed-data` (compact
   on-disk format + streaming shuffle loader, parity-tested against a
   shuffled pool).
+
+**2026-11-12 results:** **g7h1024kb8m merged +11.5** [5.5, 17.5] (stc,
+4560 games, 14:53; the 1024 width pays for its -28% NPS on x86).
+**g8h1024kb8m merged +37.2** [23.6, 50.9] (net-gate, 1060 games, 17:58;
+pool8 3.2B, 1080 Ti CUDA: best-scale 0.025574 / 0.024364). Main is now a
+1024-wide kb8m net. Rejected: feat-lmr-deeper-only +0.5 (11.5k games).
+ltc-check then ladder (~21:00). SPSA restarts on the new main after
+round 6 (its rounds were pinned to the 512 engine). Tonight on the
+1080 Ti: threat control fine-tune (no threats, ~19:00), then kb8m from
+scratch on pool8 (tests the "KB from scratch needs 3-4B" estimate), then
+the ep-threat fine-tune once threat-inputs-v2's lib lands.
+**Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
+on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
+(~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
+for packed-data.
 
 **Mid term (days-weeks): clear top 100, start on bigger nets.**
 - Data decision (Hermes notes `docs/research-2026-11-11-coda-lc0-compute.md`,
