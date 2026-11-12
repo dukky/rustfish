@@ -1,0 +1,17 @@
+[package]
+name = "nnue-trainer-cuda"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "nnue-trainer-cuda"
+path = "src/main.rs"
+
+[dependencies]
+nnue-trainer = { path = "../nnue-trainer" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
