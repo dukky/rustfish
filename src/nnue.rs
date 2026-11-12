@@ -609,13 +609,19 @@ impl<L: Layout> NnueState<L> {
     /// Bring `stack[..=top]` up to date.
     #[inline]
     fn materialise(&self) {
+        self.materialise_to(self.top);
+    }
+
+    /// Bring `stack[..=target]` up to date (`target <= top`).
+    #[inline]
+    fn materialise_to(&self, target: usize) {
         let mut k = self.computed.get();
-        if k == self.top {
+        if k >= target {
             return;
         }
         let mut stack = self.stack.borrow_mut();
         let net = &*self.net;
-        while k < self.top {
+        while k < target {
             let (lo, hi) = stack.split_at_mut(k + 1);
             apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache);
             k += 1;
@@ -627,11 +633,13 @@ impl<L: Layout> NnueState<L> {
     /// position with `pieces` pieces on the board (selects the output bucket).
     #[inline]
     pub(crate) fn evaluate(&self, stm: Color, pieces: u32) -> i32 {
-        let k = self.computed.get();
         let net = &*self.net;
-        if k + 1 == self.top && net.small_out {
-            // One pending ply (the common case): update both perspectives
-            // and take their output sums in the same pass over the lanes.
+        if self.computed.get() < self.top && net.small_out {
+            // Bring all but the last pending ply up to date, then update
+            // both perspectives for that ply and take their output sums in
+            // the same pass over the lanes.
+            self.materialise_to(self.top - 1);
+            let k = self.top - 1;
             let b = bucket(pieces);
             let mut stack = self.stack.borrow_mut();
             let (lo, hi) = stack.split_at_mut(self.top);
