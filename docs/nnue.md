@@ -152,3 +152,72 @@ Loss is `lambda * (sigmoid(eval/400) - result)^2 + (1-lambda) *
 cosine lr. Flags, layouts and formats are in each trainer's README;
 `scripts/netloop.py` drives them (`docs/nnue-experiments.md`). Acceptance is a
 `net-gate` (same shape) or `stc` (new shape) SPRT like every other change.
+
+## Threat inputs (`--threats ep`): layout spec
+
+Branch `threat-inputs-v2`. The engine has `THREATS` in `src/nnue.rs`
+(default `None`: net format, bench and evalhash unchanged). The CPU
+trainer lib and the Metal trainer take `--threats <none|ep>`; `ad`
+(attacked / defended, 2 blocks) is engine-only (up to 92 features per
+perspective) and gave no gain on a small test.
+
+**Definition (`ep`, 1 block).** A non-king piece is "en prise" when it is
+attacked by an enemy piece of lower value (P < N = B < R < Q; the king
+counts as no lower attacker of anything), or attacked by any enemy piece
+(king included) and not defended by any own piece (king included). Plain
+attack sets, no x-rays, no pins, no side-to-move dependence. It is a
+property of the position, so both perspectives activate the same pieces,
+each in its own orientation.
+
+**(a) Feature count.** `Sample.f` is `[[u16; MAXF]; 2]` with `MAXF = 64`
+(was 32). `Sample.n` = piece features + threat features (the same for both
+perspectives), new `Sample.np` = piece features. Worst case with `ep`:
+32 pieces + 30 threat rows (kings never) = 62 <= 64, so overflow cannot
+happen; no truncation code. The output bucket still comes from the piece
+count (`np`).
+
+**(b) Indexing.** Per perspective, `f[side][..np]` are the piece features
+exactly as before (square order of the record), then `f[side][np..n]` the
+threat features, in the same square order (the order of the en-prise
+pieces in the record). Threat row of a piece = its piece feature with the
+king bucket's offset replaced by the threat block's:
+
+    threat = (KB + t) * 768 + side * 384 + kind * 64 + (sq_rel ^ flip)
+
+with t = 0 for `ep`, so rows `KB*768 .. KB*768 + 768` (kb8m: 6144..6912).
+`side` = 0 own / 1 enemy (perspective-relative), `sq_rel` = sq (White
+perspective) or sq ^ 56 (Black), `flip` = the perspective's kb8m mirror
+xor (7 when its own king is on files e-h, else 0) -- the mirror **is**
+applied to threat rows, the bucket is **not** (one shared 768-row block).
+`--mirror` augmentation flips files first, as for piece rows. In code:
+`f[side][np + j] = f[side][i] - bucket_base[side] + KB*768`.
+`king_bucket(s, side) = f[side][0] / 768` stays correct (f[side][0] is a
+piece feature).
+
+**(c) Shapes.** `Shape` gains `th` (threat id: 0 none, 1 ep) and
+`tb()` = blocks (0/1). `ft_rows() = (kb + tb) * 768`, `ft_kb() = kb*768*H`
+(end of bucketed rows), `ft_b() = ft_rows() * H`. Param vector / net file
+(i16 LE, unchanged order): FT weights `(kb + tb) * 768 x H` (feature-major:
+bucket rows, then threat rows), FT bias H, output weights `BUCKETS x 2H`,
+output biases `BUCKETS`. So a threat net file is `tb*768*H*2` bytes larger
+and the threat rows sit between the bucketed rows and the FT bias.
+Factoriser: `F` stays 768 x H, stored after the net params, and merges into
+the bucket rows only (`r < kb*768`); threat rows are plain parameters
+(plain AdamW update, no merge, never touched by `F`). Checkpoint header
+word 1 gains `threat id << 48` (0 = old checkpoints unchanged).
+Warm start: `train --init <net without threat rows> --threats ep` copies
+everything and zero-fills the threat rows (also with `--factorise`: W = the
+net's bucket rows, F = 0, threat rows = 0), so the start evaluates exactly
+like the source.
+
+**(d) Weight decay.** `--wd-active-only` flags cover all FT rows,
+threat rows included: a threat row decays only in batches where it occurs.
+(Threat rows of en-prise pieces occur in almost every batch, so in practice
+they decay like any hot row.)
+
+**CUDA notes (for the desktop session).** GSample needs 64 features per
+perspective (or a separate 32-wide threat list, `f[side][np..n]`);
+`backward_ft` / `plan_masks` can treat the threat block as one extra
+768-row "bucket" (block index KB) that every pair touches; `adam_ft` must
+apply the factoriser merge to bucket rows only and a plain update to the
+`tb*768` threat rows. Until then the CUDA trainer must refuse `--threats`.
