@@ -2,7 +2,8 @@
 
 Status (2026-11-12): implemented on branch `packed-data`
 (`tools/nnue-trainer/src/packed.rs`, `src/stream.rs`). Parity was checked
-on the laptop at a small scale (section 5). Not yet used by netloop or on the
+on the laptop at a small scale (section 5): within ~0.00005 of a shuffled
+pool with a 64M buffer or a stride. Not yet used by netloop or on the
 desktop.
 
 ## 1. Problem
@@ -132,8 +133,8 @@ batch means (`var(batch mean) * b / var(sample)`, 1 for i.i.d.;
 | shuffled 32-byte pool (reference) | | 0.99 | 1.03 |
 
 (+- 0.022 noise.) It follows `1 + ~40 * b / N`. At 16M the batches are
-indistinguishable from a fully shuffled pool. The training sweep below
-decides.
+indistinguishable from a fully shuffled pool, but section 5 shows that
+is not enough: this metric only sees correlation within a batch.
 
 Throughput (M3, release build, `shuffle-check`, s4.rfp):
 
@@ -147,7 +148,58 @@ Throughput (M3, release build, `shuffle-check`, s4.rfp):
 The CUDA trainer needs ~4M pos/s: one decoder thread (or `--loader-threads
 0`, decode inside the loader thread) is 3x faster than that.
 
-PARITY_PLACEHOLDER
+## 5. Training parity (laptop, 2026-11-12)
+
+Same 218.5M positions (L1005-L1007, s12, s13, s14x2-s17x2; 745 MB packed
+= 3.41 B/position, 6.99 GB as a pool) through both paths. CPU trainer, H
+512, 8 output buckets, from scratch with the same init (`--seed 1`), 2
+epochs, lr 1e-3 -> 1e-5 cosine, batch 16384, 4 threads (+1 loader thread on
+both paths: stream runs used `--loader-threads 0`). Best-scale loss
+(`eval --best-scale`) of the final net:
+
+| data path | val.bin | val17x2 |
+|---|---|---|
+| poolA: shuffled 32-byte pool (shuffle seed 1) | 0.027381 | 0.026637 |
+| poolB: the same pool reshuffled (seed 2) | 0.027407 | 0.026703 |
+| *pool mean (spread)* | *0.027394 (0.000026)* | *0.026670 (0.000066)* |
+| stream, 1M buffer | 0.027546 (+0.000152) | 0.026849 (+0.000179) |
+| stream, 16M buffer | 0.027474 (+0.000080) | 0.026808 (+0.000138) |
+| stream, 64M buffer | 0.027459 (+0.000065) | 0.026684 (+0.000014) |
+| stream, 16M buffer, `--stream-stride 8` | 0.027450 (+0.000056) | 0.026694 (+0.000024) |
+| stream, 64M buffer, `--stream-stride 8` | 0.027441 (+0.000047) | 0.026734 (+0.000064) |
+
+(Deltas against the pool mean.)
+
+Findings:
+
+- The shuffle buffer is the variable, and the batch design effect (section
+  4) understates what is needed. At 16M the batches are i.i.d. by that
+  measure, yet the net is worse: train loss is lower and val loss higher
+  (epoch 1: train 0.02946 vs 0.02967, val 0.02878 vs 0.02841). A buffer
+  of N delivers all ~81 positions of a game within ~N/16384 steps (1000
+  steps at 16M), where a full shuffle spreads them over the epoch, and the
+  net fits game-specific labels (shared WDL result) it then sees again
+  soon after.
+- `--stream-stride k` attacks this directly: pass p takes every k-th
+  record of each chunk at a rotating offset, so k passes still cover every
+  record exactly once, but a game gives only ~81/k positions to any one
+  buffer window. 16M + stride 8 (512 MB of RAM) does as well as a 64M
+  buffer.
+- The best stream settings (64M, or stride 8) are within the pool spread
+  on val17x2, and +0.00005 on val.bin, about 2x the pool-to-pool spread
+  (n = 2 pools, so the spread itself is poorly known). That is below the
+  1e-4 threshold we use for net decisions, but not shown to be zero.
+  Before the first production net, run one same-recipe A/B on the
+  desktop: pool8 as a pool against pool8 as packed sources.
+- Cost of a stride: decode work per trained position is k times higher.
+  At 4M positions/s (CUDA), stride 8 needs ~32M decodes/s, i.e. 2 decoder
+  threads; stride 4 needs ~16M/s (1 thread). The shuffle buffer costs RAM
+  only.
+
+Recommended: `--shuffle-buffer 67108864 --stream-stride 4` on the desktop
+(2 GB RAM; one decoder thread keeps up with CUDA), or a larger buffer if
+RAM allows. The bigger the buffer, the smaller the stride needs to be.
+
 
 ## 6. Usage
 
@@ -167,7 +219,8 @@ mkfifo f; $T stream --data packed/ > f &                     # shuffled 32-byte 
 plain `.bin` files without `--shuffle-buffer` take the old pool feed
 unchanged. `--epoch-size` defaults to the total positions. The default
 buffer is 16M records (512 MB). `--loader-threads N` (default 1; 0 =
-decode in the loader thread).
+decode in the loader thread). `--stream-stride k` (default 1): pass p
+reads every k-th record of each chunk (section 5).
 
 `pack` verifies every chunk by decoding it before writing (`--no-verify`
 skips it); it accepts `.bin`, text, `-` and `.rfp` inputs, concatenated.
@@ -194,8 +247,9 @@ counted.
    `.bin`. ~1 minute per 100M positions on one core.
 2. Replace the pool build (`shuffle --out poolN.bin ...`) by a manifest
    `poolN.list` that lists the `.rfp` files in the pool, and train with
-   `--data poolN.list --shuffle-buffer 67108864`. Delete the shuffled pools
-   once a net trained this way matches (section 5).
+   `--data poolN.list --shuffle-buffer 67108864 --stream-stride 4`. Delete
+   the shuffled pools once a net trained this way matches (section 5).
+   pool9 (~5B positions) is ~17 GB packed instead of ~160 GB.
 3. netloop: ingest pipes `gunzip -c | nnue-trainer pack s<seed>.rfp -`
    instead of `convert`; `pool` writes a manifest instead of shuffling.
 4. Datagen needs no change (text stays the interchange format; CI
