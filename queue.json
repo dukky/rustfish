@@ -1,17 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "nnue-g8h1024kb8m-ep",
-    "mode": "stc",
-    "expect": 8.0,
-    "front": true,
-    "test_id": "q-nnue-g8h1024kb8m-ep-1112-2246",
-    "sha": "530f4dea0d021ae355d40edbaa7b81a986ff3ab7",
-    "base_sha": "c6575aa58cffa3b763a1fc4e7d6f8fd13e62c78a",
-    "started": "2026-11-12T22:46:12Z",
-    "bench": 356168,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
