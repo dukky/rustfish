@@ -36,7 +36,9 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   epoch 1 val 0.026793 vs g7's 0.027082 at 2.45x the training cost. Compare
   best-scale on val.bin + val17x2 at the end; if it wins clearly, measure
   NPS cost and gate a 1024 net in games (stc, shape change).
-- Queue: feat-cuckoo (running), feat-conthist-rekey (+4 exp),
+- Queue: **feat-cuckoo merged +5.5** [1.1, 9.9] (2026-11-12 01:54);
+  feat-conthist-rekey rejected (-0.2, 10.9k games: the [piece][to] re-key
+  alone is neutral, so the 2/4-ply retry loses its premise; deprioritised);
   feat-qs-evasion-prune (+2 exp; if merged add `QsQuietEvasions` to
   docs/ccrl-submission.md and tune/spsa-params.json).
 - Ladder after the next net merge.
@@ -56,7 +58,8 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   spare training capacity (~1-2 weeks).
 - SPSA of the search tunables (`spsa-nnue`) once the feature batch drains:
   the LMR, singular and threat terms all changed in a week.
-- Search backlog: continuation history 2/4 ply (after re-key), quiet-check
+- Search backlog: continuation history 2/4 ply (low priority: re-key was
+  neutral), quiet-check
   and root LMR polish, qsearch polish, improving ply-4 fallback.
 - Streaming shuffle (trainers read many source files through a shuffle
   buffer, no pool copy): halves disk; needed before pools outgrow 180 GB.
