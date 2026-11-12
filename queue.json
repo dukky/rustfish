@@ -1,12 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "feat-qs-evasion-prune",
-      "mode": "stc",
-      "expect": 2.0
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "feat-qs-evasion-prune",
+    "mode": "stc",
+    "expect": 2.0,
+    "test_id": "q-feat-qs-evasion-prune-1112-0329",
+    "sha": "0414bf0d8fe2259f7735fc7867b7a3fc353d95bb",
+    "base_sha": "327bd6c3edb1323090d284896f6c0e4dded2bebc",
+    "started": "2026-11-12T03:29:12Z",
+    "bench": 399536,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "88e13a1894334b0ee2c31279e085f05534144d13",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
