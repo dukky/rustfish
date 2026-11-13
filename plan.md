@@ -166,6 +166,17 @@ per generation (~1M positions, whole games, >= 2 seeds, newest main
 engine, never in a pool), screened first via `val-current.bin`
 (netloop's default; now -> valL1008 on both machines); old sets kept as
 references. Next: val-g10 from the D2006 + L1009 tails.
+**Today (2026-11-13), owner-agreed direction:** data growth is slow
+(pool10 ~ +4%) and pool9's extra 1.6B was older-engine data, so the next
+jumps come from more Elo per position: (1) deeper head (1080 Ti after
+gen 9: CUDA check, then g9 + head fine-tune); (2) **overfitting sweep** on
+the M3 GPU (`~/rustfish-data/overfit-sweep.sh`: pool7, H512 plain, 4 epochs
+each: base, wd 0.01, mirror, lambda 0.3, lambda 0.7, wd 0.001; scored on
+val-current at lambda 0.5; laptop datagen stopped at L1009 54M); (3) a
+recent-data window test (drop the oldest seeds); (4) gen 10 as an
+**architecture generation** (head / threats trained from the start /
+winning training settings) rather than a data one; (5) **AVX2 speed**
+(subagent, branch `speed-avx2`, measured on the 9600X with datagen paused).
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
