@@ -241,7 +241,11 @@ Dated log, newest last; superseded detail is in the commit history and
   250 GB WSL volume (~1 TB more on other drives). Fixes in order:
   streaming shuffle; recent-data window (drop seeds from much weaker
   engines; test as one variable); binpack-style compression (~2-3
-  B/position) if still needed.
+  B/position) if still needed. Branch `packed-data` (2026-11-12): packed
+  `.rfp` sources at ~3.4 B/position plus a streaming shuffle (`train
+  --data <dir|list> --shuffle-buffer N --stream-stride k`); laptop parity
+  within ~5e-5 of a shuffled pool; desktop A/B on pool8 pending
+  (`docs/data-format.md`).
 - **Anchors near the top.** The elite set reaches 3631 (11 anchors,
   3318-3631); add stronger anchors before the ladder passes ~3600.
 - **SPRT bounds:** `stc` is [0, 5]; `net-gate` (5+0.05, [0, 10]) is for
