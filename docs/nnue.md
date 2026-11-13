@@ -152,3 +152,55 @@ Loss is `lambda * (sigmoid(eval/400) - result)^2 + (1-lambda) *
 cosine lr. Flags, layouts and formats are in each trainer's README;
 `scripts/netloop.py` drives them (`docs/nnue-experiments.md`). Acceptance is a
 `net-gate` (same shape) or `stc` (new shape) SPRT like every other change.
+
+## Threat inputs (engine side)
+
+`THREATS` in `src/nnue.rs` (default `None`: net format, bench and evalhash
+are main's) adds `blocks()` x 768 FT rows after the king-bucket rows. `ep`
+(1 block, `EnPrise`): a non-king piece is en prise when an enemy piece of
+lower value attacks it (P < N = B < R < Q) or it is attacked and not
+defended (plain attack sets, kings count as attackers and defenders, no
+x-rays). Its threat row is its piece feature with the bucket offset
+replaced by `(KB + t) * 768` (the perspective's mirror xor still applies).
+The trainer side (`--threats ep`, `Sample.np`, shapes, warm start) is on
+branch `threat-inputs-v2`; `ad` (attacked / defended, 2 blocks) is
+engine-only.
+
+**Fast path** (branch `threats-fast`, 2026-11-13, on main's fused update):
+
+- Lazy per ply: a ply's piece bitboards come from the ply below plus the
+  move's delta when the ply is materialised (not at every `push_move`), and
+  its threat bitboards (`threat_bbs`: both sides' cumulative attack maps,
+  the same `threat_maps` as the move picker) are computed once, in place,
+  only for plies an eval needs.
+- The changed threat rows are found once per ply for both perspectives
+  (`threat_rows`), and join the move's piece rows in one `update_list`
+  pass: fixed kernel shapes (exact up to 2 + 2, zero-padded to 3 + 3 /
+  4 + 4, more out of line) so the loops unroll; the last ply goes through
+  the fused `update_dot` with the output layer like main's. About half the
+  plies change no threat row and take main's plain path.
+- The finny table stores each entry's threat bitboards, so a king-bucket
+  refresh applies only the threat rows that differ from the cached
+  position's.
+- AVX-512 dispatch has the extra shapes (2+1, 3+3, 4+4).
+
+Bench 13 on the M3 (interleaved x6, nodes 5157858 main / 6065263 ep): main
+2.011M, ep on the old branch 1.360M (-32.4%), ep here 1.615M (**-19.7%**).
+Per eval (`threat_throughput`, random kb8m nets): +50% (280 -> 420 ns),
+of which ~95 ns are the extra row loads (1.13 threat rows per child per
+perspective, ~40 ns per 2 KB row, bandwidth-bound; software prefetch made it
+worse), ~22 ns `threat_bbs`, the rest bookkeeping. Tried and dropped:
+obstruction-difference slider attacks instead of magics in `threat_bbs`
+(-5% NPS), reusing the attack maps in the move picker (its `threat_maps`
+call costs < 0.5%).
+
+Remaining lever: the row bytes. Only 0.16% of the g8h1024kb8m-ep threat
+weights (1269 of 786432, in 494 of 768 rows; 160 rows are all zero: kings
+and back-rank pawns) fall outside i8, so i8 threat rows widened on load
+(halving their traffic) need either a trainer clamp to [-128, 127] or an
+exact engine-side split (i8 row + a sparse per-row list of the few
+out-of-range lanes, fixed up after the vector pass), no format change.
+About half of the threat changes sit on the moved or captured piece's
+squares (quiets 0.48 of 0.96 per child, captures 1.36 of 2.17), which
+combined piece+threat rows could fold into the piece rows, at the price of
+a second bucketed row table.

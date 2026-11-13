@@ -530,16 +530,20 @@ impl ThreatMaps {
 }
 
 pub(crate) fn threat_maps(board: &Board, by: Color) -> ThreatMaps {
+    threat_maps_bb(&board.bb.pieces, color_index(by), board.bb.occ_all())
+}
+
+/// `threat_maps` from piece bitboards `[colour][kind]`, for colour index
+/// `c` with occupancy `occ` (also the NNUE threat inputs' attack maps).
+#[inline(always)]
+pub(crate) fn threat_maps_bb(pieces: &[[u64; 6]; 2], c: usize, occ: u64) -> ThreatMaps {
     use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
 
     const NOT_A_FILE: u64 = 0xfefe_fefe_fefe_fefe;
     const NOT_H_FILE: u64 = 0x7f7f_7f7f_7f7f_7f7f;
-    let c = color_index(by);
-    let bb = &board.bb;
-    let occ = bb.occ_all();
-    let p = bb.pieces[c];
+    let p = pieces[c];
 
-    let pawn = if by == Color::White {
+    let pawn = if c == 0 {
         ((p[0] << 7) & NOT_H_FILE) | ((p[0] << 9) & NOT_A_FILE)
     } else {
         ((p[0] >> 9) & NOT_H_FILE) | ((p[0] >> 7) & NOT_A_FILE)
