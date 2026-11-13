@@ -100,8 +100,10 @@ KING_LAYOUTS = {"none": ("LAYOUT_NONE", 1), "m1": ("LAYOUT_M1", 1), "kb4": ("LAY
 KING_LAYOUT_RE = r"^(pub\(crate\) const KING_LAYOUT: KingLayout = )(LAYOUT_\w+);"
 
 
-def net_bytes(h, buckets, kb=1):
-    return (kb * INPUTS * h + h + buckets * (2 * h + 1)) * 2
+def net_bytes(h, buckets, kb=1, head=False):
+    # head: per output bucket 2H -> 16 -> 32 -> 1 (nnue-trainer --head, src/nnue_head.rs)
+    extra = buckets * (16 * 2 * h + 16 + 32 * 16 + 32 + 32 + 1) if head else 0
+    return (kb * INPUTS * h + h + buckets * (2 * h + 1) + extra) * 2
 
 
 # ------------------------------------------------------------------ log parsing
@@ -317,10 +319,12 @@ def cmd_embed(args):
     if not net.exists():
         die(f"missing net {net}")
     layout_const, kb = KING_LAYOUTS[args.king_buckets]
-    want = net_bytes(args.hidden, args.buckets, kb)
+    want = net_bytes(args.hidden, args.buckets, kb, args.head)
     if net.stat().st_size != want:
         die(f"{net} is {net.stat().st_size} bytes; H={args.hidden} buckets={args.buckets} "
-            f"king-buckets={args.king_buckets} needs {want}. Wrong shape?")
+            f"king-buckets={args.king_buckets}{' head' if args.head else ''} needs {want}. Wrong shape?")
+    if args.head and args.match_scale:
+        die("--match-scale rescales the linear output only; not for --head nets")
     branch = f"nnue-{args.name}"
     if subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", "--quiet", branch],
                       capture_output=True).returncode == 0:
@@ -346,6 +350,14 @@ def cmd_embed(args):
         if base_layout != layout_const:
             src = re.sub(KING_LAYOUT_RE, rf"\g<1>{layout_const};", src, count=1, flags=re.MULTILINE)
         shape_change = base_h != args.hidden or (base_b or 1) != args.buckets or base_layout != layout_const
+        head_re = r"^(pub\(crate\) const HEAD: bool = )(true|false);"
+        hm = re.search(head_re, src, re.MULTILINE)
+        base_head = hm is not None and hm.group(2) == "true"
+        if args.head and hm is None:
+            die(f"{args.base} has no HEAD constant (head inference lives on origin/head-v2)")
+        if hm is not None and base_head != args.head:
+            src = re.sub(head_re, rf"\g<1>{'true' if args.head else 'false'};", src, count=1, flags=re.MULTILINE)
+            shape_change = True
         if base_h != args.hidden:
             src = set_const(src, "H", args.hidden)
         if base_b is not None and base_b != args.buckets:
@@ -1327,6 +1339,8 @@ def main():
     p.add_argument("--buckets", type=int, required=True)
     p.add_argument("--king-buckets", default="none", choices=sorted(KING_LAYOUTS),
                    help="king (input) bucket layout the net was trained with; sets KING_LAYOUT")
+    p.add_argument("--head", action="store_true",
+                   help="the net has the deeper head (nnue-trainer --head); sets HEAD = true")
     p.add_argument("--notes", default="", help="extra line for the commit message")
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--keep-worktree", action="store_true", help="keep the temp worktree on failure")

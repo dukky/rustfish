@@ -40,6 +40,13 @@ pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
 /// Output buckets, selected by piece count: `(pieces - 2) * BUCKETS / 32`.
 pub(crate) const BUCKETS: usize = 8;
+/// Deeper head (`src/nnue_head.rs`, docs/nnue-deeper-head.md): `true`
+/// expects nets from `nnue-trainer --head` (2H -> 16 -> 32 -> 1 per output
+/// bucket, added to the linear output). Default off: format and eval as before.
+pub(crate) const HEAD: bool = false;
+
+#[path = "nnue_head.rs"]
+pub(crate) mod head;
 
 // ------------------------------------------------------------ king buckets
 
@@ -164,7 +171,7 @@ pub(crate) const KB: usize = layout_buckets(&KING_LAYOUT);
 /// Bytes in a net file with `kb` king buckets:
 /// (kb*768*H + H + BUCKETS*2H + BUCKETS) little-endian i16.
 pub(crate) const fn net_bytes(kb: usize) -> usize {
-    (kb * INPUTS * H + H + BUCKETS * (2 * H + 1)) * 2
+    (kb * INPUTS * H + H + BUCKETS * (2 * H + 1) + if HEAD { head::HEAD_WORDS } else { 0 }) * 2
 }
 
 /// Bytes in a net file for the active layout.
@@ -258,6 +265,8 @@ pub(crate) struct Network {
     /// All |out_w| <= 127: the SIMD output kernel's i16 products and i32
     /// per-perspective sums cannot overflow (256 * 255^2 * 127 < 2^31).
     small_out: bool,
+    /// `HEAD`: the deeper head (None otherwise).
+    head: Option<Box<head::HeadNet>>,
 }
 
 impl Network {
@@ -285,7 +294,11 @@ impl Network {
         for v in out_b.iter_mut() {
             *v = words.next().unwrap();
         }
-        Ok(Self::from_parts(ft_w, ft_b, out_w, out_b))
+        let mut net = Self::from_parts(ft_w, ft_b, out_w, out_b);
+        if HEAD {
+            net.head = Some(Box::new(head::HeadNet::from_words(words.collect())));
+        }
+        Ok(net)
     }
 
     fn from_parts(ft_w: Vec<i16>, ft_b: [i16; H], out_w: Vec<i16>, out_b: [i16; BUCKETS]) -> Self {
@@ -293,7 +306,9 @@ impl Network {
         assert_eq!(out_w.len(), BUCKETS * 2 * H);
         let kb = ft_w.len() / (INPUTS * H);
         let small_out = out_w.iter().all(|w| (-127..=127).contains(w));
-        Self { ft_w: AlignedI16::new(&ft_w), kb, ft_b, out_w: AlignedI16::new(&out_w), out_b, small_out }
+        // HEAD: a zero head (output 0) until the caller supplies one.
+        let head = HEAD.then(|| Box::new(head::HeadNet::from_words(vec![0; head::HEAD_WORDS])));
+        Self { ft_w: AlignedI16::new(&ft_w), kb, ft_b, out_w: AlignedI16::new(&out_w), out_b, small_out, head }
     }
 
     pub(crate) fn load(path: &str) -> Result<Self, String> {
@@ -305,7 +320,8 @@ impl Network {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(net_bytes(self.kb));
         let all = self.ft_w.iter().chain(self.ft_b.iter()).chain(self.out_w.iter());
-        for w in all.chain(self.out_b.iter()) {
+        let head = self.head.as_ref().map(|h| h.words()).unwrap_or(&[]);
+        for w in all.chain(self.out_b.iter()).chain(head.iter()) {
             out.extend_from_slice(&w.to_le_bytes());
         }
         out
@@ -334,7 +350,11 @@ impl Network {
         let out_w = (0..BUCKETS * 2 * H).map(|_| next(out_range)).collect();
         let mut out_b = [0i16; BUCKETS];
         out_b.iter_mut().for_each(|v| *v = next(out_range));
-        Self::from_parts(ft_w, ft_b, out_w, out_b)
+        let mut net = Self::from_parts(ft_w, ft_b, out_w, out_b);
+        if HEAD {
+            net.head = Some(Box::new(head::HeadNet::from_words(head::random_words(seed))));
+        }
+        net
     }
 
     #[inline(always)]
@@ -688,6 +708,9 @@ impl<L: Layout> NnueState<L> {
             let (lo, hi) = stack.split_at_mut(self.top);
             let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b);
             self.computed.set(self.top);
+            if HEAD {
+                return finish_head(net, b, sum, &hi[0].acc, stm);
+            }
             return finish(net, b, sum);
         }
         self.materialise();
@@ -780,7 +803,22 @@ pub(crate) fn evaluate_acc(net: &Network, acc: &Accumulator, stm: Color, pieces:
         Color::Black => (&acc.v[1], &acc.v[0]),
     };
     let b = bucket(pieces);
+    if HEAD {
+        return finish_head(net, b, output_sum(net, b, us, them), acc, stm);
+    }
     finish(net, b, output_sum(net, b, us, them))
+}
+
+/// `HEAD`: `finish` plus the deeper head on the accumulators (the one hook
+/// into `src/nnue_head.rs`).
+#[inline(always)]
+fn finish_head(net: &Network, b: usize, sum: i64, acc: &Accumulator, stm: Color) -> i32 {
+    let (us, them) = match stm {
+        Color::White => (&acc.v[0], &acc.v[1]),
+        Color::Black => (&acc.v[1], &acc.v[0]),
+    };
+    let h = net.head.as_ref().expect("HEAD net without head").forward(b, us, them);
+    head::finish(net.out_b[b], sum, h, EVAL_LIMIT)
 }
 
 #[inline(always)]
@@ -1923,7 +1961,8 @@ mod tests {
         let net = Network::random_kb(11, 64, 100, 8);
         let bytes = net.to_bytes();
         assert_eq!(bytes.len(), net_bytes(8));
-        assert_eq!(bytes.len(), (8 * 768 * H + H + BUCKETS * (2 * H + 1)) * 2);
+        let head_words = if HEAD { head::HEAD_WORDS } else { 0 };
+        assert_eq!(bytes.len(), (8 * 768 * H + H + BUCKETS * (2 * H + 1) + head_words) * 2);
         assert!(Network::from_bytes_kb(&bytes, 8).is_ok());
         assert!(Network::from_bytes_kb(&bytes, 1).is_err());
     }
