@@ -72,7 +72,10 @@ struct Bucket {
 }
 
 struct TransTableInner {
+    /// `buckets[base..=base + mask]` is the table, starting on a 2 MB
+    /// boundary (huge pages on Linux; see `hugemem`).
     buckets: Box<[Bucket]>,
+    base: usize,
     mask: usize,
     current_age: AtomicU8,
 }
@@ -185,9 +188,13 @@ impl TransTable {
         // Round down so the table never exceeds the requested size.
         let n = (bytes / bucket_size).max(1);
         let n = if n.is_power_of_two() { n } else { n.next_power_of_two() / 2 };
+        // SAFETY: a Bucket is atomics only, valid all-zero (= Bucket::default());
+        // its size (64) divides 2 MB.
+        let (buckets, base) = unsafe { crate::hugemem::zeroed_aligned::<Bucket>(n) };
         Self {
             inner: Arc::new(TransTableInner {
-                buckets: (0..n).map(|_| Bucket::default()).collect(),
+                buckets,
+                base,
                 mask: n - 1,
                 current_age: AtomicU8::new(0),
             }),
@@ -213,7 +220,7 @@ impl TransTable {
 
     #[inline]
     fn bucket(&self, key: u64) -> &Bucket {
-        &self.inner.buckets[key as usize & self.inner.mask]
+        &self.inner.buckets[self.inner.base + (key as usize & self.inner.mask)]
     }
 
     /// Hint the CPU to start loading `key`'s bucket so the child node's

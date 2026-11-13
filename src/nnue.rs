@@ -219,19 +219,28 @@ struct Line([i16; 32]);
 /// one. A plain `Vec<i16>` of this size is mmapped by glibc 16 bytes past a
 /// page boundary, which made half of the 256-bit row loads on Linux x86
 /// straddle two lines (macOS happens to page-align it).
-#[derive(Clone)]
+/// The rows start on a 2 MB boundary (huge pages on Linux; see `hugemem`).
 struct AlignedI16 {
-    lines: Vec<Line>,
+    lines: Box<[Line]>,
+    base: usize,
     len: usize,
 }
 
 impl AlignedI16 {
     fn new(v: &[i16]) -> Self {
-        let mut lines = vec![Line([0; 32]); v.len().div_ceil(32)];
-        for (l, c) in lines.iter_mut().zip(v.chunks(32)) {
+        let n = v.len().div_ceil(32);
+        // SAFETY: Line is plain i16s (valid all-zero); its size (64) divides 2 MB.
+        let (mut lines, base) = unsafe { crate::hugemem::zeroed_aligned::<Line>(n) };
+        for (l, c) in lines[base..base + n].iter_mut().zip(v.chunks(32)) {
             l.0[..c.len()].copy_from_slice(c);
         }
-        Self { lines, len: v.len() }
+        Self { lines, base, len: v.len() }
+    }
+}
+
+impl Clone for AlignedI16 {
+    fn clone(&self) -> Self {
+        Self::new(self)
     }
 }
 
@@ -241,7 +250,7 @@ impl std::ops::Deref for AlignedI16 {
     fn deref(&self) -> &[i16] {
         // SAFETY: `Line` is repr(C) [i16; 32] with no padding, so `lines` is
         // `32 * lines.len() >= len` contiguous, initialised i16s.
-        unsafe { std::slice::from_raw_parts(self.lines.as_ptr() as *const i16, self.len) }
+        unsafe { std::slice::from_raw_parts(self.lines[self.base..].as_ptr() as *const i16, self.len) }
     }
 }
 

@@ -3,6 +3,7 @@ mod book;
 mod datagen;
 mod eval;
 mod evalcache;
+mod hugemem;
 mod eval_params;
 mod movegen;
 mod nnue;
