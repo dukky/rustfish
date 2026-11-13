@@ -179,6 +179,16 @@ small desktop test arm if the window test shows old data hurts); (4) gen 10 as a
 **architecture generation** (head / threats trained from the start /
 winning training settings) rather than a data one; (5) **AVX2 speed**
 (subagent, branch `speed-avx2`, measured on the 9600X with datagen paused).
+**2026-11-13 10:00: gen 9 merged +23.4** [8.8, 38.0] (net-gate, 864
+games; g9h1024kb8m, pool9 4.90B: best-scale valL1008 0.022553 vs 0.022610,
+small but consistent). **speed-avx2 merged** (speedup, bench identical):
+early TT/eval-cache prefetch at move pick + null-move prefetch, and real
+transparent huge pages for the TT on Linux (allocate, madvise, then
+zero): **+7% on both AVX2 and AVX-512** on the 9600X. NNUE is only ~25%
+of x86 time (55% on the M3) and the AVX2 kernels are load-bound, not
+spilling; next x86 costs: MovePicker::new 13%, movegen 9%, SEE 8%.
+SPSA cancelled (nothing in nine rounds); lanes back to 18 shards.
+Ladder queued.
 **Rejected-work sweep (2026-11-13):** verdicts from the HCE era and the
 mis-scaled NNUE window (11-03 17:00 .. 11-06 13:15) are weak evidence.
 Queued now (quick): `double-extension` (stc), `simp2-qs-failsoft` (nonreg).
