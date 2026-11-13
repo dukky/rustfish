@@ -212,6 +212,14 @@ fn read_recs(path: &Path) -> Vec<Rec> {
     bytes.chunks_exact(REC).map(|c| c.try_into().unwrap()).collect()
 }
 
+/// The first `n` records of a record file.
+fn read_recs_n(path: &Path, n: usize) -> Vec<Rec> {
+    let mut bytes = Vec::new();
+    let f = File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    f.take((n * REC) as u64).read_to_end(&mut bytes).unwrap();
+    bytes.chunks_exact(REC).map(|c| c.try_into().unwrap()).collect()
+}
+
 fn threads_default() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
@@ -391,10 +399,18 @@ impl Shape {
     fn file_bytes(&self) -> usize {
         self.len() * 2
     }
+    /// The shape of a net file: a plain net, or else a `--head` net.
     fn from_file_bytes(bytes: usize, buckets: usize, kb: usize) -> Option<Self> {
         let words = bytes / 2;
         let h = words.checked_sub(buckets)? / (kb * INPUTS + 1 + 2 * buckets);
         let s = Shape { h, buckets, kb, hd: 0 };
+        if s.file_bytes() == bytes {
+            return Some(s);
+        }
+        // Head: per bucket 16*2H + (16 + 16*32 + 32 + 32 + 1) more words.
+        let fixed = buckets * (1 + H1 + H2 * H1 + 2 * H2 + 1);
+        let h = words.checked_sub(fixed)? / (kb * INPUTS + 1 + 2 * buckets + buckets * 2 * H1);
+        let s = Shape { h, buckets, kb, hd: 1 };
         (s.file_bytes() == bytes).then_some(s)
     }
 }
@@ -559,6 +575,146 @@ fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
         }
     }
     p
+}
+
+/// `--init <plain net> --head`: the plain net's params, then a fresh head
+/// (`init_params`' draws) with W3 = 0, so the net starts exactly at the
+/// plain net's evals and W3's gradient opens the head up.
+fn add_head(p: &[f32], plain: Shape, rng: &mut Rng) -> Vec<f32> {
+    assert_eq!(p.len(), plain.len());
+    let sh = Shape { hd: 1, ..plain };
+    let fresh = init_params(sh, rng);
+    let mut out = p.to_vec();
+    out.extend_from_slice(&fresh[sh.head_off()..]);
+    for b in 0..sh.buckets {
+        let [_, _, _, _, w3, _] = head_offs(sh, b);
+        out[w3..w3 + H2].fill(0.0);
+    }
+    out
+}
+
+/// `fen-eval --net N [--buckets B] [--king-buckets L] --fens FILE`: the
+/// float forward (the net file dequantised, as `eval`) of each FEN line, in
+/// centipawns from the side to move (= 400 * out). For checking engine
+/// inference (`src/nnue_head.rs`) against the trainer.
+fn cmd_fen_eval(args: &[String]) {
+    let (mut net, mut fens, mut buckets, mut kl) = (None, None, 1usize, NO_BUCKETS);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--fens" => fens = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let text = std::fs::read_to_string(fens.expect("--fens")).unwrap();
+    let mut acc = vec![0.0f32; 2 * sh.h];
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let r = encode(&format!("{line} | 0 | 0.5")).unwrap_or_else(|| panic!("bad FEN {line}"));
+        let s = decode(&r, 0.5, sh.buckets, false, kl);
+        println!("{line} | {:.4}", forward(&p, sh, &s, &mut acc) * SCALE);
+    }
+}
+
+/// `permute --net N [--buckets B] [--king-buckets L] --data F [--n 20000] --out O`:
+/// reorder the FT neurons by how often they are active (engine L1 input
+/// nonzero) on `--n` positions of `--data`, most active first. The net
+/// computes the same function (FT columns, FT bias, output weights and, with
+/// a head, W1 columns are permuted together; the engine's integer eval is
+/// bit-identical), but active neurons share 4-byte chunks, so the engine's
+/// sparse head L1 (`src/nnue_head.rs`) skips more chunks.
+fn cmd_permute(args: &[String]) {
+    let (mut net, mut data, mut out, mut buckets, mut kl, mut n) = (None, None, None, 1usize, NO_BUCKETS, 20000usize);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--data" => data = Some(PathBuf::from(it.next().unwrap())),
+            "--out" => out = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
+            "--n" => n = it.next().unwrap().parse().unwrap(),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let mut recs = read_recs_n(&data.expect("--data"), n);
+    recs.truncate(n);
+    let h = sh.h;
+    // Engine L1 input of neuron j is nonzero iff its i16 accumulator >= 16.
+    let active = |acc: &[f32], j: usize| (acc[j] * QA).round() >= 16.0;
+    let mut freq = vec![0u64; h];
+    let mut acts = Vec::with_capacity(recs.len());
+    let mut acc = vec![0.0f32; 2 * h];
+    for r in &recs {
+        let s = decode(r, 0.5, sh.buckets, false, kl);
+        forward(&p, sh, &s, &mut acc);
+        let mut a = vec![false; 2 * h];
+        for side in 0..2 {
+            for j in 0..h {
+                a[side * h + j] = active(&acc[side * h..], j);
+                freq[j] += a[side * h + j] as u64;
+            }
+        }
+        acts.push(a);
+    }
+    // Most active first. (Greedy co-activation grouping of 4-chunks was
+    // tried and lost to this on g7kb8m + head: 50.8% vs 42.2% of chunks.)
+    let mut perm: Vec<usize> = (0..h).collect();
+    perm.sort_by_key(|&j| (std::cmp::Reverse(freq[j]), j));
+    let chunks = |perm: &[usize]| -> f64 {
+        let mut c = 0u64;
+        for a in &acts {
+            for side in 0..2 {
+                for q in perm.chunks(4) {
+                    c += q.iter().any(|&j| a[side * h + j]) as u64;
+                }
+            }
+        }
+        c as f64 / (acts.len() * 2 * h / 4) as f64
+    };
+    let ident: Vec<usize> = (0..h).collect();
+    let el = freq.iter().sum::<u64>() as f64 / (acts.len() * 2 * h) as f64;
+    println!("active inputs {:.1}%; nonzero 4-byte chunks {:.1}% -> {:.1}% after the permutation", 100.0 * el, 100.0 * chunks(&ident), 100.0 * chunks(&perm));
+    let q = permute_neurons(&p, sh, &perm);
+    let out = out.expect("--out");
+    File::create(&out).unwrap().write_all(&quantize(&q, sh)).unwrap();
+    println!("wrote {}", out.display());
+}
+
+/// New neuron `k` = old neuron `perm[k]`, everywhere a neuron index appears.
+fn permute_neurons(p: &[f32], sh: Shape, perm: &[usize]) -> Vec<f32> {
+    let h = sh.h;
+    let mut q = p.to_vec();
+    for r in 0..sh.kb * INPUTS + 1 {
+        // FT rows, then the FT bias (the row right after them).
+        for k in 0..h {
+            q[r * h + k] = p[r * h + perm[k]];
+        }
+    }
+    for b in 0..sh.buckets {
+        let o = sh.out_w() + b * 2 * h;
+        for side in 0..2 {
+            for k in 0..h {
+                q[o + side * h + k] = p[o + side * h + perm[k]];
+            }
+        }
+        if sh.hd > 0 {
+            let w1 = head_offs(sh, b)[0];
+            for m in 0..H1 {
+                for side in 0..2 {
+                    let o = w1 + m * 2 * h + side * h;
+                    for k in 0..h {
+                        q[o + k] = p[o + perm[k]];
+                    }
+                }
+            }
+        }
+    }
+    q
 }
 
 #[inline(always)]
@@ -1642,8 +1798,13 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             let p = if fac.on() {
                 load_init_factor(i, sh)
             } else {
-                let (p, s) = load_init(i, sh.buckets, sh.kb);
-                assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+                let (mut p, s) = load_init(i, sh.buckets, sh.kb);
+                if sh.hd > 0 && s.hd == 0 {
+                    p = add_head(&p, Shape { hd: 0, ..sh }, &mut rng);
+                    println!("init: {} has no head; added one whose output starts at 0 (W3 = 0)", i.display());
+                } else {
+                    assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets/--head");
+                }
                 p
             };
             let n = p.len();
@@ -1838,13 +1999,15 @@ impl Backend for batch::BatchTrainer {
 /// The command line; `train` uses `gpu` instead of the CPU kernels if given.
 pub fn cli(gpu: Option<&MakeBackend>) {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck|rescale|pack|unpack|stream|shuffle-check> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|fen-eval|permute|scalecheck|rescale|pack|unpack|stream|shuffle-check> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
         "shuffle" => cmd_shuffle(rest),
         "train" => cmd_train(rest, gpu),
         "eval" => cmd_eval(rest),
+        "fen-eval" => cmd_fen_eval(rest),
+        "permute" => cmd_permute(rest),
         "scalecheck" => cmd_scalecheck(rest),
         "rescale" => cmd_rescale(rest),
         "pack" => packed::cmd_pack(rest),
@@ -2620,6 +2783,35 @@ mod tests {
             assert!((a - b).abs() <= 1e-3 * b, "half loss {a} vs f32 {b}");
         }
         assert!(first.1 != full.1, "--half changed nothing");
+    }
+
+    #[test]
+    fn head_file_shape_warm_start_and_permute() {
+        let kl = KingLayout::by_name("kb4");
+        let plain = Shape { h: 32, buckets: 8, kb: kl.kb(), hd: 0 };
+        let sh = Shape { hd: 1, ..plain };
+        assert_eq!(Shape::from_file_bytes(plain.file_bytes(), 8, kl.kb()), Some(plain));
+        assert_eq!(Shape::from_file_bytes(sh.file_bytes(), 8, kl.kb()), Some(sh));
+        let mut rng = Rng::new(21);
+        let p0 = init_params(plain, &mut rng);
+        let p = add_head(&p0, plain, &mut rng);
+        assert_eq!(p.len(), sh.len());
+        let (recs, _) = test_recs(40);
+        let (mut a0, mut a1) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        for r in &recs {
+            let s = decode(r, 0.5, 8, false, kl);
+            // W3 = 0: the warm-started head adds b3 = 0, so evals are the plain net's.
+            assert_eq!(forward(&p0, plain, &s, &mut a0), forward(&p, sh, &s, &mut a1));
+        }
+        // A random head, then a permutation: same evals up to float reassociation.
+        let p = init_params(sh, &mut rng);
+        let perm: Vec<usize> = (0..sh.h).map(|k| (k * 7 + 3) % sh.h).collect();
+        let q = permute_neurons(&p, sh, &perm);
+        for r in &recs {
+            let s = decode(r, 0.5, 8, false, kl);
+            let (x, y) = (forward(&p, sh, &s, &mut a0), forward(&q, sh, &s, &mut a1));
+            assert!((x - y).abs() < 1e-4, "{x} vs {y}");
+        }
     }
 
     #[test]
