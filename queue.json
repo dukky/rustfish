@@ -1,6 +1,12 @@
 {
   "pending": [
     {
+      "branch": "nnue-g9h1024kb8m",
+      "mode": "net-gate",
+      "expect": 10.0,
+      "front": true
+    },
+    {
       "branch": "double-extension",
       "mode": "stc",
       "expect": 2.0,
@@ -20,7 +26,7 @@
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
-  "next_seed": 194,
+  "next_seed": 195,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
