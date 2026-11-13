@@ -12,15 +12,7 @@
       "expect": 3.0
     }
   ],
-  "current": {
-    "branch": "main",
-    "mode": "ladder",
-    "front": true,
-    "test_id": "q-ladder-1113-1035",
-    "sha": "90b3a501983b4e19519d74fd22cc104d73b5a42d",
-    "base_sha": "90b3a501983b4e19519d74fd22cc104d73b5a42d",
-    "started": "2026-11-13T10:35:28Z"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
