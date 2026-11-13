@@ -113,6 +113,17 @@ bake into gen 10: (1) time-odds stc (ep at ~1.3x time) to confirm cost is
 the whole story; (2) profile and make threat inputs incremental (per-move
 attack-map updates instead of recomputing); (3) ltc test (CCRL is 2+1).
 Gen 9 trains without threats.
+**Engine speed at 1024 (branch speed-1024, queued as `speedup`, bench
+unchanged):** fused last accumulator update + output layer, dual-output
+finny refresh, 64-byte alignment, runtime-selected AVX-512 kernels, wider
+NEON loads, eval-cache prefetch. M3 **+13.6%**; 9600X (under datagen load)
+**+3.3% AVX2, +7.7% AVX-512**. Profile at H1024: NNUE ~55% (update 39%,
+SCReLU dot 14%), MovePicker::new 11%, movegen 7%, SEE 5%. Not merged
+experiments: `speed-1024-rowprefetch`, `speed-1024-hugepages` (x86 only;
+measure with the desktop idle). Threat-cost ideas: route threat rows
+through the fused kernel in fixed chunks; reuse the move picker's attack
+maps instead of rebuilding per ply; i8 threat weights (trainer + format).
+PGO on desktop x86 still unmeasured.
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
