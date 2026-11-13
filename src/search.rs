@@ -30,6 +30,11 @@ const IIR_MIN_DEPTH: i32 = 4;
 // margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
 const RFP_DEEP_STEP: i32 = 100;
+// Late move pruning: at non-PV nodes up to this depth, a quiet that is not a
+// priority quiet (killer, counter-move, positive history or continuation
+// history) is skipped once the move index reaches
+// (LmpBase + depth^2) / (2 - improving): half the budget when not improving.
+const LMP_MAX_DEPTH: i32 = 8;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
 
@@ -1832,12 +1837,8 @@ fn negamax(
                 || quiet_history > 0
                 || quiet_continuation > 0);
 
-        if quiet && !priority_quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
-            let limit = match depth {
-                1 => params.lmp_limit_d1,
-                2 => params.lmp_limit_d2,
-                _ => params.lmp_limit_d3,
-            };
+        if quiet && !priority_quiet && !in_check && beta - alpha <= 1 && depth <= LMP_MAX_DEPTH {
+            let limit = ((params.lmp_base + depth * depth) / (2 - improving as i32)) as usize;
             if idx >= limit {
                 continue;
             }

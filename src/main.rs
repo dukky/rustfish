@@ -943,14 +943,13 @@ struct SearchParams {
     // piece to a square no lesser piece attacks (0 = off).
     threat_escape_bonus: i32,
     null_reduction_depth_div: i32,
-    lmp_limit_d1: usize,
+    // Late move pruning base: see LMP_MAX_DEPTH in search.rs.
+    lmp_base: i32,
     // LMR adjustments by node type (plies): + at expected cut nodes, - at PV nodes.
     lmr_cut_node: i32,
     lmr_pv_node: i32,
-    lmp_limit_d2: usize,
     // Plies the TT move loses when not singular but its TT score is >= beta.
     se_negative_extension: i32,
-    lmp_limit_d3: usize,
     lmr_min_depth: i32,
     // Extra LMR plies for quiets at nodes whose static eval is not improving.
     lmr_not_improving: i32,
@@ -974,12 +973,10 @@ impl Default for SearchParams {
             threat_history: true,
             threat_escape_bonus: 8_000,
             null_reduction_depth_div: 4,
-            lmp_limit_d1: 6,
+            lmp_base: 3,
             lmr_cut_node: 2,
             lmr_pv_node: 1,
             se_negative_extension: 1,
-            lmp_limit_d2: 10,
-            lmp_limit_d3: 14,
             lmr_min_depth: 3,
             lmr_not_improving: 1,
             lmr_min_move_index: 3,
@@ -1189,12 +1186,10 @@ fn main() {
             println!("option name ThreatHistory type check default true");
             println!("option name ThreatEscapeBonus type spin default 8000 min 0 max 30000");
             println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
-            println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
+            println!("option name LmpBase type spin default 3 min 0 max 16");
             println!("option name LmrCutNode type spin default 2 min 0 max 4");
             println!("option name LmrPvNode type spin default 1 min 0 max 4");
             println!("option name SeNegativeExtension type spin default 1 min 0 max 3");
-            println!("option name LmpLimitD2 type spin default 10 min 0 max 32");
-            println!("option name LmpLimitD3 type spin default 14 min 0 max 40");
             println!("option name LmrMinDepth type spin default 3 min 1 max 12");
             println!("option name LmrNotImproving type spin default 1 min 0 max 3");
             println!("option name LmrMinMoveIndex type spin default 3 min 1 max 24");

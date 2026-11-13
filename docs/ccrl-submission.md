@@ -52,7 +52,7 @@ binaries; few build from source. A submission should point them at one page:
 | `BookFile` | string | empty | external book path |
 | `EvalFile` | string | empty | load a net file instead of the embedded one; leave empty |
 | `UseNNUE` | check | true | off = hand-crafted eval (much weaker); leave on |
-| `FutilityMarginD1..D2`, `ReverseFutilityMarginD1..D3`, `NullReductionBase`, `NullReductionDepthDiv`, `ThreatHistory`, `ThreatEscapeBonus`, `LmpLimitD1..D3`, `LmrMinDepth`, `LmrMinMoveIndex`, `LmrExtraDepth`, `LmrExtraMoveIndex`, `LmrCutNode`, `LmrPvNode`, `LmrNotImproving`, `SeNegativeExtension`, `NodeTmBase`, `NodeTmScale` | spin / check | tuned | search and time-management tuning; testers should leave these alone |
+| `FutilityMarginD1..D2`, `ReverseFutilityMarginD1..D3`, `NullReductionBase`, `NullReductionDepthDiv`, `ThreatHistory`, `ThreatEscapeBonus`, `LmpBase`, `LmrMinDepth`, `LmrMinMoveIndex`, `LmrExtraDepth`, `LmrExtraMoveIndex`, `LmrCutNode`, `LmrPvNode`, `LmrNotImproving`, `SeNegativeExtension`, `NodeTmBase`, `NodeTmScale` | spin / check | tuned | search and time-management tuning; testers should leave these alone |
 
 `OwnBook` defaults to off and the `uci` output says so (fixed in
 `1b3d81d`, 2026-11-10), so testers need not change anything.
