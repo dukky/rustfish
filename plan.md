@@ -189,6 +189,20 @@ of x86 time (55% on the M3) and the AVX2 kernels are load-bound, not
 spilling; next x86 costs: MovePicker::new 13%, movegen 9%, SEE 8%.
 SPSA cancelled (nothing in nine rounds); lanes back to 18 shards.
 Ladder queued.
+**Midday 2026-11-13:** ladder **3562.4** [3545, 3580] (gen 9 + speed work).
+**feat-corrhist-v2 merged +12.8** [6.9, 18.6] (multi-table correction
+history, used in qsearch too, ~1% cycles). simp2-qs-failsoft merged
+(nonreg +3.5); double-extension rejected (-3.6). **--half from scratch at
+H1024** (3 x 400M pool8, same seed): valL1008 0.024375 vs f32 0.024350
+(+2.5e-5), val.bin equal: fine. **Head fine-tune on g9** (1080 Ti, 628k
+pos/s, 3 epochs, done ~16:50): epoch 1 raw valL1008 0.022437 vs g9
+0.022681 (-2.4e-4). The CUDA head check was 8e-5 off the CPU trainer at
+epoch 1, 3e-6 by epoch 3, deterministic. **Overfitting sweep** (M3,
+pool7, H512, 4 epochs, best-scale valL1008 / val.bin): base 0.024591 /
+0.026185; wd 0.01 0.024590 / 0.026116 (neutral / slightly better);
+**mirror worse** 0.024671 / 0.026248; lambda 0.7 running. Next search
+features (subagent): formula LMP with improving, per-move futility,
+capture history.
 **Rejected-work sweep (2026-11-13):** verdicts from the HCE era and the
 mis-scaled NNUE window (11-03 17:00 .. 11-06 13:15) are weak evidence.
 Queued now (quick): `double-extension` (stc), `simp2-qs-failsoft` (nonreg).
