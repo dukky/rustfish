@@ -179,6 +179,19 @@ small desktop test arm if the window test shows old data hurts); (4) gen 10 as a
 **architecture generation** (head / threats trained from the start /
 winning training settings) rather than a data one; (5) **AVX2 speed**
 (subagent, branch `speed-avx2`, measured on the 9600X with datagen paused).
+**Rejected-work sweep (2026-11-13):** verdicts from the HCE era and the
+mis-scaled NNUE window (11-03 17:00 .. 11-06 13:15) are weak evidence.
+Queued now (quick): `double-extension` (stc), `simp2-qs-failsoft` (nonreg).
+Subagent: **correction history v2** (multi-table: pawn, non-pawn per
+colour, minor/major, continuation; used in qsearch too), branch
+`feat-corrhist-v2`. Later rewrites (0 to +5 each): formula LMP with
+improving to depth ~8 (after the 1024 SPSA, which tunes LMP), per-move
+futility with a cheap gives-check test, capture history as a SEE
+threshold, 2-ply continuation history kept out of the priority test.
+Cheap but low-power (likely H0 at [0, 5]): ttcapture-lmr, razoring d3-4,
+50-move NNUE damping. Not now: NNUE_EVAL_DIV retest (a rational divisor
+would corrupt datagen labels). Correctly dead: net5-13, bigbang bundles,
+HCE-only work, recent decisive losses.
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
