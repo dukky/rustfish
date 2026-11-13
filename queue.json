@@ -7,20 +7,10 @@
       "passed_over": 2
     }
   ],
-  "current": {
-    "branch": "feat-corrhist-v2",
-    "mode": "stc",
-    "expect": 3.0,
-    "test_id": "q-feat-corrhist-v2-1113-1137",
-    "sha": "3ca098db89e40cccb8c2377e92a327bfcda11517",
-    "base_sha": "23e1a854b6ce375c557bb84f46cab5958fa27a91",
-    "started": "2026-11-13T11:37:40Z",
-    "bench": 396728,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 202,
   "consecutive_bursts": 0,
   "identical_merges": [
