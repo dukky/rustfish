@@ -61,6 +61,75 @@ kb8m H 512 `--factorise --mirror`, 3 x 2M positions, val (last 200k of
 s45): CPU 0.049903 / 0.039111 / 0.037563, GPU 0.049905 / 0.039107 /
 0.037562 (train loss equal to 6 digits).
 
+## Head (`--head`): UNTESTED ON CUDA
+
+Written on the laptop without a GPU or nvcc (2026-11-13, branch
+`head-v2`): the host code type-checks (`NNUE_CUDA_NO_NVCC=1 cargo check`)
+and `src/kernels.cu` passes a clang `-x cuda -fsyntax-only` device pass
+with stub headers, but **no kernel has run**. It mirrors the CPU trainer's
+math (`head_forward`, `head_backward`, `head_small_grads`, the `e` term of
+`train_sample`; docs/nnue-deeper-head.md):
+
+- `forward`: with `hd`, each thread also forms its 4 columns' share of
+  the 16 z1 sums (warp shuffle tree, then warps in order through shared
+  memory); warp 0 adds b1, does L2 (lane = z2 row), L3 (shuffle tree),
+  the loss and gradient, the head backward (dz2, dz1), and writes the
+  sample's scratch `hs[sample][96]` = z1 | z2 | dz1 | dz2 (the CPU `HS`
+  layout).
+- `backward_ft` staging and `backward_rest` (FT bias): dacc = `(g w + e)
+  2 a`, `e = sum_q dz1[q] W1[q][i]` (q ascending), as `train_sample`.
+- New: `backward_head_w1` (thread = lane of 2H, grid.y = chunk x bucket;
+  walks its chunk's samples of that bucket in order, gW1[q] += dz1[q] a^2),
+  `backward_head_small` (thread = one of the 593 b1/W2/b2/W3/b3 params per
+  bucket), `reduce_head` (chunk partials in chunk order -> `gr`). AdamW of
+  the head is `adam_flat` (the head is part of `rest`). Extra memory at
+  batch 16384: hs 6 MB, partials 64 chunks x 8 x head_len floats (34 MB at
+  H 512, 67 MB at H 1024).
+- Without `--head` the kernels take the old code paths (`hd = 0`): check
+  that plain runs are byte-identical to the previous build (step 1 below).
+
+### Validating on the GPU (desktop checklist)
+
+```bash
+cd ~/dev/rustfish && git fetch && git checkout head-v2
+RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path tools/nnue-trainer/Cargo.toml
+RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path tools/nnue-trainer-cuda/Cargo.toml
+C=tools/nnue-trainer/target/release/nnue-trainer
+G=tools/nnue-trainer-cuda/target/release/nnue-trainer-cuda
+D=~/rustfish-data; mkdir -p $D/headcheck
+head -c $((32 * 6000000)) $D/pool8.bin > $D/headcheck/slice.bin     # any shuffled 32-byte pool
+V="--val $D/val.bin"
+S="--data $D/headcheck/slice.bin --hidden 512 --buckets 8 --king-buckets kb8m --factorise --mirror --epochs 3 --epoch-size 2000000 --seed 1"
+# 1. no-head regression: same net bytes as main's nnue-trainer-cuda
+git worktree add /tmp/rf-main origin/main
+RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path /tmp/rf-main/tools/nnue-trainer-cuda/Cargo.toml
+G_MAIN=/tmp/rf-main/tools/nnue-trainer-cuda/target/release/nnue-trainer-cuda
+$G train $S $V --out $D/headcheck/plain-new.bin --threads 2 && $G_MAIN train $S $V --out $D/headcheck/plain-old.bin --threads 2
+cmp $D/headcheck/plain-new.bin $D/headcheck/plain-old.bin
+# 2. CPU vs GPU with the head: epoch train / val losses within ~1e-5 (plain nets agree to ~1e-6)
+$C train $S $V --head --out $D/headcheck/cpu.bin --threads 12 | tee $D/headcheck/cpu.log
+$G train $S $V --head --out $D/headcheck/gpu.bin --threads 2 | tee $D/headcheck/gpu.log
+grep epoch $D/headcheck/cpu.log $D/headcheck/gpu.log
+# 3. deterministic: a rerun writes the same bytes
+$G train $S $V --head --out $D/headcheck/gpu2.bin --threads 2 && cmp $D/headcheck/gpu.bin $D/headcheck/gpu2.bin
+# 4. warm start from a plain net is exact (start val loss = the plain net's, both trainers)
+$G train $S $V --head --init $D/headcheck/plain-new.bin --epochs 1 --max-batches 1 --out $D/headcheck/warm.bin --threads 2 | grep "start val"
+$C eval --net $D/headcheck/plain-new.bin --buckets 8 --king-buckets kb8m --val $D/val.bin
+# 5. checkpoints cross over: CPU checkpoint resumed on the GPU continues the CPU loss curve
+$C train $S $V --head --epochs 1 --out $D/headcheck/x.bin --threads 12
+$G train $S $V --head --resume $D/headcheck/x.ckpt --out $D/headcheck/y.bin --threads 2
+# 6. engine agreement on the GPU net (builds a HEAD engine in the workdir)
+python3 scripts/head_check.py --net $D/headcheck/gpu.bin --hidden 512 --king-buckets kb8m \
+    --records $D/val.bin --trainer $C --workdir $D/headcheck/engine
+```
+
+If 2 disagrees: compare one batch (`--epochs 1 --epoch-size 16384`,
+`--lr 1e-3`) with `eval` on both nets; a wrong head gradient shows as a
+diverging train loss within the first epoch, a wrong forward as a
+different start val loss (the start loss is computed by the shared CPU
+code, so it must agree exactly; the first epoch's train loss comes from
+the GPU forward).
+
 ## Kernels (per batch)
 
 1. `forward`: a block per sample (bucket-pair order), H/2 threads, float4
