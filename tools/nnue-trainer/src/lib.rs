@@ -909,19 +909,31 @@ fn init_factor(sh: Shape, rng: &mut Rng) -> Vec<f32> {
 /// `--factorise --init`: a one-bucket net goes into `F` (`W = 0`, so every
 /// bucket starts as that net's rows); a net of the full bucketed shape goes
 /// into `W` with `F = 0`.
-fn load_init_factor(path: &Path, sh: Shape) -> Vec<f32> {
+fn load_init_factor(path: &Path, sh: Shape, rng: &mut Rng) -> Vec<f32> {
     let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
+    // `--head` from a plain net: add a head whose output starts at 0 (add_head).
+    let mut headed = |p: Vec<f32>, s: Shape| -> Vec<f32> {
+        if sh.hd > 0 && s.hd == 0 {
+            println!("init: {} has no head; added one whose output starts at 0 (W3 = 0)", path.display());
+            add_head(&p, Shape { kb: sh.kb, ..s }, rng)
+        } else {
+            p
+        }
+    };
     if Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some() {
         let (p, s) = load_net(path, sh.buckets, sh.kb);
-        assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+        assert_eq!(Shape { hd: sh.hd, ..s }, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+        assert!(s.hd <= sh.hd, "init net has a head; add --head");
         println!("init: {} has all {} king buckets; factoriser starts at 0", path.display(), sh.kb);
-        return factor_vector(p, sh, None);
+        return factor_vector(headed(p, s), sh, None);
     }
     let (p1, s1) = load_net(path, sh.buckets, 1);
-    assert_eq!(Shape { kb: sh.kb, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    assert_eq!(Shape { kb: sh.kb, hd: sh.hd, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    assert!(s1.hd <= sh.hd, "init net has a head; add --head");
     println!("init: {} is a one-bucket net; its FT rows become the factoriser, buckets start at 0", path.display());
     let mut p = vec![0.0f32; sh.ft_b()];
     p.extend_from_slice(&p1[s1.ft_b()..]);
+    let p = headed(p, s1);
     factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
 }
 
@@ -1796,7 +1808,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
         (Some(r), _) => load_ckpt(r, sh, kl, fac),
         (None, Some(i)) => {
             let p = if fac.on() {
-                load_init_factor(i, sh)
+                load_init_factor(i, sh, &mut rng)
             } else {
                 let (mut p, s) = load_init(i, sh.buckets, sh.kb);
                 if sh.hd > 0 && s.hd == 0 {
@@ -2235,7 +2247,7 @@ mod tests {
         let init = dir.join("plain.bin");
         File::create(&init).unwrap().write_all(&quantize(&p1, s1)).unwrap();
         let q1 = dequantize(&quantize(&p1, s1), s1);
-        let pi = load_init_factor(&init, sh);
+        let pi = load_init_factor(&init, sh, &mut Rng::new(1));
         merge_factor(&pi, sh, fac, &mut m);
         assert_eq!(m, expand_buckets(&q1, s1, sh.kb));
         assert_eq!(&pi[sh.len()..], &q1[..s1.ft_b()]);

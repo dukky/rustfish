@@ -16,6 +16,13 @@ fn main() {
     });
     let arch = std::env::var("NNUE_CUDA_ARCH").unwrap_or_else(|_| "compute_61".into());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("kernels.ptx");
+    // `NNUE_CUDA_NO_NVCC=1 cargo check`: type-check the host code on a
+    // machine without the toolkit (an empty PTX; the binary cannot run).
+    println!("cargo:rerun-if-env-changed=NNUE_CUDA_NO_NVCC");
+    if std::env::var("NNUE_CUDA_NO_NVCC").is_ok() {
+        std::fs::write(&out, "").unwrap();
+        return;
+    }
     let st = Command::new(&nvcc)
         .args(["-ptx", "-O3", &format!("-arch={arch}"), "-Wno-deprecated-gpu-targets", "src/kernels.cu", "-o"])
         .arg(&out)

@@ -10,6 +10,24 @@
 
 #define INPUTS 768
 #define CLIP 1.98f
+// --head (docs/nnue-deeper-head.md): per output bucket W1 [H1][2H], b1,
+// W2 [H2][H1], b2, W3 [H2], b3 after the output biases in `rest`; per
+// sample scratch hs[HS] = z1 (H1) | z2 (H2) | dz1 (H1) | dz2 (H2), the CPU
+// trainer's layout (nnue_trainer::HS). UNTESTED ON CUDA (written without a
+// GPU; see README "Head: validating on the GPU").
+#define H1 16
+#define H2 32
+#define HS 96
+#define HSMALL (H1 + H2 * H1 + H2 + H2 + 1)
+__device__ __forceinline__ int head_len(int H) { return H1 * 2 * H + HSMALL; }
+__device__ __forceinline__ const float *head_of(const float *rest, int H, int buckets, int b) {
+    return rest + H + buckets * 2 * H + buckets + (size_t)b * head_len(H);
+}
+__device__ __forceinline__ float sq01(float z) {
+    float c = fminf(fmaxf(z, 0.f), 1.f);
+    return c * c;
+}
+__device__ __forceinline__ float dsq01(float z) { return (z > 0.f && z < 1.f) ? 2.0f * z : 0.0f; }
 
 struct GSample {
     uint16_t f[2][32];
@@ -39,7 +57,8 @@ __device__ __forceinline__ float4 row4(const __half *wt, size_t at) {
 
 template <typename W>
 __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *order, const W *wt, const float *rest,
-                                             float *acc, float *gout, float *loss, int H, int buckets) {
+                                             float *acc, float *gout, float *loss, int H, int buckets, float *hs,
+                                             int hd) {
     int sample = order[blockIdx.x];
     const GSample &s = ss[sample];
     int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
@@ -78,6 +97,68 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
     for (int o = 16; o; o >>= 1) part += __shfl_down_sync(0xffffffff, part, o);
     __shared__ float red[32];
     if ((t & 31) == 0) red[t >> 5] = part;
+    if (hd) {
+        // Head L1 partials of this thread's 4 columns, per z1 row q, then a
+        // fixed-order reduction: warp shuffle tree, then warps in order.
+        __shared__ float hred[32][H1];
+        __shared__ float z1s[H1], dz2s[H2];
+        const float *hp = head_of(rest, H, buckets, s.bucket);
+        const float *w1 = hp + side * H + c;
+        float a0 = x0 * x0, a1 = x1 * x1, a2 = x2 * x2, a3 = x3 * x3;
+#pragma unroll
+        for (int q = 0; q < H1; q++) {
+            const float *r = w1 + (size_t)q * 2 * H;
+            float pq = a0 * r[0] + a1 * r[1] + a2 * r[2] + a3 * r[3];
+            for (int o = 16; o; o >>= 1) pq += __shfl_down_sync(0xffffffff, pq, o);
+            if ((t & 31) == 0) hred[t >> 5][q] = pq;
+        }
+        __syncthreads();
+        if (t < 32) {
+            int nw = blockDim.x >> 5;
+            const float *b1 = hp + H1 * 2 * H, *w2 = b1 + H1, *b2 = w2 + H2 * H1, *w3 = b2 + H2, *b3 = w3 + H2;
+            float z1 = 0.0f;
+            if (t < H1) {
+                z1 = b1[t];
+                for (int i = 0; i < nw; i++) z1 += hred[i][t];
+                z1s[t] = z1;
+            }
+            __syncwarp();
+            // Lane m: z2[m] and its L3 term.
+            float z2 = b2[t];
+#pragma unroll
+            for (int k = 0; k < H1; k++) z2 += sq01(z1s[k]) * w2[t * H1 + k];
+            float o3 = sq01(z2) * w3[t];
+            for (int o = 16; o; o >>= 1) o3 += __shfl_down_sync(0xffffffff, o3, o);
+            float g = 0.0f;
+            if (t == 0) {
+                float sum = 0;
+                for (int i = 0; i < nw; i++) sum += red[i];
+                float out = ob[s.bucket] + sum;
+                out += b3[0] + o3;
+                float pred = 1.0f / (1.0f + expf(-out));
+                float err = pred - s.target;
+                g = 2.0f * err * pred * (1.0f - pred);
+                gout[sample] = g;
+                loss[sample] = err * err;
+            }
+            g = __shfl_sync(0xffffffff, g, 0);
+            // Head backward (as head_backward): dz2 = g W3 dsq(z2),
+            // dz1 = dsq(z1) sum_m dz2[m] W2[m][k].
+            float dz2 = g * w3[t] * dsq01(z2);
+            dz2s[t] = dz2;
+            __syncwarp();
+            float *hsp = hs + (size_t)sample * HS;
+            hsp[H1 + t] = z2;
+            hsp[2 * H1 + H2 + t] = dz2;
+            if (t < H1) {
+                float sm = 0.0f;
+                for (int m = 0; m < H2; m++) sm += dz2s[m] * w2[m * H1 + t];
+                hsp[t] = z1;
+                hsp[H1 + H2 + t] = sm * dsq01(z1);
+            }
+        }
+        return;
+    }
     __syncthreads();
     if (t == 0) {
         float sum = 0;
@@ -91,14 +172,14 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
 }
 
 extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
-                                   float *acc, float *gout, float *loss, int H, int buckets) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets);
+                                   float *acc, float *gout, float *loss, int H, int buckets, float *hs, int hd) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
 }
 
 // `--half`: the same with the fp16 copy of the merged FT rows.
 extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order, const __half *wt, const float *rest,
-                                        float *acc, float *gout, float *loss, int H, int buckets) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets);
+                                        float *acc, float *gout, float *loss, int H, int buckets, float *hs, int hd) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
 }
 
 // ---------------------------------------------------------------- FT backward
@@ -137,7 +218,8 @@ extern "C" __global__ void plan_masks(const GSample *ss, const uint32_t *pairs, 
 extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss, const uint32_t *pairs,
                                                               const Item *items, const uint32_t *masks,
                                                               const float *acc, const float *gout,
-                                                              const float *rest, float *part, int H) {
+                                                              const float *rest, float *part, int H,
+                                                              const float *hs, int hd, int buckets) {
     __shared__ float sd[2][R][32];
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int col = blockIdx.x * 32 + lane;
@@ -158,7 +240,17 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
             float x = acc[((size_t)j * 2 + side) * H + col];
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[s.bucket * 2 * H + side * H + col];
-            sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
+            if (hd) {
+                // As train_sample: e = sum_q dz1[q] W1[q][i], dacc = (g w + e) 2 a.
+                const float *w1 = head_of(rest, H, buckets, s.bucket) + side * H + col;
+                const float *dz = hs + (size_t)j * HS + H1 + H2;
+                float e = 0.0f;
+#pragma unroll
+                for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
+                sd[buf][r][lane] = (x > 0.f && x < 1.f) ? (gout[j] * w + e) * 2.0f * c : 0.0f;
+            } else {
+                sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
+            }
         }
         // Double-buffered staging: one barrier per range.
         __syncthreads();
@@ -190,7 +282,7 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
 // sample order. pr layout per chunk: ow (B * 2H) | bias (2H) | ob (B).
 #define CH 256
 extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, const float *gout, const float *rest,
-                                         float *pr, int H, int buckets, int n) {
+                                         float *pr, int H, int buckets, int n, const float *hs, int hd) {
     int cc = blockIdx.x * blockDim.x + threadIdx.x;  // side * H + col
     int chunk = blockIdx.y;
     int j0 = chunk * CH, j1 = min(j0 + CH, n);
@@ -208,7 +300,16 @@ extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, co
 #pragma unroll
             for (int k = 0; k < 8; k++)
                 if (k == b) gw[k] += gg * c * c;
-            gb += (x > 0.f && x < 1.f) ? gg * w * 2.0f * c : 0.0f;
+            if (hd) {
+                const float *w1 = head_of(rest, H, buckets, b) + cc;
+                const float *dz = hs + (size_t)j * HS + H1 + H2;
+                float e = 0.0f;
+#pragma unroll
+                for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
+                gb += (x > 0.f && x < 1.f) ? (gg * w + e) * 2.0f * c : 0.0f;
+            } else {
+                gb += (x > 0.f && x < 1.f) ? gg * w * 2.0f * c : 0.0f;
+            }
         }
         for (int k = 0; k < buckets; k++) out[(size_t)k * 2 * H + cc] = gw[k];
         out[(size_t)buckets * 2 * H + cc] = gb;
@@ -241,6 +342,73 @@ extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int
         for (int k = 0; k < chunks; k++) s += pr[k * stride + (size_t)buckets * 2 * H + 2 * H + b];
     }
     grest[i] = s;
+}
+
+// ---------------------------------------------------------------- head backward (--head)
+
+// Partials of chunk `chunk` (CH samples) in the head's own layout:
+// ph[chunk][bucket][head_len]. W1: thread = lane cc of 2H, grid.y = chunk *
+// buckets + bucket; each thread walks the chunk's samples of its bucket in
+// sample order (gW1[q][cc] += dz1[q] * a^2, as train_sample).
+extern "C" __global__ void backward_head_w1(const GSample *ss, const float *acc, const float *hs, float *ph, int H,
+                                            int buckets, int n) {
+    int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.y % buckets, chunk = blockIdx.y / buckets;
+    if (cc >= 2 * H) return;
+    int j0 = chunk * CH, j1 = min(j0 + CH, n);
+    float g[H1];
+#pragma unroll
+    for (int q = 0; q < H1; q++) g[q] = 0.0f;
+    for (int j = j0; j < j1; j++) {
+        if (ss[j].bucket != b) continue;
+        float c = fminf(fmaxf(acc[(size_t)j * 2 * H + cc], 0.f), 1.f);
+        float a2 = c * c;
+        const float *dz = hs + (size_t)j * HS + H1 + H2;
+#pragma unroll
+        for (int q = 0; q < H1; q++) g[q] += dz[q] * a2;
+    }
+    float *out = ph + ((size_t)chunk * buckets + b) * head_len(H);
+#pragma unroll
+    for (int q = 0; q < H1; q++) out[(size_t)q * 2 * H + cc] = g[q];
+}
+
+// b1, W2, b2, W3, b3 (HSMALL params per bucket, thread = param), grid
+// (buckets, chunks); as head_small_grads.
+extern "C" __global__ void backward_head_small(const GSample *ss, const float *gout, const float *hs, float *ph, int H,
+                                               int buckets, int n) {
+    int b = blockIdx.x, chunk = blockIdx.y, t = threadIdx.x;
+    if (t >= HSMALL) return;
+    int j0 = chunk * CH, j1 = min(j0 + CH, n);
+    float sm = 0.0f;
+    for (int j = j0; j < j1; j++) {
+        if (ss[j].bucket != b) continue;
+        const float *z = hs + (size_t)j * HS;
+        const float *z1 = z, *z2 = z + H1, *dz1 = z + H1 + H2, *dz2 = z + 2 * H1 + H2;
+        float g = gout[j];
+        if (t < H1) {
+            sm += dz1[t];
+        } else if (t < H1 + H2 * H1) {
+            int m = (t - H1) / H1, k = (t - H1) % H1;
+            sm += dz2[m] * sq01(z1[k]);
+        } else if (t < H1 + H2 * H1 + H2) {
+            sm += dz2[t - H1 - H2 * H1];
+        } else if (t < H1 + H2 * H1 + 2 * H2) {
+            sm += g * sq01(z2[t - H1 - H2 * H1 - H2]);
+        } else {
+            sm += g;
+        }
+    }
+    ph[((size_t)chunk * buckets + b) * head_len(H) + H1 * 2 * H + t] = sm;
+}
+
+// Head gradient = the chunk partials summed in chunk order.
+extern "C" __global__ void reduce_head(const float *ph, float *grest, int H, int buckets, int chunks) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t nh = (size_t)buckets * head_len(H);
+    if (i >= nh) return;
+    float sm = 0.0f;
+    for (int k = 0; k < chunks; k++) sm += ph[(size_t)k * nh + i];
+    grest[H + buckets * 2 * H + buckets + i] = sm;
 }
 
 // ---------------------------------------------------------------- AdamW

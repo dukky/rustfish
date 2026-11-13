@@ -9,7 +9,7 @@
 
 use nnue_trainer::batch::{par_units, BatchTrainer, Pool};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use nnue_trainer::{decode, Adam, Backend, BackendCfg, KingLayout, Rec, Shape, CLIP, INPUTS};
+use nnue_trainer::{decode, Adam, Backend, BackendCfg, KingLayout, Rec, Shape, CLIP, H1, HS, INPUTS};
 use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -249,6 +249,9 @@ struct Kernels {
     reduce_rest: Handle,
     adam_flat: Handle,
     adam_ft: Handle,
+    backward_head_w1: Handle,
+    backward_head_small: Handle,
+    reduce_head: Handle,
 }
 
 struct GpuTrainer {
@@ -277,6 +280,10 @@ struct GpuTrainer {
     prest: DBuf<f32>,
     acc: DBuf<f32>,
     gout: DBuf<f32>,
+    /// `--head`: per-sample head scratch (z1, z2, dz1, dz2; `HS` floats) and
+    /// the per-chunk head gradient partials `[chunk][bucket][head_len]`.
+    hsc: DBuf<f32>,
+    phead: DBuf<f32>,
     slots: [Slot; 2],
     /// Per range of R pairs: per-feature bitmasks of its pairs (plan_masks).
     masks: DBuf<u32>,
@@ -299,7 +306,10 @@ impl GpuTrainer {
         let sh = cfg.sh;
         assert!(sh.h % 64 == 0 && sh.h <= 2048, "nnue-trainer-cuda: --hidden must be a multiple of 64, at most 2048");
         assert!(sh.buckets <= 8 && sh.kb <= 64, "nnue-trainer-cuda: at most 8 output buckets, 64 king buckets");
-        assert!(sh.hd == 0, "nnue-trainer-cuda: no --head support yet (CPU trainer only, see docs/nnue-deeper-head.md)");
+        assert!(sh.hd <= 1, "nnue-trainer-cuda: unknown head");
+        if sh.hd > 0 {
+            eprintln!("nnue-trainer-cuda: --head is UNTESTED ON CUDA; validate against the CPU trainer first (README)");
+        }
         let (h, rows, b) = (sh.h, sh.kb * INPUTS, cfg.batch);
         let nrest = sh.len() - sh.ft_b();
         ck(unsafe { cuInit(0) }, "init");
@@ -329,6 +339,9 @@ impl GpuTrainer {
             reduce_rest: get("reduce_rest"),
             adam_flat: get("adam_flat"),
             adam_ft: get("adam_ft"),
+            backward_head_w1: get("backward_head_w1"),
+            backward_head_small: get("backward_head_small"),
+            reduce_head: get("reduce_head"),
         };
         let max_items = (2 * b).div_ceil(WI) + sh.kb;
         let max_ranges = (2 * b).div_ceil(R) + max_items;
@@ -363,6 +376,8 @@ impl GpuTrainer {
             prest: DBuf::new(chunks * prest_stride),
             acc: DBuf::new(b * 2 * h),
             gout: DBuf::new(b),
+            hsc: DBuf::new(if sh.hd > 0 { b * HS } else { 0 }),
+            phead: DBuf::new(if sh.hd > 0 { chunks * sh.buckets * sh.head_len() } else { 0 }),
             slots: [Slot::new(b, max_items, max_ranges, sh.kb, rows), Slot::new(b, max_items, max_ranges, sh.kb, rows)],
             masks: DBuf::new(max_ranges * INPUTS * (R / 32)),
             slot: 0,
@@ -546,18 +561,29 @@ impl Backend for GpuTrainer {
         use Arg::*;
         let k = &self.k;
         let (fwd, wt) = if self.half { (k.forward_half, self.wth.ptr) } else { (k.forward, self.wt.ptr) };
-        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi)]);
+        let hd = sh.hd as i32;
+        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), P(self.hsc.ptr), I(hd)]);
         launch(k.plan_masks, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.masks.ptr), I(nr as i32)]);
         launch(
             k.backward_ft,
             ((h / 32) as u32, ni as u32),
             1024,
             st,
-            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.masks.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi)],
+            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.masks.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), P(self.hsc.ptr), I(hd), I(bi)],
         );
         let chunks = n.div_ceil(CH);
-        launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn)]);
+        launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn), P(self.hsc.ptr), I(hd)]);
         launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+        if sh.hd > 0 {
+            // Head gradients: W1 per (lane, bucket, chunk), the small layers
+            // per (bucket, chunk), then summed in chunk order into gr.
+            let (bu, ch) = (sh.buckets as u32, chunks as u32);
+            launch(k.backward_head_w1, ((2 * h).div_ceil(256) as u32, ch * bu), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.hsc.ptr), P(self.phead.ptr), I(hi), I(bi), I(nn)]);
+            let small = sh.head_len() - H1 * 2 * h;
+            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(sl.ss.ptr), P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), I(hi), I(bi), I(nn)]);
+            let nh = sh.buckets * sh.head_len();
+            launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+        }
         let act = if wd_active { sl.active.ptr } else { 0 };
         launch(
             k.adam_ft,

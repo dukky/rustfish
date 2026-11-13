@@ -159,3 +159,30 @@ bit for bit (tests).
 true` (no `--match-scale`: it rescales only the linear output).
 `scripts/head_check.py --net N --records val.bin --workdir D` builds a head
 engine in `D` and checks it against `nnue-trainer fen-eval`.
+
+**Trainer speed (CPU, M3, 2 threads, H512 kb8m, interleaved):** plain
+~150k pos/s; `--head` 52-60k (head-v1) -> 70-76k after moving the 16-term
+loop outermost in the FT-tile backward (bit-identical). The rest of the
+head cost is the per-sample W1 gradient read-modify-write and the `e` sum
+(~7 vector ops per W1 element per sample); keeping a tile's W1 gradient in
+registers over runs of same-bucket samples (stable bucket order keeps
+every element's summation order) is the next step, est. 1.3x more.
+
+**CUDA:** ported, untested (tools/nnue-trainer-cuda/README.md, "Head").
+
+## Step 2 on the desktop (H512 kb8m + head vs main)
+
+1. Validate the CUDA head (tools/nnue-trainer-cuda/README.md checklist).
+2. Train with the gen-8/9 chain recipe at H 512 with `--head` on every
+   stage (copy `~/rustfish-data/gen9.sh`, set `--hidden 512`, add
+   `--head`): plain H512 -> m1 -> kb8m factoriser. `--init` carries the
+   head through the chain (head nets load as head nets); `--init <plain
+   net> --head` instead adds a zero-output head (W3 = 0, exact start) if
+   only the last stage should have one. Data: `--data pool9.list
+   --shuffle-buffer 67108864 --stream-stride 4 --epoch-size N`.
+3. `nnue-trainer permute --net net.bin --buckets 8 --king-buckets kb8m
+   --data val.bin --out net-p.bin` (exact; fewer nonzero L1 chunks).
+4. `python3 scripts/head_check.py --net net-p.bin --records val.bin
+   --workdir /tmp/headeng` (agreement + a HEAD engine for bench/NPS),
+   then `scripts/netloop.py embed --head --hidden 512 --buckets 8
+   --king-buckets kb8m ...` and an `stc` gate against main.
