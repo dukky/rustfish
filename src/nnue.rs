@@ -449,6 +449,34 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
     e.bb = *bb;
 }
 
+/// Cache line size the prefetches step by (Apple cores: 128 bytes).
+const LINE_I16: usize = if cfg!(target_arch = "aarch64") { 64 } else { 32 };
+
+#[inline(always)]
+fn prefetch_row(row: &[i16; H]) {
+    let mut i = 0;
+    while i < H {
+        prefetch(row[i..].as_ptr());
+        i += LINE_I16;
+    }
+}
+
+#[inline(always)]
+fn prefetch(p: *const i16) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch is only a hint; SSE is baseline on x86-64.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p as *const i8, std::arch::x86_64::_MM_HINT_T0)
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: a prefetch is only a hint and never faults.
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, readonly, preserves_flags))
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = p;
+}
+
 /// Feature changes of one move: at most two additions and two removals
 /// (castling: king + rook; capture-promotion: pawn + victim removed).
 #[derive(Clone, Copy, Default)]
@@ -636,6 +664,20 @@ impl<L: Layout> NnueState<L> {
                     slot.refresh[pi] = true;
                     slot.bb = bb_after(board, &delta);
                 }
+            }
+        }
+        // Start fetching the feature rows this ply will need: the update
+        // runs at the next evaluate, typically after the child's TT probe
+        // and move generation, by which time the rows are on their way in.
+        let slot = &stack[self.top];
+        let net = &*self.net;
+        for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+            if L::REFRESH && slot.refresh[pi] {
+                continue;
+            }
+            let k = if L::REFRESH { slot.ctx[pi] } else { KingCtx::ZERO };
+            for &(sq, p) in delta.sub[..delta.n_sub].iter().chain(delta.add[..delta.n_add].iter()) {
+                prefetch_row(net.row(feature(persp, p.unwrap(), sq, k)));
             }
         }
     }
