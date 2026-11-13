@@ -4,7 +4,7 @@
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
-  "next_seed": 205,
+  "next_seed": 206,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
@@ -18,11 +18,5 @@
     "8e150ec6429f815ca3787a3f042afe5eb89bfad1",
     "c7818639afaefc95453fa2405ca0b1e34dec100c",
     "d40aa894aff68184008d8d9d2d18cbe96986cc4e"
-  ],
-  "cancel_sweep": [
-    {
-      "prefix": "SPRT q-simp2-qs-failsoft-1113-0924 ",
-      "until": "2026-11-13T21:51:03Z"
-    }
   ]
 }
