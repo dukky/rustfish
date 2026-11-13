@@ -72,7 +72,7 @@ struct Bucket {
 }
 
 struct TransTableInner {
-    buckets: Box<[Bucket]>,
+    buckets: crate::hugemem::HugeBuf<Bucket>,
     mask: usize,
     current_age: AtomicU8,
 }
@@ -187,7 +187,8 @@ impl TransTable {
         let n = if n.is_power_of_two() { n } else { n.next_power_of_two() / 2 };
         Self {
             inner: Arc::new(TransTableInner {
-                buckets: (0..n).map(|_| Bucket::default()).collect(),
+                // SAFETY: a Bucket is atomics only; all-zero = Bucket::default().
+                buckets: unsafe { crate::hugemem::HugeBuf::zeroed(n) },
                 mask: n - 1,
                 current_age: AtomicU8::new(0),
             }),

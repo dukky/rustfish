@@ -4,6 +4,7 @@ mod datagen;
 mod eval;
 mod evalcache;
 mod eval_params;
+mod hugemem;
 mod movegen;
 mod nnue;
 mod psqt;
