@@ -132,8 +132,11 @@ positions, H1024 kb8m, 2 epochs): streaming loader (64M buffer, stride 4)
 So pools are now manifests, no shuffle copies (merge `packed-data` to main
 next). **Gen 9 started 01:17** (`~/rustfish-data/gen9.sh`, logs in
 `gpu-jobs/`): pool9 by stream = pool8 + CI 62-118 + D2004 = **4.90B**, gen-8
-chain recipe, --half, no threats; ETA ~10:30. Threat net LTC diagnostic
-(manual, vs 0f6fda6, 60+0.6) running on CI. feat-history-prune rejected
+chain recipe, --half, no threats; ETA ~10:30. Threat net LTC diagnostic (manual, vs 0f6fda6, 60+0.6): **-3.0**
+[-11.6, +5.6] (1720 games) vs -23.2 at 10+0.1: the gap closes with time,
+so it is cost. In progress (subagents): `threats-fast` (threats on main's
+fused path, cheaper threat bitboards) and `head-v2` (deeper head: engine
+inference, faster CPU trainer, CUDA port). packed-data merged (4c75112). feat-history-prune rejected
 (-1.3). speed-1024 merged (00:09).
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
