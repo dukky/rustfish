@@ -124,6 +124,17 @@ measure with the desktop idle). Threat-cost ideas: route threat rows
 through the fused kernel in fixed chunks; reuse the move picker's attack
 maps instead of rebuilding per ply; i8 threat weights (trainer + format).
 PGO on desktop x86 still unmeasured.
+**Overnight 2026-11-13:** kb8m from scratch on pool8 (10 epochs) lost to
+the chain: best-scale 0.025897 / 0.024827 vs g8 0.025574 / 0.024364 (train
+0.0236 vs val 0.0270: still data-limited). **Packed-data A/B** (643M ci9
+positions, H1024 kb8m, 2 epochs): streaming loader (64M buffer, stride 4)
+**beat** the shuffled pool: 0.026742 / 0.025839 vs 0.026778 / 0.025897.
+So pools are now manifests, no shuffle copies (merge `packed-data` to main
+next). **Gen 9 started 01:17** (`~/rustfish-data/gen9.sh`, logs in
+`gpu-jobs/`): pool9 by stream = pool8 + CI 62-118 + D2004 = **4.90B**, gen-8
+chain recipe, --half, no threats; ETA ~10:30. Threat net LTC diagnostic
+(manual, vs 0f6fda6, 60+0.6) running on CI. feat-history-prune rejected
+(-1.3). speed-1024 merged (00:09).
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
