@@ -173,7 +173,9 @@ gen 9: CUDA check, then g9 + head fine-tune); (2) **overfitting sweep** on
 the M3 GPU (`~/rustfish-data/overfit-sweep.sh`: pool7, H512 plain, 4 epochs
 each: base, wd 0.01, mirror, lambda 0.3, lambda 0.7, wd 0.001; scored on
 val-current at lambda 0.5; laptop datagen stopped at L1009 54M); (3) a
-recent-data window test (drop the oldest seeds); (4) gen 10 as an
+recent-data window test (drop the oldest seeds; relabelling old data is
+parked by the owner: not on CI (bulk compute, same as datagen), and only a
+small desktop test arm if the window test shows old data hurts); (4) gen 10 as an
 **architecture generation** (head / threats trained from the start /
 winning training settings) rather than a data one; (5) **AVX2 speed**
 (subagent, branch `speed-avx2`, measured on the 9600X with datagen paused).
