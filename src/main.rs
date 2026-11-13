@@ -998,6 +998,7 @@ struct EngineState {
     history: HistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
+    corr: Box<search::CorrectionHistory>,
     search_params: SearchParams,
     lmr_table: [[i32; 64]; 64],
     searches_since_decay: u8,
@@ -1033,6 +1034,7 @@ impl EngineState {
             history: [[[[[0; 64]; 64]; 2]; 2]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            corr: search::CorrectionHistory::new_boxed(),
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
             searches_since_decay: 0,
@@ -1078,6 +1080,7 @@ impl EngineState {
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.corr.clear();
         self.searches_since_decay = 0;
         self.position_history.clear();
     }
@@ -1132,6 +1135,7 @@ impl EngineState {
             history: self.history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
+            corr: self.corr.clone(),
             search_params: self.search_params,
             lmr_table: self.lmr_table,
             searches_since_decay: 0,

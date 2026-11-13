@@ -33,6 +33,213 @@ const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
 
+// ---- Correction history ----------------------------------------------------
+// The static eval has errors that depend on parts of the position the net
+// sees only coarsely. Correction history learns them online: several additive
+// tables, each indexed by side to move and a hash of one slice of the
+// position, hold a running estimate of (search score - static eval):
+//   - pawn structure (CK_PAWN),
+//   - non-pawn pieces (N, B, R, Q, K) of white, and of black (CK_NONPAWN),
+//   - knights + bishops + kings of both colours (CK_MINOR),
+//   - continuation: the previous move's piece and to-square.
+//
+// Keys: hashed from the bitboards at the node (`CorrIdx::new`), not kept in
+// make/undo. Each (colour, kind) bitboard is folded and multiplied by its own
+// odd constant; a slice's key is the xor of its bitboards' products, and the
+// top bits index the table. Measured cheaper than incremental zobrist-subset
+// keys (those cost ~4 xor-updates per make/undo pair on every node, also on
+// nodes that never evaluate), and there is no incremental state to get wrong.
+//
+// corrected eval = raw + sum(weight_k * entry_k) / 2^CORR_WEIGHT_SHIFT, clamped
+// to +-CORR_EVAL_BOUND (clear of mate scores). It is the static eval for every
+// decision: futility/razoring, RFP, the NMP condition, improving, ProbCut and
+// qsearch stand-pat (the existing TT-bound refinement is applied on top).
+//
+// TT: stores the *raw* eval (net output, neither corrected nor TT-refined);
+// the correction is applied on every load, so stored evals never go stale as
+// the tables learn.
+//
+// Update (negamax only: not qsearch, not singular-verification searches):
+// when the node is not in check, the best move is neither a capture nor a
+// promotion, the score is not a mate score, and the bound is informative (a
+// fail-high only if score > corrected eval, a fail-low only if score <
+// corrected eval). Every entry used is pushed toward the residual
+// r = score - corrected eval (one shared residual for the additive tables, a
+// gradient step) with bonus = clamp(r * depth / CORR_BONUS_DEPTH_DIV,
+// +-CORR_LIMIT / 4) and gravity e += bonus - e * |bonus| / CORR_LIMIT, which
+// keeps every entry within +-CORR_LIMIT. Entries are in centipawns.
+pub(crate) const CORR_BITS: u32 = 14;
+pub(crate) const CORR_SIZE: usize = 1 << CORR_BITS;
+const CORR_LIMIT: i32 = 1024;
+const CORR_BONUS_DEPTH_DIV: i32 = 8;
+const CORR_WEIGHT_SHIFT: u32 = 10;
+const CK_PAWN: usize = 0;
+const CK_NONPAWN: [usize; 2] = [1, 2];
+const CK_MINOR: usize = 3;
+const CK_COUNT: usize = 4;
+// Weights out of 2^CORR_WEIGHT_SHIFT, by CK_* slot: pawn, non-pawn white,
+// non-pawn black, minor; then continuation. Conservative: a table can
+// move the eval by at most weight * CORR_LIMIT / 2^CORR_WEIGHT_SHIFT cp.
+const CORR_WEIGHTS: [i32; CK_COUNT] = [64, 56, 56, 40];
+const CORR_WEIGHT_CONT: i32 = 40;
+const CORR_EVAL_BOUND: i32 = MATE_SCORE - 2 * MAX_PLY as i32 - 1;
+// Odd multipliers per [colour][kind] bitboard (fixed random values). A static
+// read through black_box: loading them from memory is cheaper than the four
+// instructions per 64-bit immediate that constant folding would emit on ARM.
+static CK_MUL: [[u64; 6]; 2] = [
+    [0x04ABCDAB2DBC1C77, 0x21709310D5842321, 0xEB4995A65D3437A3, 0xE9686BEFA32F445F, 0x753B4FAC0276969B, 0x83EEEB6E10D13959],
+    [0x1854234621EBEA3B, 0x64374F030C657BB7, 0x8D6E3FF40D57462F, 0x99A4FA061C160B2B, 0x07F4651D4E08B4EF, 0xE2D49E4A4CAE7BE7],
+];
+
+/// The per-slice keys of a position, from its bitboards.
+#[inline(always)]
+fn corr_keys(bb: &crate::bitboard::BoardBB) -> [u64; CK_COUNT] {
+    // Without the fold, a piece on a high square would set only the top few
+    // product bits, the same ones for every multiplier.
+    #[inline(always)]
+    fn h(b: u64, m: u64) -> u64 {
+        (b ^ (b >> 29)).wrapping_mul(m)
+    }
+    let p = &bb.pieces;
+    let m: &[[u64; 6]; 2] = std::hint::black_box(&CK_MUL);
+    let (wp, wn, wb, wr, wq, wk) = (
+        h(p[0][0], m[0][0]),
+        h(p[0][1], m[0][1]),
+        h(p[0][2], m[0][2]),
+        h(p[0][3], m[0][3]),
+        h(p[0][4], m[0][4]),
+        h(p[0][5], m[0][5]),
+    );
+    let (bp, bn, bbi, br, bq, bk) = (
+        h(p[1][0], m[1][0]),
+        h(p[1][1], m[1][1]),
+        h(p[1][2], m[1][2]),
+        h(p[1][3], m[1][3]),
+        h(p[1][4], m[1][4]),
+        h(p[1][5], m[1][5]),
+    );
+    let (wminor, bminor, wmajor, bmajor) = (wn ^ wb, bn ^ bbi, wr ^ wq, br ^ bq);
+    let mut keys = [0u64; CK_COUNT];
+    keys[CK_PAWN] = wp ^ bp;
+    keys[CK_NONPAWN[0]] = wminor ^ wmajor ^ wk;
+    keys[CK_NONPAWN[1]] = bminor ^ bmajor ^ bk;
+    keys[CK_MINOR] = wminor ^ bminor ^ wk ^ bk;
+    keys
+}
+
+/// Where a node's correction lives: computed once per node, reused by the update.
+#[derive(Copy, Clone)]
+pub(crate) struct CorrIdx {
+    stm: usize,
+    slots: [u16; CK_COUNT],
+    /// piece_index(moved piece) * 64 + to of the move that led here.
+    cont: Option<u16>,
+}
+
+impl CorrIdx {
+    #[inline]
+    fn new(board: &Board, prev_move: Option<Move>) -> Self {
+        let keys = corr_keys(&board.bb);
+        let cont = prev_move.and_then(|mv| {
+            let piece = board.squares[mv.to as usize]?;
+            Some((crate::tt::piece_index(piece) * 64 + mv.to as usize) as u16)
+        });
+        Self {
+            stm: color_index(board.side_to_move),
+            slots: [
+                (keys[0] >> (64 - CORR_BITS)) as u16,
+                (keys[1] >> (64 - CORR_BITS)) as u16,
+                (keys[2] >> (64 - CORR_BITS)) as u16,
+                (keys[3] >> (64 - CORR_BITS)) as u16,
+            ],
+            cont,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CorrectionHistory {
+    /// [side to move][CK_* slice][key slot]
+    tables: [[[i16; CORR_SIZE]; CK_COUNT]; 2],
+    /// [side to move][piece_index(moved piece) * 64 + to]
+    cont: [[i16; 12 * 64]; 2],
+}
+
+impl CorrectionHistory {
+    pub(crate) fn new_boxed() -> Box<Self> {
+        Box::new(Self { tables: [[[0; CORR_SIZE]; CK_COUNT]; 2], cont: [[0; 12 * 64]; 2] })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.tables.as_flattened_mut().as_flattened_mut().fill(0);
+        self.cont.as_flattened_mut().fill(0);
+    }
+
+    /// Correction in centipawns for the side to move.
+    #[inline]
+    fn correction(&self, idx: &CorrIdx) -> i32 {
+        let t = &self.tables[idx.stm];
+        let mut sum = 0i32;
+        for k in 0..CK_COUNT {
+            sum += CORR_WEIGHTS[k] * t[k][idx.slots[k] as usize] as i32;
+        }
+        if let Some(i) = idx.cont {
+            sum += CORR_WEIGHT_CONT * self.cont[idx.stm][i as usize] as i32;
+        }
+        sum >> CORR_WEIGHT_SHIFT
+    }
+
+    /// Raw static eval -> corrected static eval.
+    #[inline]
+    fn apply(&self, idx: &CorrIdx, raw: i32) -> i32 {
+        (raw + self.correction(idx)).clamp(-CORR_EVAL_BOUND, CORR_EVAL_BOUND)
+    }
+
+    /// Pushes every entry used at a node toward `residual` (score - corrected eval).
+    fn update(&mut self, idx: &CorrIdx, depth: i32, residual: i32) {
+        let bonus = (residual * depth / CORR_BONUS_DEPTH_DIV).clamp(-CORR_LIMIT / 4, CORR_LIMIT / 4);
+        #[inline(always)]
+        fn gravity(e: &mut i16, bonus: i32) {
+            let v = *e as i32;
+            *e = (v + bonus - v * bonus.abs() / CORR_LIMIT).clamp(-CORR_LIMIT, CORR_LIMIT) as i16;
+        }
+        let t = &mut self.tables[idx.stm];
+        for k in 0..CK_COUNT {
+            gravity(&mut t[k][idx.slots[k] as usize], bonus);
+        }
+        if let Some(i) = idx.cont {
+            gravity(&mut self.cont[idx.stm][i as usize], bonus);
+        }
+    }
+}
+
+/// Folds a finished negamax node into the correction history, when its
+/// result says something about the static eval's error (see above).
+#[allow(clippy::too_many_arguments)]
+fn update_correction(
+    engine: &mut EngineState,
+    board: &Board,
+    idx: &CorrIdx,
+    depth: i32,
+    best: i32,
+    best_move: Option<Move>,
+    corr_eval: i32,
+    bound: Bound,
+) {
+    if best.abs() >= MATE_SCORE - 2 * MAX_PLY as i32 {
+        return;
+    }
+    if best_move.is_some_and(|mv| mv.promotion.is_some() || is_capture_move(board, mv)) {
+        return;
+    }
+    match bound {
+        Bound::Lower if best <= corr_eval => return,
+        Bound::Upper if best >= corr_eval => return,
+        _ => {}
+    }
+    engine.corr.update(idx, depth, best - corr_eval);
+}
+
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
 // gets a sequence number; `stop` marks every go issued so far as stopped. Tying
 // stops to go numbers means a `stop` read before its `go` starts still applies,
@@ -313,8 +520,9 @@ fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) 
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
 }
 
-fn tt_static_eval(entry: crate::tt::TTEntry, ply: usize) -> Option<i32> {
-    let mut se = entry.static_eval()?;
+/// Tightens a static eval with the TT entry's score bound, if not a mate score.
+fn tt_refine_eval(tt_entry: Option<crate::tt::TTEntry>, mut se: i32, ply: usize) -> i32 {
+    let Some(entry) = tt_entry else { return se };
     let tt_score = score_from_tt(entry.score, ply);
     if tt_score.abs() < MATE_SCORE - 1000 {
         match entry.bound {
@@ -323,7 +531,7 @@ fn tt_static_eval(entry: crate::tt::TTEntry, ply: usize) -> Option<i32> {
             Bound::Exact => se = tt_score,
         }
     }
-    Some(se)
+    se
 }
 
 struct RootWorkerResult {
@@ -1289,7 +1497,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check));
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
     }
 
     let alpha_orig = alpha;
@@ -1313,16 +1521,21 @@ fn negamax(
         }
     }
 
+    // raw_static_eval: the net's eval (TT field or eval cache); the TT stores this.
+    // corr_eval: raw + correction history. static_eval: corr_eval tightened by
+    // the TT bound; drives every pruning decision below.
     let raw_static_eval = if in_check {
         None
     } else {
         Some(
             tt_entry
-                .and_then(|entry| tt_static_eval(entry, ply))
+                .and_then(|entry| entry.static_eval())
                 .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
-    let static_eval = raw_static_eval;
+    let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
+    let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
+    let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
     // Improving: our static eval beats the one from our previous move (two plies up).
     let improving = match static_eval {
@@ -1342,7 +1555,7 @@ fn negamax(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check));
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
             }
         }
 
@@ -1476,6 +1689,7 @@ fn negamax(
                     child_key,
                     ply + 1,
                     None,
+                    Some(mv),
                 );
                 if score >= probcut_beta && !search.stop {
                     score = -negamax(
@@ -1813,6 +2027,9 @@ fn negamax(
                 }
             }
             if excluded.is_none() {
+                if let (Some(ce), Some(ci)) = (corr_eval, corr_idx) {
+                    update_correction(engine, board, &ci, depth, best, best_move, ce, Bound::Lower);
+                }
                 engine.tt.store(
                     key,
                     depth,
@@ -1837,6 +2054,9 @@ fn negamax(
     } else {
         Bound::Exact
     };
+    if let (Some(ce), Some(ci)) = (corr_eval, corr_idx) {
+        update_correction(engine, board, &ci, depth, best, best_move, ce, bound);
+    }
     engine
         .tt
         .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
@@ -1850,7 +2070,7 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     let key = board_hash(board, &engine.zobrist);
     let mut search = Search::new(None);
     let mut rep_stack = vec![key];
-    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None);
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None, None);
     (q - eval_for_side(board)).abs()
 }
 
@@ -1865,6 +2085,8 @@ fn quiescence(
     ply: usize,
     // Whether the side to move is in check, when the caller already knows.
     known_in_check: Option<bool>,
+    // The move that led here (continuation correction history).
+    prev_move: Option<Move>,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -1912,11 +2134,13 @@ fn quiescence(
     } else {
         Some(
             tt_entry
-                .and_then(|entry| tt_static_eval(entry, ply))
+                .and_then(|entry| entry.static_eval())
                 .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
-    let static_eval = raw_static_eval;
+    // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
+    let static_eval = raw_static_eval
+        .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
@@ -1965,7 +2189,7 @@ fn quiescence(
         engine.tt.prefetch(child_key);
         engine.eval_cache.prefetch(child_key);
         rep_stack.push(child_key);
-        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None);
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv));
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -2498,6 +2722,111 @@ mod tests {
     use super::*;
     use std::thread;
 
+    /// The board with only the given [colour][kind] bitboards kept.
+    fn bb_subset(bb: &crate::bitboard::BoardBB, keep: impl Fn(usize, usize) -> bool) -> crate::bitboard::BoardBB {
+        let mut out = *bb;
+        for c in 0..2 {
+            for k in 0..6 {
+                if !keep(c, k) {
+                    out.pieces[c][k] = 0;
+                }
+            }
+        }
+        out
+    }
+
+    /// Each correction key depends on exactly its slice of the position.
+    #[test]
+    fn corr_keys_depend_only_on_their_slice() {
+        let mut board = Board::new();
+        board.set_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let bb = board.bb;
+        let keys = corr_keys(&bb);
+        let slices: [(usize, &dyn Fn(usize, usize) -> bool); CK_COUNT] = [
+            (CK_PAWN, &|_, k| k == 0),
+            (CK_NONPAWN[0], &|c, k| c == 0 && k != 0),
+            (CK_NONPAWN[1], &|c, k| c == 1 && k != 0),
+            (CK_MINOR, &|_, k| matches!(k, 1 | 2 | 5)),
+        ];
+        for (slot, keep) in slices {
+            assert_eq!(keys[slot], corr_keys(&bb_subset(&bb, keep))[slot], "slot {slot}");
+            // Removing any one piece of the slice changes the key.
+            for c in 0..2 {
+                for k in 0..6 {
+                    if keep(c, k) && bb.pieces[c][k] != 0 {
+                        let mut less = bb;
+                        less.pieces[c][k] &= less.pieces[c][k] - 1;
+                        assert_ne!(keys[slot], corr_keys(&less)[slot], "slot {slot} c {c} k {k}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Keys from the incrementally kept bitboards equal keys from scratch
+    /// along random games rich in castling, en passant and promotions, after
+    /// every make and every undo; and distinct pawn structures spread over
+    /// the table.
+    #[test]
+    fn corr_keys_after_random_moves_match_from_scratch() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r3k2r/1P4P1/8/2pPp3/8/8/1p4p1/R3K2R w KQkq e6 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        let (mut castles, mut eps, mut promos) = (0, 0, 0);
+        let mut rng = 0x1234_5678_9abc_def1u64;
+        let mut legal = Vec::new();
+        let mut pawn_structs = std::collections::HashMap::new();
+        for fen in fens {
+            for _ in 0..40 {
+                let mut board = Board::new();
+                board.set_fen(fen);
+                let mut line: Vec<(Move, Undo, [u64; CK_COUNT])> = Vec::new();
+                for _ in 0..80 {
+                    board.generate_legal_moves(false, &mut legal);
+                    if legal.is_empty() {
+                        break;
+                    }
+                    let special: Vec<Move> = legal
+                        .iter()
+                        .copied()
+                        .filter(|m| m.is_castle || m.is_en_passant || m.promotion.is_some())
+                        .collect();
+                    let r = crate::tt::splitmix64(&mut rng);
+                    let mv = if !special.is_empty() && r % 3 == 0 {
+                        special[(r >> 8) as usize % special.len()]
+                    } else {
+                        legal[(r >> 8) as usize % legal.len()]
+                    };
+                    castles += mv.is_castle as u32;
+                    eps += mv.is_en_passant as u32;
+                    promos += mv.promotion.is_some() as u32;
+                    let before = corr_keys(&board.bb);
+                    let undo = board.make_move(mv);
+                    let keys = corr_keys(&board.bb);
+                    assert_eq!(keys, corr_keys(&board.recompute_bb()), "after {mv:?} from {fen}");
+                    let pawns = (board.bb.pieces[0][0], board.bb.pieces[1][0]);
+                    pawn_structs.insert(pawns, CorrIdx::new(&board, Some(mv)).slots[CK_PAWN]);
+                    line.push((mv, undo, before));
+                }
+                while let Some((mv, undo, before)) = line.pop() {
+                    board.undo_move(mv, undo);
+                    assert_eq!(corr_keys(&board.bb), before);
+                    assert_eq!(before, corr_keys(&board.recompute_bb()));
+                }
+            }
+        }
+        assert!(castles > 0 && eps > 0 && promos > 0, "{castles} {eps} {promos}");
+        // n structures into CORR_SIZE slots: expect about n - n^2 / (2 * size) distinct.
+        let n = pawn_structs.len() as f64;
+        let distinct = pawn_structs.values().collect::<std::collections::HashSet<_>>().len() as f64;
+        let expected = CORR_SIZE as f64 * (1.0 - (-n / CORR_SIZE as f64).exp());
+        assert!(n > 2000.0 && distinct > 0.97 * expected, "n {n} distinct {distinct} expected {expected}");
+    }
+
     #[test]
     fn insufficient_material_detector() {
         let check = |fen: &str, expected: bool| {
@@ -2809,6 +3138,7 @@ mod tests {
                     key,
                     3,
                     None,
+                    None,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 3);
@@ -2848,6 +3178,7 @@ mod tests {
                     &mut rep_stack,
                     key,
                     5,
+                    None,
                     None,
                 );
 
