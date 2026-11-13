@@ -25,11 +25,50 @@ evidence** for or against an idea.
    training finishes (netloop record), whatever the gate result; the
    dashboard shows gate status from the queue log automatically.
 
-### Fixed validation set
+### Validation sets (rule, 2026-11-13)
 
-`val.bin`: the last 1,000,000 positions of seed 9 (net4 self-play, 8000
-nodes), removed from the seed-9 training file. Positions come from games the
-nets never trained on. Labels: `lambda = 0.5`.
+Screening uses a **current** validation set held out from recent data, not
+a fixed one. The original `val.bin` (last 1M positions of seed 9, net4
+self-play) and `val17x2` (seed 17 tail, x2) come from engines ~1000 Elo
+weaker than today's; by gen 7-9 they measured an outdated distribution
+(score scale drifted, slope 1.19 -> 1.29) and nearly stopped separating
+nets. Calibration on the kb8m nets (best-scale loss deltas vs gate Elo):
+
+| step | val.bin | val17x2 | valL1008 | gate |
+|---|---|---|---|---|
+| g4 -> g5kb8m | -5.7e-5 | -2.2e-4 | -6.2e-4 | +30.4 |
+| g5 -> g6kb8m | -5.4e-5 | -1.8e-4 | -4.4e-4 | +17.2 |
+| g6 -> g7kb8m | -1.1e-5 | -1.1e-4 | -3.7e-4 | +30.6 |
+| g7kb8m -> g7h1024kb8m | -1.8e-4 | -2.2e-4 | -3.6e-4 | +11.5 (-28% NPS) |
+| g7h1024kb8m -> g8h1024kb8m | -6.3e-5 | -2.3e-4 | -8.1e-4 | +37.2 |
+| g8 -> g8 + threats (ep) | -2.3e-4 | -2.7e-4 | -2.3e-4 | -23.2 (-21% NPS) |
+
+Loss alone cannot predict nets that change NPS; speed is measured
+separately and games decide.
+
+**The rule:**
+
+1. **Each generation gets a new validation set**, `val-g<N>.bin`: about 1M
+   positions as whole games, from the newest datagen made by the current
+   main engine, from at least two distinct seeds (no single run's quirks).
+2. **It is never in any pool**: its source files are excluded from pool
+   manifests from the moment it is cut, and its provenance (source runs,
+   seeds, engine sha, positions, sha256) is recorded in the table below.
+3. **Screen on the newest set first** (`val-current.bin` in the data dir
+   is a symlink to it; `netloop.py` defaults to it when present), report
+   the previous generation's set alongside for continuity, and keep
+   `val.bin` / `val17x2` only as long-running references.
+4. **Re-calibrate** after every few gates: check that loss deltas on the
+   current set still track gate Elo for same-speed nets (table above).
+5. A net evaluated on a set cut from its own engine's games is on home
+   ground (slightly favoured); compare successors on the predecessor's set.
+
+| set | cut | source | engine | positions | sha256 (16) | notes |
+|---|---|---|---|---|---|---|
+| `val.bin` | 2026-11-04 | seed 9 tail | net4 era | 1,000,000 | | reference only |
+| `val17x2.bin` | 2026-11-06 | seed 17 tail, x2 | | 1,000,000 | | reference only |
+| `valL1008.bin` | 2026-11-13 | laptop L1008 (seed 1008) tail | 04e6e43 (g8h1024kb8m) | 1,000,000 | 983ec3d43ceecfee | stopgap, one seed; screens gen 9; L1008 stays out of pools |
+| `val-g10.bin` | after D2006 | D2006 + L1009 tails (whole games) | e3390ac / 04e6e43 (g8) | ~1,000,000 | | planned; D2006/L1009 tails out of pool10 |
 
 ## Audit of the v1 chain (2026-11-06)
 

@@ -161,10 +161,11 @@ then g9h1024kb8m + head fine-tune (3 epochs pool9). packed-data merged (4c75112)
 2-5e-5 on val.bin / val17x2 (old seed-9/17 engines) and **better by
 9.6e-5 best-scale (1.9e-4 raw) on valL1008** = 1M held-out positions from
 the gen-8 engine (laptop L1008 tail, in no pool): the old sets measure an
-outdated distribution (score scale drifted 1.19 -> 1.29). **Screen on
-valL1008 first from now on** (desktop `~/rustfish-data/valL1008.bin`,
-laptop scratch), old sets second; refresh it each generation from
-held-out new data.
+outdated distribution (score scale drifted 1.19 -> 1.29). **Rule (docs/nnue-experiments.md "Validation sets"):** a new held-out set
+per generation (~1M positions, whole games, >= 2 seeds, newest main
+engine, never in a pool), screened first via `val-current.bin`
+(netloop's default; now -> valL1008 on both machines); old sets kept as
+references. Next: val-g10 from the D2006 + L1009 tails.
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits

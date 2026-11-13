@@ -237,7 +237,7 @@ def cmd_train(args, extra):
     pool = Path(args.pool)
     if not pool.is_absolute():
         pool = d / pool
-    val = Path(args.val) if args.val else d / "val.bin"
+    val = Path(args.val) if args.val else default_val(d)
     for f in (pool, val):
         if not f.exists():
             die(f"missing {f}")
@@ -362,7 +362,7 @@ def cmd_embed(args):
                 ref = Path(args.match_scale).expanduser()
                 ref_b = args.match_ref_buckets or args.buckets
                 ref_layout = args.match_ref_king_buckets or args.king_buckets
-            val = Path(args.match_val).expanduser() if args.match_val else d / "val.bin"
+            val = Path(args.match_val).expanduser() if args.match_val else default_val(d)
             scaled = wt / "net/scaled.bin"
             res = rescale_to(trainer(args), net, scaled, buckets=args.buckets, layout=args.king_buckets,
                              ref=ref, ref_buckets=ref_b, ref_layout=ref_layout, val=val, norm=args.match_norm)
@@ -599,7 +599,7 @@ def row_from_args(args, name, branch, *, net=None):
     extra = {}
     if getattr(args, "best_scale", False):
         net = Path(net or d / f"{name}.bin").expanduser()
-        val = Path(args.best_scale_val).expanduser() if args.best_scale_val else d / "val.bin"
+        val = Path(args.best_scale_val).expanduser() if args.best_scale_val else default_val(d)
         try:
             extra = best_scale(trainer(args), net, val, buckets=p["buckets"] or 1,
                                king_buckets=p["king_buckets"] or getattr(args, "king_buckets", "none"))
@@ -693,6 +693,13 @@ SEED_RE = re.compile(r"^Datagen (\S+) seed (\d+) ")
 SCALE_RE = re.compile(r"slope (\S+) r (\S+) mean\|score\| (\S+)cp mean\|eval\| (\S+)cp")
 LOSS_RE = re.compile(r" loss (\S+) ")
 TRAINER_BUSY_RE = r"nnue-trainer[-a-z]* train "
+def default_val(d):
+    """The current validation set (docs/nnue-experiments.md, "Validation sets"):
+    <data-dir>/val-current.bin if present, else the old val.bin."""
+    cur = Path(d) / "val-current.bin"
+    return cur if cur.exists() else Path(d) / "val.bin"
+
+
 SCALE_HALF = (0.40, 0.65)  # data written at the engine's net/2 scale
 SCALE_OK = (0.80, 1.40)  # the data/eval slope drifts up as the engine gets stronger: ~1.19 (gen 4), ~1.25 (gen 7), ~1.29 (g7kb8m)
 REC = 32
@@ -1281,7 +1288,7 @@ def record_flags(p, baseline_default):
     p.add_argument("--best-scale", action="store_true",
                    help="also record best_scale_val / best_scale_factor (nnue-trainer eval --best-scale); "
                         "default off")
-    p.add_argument("--best-scale-val", help="positions for --best-scale (default <data-dir>/val.bin)")
+    p.add_argument("--best-scale-val", help="positions for --best-scale (default <data-dir>/val-current.bin, else val.bin)")
 
 
 def main():

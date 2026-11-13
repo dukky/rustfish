@@ -52,6 +52,7 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 - `scripts/queue.py` + `scripts/queue-settings.json` — the GitHub merge queue (modes, lanes, bursts, ladder)
 - `scripts/netloop.py` — net pipeline: ingest data, train, screen, embed, queue a net gate (`docs/nnue-experiments.md`)
 - `tools/nnue-trainer` (CPU, Rust), `tools/nnue-trainer-cuda` (NVIDIA GPU: the CPU trainer's CLI with a CUDA backend; needs nvcc, see its README) and `tools/nnue-trainer-metal` (M3 GPU) — NNUE trainers
+- Net screening uses the current validation set (`val-current.bin` in the data dir; rule and provenance in `docs/nnue-experiments.md`, "Validation sets"): never train on it, never screen on the old `val.bin` alone.
 - `plan.md` — the roadmap: current status, what is running, short/medium/long-term plans, known problems and the process audit; read this before picking new work and update it when work starts, lands or dies
 - `docs/archive/` — superseded planning/review notes kept for history (including the July 2026 plan and `post-2100-revised.md`); do **not** treat their recommendations as current
 
