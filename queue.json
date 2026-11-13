@@ -18,7 +18,14 @@
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
-    "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9"
+    "1b3d81d3c6f9eed83d8ae1ef30b9936cb51771a9",
+    "2e2d893cde0c8f282faec05b9c2b3c892dd8fcff",
+    "520ef249ae1ec31a84ba136683494c9ddaf8b6de",
+    "d730c441a6a4062bcc5af8015588cdacce2acde2",
+    "5ea92c47359c214a0823b56236faee2fa05d8914",
+    "38c232d67c6ffe1489569b25427f1e589f29559c",
+    "49b1408466dc43fae31b872c87472af46d09f1f1",
+    "8e150ec6429f815ca3787a3f042afe5eb89bfad1"
   ],
   "cancel_sweep": [
     {
