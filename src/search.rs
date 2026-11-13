@@ -1392,6 +1392,8 @@ fn negamax(
             }
 
             let child_key = null_move_hash(key, old_ep, &engine.zobrist);
+            engine.tt.prefetch(child_key);
+            engine.eval_cache.prefetch(child_key);
             rep_stack.push(child_key);
             let null_idx_before = search.null_idx;
             search.null_idx = rep_stack.len() - 1;
@@ -1543,6 +1545,11 @@ fn negamax(
         if Some(mv) == excluded {
             continue;
         }
+        // Start the child's TT/eval-cache loads before the pruning checks
+        // and make_move; the exact-key prefetch below covers the rest.
+        let early = approx_child_hash(key, board, mv, &engine.zobrist);
+        engine.tt.prefetch(early);
+        engine.eval_cache.prefetch(early);
         // Singular extension: if every alternative to the TT move fails low
         // against a margin below the TT score, the TT move is singular.
         let mut extension = 0;
@@ -1939,6 +1946,9 @@ fn quiescence(
     }
 
     while let Some((mv, stage)) = picker.next() {
+        let early = approx_child_hash(key, board, mv, &engine.zobrist);
+        engine.tt.prefetch(early);
+        engine.eval_cache.prefetch(early);
         if !in_check {
             // Stage buckets already encode the SEE sign, so only the TT move
             // (which bypassed bucketing) needs a fresh SEE here.

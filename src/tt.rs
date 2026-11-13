@@ -587,6 +587,26 @@ pub(crate) fn child_hash(key: u64, board_after: &Board, mv: Move, undo: Undo, zo
     next
 }
 
+/// The child key of `mv` from the position before it is made, for
+/// prefetching only: exact for ordinary moves and captures, but castling,
+/// en passant and promotions (and castling-right changes) are ignored, so
+/// for those it is just some other key and the prefetch is wasted.
+#[inline(always)]
+pub(crate) fn approx_child_hash(key: u64, board_before: &Board, mv: Move, zobrist: &Zobrist) -> u64 {
+    let mut next = key ^ zobrist.side;
+    if let Some(ep) = board_before.en_passant {
+        next ^= zobrist.ep_file[(ep % 8) as usize];
+    }
+    if let Some(p) = board_before.squares[mv.from as usize] {
+        let pi = piece_index(p);
+        next ^= zobrist.piece[pi][mv.from as usize] ^ zobrist.piece[pi][mv.to as usize];
+    }
+    if let Some(c) = board_before.squares[mv.to as usize] {
+        next ^= zobrist.piece[piece_index(c)][mv.to as usize];
+    }
+    next
+}
+
 pub(crate) fn null_move_hash(key: u64, ep_before: Option<u8>, zobrist: &Zobrist) -> u64 {
     let mut next = key ^ zobrist.side;
     if let Some(ep) = ep_before {

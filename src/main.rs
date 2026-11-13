@@ -23,7 +23,7 @@ use eval::eval_for_side;
 use movegen::{generate_pseudo_moves, is_square_attacked_occ};
 use movegen::{generate_legal_moves_fused, in_bounds, is_square_attacked, piece_attacks, move_to_uci, parse_square, parse_uci_move};
 use search::{build_lmr_table, handle_go};
-use tt::{board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
+use tt::{approx_child_hash, board_hash, child_hash, null_move_hash, score_from_tt, score_to_tt, Bound, TransTable, Zobrist};
 use uci::{flush_stdout, handle_bench, handle_divide, handle_evalhash, spawn_input_reader, handle_perft, handle_perft_test, handle_position, handle_selftest, handle_setoption};
 
 const MATE_SCORE: i32 = 30_000;
