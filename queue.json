@@ -1,16 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "feat-history-prune",
-    "mode": "stc",
-    "expect": 3.0,
-    "test_id": "q-feat-history-prune-1112-2305",
-    "sha": "bf4573ec2a56f8b002376a6ae75c6beed959d7cd",
-    "base_sha": "04e6e439e42a4ee2651528ce0f398210968e4db7",
-    "started": "2026-11-12T23:05:31Z",
-    "bench": 406378,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
