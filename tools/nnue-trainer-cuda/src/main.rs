@@ -56,6 +56,62 @@ extern "C" {
     fn cuEventSynchronize(ev: Handle) -> CuResult;
     fn cuStreamWaitEvent(stream: Handle, ev: Handle, flags: u32) -> CuResult;
     fn cuGetErrorString(e: CuResult, s: *mut *const i8) -> CuResult;
+    fn cuEventElapsedTime(ms: *mut f32, start: Handle, end: Handle) -> CuResult;
+}
+
+/// `NNUE_CUDA_PROF=1`: timing events between the kernels of every batch;
+/// per-stage averages printed at every `flush` (epoch end).
+struct Prof {
+    /// Per slot: events recorded on the compute stream before each stage.
+    ev: [Vec<Handle>; 2],
+    names: Vec<&'static str>,
+    ms: Vec<f64>,
+    host_ms: f64,
+    wait_ms: f64,
+    n: u64,
+}
+
+impl Prof {
+    const STAGES: [&'static str; 8] = ["forward", "plan_csr", "backward_ft", "backward_rest", "reduce_rest", "adam_ft", "adam_flat", "loss copy"];
+    fn new() -> Self {
+        let mk = || {
+            (0..=Self::STAGES.len())
+                .map(|_| {
+                    let mut e = std::ptr::null_mut();
+                    ck(unsafe { cuEventCreate(&mut e, 0) }, "event");
+                    e
+                })
+                .collect::<Vec<_>>()
+        };
+        Prof { ev: [mk(), mk()], names: Self::STAGES.to_vec(), ms: vec![0.0; Self::STAGES.len()], host_ms: 0.0, wait_ms: 0.0, n: 0 }
+    }
+    fn mark(&self, slot: usize, i: usize, st: Handle) {
+        ck(unsafe { cuEventRecord(self.ev[slot][i], st) }, "event record");
+    }
+    /// After slot's batch finished.
+    fn collect(&mut self, slot: usize) {
+        for i in 0..self.names.len() {
+            let mut t = 0.0f32;
+            ck(unsafe { cuEventElapsedTime(&mut t, self.ev[slot][i], self.ev[slot][i + 1]) }, "elapsed");
+            self.ms[i] += t as f64;
+        }
+        self.n += 1;
+    }
+    fn report(&mut self) {
+        if self.n == 0 {
+            return;
+        }
+        let n = self.n as f64;
+        let tot: f64 = self.ms.iter().sum::<f64>() / n;
+        let mut line = format!("prof {} batches: gpu {tot:.3} ms/batch =", self.n);
+        for (name, ms) in self.names.iter().zip(&self.ms) {
+            line += &format!(" {name} {:.3}", ms / n);
+        }
+        line += &format!("; host prep {:.3} ms, host wait {:.3} ms", self.host_ms / n, self.wait_ms / n);
+        eprintln!("{line}");
+        self.ms.iter_mut().for_each(|x| *x = 0.0);
+        (self.host_ms, self.wait_ms, self.n) = (0.0, 0.0, 0);
+    }
 }
 
 fn ck(r: CuResult, what: &str) {
@@ -234,8 +290,10 @@ struct AdamC {
 
 /// Pairs per FT-backward work item (one king bucket each).
 const WI: usize = 2048;
-/// Pairs per bitmask range (kernels.cu `R`).
-const R: usize = 128;
+/// Pairs per incidence-list range (kernels.cu `R`).
+const R: usize = 256;
+/// Words per range of the incidence lists (kernels.cu `CSRW`).
+const CSRW: usize = INPUTS + R * 32 / 4;
 /// Samples per output-layer gradient chunk (kernels.cu `CH`).
 const CH: usize = 256;
 
@@ -244,7 +302,7 @@ struct Kernels {
     forward_half: Handle,
     to_half: Handle,
     backward_ft: Handle,
-    plan_masks: Handle,
+    plan_csr: Handle,
     backward_rest: Handle,
     reduce_rest: Handle,
     adam_flat: Handle,
@@ -278,8 +336,8 @@ struct GpuTrainer {
     acc: DBuf<f32>,
     gout: DBuf<f32>,
     slots: [Slot; 2],
-    /// Per range of R pairs: per-feature bitmasks of its pairs (plan_masks).
-    masks: DBuf<u32>,
+    /// Per range of R pairs: its (pair, feature) incidences by feature (plan_csr).
+    csr: DBuf<u32>,
     slot: usize,
     /// The last batch launched whose loss `step` has not returned yet:
     /// (slot, positions).
@@ -289,6 +347,7 @@ struct GpuTrainer {
     copy: Handle,
     /// `--wd-active-only` row flags set by the decode.
     act: Vec<AtomicU8>,
+    prof: Option<Prof>,
 }
 
 unsafe impl Send for GpuTrainer {}
@@ -323,7 +382,7 @@ impl GpuTrainer {
             forward_half: get("forward_half"),
             to_half: get("to_half"),
             backward_ft: get("backward_ft"),
-            plan_masks: get("plan_masks"),
+            plan_csr: get("plan_csr"),
             backward_rest: get("backward_rest"),
             reduce_rest: get("reduce_rest"),
             adam_flat: get("adam_flat"),
@@ -363,12 +422,13 @@ impl GpuTrainer {
             acc: DBuf::new(b * 2 * h),
             gout: DBuf::new(b),
             slots: [Slot::new(b, max_items, max_ranges, sh.kb, rows), Slot::new(b, max_items, max_ranges, sh.kb, rows)],
-            masks: DBuf::new(max_ranges * INPUTS * (R / 32)),
+            csr: DBuf::new(max_ranges * CSRW),
             slot: 0,
             pending: None,
             stream,
             copy,
             act: (0..rows).map(|_| AtomicU8::new(0)).collect(),
+            prof: std::env::var("NNUE_CUDA_PROF").ok().filter(|v| v != "0").map(|_| Prof::new()),
         }
     }
 
@@ -381,7 +441,12 @@ impl GpuTrainer {
     /// Waits for slot `si`'s batch and sums its `n` losses (sample order).
     fn loss_of(&mut self, si: usize, n: usize) -> f64 {
         let sl = &mut self.slots[si];
+        let t = std::time::Instant::now();
         ck(unsafe { cuEventSynchronize(sl.done) }, "wait");
+        if let Some(p) = self.prof.as_mut() {
+            p.wait_ms += t.elapsed().as_secs_f64() * 1e3;
+            p.collect(si);
+        }
         sl.hloss.slice()[..n].iter().map(|&l| l as f64).sum()
     }
 
@@ -426,6 +491,7 @@ impl Backend for GpuTrainer {
         let (h, kb) = (sh.h, sh.kb);
         let si = self.slot;
         self.slot ^= 1;
+        let t_host = std::time::Instant::now();
         let wd_active = self.wd_active;
         // Prepare this batch on the CPU while the GPU runs the previous one
         // (this slot's last batch, two steps ago, finished: `step` waited
@@ -545,19 +611,34 @@ impl Backend for GpuTrainer {
         use Arg::*;
         let k = &self.k;
         let (fwd, wt) = if self.half { (k.forward_half, self.wth.ptr) } else { (k.forward, self.wt.ptr) };
+        if let Some(p) = self.prof.as_mut() {
+            p.host_ms += t_host.elapsed().as_secs_f64() * 1e3;
+        }
+        let prof = self.prof.as_ref();
+        let mark = |i: usize| {
+            if let Some(p) = prof {
+                p.mark(si, i, st)
+            }
+        };
+        mark(0);
         launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi)]);
-        launch(k.plan_masks, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.masks.ptr), I(nr as i32)]);
+        mark(1);
+        launch(k.plan_csr, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.csr.ptr)]);
+        mark(2);
         launch(
             k.backward_ft,
             ((h / 32) as u32, ni as u32),
             1024,
             st,
-            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.masks.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi)],
+            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.csr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi)],
         );
         let chunks = n.div_ceil(CH);
+        mark(3);
         launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn)]);
+        mark(4);
         launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
         let act = if wd_active { sl.active.ptr } else { 0 };
+        mark(5);
         launch(
             k.adam_ft,
             ((INPUTS * h).div_ceil(256) as u32, 1),
@@ -565,8 +646,11 @@ impl Backend for GpuTrainer {
             st,
             &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(if self.half { self.wth.ptr } else { 0 }), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32)],
         );
+        mark(6);
         launch(k.adam_flat, (nrest.div_ceil(256) as u32, 1), 256, st, &[C(c), P(self.pr.ptr), P(self.mr.ptr), P(self.vr.ptr), P(self.gr.ptr), I(nrest as i32)]);
+        mark(7);
         ck(unsafe { cuMemcpyDtoHAsync_v2(sl.hloss.ptr as *mut c_void, sl.loss.ptr, n * 4, st) }, "loss download");
+        mark(8);
         ck(unsafe { cuEventRecord(sl.done, st) }, "event record");
         // Return the previous batch's loss (it runs ahead of this one).
         let prev = self.pending.replace((si, n));
@@ -574,7 +658,11 @@ impl Backend for GpuTrainer {
     }
 
     fn flush(&mut self, _p: &mut [f32], _opt: &mut Adam) -> f64 {
-        self.pending.take().map_or(0.0, |(ps, pn)| self.loss_of(ps, pn))
+        let l = self.pending.take().map_or(0.0, |(ps, pn)| self.loss_of(ps, pn));
+        if let Some(p) = self.prof.as_mut() {
+            p.report();
+        }
+        l
     }
 
     fn export(&mut self, p: &mut [f32], opt: &mut Adam) {

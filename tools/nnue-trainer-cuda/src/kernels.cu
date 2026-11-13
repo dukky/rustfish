@@ -103,54 +103,98 @@ extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order
 
 // ---------------------------------------------------------------- FT backward
 
-// Block = (32-column tile, work item = up to WI pairs of one king bucket),
-// 1024 threads, lane = column; warp w owns the bucket's features w, w+32,
-// ..., w+736 in registers. Per range of R pairs: stage dacc[R][32] in
-// shared memory, set per-feature bitmasks of the pairs that contain it,
-// then each warp adds its features' staged rows in pair order. Writes the
-// item's gradient slice `part[item][768][H]` (zeros included).
-#define R 128
-#define FPW (INPUTS / 32)
+// Ranges of R pairs (they never cross a work item: items start at
+// multiples of R within their bucket's run). `plan_csr`, once per batch for
+// every column tile: per range, its incidences (pair, feature) sorted by
+// feature, pairs ascending within a feature: `csr[range]` = per feature a
+// packed (start | end << 16) into the range's list, then the list of pair
+// offsets in the range (bytes, < R).
+#define R 256
+#define RW (R / 32)
+#define LIST_WORDS (R * 32 / 4)
+#define CSRW (INPUTS + LIST_WORDS)
 
-// Per range of R pairs (ranges never cross a work item: items start at
-// multiples of R within their bucket's run): the bitmask of the range's
-// pairs that contain each of the bucket's features, `masks[range][768][R/32]`,
-// built once per batch for every column tile.
-extern "C" __global__ void plan_masks(const GSample *ss, const uint32_t *pairs, const int *range_start,
-                                      const int *range_bucket, uint32_t *masks, int nranges) {
-    __shared__ uint32_t mask[INPUTS][R / 32];
-    int rg = blockIdx.x;
-    for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) (&mask[0][0])[i] = 0u;
+extern "C" __global__ void __launch_bounds__(256) plan_csr(const GSample *ss, const uint32_t *pairs, const int *range_start,
+                                                           const int *range_bucket, uint32_t *csr) {
+    __shared__ uint32_t mask[INPUTS][RW];
+    __shared__ int wsum[8];
+    int rg = blockIdx.x, t = threadIdx.x;
+    for (int i = t; i < INPUTS * RW; i += 256) (&mask[0][0])[i] = 0u;
     __syncthreads();
     int r0 = range_start[rg], nr = range_start[rg + 1] - r0, b = range_bucket[rg];
-    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
-    for (int r = warp; r < nr; r += nw) {
+    int lane = t & 31, warp = t >> 5;
+    for (int r = warp; r < nr; r += 8) {
         uint32_t pr = pairs[r0 + r];
         const GSample &s = ss[pr >> 1];
         if (lane < s.n) atomicOr(&mask[s.f[pr & 1][lane] - b * INPUTS][r >> 5], 1u << (r & 31));
     }
     __syncthreads();
-    uint32_t *out = masks + (size_t)rg * INPUTS * (R / 32);
-    for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) out[i] = (&mask[0][0])[i];
+    // Thread t: features 3t .. 3t + 2; exclusive scan of their counts.
+    int c[3], tot = 0;
+#pragma unroll
+    for (int j = 0; j < 3; j++) {
+        int n = 0;
+#pragma unroll
+        for (int q = 0; q < RW; q++) n += __popc(mask[3 * t + j][q]);
+        c[j] = n;
+        tot += n;
+    }
+    int x = tot;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        int y = __shfl_up_sync(0xffffffff, x, o);
+        if (lane >= o) x += y;
+    }
+    if (lane == 31) wsum[warp] = x;
+    __syncthreads();
+    int base = x - tot;
+    for (int w = 0; w < warp; w++) base += wsum[w];
+    uint32_t *out = csr + (size_t)rg * CSRW;
+    uint8_t *lst = (uint8_t *)(out + INPUTS);
+#pragma unroll
+    for (int j = 0; j < 3; j++) {
+        int f = 3 * t + j, k = base;
+        out[f] = (uint32_t)base | (uint32_t)(base + c[j]) << 16;
+#pragma unroll
+        for (int q = 0; q < RW; q++) {
+            uint32_t m = mask[f][q];
+            while (m) {
+                int bit = __ffs(m) - 1;
+                m &= m - 1;
+                lst[k++] = (uint8_t)(q * 32 + bit);
+            }
+        }
+        base += c[j];
+    }
 }
 
+// Block = (32-column tile, work item = up to WI pairs of one king bucket),
+// 1024 threads, lane = column; warp w owns the bucket's features w, w+32,
+// ..., w+736 in registers. Per range of R pairs: stage dacc[R][32] and the
+// range's CSR in shared memory, then each warp adds its features' staged
+// rows in pair order (the same order as a scan of per-feature pair
+// bitmasks). Writes the item's gradient slice `part[item][768][H]` (zeros
+// included).
+#define FPW (INPUTS / 32)
 extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss, const uint32_t *pairs,
-                                                              const Item *items, const uint32_t *masks,
+                                                              const Item *items, const uint32_t *csr,
                                                               const float *acc, const float *gout,
                                                               const float *rest, float *part, int H) {
-    __shared__ float sd[2][R][32];
-    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    __shared__ float sd[R][32];
+    __shared__ uint32_t so[INPUTS];
+    __shared__ uint32_t sl[LIST_WORDS];
+    int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     int col = blockIdx.x * 32 + lane;
     const float *ow = rest + H;
     Item it = items[blockIdx.y];
     float g[FPW];
 #pragma unroll
     for (int i = 0; i < FPW; i++) g[i] = 0.0f;
-    // Item.start/end are pair offsets; ranges of R pairs from it.start, the
-    // global range index from it.range.
-    int buf = 0;
-    for (int r0 = it.start, rg = it.range; r0 < it.end; r0 += R, rg++, buf ^= 1) {
+    for (int r0 = it.start, rg = it.range; r0 < it.end; r0 += R, rg++) {
         int nr = min(R, it.end - r0);
+        // Single-buffered (R = 256 fills the 48 KB): the previous range's
+        // sums are done before its staging is overwritten.
+        __syncthreads();
         for (int r = warp; r < nr; r += 32) {
             uint32_t pr = pairs[r0 + r];
             int j = pr >> 1, side = pr & 1;
@@ -158,24 +202,18 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
             float x = acc[((size_t)j * 2 + side) * H + col];
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[s.bucket * 2 * H + side * H + col];
-            sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
+            sd[r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
         }
-        // Double-buffered staging: one barrier per range.
+        const uint32_t *cs = csr + (size_t)rg * CSRW;
+        if (t < INPUTS) so[t] = cs[t];
+        int nw = ((cs[INPUTS - 1] >> 16) + 3) >> 2;
+        for (int w = t; w < nw; w += 1024) sl[w] = cs[INPUTS + w];
         __syncthreads();
-        const uint32_t *mk = masks + (size_t)rg * INPUTS * (R / 32);
+        const uint8_t *lb = (const uint8_t *)sl;
 #pragma unroll
         for (int i = 0; i < FPW; i++) {
-            const uint4 m4 = __ldg((const uint4 *)(mk + (warp + 32 * i) * (R / 32)));
-            uint32_t ms[4] = {m4.x, m4.y, m4.z, m4.w};
-#pragma unroll
-            for (int q = 0; q < R / 32; q++) {
-                uint32_t m = ms[q];
-                while (m) {
-                    int b = __ffs(m) - 1;
-                    m &= m - 1;
-                    g[i] += sd[buf][q * 32 + b][lane];
-                }
-            }
+            uint32_t oe = so[warp + 32 * i];
+            for (int k = oe & 0xffff, e = oe >> 16; k < e; k++) g[i] += sd[lb[k]][lane];
         }
     }
     float *out = part + (size_t)blockIdx.y * INPUTS * H;

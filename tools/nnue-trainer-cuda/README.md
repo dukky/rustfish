@@ -65,14 +65,14 @@ s45): CPU 0.049903 / 0.039111 / 0.037563, GPU 0.049905 / 0.039107 /
 
 1. `forward`: a block per sample (bucket-pair order), H/2 threads, float4
    columns; accumulators, output gradient, loss.
-2. `plan_masks` (once per batch, for every column tile): per range of 128
-   pairs, per feature of its bucket, the bitmask of the pairs containing it.
-   `backward_ft`: the Metal trainer's `grad_fused`. Block = (32-column tile,
-   work item = up to 2048 pairs of one king bucket), 1024 threads (lane =
-   column, warp w owns features w + 32i of the bucket in registers). Per
-   128 pairs: dacc staged in shared memory (double-buffered, one barrier
-   per range), each warp sums its features' rows in pair order.
-   Writes per-item partial gradients.
+2. `plan_csr` (once per batch, for every column tile): per range of 256
+   pairs, its (pair, feature) incidences sorted by feature (pairs ascending
+   within a feature): per-feature start/end and a byte list of pair offsets.
+   `backward_ft`: block = (32-column tile, work item = up to 2048 pairs of
+   one king bucket), 1024 threads (lane = column, warp w owns features
+   w + 32i of the bucket in registers). Per 256 pairs: dacc and the range's
+   lists staged in shared memory, each warp walks its features' lists and
+   sums the staged rows in pair order. Writes per-item partial gradients.
 3. `backward_rest` + `reduce_rest`: output-weight, FT-bias and output-bias
    gradients over 256-sample chunks, summed in chunk order.
 4. `adam_ft`: per FT element, the bucket's item partials in item order;
@@ -104,6 +104,23 @@ gradients 0.34 ms, AdamW 0.47 ms. Uploads run on a second stream.
 Kernels alone (`bench.cu`, kb8m H 512): forward 1.6 ms, FT backward 2.2
 ms, AdamW 0.4 ms per batch (3.9M pos/s). Checked: CPU checkpoint resumed on
 the GPU and back, `--init` warm start, `--keep-best`, `--wd`.
+
+`NNUE_CUDA_PROF=1` records timing events between the kernels and prints
+per-stage ms/batch (and the host's prep / wait time) at every epoch end.
+
+Per batch at kb8m H 1024 `--half` (2026-11-13, 180 W cap): forward 2.1 ms,
+`backward_ft` 2.2 ms (3.8 ms with the per-range bitmasks it replaced),
+output-layer gradients 0.6 ms, AdamW 0.8 ms; host prep (decode, sort) 1.1
+ms runs under the GPU's batch, so the feed is not the limit.
+
+`backward_ft` variants measured (kb8m H 1024 `--half`, ms/batch; all
+byte-identical): bitmasks R 128 3.82; incidence lists R 64 with 64-column
+tiles and feature halves 3.0 (unrolled 3.4, register prefetch of the next
+range 3.0, quarters at 512 threads 3.9-4.1); R 128 32 columns 2.67; R 128
+64 columns, halves 2.26; **R 256 32 columns 2.22** (single-buffered: R 256
+fills the 48 KB); same with 768 / 512 threads 3.1 / 2.9. Fewer, larger
+ranges win: the per-feature loop and the barrier per range cost more than
+the adds.
 
 Approaches that lost (1080 Ti, kb8m):
 - Smaller output-gradient chunks (`CH` 64 / 32 instead of 256): no gain.
