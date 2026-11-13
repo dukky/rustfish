@@ -1,6 +1,17 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "nnue-g8h1024kb8m-ep2",
+    "mode": "stc",
+    "expect": 3.0,
+    "front": true,
+    "test_id": "q-nnue-g8h1024kb8m-ep2-1113-0437",
+    "sha": "8650d76961f9d5ac777f3566a954802f59776989",
+    "base_sha": "4b1ea95c3731a0385c4e57ffd3b05aee06eea3d7",
+    "started": "2026-11-13T04:37:23Z",
+    "bench": 356168,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
@@ -16,11 +27,5 @@
     "38c232d67c6ffe1489569b25427f1e589f29559c",
     "49b1408466dc43fae31b872c87472af46d09f1f1",
     "8e150ec6429f815ca3787a3f042afe5eb89bfad1"
-  ],
-  "cancel_sweep": [
-    {
-      "prefix": "SPRT q-feat-lmr-deeper-only-1112-0849 ",
-      "until": "2026-11-13T01:37:13Z"
-    }
   ]
 }
