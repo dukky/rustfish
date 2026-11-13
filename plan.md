@@ -134,9 +134,18 @@ next). **Gen 9 started 01:17** (`~/rustfish-data/gen9.sh`, logs in
 `gpu-jobs/`): pool9 by stream = pool8 + CI 62-118 + D2004 = **4.90B**, gen-8
 chain recipe, --half, no threats; ETA ~10:30. Threat net LTC diagnostic (manual, vs 0f6fda6, 60+0.6): **-3.0**
 [-11.6, +5.6] (1720 games) vs -23.2 at 10+0.1: the gap closes with time,
-so it is cost. In progress (subagents): `threats-fast` (threats on main's
-fused path, cheaper threat bitboards) and `head-v2` (deeper head: engine
-inference, faster CPU trainer, CUDA port). packed-data merged (4c75112). feat-history-prune rejected
+so it is cost. **threats-fast** (a8e778c; THREATS off = main exactly) and
+**nnue-g8h1024kb8m-ep2** (8650d76, same ep net and search): threat NPS cost
+on the M3 -32% -> **-20%** (fused path, threat-aware finny refresh, lazy
+per-ply work, fixed-shape kernels); part of the rest is the ep net's 18%
+larger tree. Queued `stc` --front. Next lever: i8 threat rows (0.16% of
+weights out of range; exact split possible, no format change).
+**head-v2** (cecaf14 / aff868a / c80674f): engine head inference
+(`src/nnue_head.rs`, HEAD off = main), agrees with the trainer within
+~0.5-0.6 cp mean; H512 kb8m + head runs 9% slower than main on the M3;
+CPU head trainer +29%; CUDA head port untested. After gen 9 the desktop
+runs `head-after-gen9.sh`: CUDA vs CPU head check (<= 1e-5, deterministic),
+then g9h1024kb8m + head fine-tune (3 epochs pool9). packed-data merged (4c75112). feat-history-prune rejected
 (-1.3). speed-1024 merged (00:09).
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
