@@ -138,7 +138,11 @@ so it is cost. **threats-fast** (a8e778c; THREATS off = main exactly) and
 **nnue-g8h1024kb8m-ep2** (8650d76, same ep net and search): threat NPS cost
 on the M3 -32% -> **-20%** (fused path, threat-aware finny refresh, lazy
 per-ply work, fixed-shape kernels); part of the rest is the ep net's 18%
-larger tree. Queued `stc` --front. Next lever: i8 threat rows (0.16% of
+larger tree. **stc -10.2** [-15.9, -4.6] (4560 games; was -23.2); **ltc (60+0.6) vs main
+-7.0** [-19.3, +5.2] (840 games; the old ep was -3.0 at ltc). So at longer TC
+threats are about break-even, not a clear win: the +58 at fixed depth
+overstates them. Parked for merging; revisit with a fully trained threat
+net in gen 10 and/or i8 threat rows. Next lever: i8 threat rows (0.16% of
 weights out of range; exact split possible, no format change).
 **head-v2** (cecaf14 / aff868a / c80674f): engine head inference
 (`src/nnue_head.rs`, HEAD off = main), agrees with the trainer within
