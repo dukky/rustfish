@@ -156,6 +156,15 @@ CPU head trainer +29%; CUDA head port untested. After gen 9 the desktop
 runs `head-after-gen9.sh`: CUDA vs CPU head check (<= 1e-5, deterministic),
 then g9h1024kb8m + head fine-tune (3 epochs pool9). packed-data merged (4c75112). feat-history-prune rejected
 (-1.3). speed-1024 merged (00:09).
+**Validation sets are stale (2026-11-13):** gen 9's plain stage looked
+3.2e-4 *worse* than gen 8's on raw val.bin, but best-scale it is within
+2-5e-5 on val.bin / val17x2 (old seed-9/17 engines) and **better by
+9.6e-5 best-scale (1.9e-4 raw) on valL1008** = 1M held-out positions from
+the gen-8 engine (laptop L1008 tail, in no pool): the old sets measure an
+outdated distribution (score scale drifted 1.19 -> 1.29). **Screen on
+valL1008 first from now on** (desktop `~/rustfish-data/valL1008.bin`,
+laptop scratch), old sets second; refresh it each generation from
+held-out new data.
 **Pool9** (~5B = pool8 + CI 62-118 + D2004/D2005): phase 1 downloading
 on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
