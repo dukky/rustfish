@@ -123,7 +123,12 @@ experiments: `speed-1024-rowprefetch`, `speed-1024-hugepages` (x86 only;
 measure with the desktop idle). Threat-cost ideas: route threat rows
 through the fused kernel in fixed chunks; reuse the move picker's attack
 maps instead of rebuilding per ply; i8 threat weights (trainer + format).
-PGO on desktop x86 still unmeasured.
+**Clean x86 (idle 9600X, x86-64-v3 builds, bench 13, x6):** speed work
++8.9% on the AVX-512 path (3.20M -> 3.48M), only **+2.2% on AVX2** (3.24M ->
+3.31M): the AVX2 fused path is the next speed target (most CCRL testers
+are AVX2). **PGO -2.2% on x86** (both paths): releases stay plain.
+Huge pages / row prefetch: -1.4% each, dropped. Datagen on 9 threads
+halves single-thread NPS on the desktop: benchmark only when it's idle.
 **Overnight 2026-11-13:** kb8m from scratch on pool8 (10 epochs) lost to
 the chain: best-scale 0.025897 / 0.024827 vs g8 0.025574 / 0.024364 (train
 0.0236 vs val 0.0270: still data-limited). **Packed-data A/B** (643M ci9
