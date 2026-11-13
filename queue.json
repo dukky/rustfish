@@ -1,6 +1,22 @@
 {
-  "pending": [],
-  "current": null,
+  "pending": [
+    {
+      "branch": "double-extension",
+      "mode": "stc",
+      "expect": 2.0,
+      "passed_over": 1
+    }
+  ],
+  "current": {
+    "branch": "simp2-qs-failsoft",
+    "mode": "nonreg",
+    "test_id": "q-simp2-qs-failsoft-1113-0924",
+    "sha": "d945c7e7aed50c8bfd711a1062c4458bbb01c4fe",
+    "base_sha": "9f6fd91cf895cef307622c009faa9393c9fd72d9",
+    "started": "2026-11-13T09:24:31Z",
+    "bench": 388178,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
