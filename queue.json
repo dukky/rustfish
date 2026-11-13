@@ -1,9 +1,8 @@
 {
   "pending": [
     {
-      "branch": "nnue-g9h1024kb8m",
-      "mode": "net-gate",
-      "expect": 10.0,
+      "branch": "simp2-qs-failsoft",
+      "mode": "nonreg",
       "front": true
     },
     {
@@ -14,13 +13,15 @@
     }
   ],
   "current": {
-    "branch": "simp2-qs-failsoft",
-    "mode": "nonreg",
-    "test_id": "q-simp2-qs-failsoft-1113-0924",
-    "sha": "d945c7e7aed50c8bfd711a1062c4458bbb01c4fe",
-    "base_sha": "9f6fd91cf895cef307622c009faa9393c9fd72d9",
-    "started": "2026-11-13T09:24:31Z",
-    "bench": 388178,
+    "branch": "nnue-g9h1024kb8m",
+    "mode": "net-gate",
+    "expect": 10.0,
+    "front": true,
+    "test_id": "q-nnue-g9h1024kb8m-1113-0951",
+    "sha": "bc5b78c5113402db25ddb1f731e3daaaac762c72",
+    "base_sha": "c06ce6bff9e12daf54a5314efc1a484f6c7ec58f",
+    "started": "2026-11-13T09:51:48Z",
+    "bench": 370512,
     "evalhash": "248c85c4a1cc6558"
   },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
@@ -38,5 +39,11 @@
     "38c232d67c6ffe1489569b25427f1e589f29559c",
     "49b1408466dc43fae31b872c87472af46d09f1f1",
     "8e150ec6429f815ca3787a3f042afe5eb89bfad1"
+  ],
+  "cancel_sweep": [
+    {
+      "prefix": "SPRT q-simp2-qs-failsoft-1113-0924 ",
+      "until": "2026-11-13T21:51:03Z"
+    }
   ]
 }
