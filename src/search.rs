@@ -32,6 +32,11 @@ const RFP_MAX_DEPTH: i32 = 7;
 const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
+// Verified razoring at depths 3..=RAZOR_MAX_DEPTH (depths 1-2 drop into qsearch
+// unconditionally below): margin continues the d1/d2 margins' +100 cp per ply.
+const RAZOR_MAX_DEPTH: i32 = 4;
+const RAZOR_MARGIN_BASE: i32 = 20;
+const RAZOR_MARGIN_DEPTH: i32 = 100;
 
 // ---- Correction history ----------------------------------------------------
 // The static eval has errors that depend on parts of the position the net
@@ -1556,6 +1561,20 @@ fn negamax(
             };
             if se + margin <= alpha {
                 return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+            }
+        }
+
+        // Razoring: far below alpha, a qsearch that also fails low is trusted.
+        if beta - alpha <= 1
+            && (3..=RAZOR_MAX_DEPTH).contains(&depth)
+            && se + RAZOR_MARGIN_BASE + RAZOR_MARGIN_DEPTH * depth <= alpha
+        {
+            let score = quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+            if search.stop {
+                return 0;
+            }
+            if score <= alpha {
+                return score;
             }
         }
 
