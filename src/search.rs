@@ -458,18 +458,33 @@ fn threat_escape_bonus(board: &Board, maps: &ThreatMaps, threatened: u64, mv: Mo
     }
 }
 
+/// One continuation-history slot: slot 0 is keyed on the opponent's move one
+/// ply up, slot 1 on the side to move's own move two plies up.
+fn continuation_slot_score(
+    engine: &EngineState,
+    side: Color,
+    slot: usize,
+    prev: Option<Move>,
+    mv: Move,
+) -> i32 {
+    prev.map(|prev| {
+        engine.continuation_history[slot][color_index(side)][prev.to as usize][mv.from as usize]
+            [mv.to as usize]
+    })
+    .unwrap_or(0)
+}
+
+/// Continuation history from the last two plies, for move ordering: `plied[0]`
+/// is the move played by the opponent one ply up, `plied[1]` the move two plies
+/// up (played by the side to move). The two-ply slot counts at half weight.
 fn continuation_history_score(
     engine: &EngineState,
     side: Color,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     mv: Move,
 ) -> i32 {
-    prev_move
-        .map(|prev| {
-            engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-                [mv.to as usize]
-        })
-        .unwrap_or(0)
+    continuation_slot_score(engine, side, 0, plied[0], mv)
+        + continuation_slot_score(engine, side, 1, plied[1], mv) / 2
 }
 
 /// Bound on |history| and |continuation history| under the gravity update.
@@ -504,16 +519,18 @@ fn apply_history_delta(engine: &mut EngineState, side: Color, threats: u64, mv: 
 fn apply_continuation_history_delta(
     engine: &mut EngineState,
     side: Color,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     mv: Move,
     delta: i32,
 ) {
-    let Some(prev) = prev_move else {
-        return;
-    };
-    let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-        [mv.to as usize];
-    apply_gravity(h, delta);
+    let c = color_index(side);
+    for (slot, prev) in plied.iter().enumerate() {
+        let Some(prev) = *prev else { continue };
+        let h = &mut engine.continuation_history[slot][c][prev.to as usize][mv.from as usize]
+            [mv.to as usize];
+        let delta = if slot == 1 { delta / 2 } else { delta };
+        apply_gravity(h, delta);
+    }
 }
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
@@ -631,7 +648,7 @@ impl MovePicker {
         engine: &EngineState,
         tt_move: Option<Move>,
         counter_move: Option<Move>,
-        prev_move: Option<Move>,
+        plied: &[Option<Move>; 2],
         killers: &[Option<Move>; 2],
         history: &HistoryTable,
         captures_only: bool,
@@ -674,8 +691,6 @@ impl MovePicker {
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
         let side_hist = &history[color_index(side)];
-        let cont_row = prev_move
-            .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
 
         for mv in move_buf.iter().copied() {
             picker.total += 1;
@@ -697,7 +712,10 @@ impl MovePicker {
 
             let (tf, tt) = threat_slot(threats, mv);
             let h = side_hist[tf][tt][mv.from as usize][mv.to as usize];
-            let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
+            // The bucket test is the priority classification, so it stays
+            // one-ply; the two-ply slot only contributes to the ordering score.
+            let ch0 = continuation_slot_score(engine, side, 0, plied[0], mv);
+            let ch = ch0 + continuation_slot_score(engine, side, 1, plied[1], mv) / 2;
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
             let is_counter = Some(mv) == counter_move;
@@ -718,7 +736,7 @@ impl MovePicker {
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
             let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
-            if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
+            if is_k0 || is_k1 || is_counter || h > 0 || ch0 > 0 {
                 picker.bufs.priority_quiets.push((mv, score + esc));
             } else {
                 picker.bufs.quiets.push((mv, score.max(h) + esc));
@@ -951,7 +969,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         &mut root_moves,
         tt_root_move,
         None,
-        None,
+        &[None, None],
         &search.killers[0],
         &engine.history,
     );
@@ -1277,7 +1295,7 @@ fn search_root(
         root_moves,
         tt_move,
         None,
-        None,
+        &[None, None],
         &search.killers[0],
         &engine.history,
     );
@@ -1310,7 +1328,7 @@ fn search_root(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), None],
                 true,
                 None,
                 false,
@@ -1331,7 +1349,7 @@ fn search_root(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), None],
                 true,
                 None,
                 true,
@@ -1349,7 +1367,7 @@ fn search_root(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), None],
                     true,
                     None,
                     true,
@@ -1366,7 +1384,7 @@ fn search_root(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), None],
                     true,
                     None,
                     false,
@@ -1446,7 +1464,7 @@ fn negamax(
     engine: &mut EngineState,
     rep_stack: &mut Vec<u64>,
     key: u64,
-    prev_move: Option<Move>,
+    plied: [Option<Move>; 2],
     allow_null: bool,
     // Whether the side to move is in check, when the caller already knows.
     known_in_check: Option<bool>,
@@ -1497,7 +1515,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), plied[0]);
     }
 
     let alpha_orig = alpha;
@@ -1533,7 +1551,7 @@ fn negamax(
                 .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
-    let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
+    let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, plied[0]));
     let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
@@ -1555,7 +1573,7 @@ fn negamax(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), plied[0]);
             }
         }
 
@@ -1621,7 +1639,7 @@ fn negamax(
                 engine,
                 rep_stack,
                 child_key,
-                None,
+                [None, None],
                 false,
                 None,
                 !cut_node,
@@ -1664,7 +1682,7 @@ fn negamax(
                 engine,
                 tt_move,
                 None,
-                None,
+                &[None, None],
                 &[None, None],
                 &engine.history,
                 true,
@@ -1702,7 +1720,7 @@ fn negamax(
                         engine,
                         rep_stack,
                         child_key,
-                        Some(mv),
+                        [Some(mv), plied[0]],
                         true,
                         None,
                         !cut_node,
@@ -1728,14 +1746,14 @@ fn negamax(
         }
     }
 
-    let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
+    let counter_move = counter_move_for(engine, board.side_to_move, plied[0]);
     let killers = search.killers[ply];
     let mut picker = MovePicker::new(
         board,
         engine,
         tt_move,
         counter_move,
-        prev_move,
+        &plied,
         &killers,
         &engine.history,
         false,
@@ -1788,7 +1806,7 @@ fn negamax(
                         engine,
                         rep_stack,
                         key,
-                        prev_move,
+                        plied,
                         false,
                         Some(in_check),
                         cut_node,
@@ -1822,7 +1840,9 @@ fn negamax(
             0
         };
         let quiet_continuation = if quiet {
-            continuation_history_score(engine, side, prev_move, mv)
+            // The priority classification stays one-ply: the two-ply slot only
+            // orders moves, it must not exempt them from LMP/futility/SEE.
+            continuation_slot_score(engine, side, 0, plied[0], mv)
         } else {
             0
         };
@@ -1908,7 +1928,7 @@ fn negamax(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), plied[0]],
                 true,
                 Some(gives_check),
                 !pv_node && !cut_node,
@@ -1966,7 +1986,7 @@ fn negamax(
                 engine,
                 rep_stack,
                 child_key,
-                Some(mv),
+                [Some(mv), plied[0]],
                 true,
                 Some(gives_check),
                 reduced || !cut_node,
@@ -1983,7 +2003,7 @@ fn negamax(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), plied[0]],
                     true,
                     Some(gives_check),
                     !cut_node,
@@ -2001,7 +2021,7 @@ fn negamax(
                     engine,
                     rep_stack,
                     child_key,
-                    Some(mv),
+                    [Some(mv), plied[0]],
                     true,
                     Some(gives_check),
                     false,
@@ -2026,7 +2046,7 @@ fn negamax(
         if alpha >= beta {
             if quiet {
                 let bonus = history_bonus(depth);
-                if let Some(prev) = prev_move {
+                if let Some(prev) = plied[0] {
                     engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
                         Some(mv);
                 }
@@ -2035,11 +2055,11 @@ fn negamax(
                     search.killers[ply][0] = Some(mv);
                 }
                 apply_history_delta(engine, side, threats, mv, bonus);
-                apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                apply_continuation_history_delta(engine, side, &plied, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, threats, tried, -bonus);
-                        apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_continuation_history_delta(engine, side, &plied, tried, -bonus);
                     }
                 }
             }
@@ -2173,7 +2193,7 @@ fn quiescence(
         engine,
         tt_move,
         None,
-        None,
+        &[None, None],
         &[None, None],
         &engine.history,
         !in_check,
@@ -2246,7 +2266,7 @@ fn order_moves(
     moves: &mut Vec<Move>,
     tt_move: Option<Move>,
     counter_move: Option<Move>,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
 ) {
@@ -2258,7 +2278,7 @@ fn order_moves(
             *m,
             tt_move,
             counter_move,
-            prev_move,
+            plied,
             killers,
             history,
             &maps,
@@ -2814,7 +2834,7 @@ fn move_order_score(
     mv: Move,
     tt_move: Option<Move>,
     counter_move: Option<Move>,
-    prev_move: Option<Move>,
+    plied: &[Option<Move>; 2],
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
     maps: &ThreatMaps,
@@ -2844,7 +2864,7 @@ fn move_order_score(
         .unwrap_or(0)
         .saturating_sub(piece_value(PieceType::Pawn));
     let castle = if mv.is_castle { 10 } else { 0 };
-    let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
+    let continuation = continuation_history_score(engine, board.side_to_move, plied, mv);
     let params = &engine.search_params;
     let threats = history_threats(maps, params);
     let bonus = params.threat_escape_bonus;
@@ -2867,6 +2887,31 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// Regression: with two continuation-history slots the table is 4 MB, and
+    /// holding it inline in EngineState overflowed the 8 MB stacks the engine
+    /// runs on. Build the engine and run a real depth-12 search (book off, so
+    /// the search is not skipped) on a stack of that size.
+    #[test]
+    fn deep_search_fits_default_stack() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_startpos();
+                let mut engine = EngineState::new();
+                engine.own_book = false;
+                let out = handle_go("go depth 12", &mut board, &mut engine);
+                assert!(
+                    out.as_deref().is_some_and(|s| !s.trim().is_empty()),
+                    "no root move: {out:?}"
+                );
+                assert!(engine.last_search_nodes > 0, "search did not run");
+            })
+            .expect("spawn")
+            .join()
+            .expect("depth-12 search panicked");
+    }
 
     /// The board with only the given [colour][kind] bitboards kept.
     fn bb_subset(bb: &crate::bitboard::BoardBB, keep: impl Fn(usize, usize) -> bool) -> crate::bitboard::BoardBB {

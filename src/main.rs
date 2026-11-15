@@ -927,7 +927,26 @@ impl Board {
 /// threat bits say whether the opponent attacks the from/to square.
 type HistoryTable = [[[[[i32; 64]; 64]; 2]; 2]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
-type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// Two continuation slots: the move one ply up (opponent) and two plies up.
+/// 4 MB, so it lives on the heap (see `new_continuation_history`).
+type ContinuationHistoryTable = [[[[[i32; 64]; 64]; 64]; 2]; 2];
+
+/// Allocates a zeroed continuation-history table directly on the heap.
+/// `Box::new([[...]])` would build the 4 MB array on the stack first, which
+/// overflows the 8 MB main and search-thread stacks (especially in debug).
+fn new_continuation_history() -> Box<ContinuationHistoryTable> {
+    let layout = std::alloc::Layout::new::<ContinuationHistoryTable>();
+    // SAFETY: the layout is non-zero-sized, all-zero bits are a valid i32
+    // array, and the pointer comes from the global allocator with this
+    // type's layout, as Box::from_raw requires.
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut ContinuationHistoryTable;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        Box::from_raw(ptr)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -997,7 +1016,7 @@ struct EngineState {
     eval_cache: evalcache::EvalCache,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
-    continuation_history: ContinuationHistoryTable,
+    continuation_history: Box<ContinuationHistoryTable>,
     corr: Box<search::CorrectionHistory>,
     search_params: SearchParams,
     lmr_table: [[i32; 64]; 64],
@@ -1033,7 +1052,7 @@ impl EngineState {
             eval_cache: evalcache::EvalCache::new(),
             history: [[[[[0; 64]; 64]; 2]; 2]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
-            continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            continuation_history: new_continuation_history(),
             corr: search::CorrectionHistory::new_boxed(),
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
@@ -1079,7 +1098,7 @@ impl EngineState {
         self.eval_cache.clear();
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
-        self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.continuation_history = new_continuation_history();
         self.corr.clear();
         self.searches_since_decay = 0;
         self.position_history.clear();
@@ -1109,7 +1128,12 @@ impl EngineState {
     // continuation table used to be strided, ~4% of a 5000-node search).
     fn decay_history(&mut self) {
         let history = self.history.as_flattened_mut().as_flattened_mut().as_flattened_mut().as_flattened_mut();
-        let cont = self.continuation_history.as_flattened_mut().as_flattened_mut().as_flattened_mut();
+        let cont = self
+            .continuation_history
+            .as_flattened_mut()
+            .as_flattened_mut()
+            .as_flattened_mut()
+            .as_flattened_mut();
         for e in history.iter_mut() {
             *e /= 2;
         }
@@ -1134,7 +1158,7 @@ impl EngineState {
             eval_cache: evalcache::EvalCache::new(),
             history: self.history,
             counter_moves: self.counter_moves,
-            continuation_history: self.continuation_history,
+            continuation_history: self.continuation_history.clone(),
             corr: self.corr.clone(),
             search_params: self.search_params,
             lmr_table: self.lmr_table,
