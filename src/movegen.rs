@@ -578,9 +578,171 @@ pub(crate) fn threat_maps(board: &Board, by: Color) -> ThreatMaps {
     ThreatMaps { pawn, minor, rook, all }
 }
 
+/// Per-node data for a gives-check test without make_move (side to move =
+/// the checking side): the squares from which each piece kind would attack
+/// the enemy king, and our pieces whose departure would uncover a check by
+/// one of our sliders (discovered-check candidates).
+pub(crate) struct CheckInfo {
+    king: u8,
+    /// Indexed by `kind_index`: pawn, knight, bishop, rook, queen, king (0).
+    check_squares: [u64; 6],
+    discoverers: u64,
+    diag: u64,
+    ortho: u64,
+}
+
+impl CheckInfo {
+    pub(crate) fn new(board: &Board) -> Self {
+        use crate::bitboard::{bishop_attacks, rook_attacks, KNIGHT_ATTACKS, PAWN_ATTACKERS};
+
+        let c = color_index(board.side_to_move);
+        let bb = &board.bb;
+        let p = &bb.pieces[c];
+        let diag = p[2] | p[4];
+        let ortho = p[3] | p[4];
+        let Some(king) = board.king_square(board.side_to_move.opposite()) else {
+            return Self { king: 0, check_squares: [0; 6], discoverers: 0, diag, ortho };
+        };
+        let k = king as usize;
+        let occ = bb.occ_all();
+        let (b_att, r_att) = (bishop_attacks(k, occ), rook_attacks(k, occ));
+        let check_squares = [PAWN_ATTACKERS[c][k], KNIGHT_ATTACKS[k], b_att, r_att, b_att | r_att, 0];
+
+        // Our sliders on an empty-board line with the king; a lone own piece
+        // between one of them and the king is a discovered-check candidate.
+        let king_bit = 1u64 << king;
+        let mut snipers = (bishop_attacks(k, 0) & diag) | (rook_attacks(k, 0) & ortho);
+        let mut discoverers = 0u64;
+        while snipers != 0 {
+            let s = snipers.trailing_zeros() as usize;
+            snipers &= snipers - 1;
+            let s_bit = 1u64 << s;
+            let between = if bishop_attacks(k, 0) & s_bit != 0 {
+                bishop_attacks(k, s_bit) & bishop_attacks(s, king_bit)
+            } else {
+                rook_attacks(k, s_bit) & rook_attacks(s, king_bit)
+            };
+            let blockers = between & occ;
+            if blockers.count_ones() == 1 && blockers & bb.occ[c] != 0 {
+                discoverers |= blockers;
+            }
+        }
+        Self { king, check_squares, discoverers, diag, ortho }
+    }
+
+    /// Whether `mv` (a legal move of the side to move) gives check. Exact for
+    /// every move kind; ordinary moves cost a table lookup or two, and only
+    /// discovered-check candidates, promotions, castling and en passant
+    /// trace slider attacks over the post-move occupancy.
+    #[inline]
+    pub(crate) fn gives_check(&self, board: &Board, mv: Move) -> bool {
+        use crate::bitboard::{bishop_attacks, rook_attacks};
+
+        let Some(piece) = board.squares[mv.from as usize] else {
+            return false;
+        };
+        let k = self.king as usize;
+        let (from_bit, to_bit) = (1u64 << mv.from, 1u64 << mv.to);
+        let occ = board.bb.occ_all();
+
+        if mv.is_castle {
+            let (rook_from, rook_to) = match mv.to {
+                6 => (7u8, 5u8),
+                2 => (0, 3),
+                62 => (63, 61),
+                _ => (56, 59),
+            };
+            let (rf, rt) = (1u64 << rook_from, 1u64 << rook_to);
+            let occ2 = occ ^ from_bit ^ to_bit ^ rf ^ rt;
+            let ortho = (self.ortho & !rf) | rt;
+            return rook_attacks(k, occ2) & ortho != 0 || bishop_attacks(k, occ2) & self.diag != 0;
+        }
+        if mv.is_en_passant {
+            if self.check_squares[0] & to_bit != 0 {
+                return true;
+            }
+            let cap = if board.side_to_move == Color::White { mv.to - 8 } else { mv.to + 8 };
+            let occ2 = (occ ^ from_bit ^ (1u64 << cap)) | to_bit;
+            return rook_attacks(k, occ2) & self.ortho != 0 || bishop_attacks(k, occ2) & self.diag != 0;
+        }
+
+        if let Some(promo) = mv.promotion {
+            // The vacated from-square may lie between `to` and the king.
+            let promoted = Piece { color: piece.color, kind: promo };
+            if piece_attacks(mv.to, promoted, occ ^ from_bit) & (1u64 << self.king) != 0 {
+                return true;
+            }
+        } else if self.check_squares[crate::bitboard::kind_index(piece.kind)] & to_bit != 0 {
+            return true;
+        }
+
+        if self.discoverers & from_bit != 0 {
+            let occ2 = (occ ^ from_bit) | to_bit;
+            return rook_attacks(k, occ2) & self.ortho & !from_bit != 0
+                || bishop_attacks(k, occ2) & self.diag & !from_bit != 0;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gives_check_matches_make_move() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r3k2r/1P4P1/8/2pPp3/8/8/1p4p1/R3K2R w KQkq e6 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "5k2/8/8/8/8/8/8/4K2R w K - 0 1",
+            "8/2k5/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "3k4/8/8/8/8/8/8/R3K3 w Q - 0 1",
+        ];
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut legal = Vec::new();
+        let (mut checks, mut kinds) = (0u32, [0u32; 4]);
+        for fen in fens {
+            for _ in 0..40 {
+                let mut board = Board::new();
+                board.set_fen(fen);
+                for _ in 0..60 {
+                    board.generate_legal_moves(false, &mut legal);
+                    if legal.is_empty() {
+                        break;
+                    }
+                    let info = CheckInfo::new(&board);
+                    for mv in legal.clone() {
+                        let fast = info.gives_check(&board, mv);
+                        let undo = board.make_move(mv);
+                        let slow = board.is_in_check(board.side_to_move);
+                        board.undo_move(mv, undo);
+                        assert_eq!(fast, slow, "{mv:?} in a line from {fen}");
+                        if slow {
+                            checks += 1;
+                            let disc = info.discoverers >> mv.from & 1 == 1;
+                            let i = if mv.is_castle {
+                                0
+                            } else if mv.is_en_passant {
+                                1
+                            } else if mv.promotion.is_some() {
+                                2
+                            } else {
+                                3 * disc as usize
+                            };
+                            kinds[i] += 1;
+                        }
+                    }
+                    let r = crate::tt::splitmix64(&mut rng);
+                    let mv = legal[(r >> 8) as usize % legal.len()];
+                    board.make_move(mv);
+                }
+            }
+        }
+        assert!(checks > 1000 && kinds.iter().all(|&n| n > 0), "{checks} {kinds:?}");
+    }
 
     #[test]
     fn threat_maps_match_square_attacks() {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::movegen::{threat_maps, ThreatMaps};
+use crate::movegen::{threat_maps, CheckInfo, ThreatMaps};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
@@ -1754,6 +1754,7 @@ fn negamax(
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
     let mut idx = 0usize;
+    let mut check_info: Option<CheckInfo> = None;
 
     while let Some((mv, stage)) = picker.next() {
         if Some(mv) == excluded {
@@ -1839,6 +1840,22 @@ fn negamax(
                 _ => params.lmp_limit_d3,
             };
             if idx >= limit {
+                continue;
+            }
+        }
+
+        // Per-move futility: a late quiet that cannot raise static eval to
+        // alpha, and does not give check, is uninteresting at a zero window.
+        if quiet
+            && !priority_quiet
+            && !in_check
+            && beta - alpha <= 1
+            && depth <= 8
+            && idx > 0
+            && static_eval.is_some_and(|se| se + params.futility_margin_d1 * depth / 2 <= alpha)
+        {
+            let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
+            if !ci.gives_check(board, mv) {
                 continue;
             }
         }
