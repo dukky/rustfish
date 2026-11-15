@@ -928,6 +928,9 @@ impl Board {
 type HistoryTable = [[[[[i32; 64]; 64]; 2]; 2]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
 type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// Capture history, [side][moving kind][destination][captured kind]: how often
+/// a capture has cut, used to adjust the bad-capture SEE threshold.
+type CaptureHistoryTable = [[[[i32; 6]; 64]; 6]; 2];
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -996,6 +999,7 @@ struct EngineState {
     tt: TransTable,
     eval_cache: evalcache::EvalCache,
     history: HistoryTable,
+    capture_history: CaptureHistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
     corr: Box<search::CorrectionHistory>,
@@ -1032,6 +1036,7 @@ impl EngineState {
             tt: TransTable::new(hash_mb),
             eval_cache: evalcache::EvalCache::new(),
             history: [[[[[0; 64]; 64]; 2]; 2]; 2],
+            capture_history: [[[[0; 6]; 64]; 6]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
             corr: search::CorrectionHistory::new_boxed(),
@@ -1078,6 +1083,7 @@ impl EngineState {
         self.tt.clear();
         self.eval_cache.clear();
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
+        self.capture_history = [[[[0; 6]; 64]; 6]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
         self.corr.clear();
@@ -1109,8 +1115,12 @@ impl EngineState {
     // continuation table used to be strided, ~4% of a 5000-node search).
     fn decay_history(&mut self) {
         let history = self.history.as_flattened_mut().as_flattened_mut().as_flattened_mut().as_flattened_mut();
+        let capture_history = self.capture_history.as_flattened_mut().as_flattened_mut().as_flattened_mut();
         let cont = self.continuation_history.as_flattened_mut().as_flattened_mut().as_flattened_mut();
         for e in history.iter_mut() {
+            *e /= 2;
+        }
+        for e in capture_history.iter_mut() {
             *e /= 2;
         }
         for e in cont.iter_mut() {
@@ -1133,6 +1143,7 @@ impl EngineState {
             tt: self.tt.clone(),
             eval_cache: evalcache::EvalCache::new(),
             history: self.history,
+            capture_history: self.capture_history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
             corr: self.corr.clone(),
