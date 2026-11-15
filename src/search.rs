@@ -260,6 +260,10 @@ const SEE_QUIET_MARGIN: i32 = 20;
 // Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
 const SEE_PRUNE_MAX_DEPTH: i32 = 6;
 const SEE_PRUNE_CAPTURE_MARGIN: i32 = 100;
+// Capture history moves that SEE threshold by at most this many centipawns.
+// Below SEE_PRUNE_CAPTURE_MARGIN so the threshold stays negative at depth 1.
+const SEE_CAPTURE_HISTORY_SCALE: i32 = 512;
+const SEE_CAPTURE_HISTORY_ADJUST: i32 = 64;
 // ProbCut: minimum depth, margin over beta, and depth reduction for the
 // verification search (child searched at depth - 1 - PROBCUT_REDUCTION).
 const PROBCUT_MIN_DEPTH: i32 = 5;
@@ -514,6 +518,56 @@ fn apply_continuation_history_delta(
     let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
         [mv.to as usize];
     apply_gravity(h, delta);
+}
+
+/// The captured piece for `mv`, including the pawn behind an en-passant target.
+fn captured_piece(board: &Board, mv: Move) -> Option<Piece> {
+    if mv.is_en_passant {
+        Some(Piece {
+            color: board.side_to_move.opposite(),
+            kind: PieceType::Pawn,
+        })
+    } else {
+        board.squares[mv.to as usize]
+    }
+}
+
+fn capture_history_score(engine: &EngineState, board: &Board, side: Color, mv: Move) -> i32 {
+    let (Some(moving), Some(captured)) =
+        (board.squares[mv.from as usize], captured_piece(board, mv))
+    else {
+        return 0;
+    };
+    engine.capture_history[color_index(side)][moving.kind as usize][mv.to as usize]
+        [captured.kind as usize]
+}
+
+fn apply_capture_history_delta(
+    engine: &mut EngineState,
+    board: &Board,
+    side: Color,
+    mv: Move,
+    delta: i32,
+) {
+    let (Some(moving), Some(captured)) =
+        (board.squares[mv.from as usize], captured_piece(board, mv))
+    else {
+        return;
+    };
+    let h = &mut engine.capture_history[color_index(side)][moving.kind as usize][mv.to as usize]
+        [captured.kind as usize];
+    apply_gravity(h, delta);
+}
+
+fn capture_history_see_adjust(cap_hist: i32) -> i32 {
+    (cap_hist / SEE_CAPTURE_HISTORY_SCALE)
+        .clamp(-SEE_CAPTURE_HISTORY_ADJUST, SEE_CAPTURE_HISTORY_ADJUST)
+}
+
+/// Bad-capture SEE threshold, lowered for captures that have cut before and
+/// raised for ones that have not.
+fn capture_see_threshold(base: i32, cap_hist: i32) -> i32 {
+    base - capture_history_see_adjust(cap_hist)
 }
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
@@ -1753,6 +1807,7 @@ fn negamax(
     let mut best_move = None;
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
+    let mut captures_tried = PooledMoveVec::take();
     let mut idx = 0usize;
     let mut check_info: Option<CheckInfo> = None;
 
@@ -1880,13 +1935,20 @@ fn negamax(
             && depth <= SEE_PRUNE_MAX_DEPTH
             && idx > 0
             && best > -(MATE_SCORE - 1000)
-            && !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth)
         {
-            continue;
+            let threshold = capture_see_threshold(
+                -SEE_PRUNE_CAPTURE_MARGIN * depth,
+                capture_history_score(engine, board, side, mv),
+            );
+            if !see_ge(board, mv, threshold) {
+                continue;
+            }
         }
 
         if quiet {
             quiets_tried.push(mv);
+        } else {
+            captures_tried.push(mv);
         }
 
         let undo = board.make_move(mv);
@@ -2040,6 +2102,14 @@ fn negamax(
                     if tried != mv {
                         apply_history_delta(engine, side, threats, tried, -bonus);
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                    }
+                }
+            } else {
+                let bonus = history_bonus(depth);
+                apply_capture_history_delta(engine, board, side, mv, bonus);
+                for tried in captures_tried.iter().copied() {
+                    if tried != mv {
+                        apply_capture_history_delta(engine, board, side, tried, -bonus / 2);
                     }
                 }
             }
@@ -3398,5 +3468,87 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn capture_history_indexes_mover_destination_and_victim() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_fen("4k3/8/8/3q4/8/4N3/8/4K3 w - - 0 1");
+                let mv = parse_uci_move(&mut board, "e3d5").expect("legal capture");
+                let side = board.side_to_move;
+                let mut engine = EngineState::new();
+                assert_eq!(capture_history_score(&engine, &board, side, mv), 0);
+
+                apply_capture_history_delta(&mut engine, &board, side, mv, history_bonus(5));
+                let h = capture_history_score(&engine, &board, side, mv);
+                assert!(h > 0);
+                assert_eq!(
+                    engine.capture_history[color_index(side)][PieceType::Knight as usize]
+                        [mv.to as usize][PieceType::Queen as usize],
+                    h
+                );
+                // Side, destination and victim are all part of the index.
+                assert_eq!(
+                    engine.capture_history[color_index(side.opposite())]
+                        [PieceType::Knight as usize][mv.to as usize]
+                        [PieceType::Queen as usize],
+                    0
+                );
+                assert_eq!(
+                    engine.capture_history[color_index(side)][PieceType::Knight as usize]
+                        [mv.to as usize][PieceType::Pawn as usize],
+                    0
+                );
+
+                // En passant records the pawn behind the target square as the victim.
+                board.set_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+                let ep = parse_uci_move(&mut board, "e5d6").expect("legal en passant");
+                let mut engine = EngineState::new();
+                apply_capture_history_delta(&mut engine, &board, side, ep, history_bonus(3));
+                assert!(
+                    engine.capture_history[color_index(side)][PieceType::Pawn as usize]
+                        [ep.to as usize][PieceType::Pawn as usize]
+                        > 0
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn capture_see_threshold_is_monotone_and_bounded() {
+        assert!(SEE_CAPTURE_HISTORY_ADJUST < SEE_PRUNE_CAPTURE_MARGIN);
+        assert_eq!(
+            capture_history_see_adjust(i32::MAX),
+            SEE_CAPTURE_HISTORY_ADJUST
+        );
+        assert_eq!(
+            capture_history_see_adjust(i32::MIN),
+            -SEE_CAPTURE_HISTORY_ADJUST
+        );
+
+        for base in [-100, -200, -600] {
+            let mut prev = i32::MAX;
+            for cap_hist in [-HISTORY_MAX, -10_000, -1, 0, 1, 10_000, HISTORY_MAX] {
+                let threshold = capture_see_threshold(base, cap_hist);
+                assert!(threshold <= prev);
+                assert!(threshold >= base - SEE_CAPTURE_HISTORY_ADJUST);
+                assert!(threshold <= base + SEE_CAPTURE_HISTORY_ADJUST);
+                prev = threshold;
+            }
+        }
+
+        // At depth 1 a good capture history lowers the threshold past a
+        // slightly negative SEE, a bad one raises it past the same SEE.
+        let base = -SEE_PRUNE_CAPTURE_MARGIN;
+        let good = capture_see_threshold(base, i32::MAX);
+        let bad = capture_see_threshold(base, i32::MIN);
+        assert!(good <= -50);
+        assert!(bad > -50);
+        assert!(good < 0 && bad < 0);
     }
 }
