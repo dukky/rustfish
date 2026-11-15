@@ -6,20 +6,10 @@
       "expect": 1.0
     }
   ],
-  "current": {
-    "branch": "feat-futility-moves",
-    "mode": "stc",
-    "expect": 2.0,
-    "test_id": "q-feat-futility-moves-1115-1358",
-    "sha": "b1961e7cac379b6fa908c5a6be7c5c3086e3e2dc",
-    "base_sha": "407e4e8ef6904f282555e2d5445ed90273baad89",
-    "started": "2026-11-15T13:58:41Z",
-    "bench": 427762,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
-  "merges_since_check": 3,
-  "merges_since_ladder": 3,
+  "merges_since_check": 4,
+  "merges_since_ladder": 4,
   "next_seed": 214,
   "consecutive_bursts": 0,
   "identical_merges": [
