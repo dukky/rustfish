@@ -1,12 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "feat-lmp-formula",
-      "mode": "stc",
-      "expect": 1.0
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "feat-lmp-formula",
+    "mode": "stc",
+    "expect": 1.0,
+    "test_id": "q-feat-lmp-formula-1115-1453",
+    "sha": "0faaaeac55472d7d36754dd98dbd09d9aef353f8",
+    "base_sha": "b1961e7cac379b6fa908c5a6be7c5c3086e3e2dc",
+    "started": "2026-11-15T14:53:07Z",
+    "bench": 282292,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
