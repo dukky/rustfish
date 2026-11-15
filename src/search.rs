@@ -1671,7 +1671,7 @@ fn negamax(
                 &mut search.move_buf,
             );
             while let Some((mv, stage)) = picker.next() {
-                if stage == Stage::BadCapture || see(board, mv) < see_threshold {
+                if stage == Stage::BadCapture || !see_ge(board, mv, see_threshold) {
                     continue;
                 }
                 let undo = board.make_move(mv);
@@ -1852,7 +1852,7 @@ fn negamax(
             && idx > 0
             && depth <= SEE_QUIET_MAX_DEPTH
             && best > -(MATE_SCORE - 1000)
-            && see(board, mv) < -SEE_QUIET_MARGIN * depth * depth
+            && !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth)
         {
             continue;
         }
@@ -1863,7 +1863,7 @@ fn negamax(
             && depth <= SEE_PRUNE_MAX_DEPTH
             && idx > 0
             && best > -(MATE_SCORE - 1000)
-            && see(board, mv) < -SEE_PRUNE_CAPTURE_MARGIN * depth
+            && !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth)
         {
             continue;
         }
@@ -2179,7 +2179,7 @@ fn quiescence(
             if stage == Stage::BadCapture {
                 continue;
             }
-            if stage == Stage::Tt && see(board, mv) < 0 {
+            if stage == Stage::Tt && !see_ge(board, mv, 0) {
                 continue;
             }
         }
@@ -2662,6 +2662,135 @@ fn see(board: &Board, mv: Move) -> i32 {
     gain[0]
 }
 
+/// Thresholded SEE: returns `see(board, mv) >= threshold` while building only
+/// as much of the swap list as the answer needs. The unwound `see` value is
+/// `min(gain[d], -A[d + 1])` at each ply, so the test alternates between
+/// `gain >= bound` and `gain <= bound`, flipping the bound's sign every ply.
+fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
+    use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS};
+
+    if mv.is_castle {
+        return 0 >= threshold;
+    }
+
+    let moving = match board.squares[mv.from as usize] {
+        Some(p) => p,
+        None => return 0 >= threshold,
+    };
+
+    let mut occ = board.bb.occ_all();
+
+    let captured = if mv.is_en_passant {
+        let cap_sq = if moving.color == Color::White { mv.to - 8 } else { mv.to + 8 };
+        occ &= !(1u64 << cap_sq);
+        board.squares[cap_sq as usize]
+    } else {
+        board.squares[mv.to as usize]
+    };
+    let captured_value = captured.map(|c| piece_value(c.kind)).unwrap_or(0);
+
+    occ &= !(1u64 << mv.from);
+    occ |= 1u64 << mv.to;
+    let placed_kind = mv.promotion.unwrap_or(moving.kind);
+
+    let promo_delta = mv
+        .promotion
+        .map(|p| piece_value(p) - piece_value(PieceType::Pawn))
+        .unwrap_or(0);
+
+    let mut gain = [0i32; 32];
+    let mut depth = 0usize;
+    gain[0] = captured_value + promo_delta;
+
+    if gain[0] < threshold {
+        return false;
+    }
+    // `ge` selects the running bound: true tests `gain[depth] >= bound`,
+    // false tests `gain[depth] <= bound`.
+    let mut ge = false;
+    let mut bound = -threshold;
+
+    let pc = &board.bb.pieces;
+    let t = mv.to as usize;
+    let diag_sliders = pc[0][2] | pc[0][4] | pc[1][2] | pc[1][4];
+    let ortho_sliders = pc[0][3] | pc[0][4] | pc[1][3] | pc[1][4];
+    let mut attackers = (PAWN_ATTACKERS[0][t] & pc[0][0])
+        | (PAWN_ATTACKERS[1][t] & pc[1][0])
+        | (KNIGHT_ATTACKS[t] & (pc[0][1] | pc[1][1]))
+        | (KING_ATTACKS[t] & (pc[0][5] | pc[1][5]))
+        | (bishop_attacks(t, occ) & diag_sliders)
+        | (rook_attacks(t, occ) & ortho_sliders);
+
+    let mut side = board.side_to_move.opposite();
+    let mut occupant_value = piece_value(placed_kind);
+
+    loop {
+        depth += 1;
+        if depth >= gain.len() {
+            return !ge;
+        }
+
+        attackers &= occ;
+        let c = color_index(side);
+        let mine = attackers & board.bb.occ[c];
+        // No recapture: the last real gain entry is the final result, and it
+        // already passed the check that switched to this ply's bound.
+        if mine == 0 {
+            return !ge;
+        }
+
+        let p = &pc[c];
+        let (bit, kind) = if mine & p[0] != 0 {
+            let b = mine & p[0];
+            (b & b.wrapping_neg(), PieceType::Pawn)
+        } else if mine & p[1] != 0 {
+            let b = mine & p[1];
+            (b & b.wrapping_neg(), PieceType::Knight)
+        } else if mine & p[2] != 0 {
+            (pick_slider(mine & p[2], t, SEE_BISHOP_ORDER), PieceType::Bishop)
+        } else if mine & p[3] != 0 {
+            (pick_slider(mine & p[3], t, SEE_ROOK_ORDER), PieceType::Rook)
+        } else if mine & p[4] != 0 {
+            (pick_slider(mine & p[4], t, SEE_QUEEN_ORDER), PieceType::Queen)
+        } else {
+            let b = mine & p[5];
+            (b & b.wrapping_neg(), PieceType::King)
+        };
+
+        gain[depth] = occupant_value - gain[depth - 1];
+
+        // Same early stop as `see`: the side to move would rather not
+        // continue the exchange, so this gain entry is the final one.
+        if gain[depth].max(-gain[depth - 1]) < 0 {
+            return if ge { gain[depth] >= bound } else { gain[depth] <= bound };
+        }
+        if ge {
+            if gain[depth] < bound {
+                return false;
+            }
+        } else if gain[depth] <= bound {
+            return true;
+        }
+        ge = !ge;
+        bound = -bound;
+
+        occ &= !bit;
+        match kind {
+            PieceType::Pawn | PieceType::Bishop => {
+                attackers |= bishop_attacks(t, occ) & diag_sliders;
+            }
+            PieceType::Rook => attackers |= rook_attacks(t, occ) & ortho_sliders,
+            PieceType::Queen | PieceType::King => {
+                attackers |= (bishop_attacks(t, occ) & diag_sliders)
+                    | (rook_attacks(t, occ) & ortho_sliders);
+            }
+            PieceType::Knight => {}
+        }
+        occupant_value = piece_value(kind);
+        side = side.opposite();
+    }
+}
+
 fn move_order_score(
     board: &Board,
     engine: &EngineState,
@@ -3031,6 +3160,71 @@ mod tests {
             positions, captures, quiets
         );
         assert!(positions == 20_000 && captures > 60_000, "captures {}", captures);
+    }
+
+    #[test]
+    fn see_ge_matches_see_thresholds() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r1bq1rk1/pppn1ppp/3bpn2/3p4/2PP4/2N1PN2/PPQ2PPP/R1B1KB1R w KQ - 2 8",
+            "8/2p5/3p4/KP5r/1R3pk1/4P1p1/5P2/8 w - - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "1r1q1rk1/1b2bppp/p2p1n2/1pnPp3/4P3/1BN1BN1P/PP3PP1/R2Q1RK1 w - - 0 1",
+            "3r1rk1/1b1q1ppp/p3pn2/1pbnN3/3P4/P1N1B1P1/1PQ1PPBP/2RR2K1 w - - 0 1",
+            "r3k2r/1P4P1/8/2pPp3/8/8/1p4p1/R3K2R w KQkq e6 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+        ];
+        let mut board = Board::new();
+        let mut legal = Vec::new();
+        let mut moves = Vec::new();
+        let mut rng = 0xDEAD_BEEF_CAFE_1234u64;
+        let (mut checked, mut castles, mut eps, mut promos) = (0usize, 0, 0, 0);
+        for (i, fen) in fens.iter().enumerate() {
+            // The initial position guarantees castling, en passant and promotion
+            // moves at least once; the random walks then vary the material.
+            for walk in 0..=50 {
+                board.set_fen(fen);
+                if walk > 0 {
+                    let plies = (crate::tt::splitmix64(&mut rng) % 70) as usize;
+                    for _ in 0..plies {
+                        board.generate_legal_moves(false, &mut legal);
+                        if legal.is_empty() {
+                            break;
+                        }
+                        let r = crate::tt::splitmix64(&mut rng);
+                        let _ = board.make_move(legal[(r >> 8) as usize % legal.len()]);
+                    }
+                }
+                moves.clear();
+                generate_pseudo_moves(&board, false, &mut moves);
+                for &mv in &moves {
+                    castles += mv.is_castle as usize;
+                    eps += mv.is_en_passant as usize;
+                    promos += mv.promotion.is_some() as usize;
+                    let v = see(&board, mv);
+                    for t in (-2000..=2000).step_by(25) {
+                        assert_eq!(
+                            see_ge(&board, mv, t),
+                            v >= t,
+                            "SEE {v} vs threshold {t} for {} (fen {i}, walk {walk})",
+                            move_to_uci(mv)
+                        );
+                    }
+                    for t in v - 1..=v + 1 {
+                        assert_eq!(
+                            see_ge(&board, mv, t),
+                            v >= t,
+                            "SEE {v} vs threshold {t} for {} (fen {i}, walk {walk})",
+                            move_to_uci(mv)
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000, "checked {checked}");
+        assert!(castles > 0 && eps > 0 && promos > 0, "castles {castles} eps {eps} promos {promos}");
     }
 
     #[test]
