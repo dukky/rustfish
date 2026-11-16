@@ -7,6 +7,14 @@
     {
       "branch": "simp2-rfp-improving-r2",
       "mode": "nonreg"
+    },
+    {
+      "branch": "search-countermove-history",
+      "mode": "stc"
+    },
+    {
+      "branch": "feat-root-lmr-quiets",
+      "mode": "stc"
     }
   ],
   "current": {
@@ -22,7 +30,7 @@
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
-  "next_seed": 227,
+  "next_seed": 228,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
