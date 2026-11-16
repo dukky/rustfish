@@ -10,16 +10,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "search-countermove-history",
-    "mode": "stc",
-    "test_id": "q-search-countermove-history-1116-2310",
-    "sha": "84608844d09f15e47a5b5f2f07f015d94a0bd8af",
-    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
-    "started": "2026-11-16T23:10:10Z",
-    "bench": 399798,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
