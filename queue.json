@@ -17,16 +17,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "feat-caphist-see-r2",
-    "mode": "stc",
-    "test_id": "q-feat-caphist-see-r2-1116-1945",
-    "sha": "5a0a155d0b0c22e5cab5f434340c3a06e3948724",
-    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
-    "started": "2026-11-16T19:45:33Z",
-    "bench": 427762,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
