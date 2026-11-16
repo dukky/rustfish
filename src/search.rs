@@ -267,9 +267,16 @@ const PROBCUT_MARGIN: i32 = 190;
 const PROBCUT_REDUCTION: i32 = 3;
 const LMR_MAX_DEPTH: usize = 64;
 const LMR_MAX_MOVES: usize = 64;
-// Root LMR: after the early root moves, search late moves one ply shallower
-// first. A reduced move that beats alpha is re-searched at full depth, so this
-// only saves work on moves that fail low.
+// Root LMR: after the early root moves, search late cold quiets one ply
+// shallower first. A reduced move that beats alpha is re-searched at full
+// depth, so this only saves work on moves that fail low. The move class is the
+// interior LMR one: captures are never reduced there, and a quiet with
+// positive history gets a one-ply relief that cancels the one-ply root
+// reduction, so neither is reduced here either. Captures especially: every
+// test of reducing captures has failed (feat-lmr-captures -3.3;
+// lmr-pv-captures-r2 +2.1 and ttcapture-lmr +3.3, both H0), because a late
+// capture's justification (or its refutation) is often deeper than a single
+// ply of reduction can see.
 const ROOT_LMR_MIN_DEPTH: i32 = 5;
 const ROOT_LMR_MIN_INDEX: usize = 4;
 const ROOT_LMR_REDUCTION: i32 = 1;
@@ -1288,12 +1295,22 @@ fn search_root(
         search.root_nodes = vec![0; 64 * 64];
     }
 
+    // The quiet-history slot the ordering read, for the root LMR move class.
+    // Computed once per iteration: the root list is short and this is not hot.
+    let side = board.side_to_move;
+    let root_threats = {
+        let maps = node_threat_maps(board, &engine.search_params);
+        history_threats(&maps, &engine.search_params)
+    };
+
     for (idx, mv) in root_moves.iter().copied().enumerate() {
         if search.should_stop() {
             return (best_score, best_move, false);
         }
 
         let nodes_before = search.nodes;
+        // Read before `make_move`: afterwards the destination holds our own piece.
+        let capture = is_capture_move(board, mv);
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         rep_stack.push(child_key);
@@ -1316,11 +1333,13 @@ fn search_root(
                 false,
             );
         } else {
-            let reduction = if idx >= ROOT_LMR_MIN_INDEX && depth >= ROOT_LMR_MIN_DEPTH {
-                ROOT_LMR_REDUCTION
-            } else {
-                0
-            };
+            // Root LMR reduces late cold quiets only (see ROOT_LMR_MIN_DEPTH).
+            let hot = Some(mv) == search.killers[0][0]
+                || Some(mv) == search.killers[0][1]
+                || history_score(&engine.history, side, root_threats, mv) > 0;
+            let late =
+                !capture && !hot && idx >= ROOT_LMR_MIN_INDEX && depth >= ROOT_LMR_MIN_DEPTH;
+            let reduction = if late { ROOT_LMR_REDUCTION } else { 0 };
             score = -negamax(
                 board,
                 depth - 1 - reduction,
