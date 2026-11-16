@@ -516,6 +516,48 @@ fn apply_continuation_history_delta(
     apply_gravity(h, delta);
 }
 
+/// Trust in countermove history relative to main history. Continuation history
+/// is weighted /2; this table is sparser (one row per enemy (piece, to)), so it
+/// only nudges the order of quiets. The plain-quiet stage clamps its score with
+/// `max(h)`, so in practice this term promotes quiets with a positive entry.
+const COUNTER_HISTORY_DIV: i32 = 4;
+
+/// Countermove-history slot for the position after `prev_move`: the kind of
+/// piece that just moved and the square it landed on. Read from the board, so a
+/// promotion indexes by the promoted kind and castling by the king's square.
+#[inline(always)]
+fn counter_move_history_key(board: &Board, prev_move: Option<Move>) -> Option<(usize, usize)> {
+    let prev = prev_move?;
+    let piece = board.squares[prev.to as usize]?;
+    Some((piece.kind as usize, prev.to as usize))
+}
+
+fn counter_move_history_score(
+    engine: &EngineState,
+    side: Color,
+    key: Option<(usize, usize)>,
+    mv: Move,
+) -> i32 {
+    key.map(|(kind, prev_to)| {
+        engine.counter_move_history[color_index(side)][kind][prev_to][mv.to as usize]
+    })
+    .unwrap_or(0)
+}
+
+fn apply_counter_move_history_delta(
+    engine: &mut EngineState,
+    side: Color,
+    key: Option<(usize, usize)>,
+    mv: Move,
+    delta: i32,
+) {
+    let Some((kind, prev_to)) = key else {
+        return;
+    };
+    let h = &mut engine.counter_move_history[color_index(side)][kind][prev_to][mv.to as usize];
+    apply_gravity(h, delta);
+}
+
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
 }
@@ -676,6 +718,9 @@ impl MovePicker {
         let side_hist = &history[color_index(side)];
         let cont_row = prev_move
             .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
+        let cmh_table = &engine.counter_move_history[color_index(side)];
+        let cmh_row = counter_move_history_key(board, prev_move)
+            .map(|(kind, prev_to)| &cmh_table[kind][prev_to]);
 
         for mv in move_buf.iter().copied() {
             picker.total += 1;
@@ -698,10 +743,11 @@ impl MovePicker {
             let (tf, tt) = threat_slot(threats, mv);
             let h = side_hist[tf][tt][mv.from as usize][mv.to as usize];
             let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
+            let cmh = cmh_row.map(|row| row[mv.to as usize]).unwrap_or(0);
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
             let is_counter = Some(mv) == counter_move;
-            let mut score = h + ch / 2;
+            let mut score = h + ch / 2 + cmh / COUNTER_HISTORY_DIV;
             if is_k0 {
                 score += 30_000;
             } else if is_counter {
@@ -1729,6 +1775,7 @@ fn negamax(
     }
 
     let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
+    let cmh_key = counter_move_history_key(board, prev_move);
     let killers = search.killers[ply];
     let mut picker = MovePicker::new(
         board,
@@ -2036,10 +2083,12 @@ fn negamax(
                 }
                 apply_history_delta(engine, side, threats, mv, bonus);
                 apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                apply_counter_move_history_delta(engine, side, cmh_key, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, threats, tried, -bonus);
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_counter_move_history_delta(engine, side, cmh_key, tried, -bonus);
                     }
                 }
             }
@@ -2845,11 +2894,18 @@ fn move_order_score(
         .saturating_sub(piece_value(PieceType::Pawn));
     let castle = if mv.is_castle { 10 } else { 0 };
     let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
+    let cmh_key = counter_move_history_key(board, prev_move);
+    let counter = counter_move_history_score(engine, board.side_to_move, cmh_key, mv);
     let params = &engine.search_params;
     let threats = history_threats(maps, params);
     let bonus = params.threat_escape_bonus;
     let escape = threat_escape_bonus(board, maps, threatened_pieces(board, maps, bonus), mv, bonus);
-    history_score(history, board.side_to_move, threats, mv) + continuation / 2 + promo + castle + escape
+    history_score(history, board.side_to_move, threats, mv)
+        + continuation / 2
+        + counter / COUNTER_HISTORY_DIV
+        + promo
+        + castle
+        + escape
 }
 
 pub(crate) fn piece_value(kind: PieceType) -> i32 {
@@ -3394,6 +3450,104 @@ mod tests {
                 );
 
                 assert_eq!(score, -MATE_SCORE + 5);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The countermove table is keyed by the enemy piece that just moved and its
+    /// destination, not by the reply's origin: exactly that entry trains.
+    #[test]
+    fn counter_move_history_keys_on_enemy_piece_and_square() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_startpos();
+                board.attach_nnue(None);
+                let mut moves = Vec::new();
+                board.generate_legal_moves(false, &mut moves);
+                // 1.Nf3: a knight lands on f3 (g1 = 6, f3 = 21).
+                let nf3 = *moves.iter().find(|m| m.from == 6 && m.to == 21).unwrap();
+                let undo = board.make_move(nf3);
+
+                let mut engine = EngineState::new();
+                let side = board.side_to_move;
+                let key = counter_move_history_key(&board, Some(nf3));
+                assert_eq!(key, Some((PieceType::Knight as usize, 21)));
+                // 1...d5 (d7 = 51, d5 = 35) as a quiet reply to the knight.
+                let d5 = Move {
+                    from: 51,
+                    to: 35,
+                    promotion: None,
+                    is_en_passant: false,
+                    is_castle: false,
+                };
+                assert_eq!(counter_move_history_score(&engine, side, key, d5), 0);
+                apply_counter_move_history_delta(&mut engine, side, key, d5, 1_000);
+                assert!(counter_move_history_score(&engine, side, key, d5) > 0);
+
+                // The same reply destination after a different enemy piece, and a
+                // different destination after the same piece, are separate slots.
+                let c = color_index(side);
+                assert_eq!(
+                    engine.counter_move_history[c][PieceType::Pawn as usize][21][35],
+                    0
+                );
+                assert_eq!(
+                    engine.counter_move_history[c][PieceType::Knight as usize][21][36],
+                    0
+                );
+
+                // Gravity keeps a long run of maximum bonuses inside the bound.
+                for _ in 0..200 {
+                    apply_counter_move_history_delta(&mut engine, side, key, d5, 100_000);
+                }
+                let v = counter_move_history_score(&engine, side, key, d5);
+                assert!(
+                    (-HISTORY_MAX..=HISTORY_MAX).contains(&v),
+                    "unbounded countermove history: {v}"
+                );
+                assert!(v > 0);
+
+                board.undo_move(nf3, undo);
+                // The key reads the board, so an empty destination is no key at all.
+                assert_eq!(counter_move_history_key(&board, Some(nf3)), None);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A real search trains the countermove table, so the update path is live.
+    #[test]
+    fn counter_move_history_trains_during_a_search() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                // Kiwipete: quiet cutoffs are plentiful here.
+                board.set_fen(
+                    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                );
+                let mut engine = EngineState::new();
+                let best = handle_go("go depth 8", &mut board, &mut engine)
+                    .expect("search returned a move");
+                assert!(!best.is_empty());
+
+                let trained = engine
+                    .counter_move_history
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .flatten()
+                    .filter(|h| **h != 0)
+                    .count();
+                assert!(
+                    trained > 0,
+                    "no countermove-history entry trained at depth 8"
+                );
             })
             .unwrap()
             .join()

@@ -928,6 +928,13 @@ impl Board {
 type HistoryTable = [[[[[i32; 64]; 64]; 2]; 2]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
 type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+/// Countermove history, [side][kind the opponent just moved][its destination]
+/// [our destination]. The continuation table above is keyed by the previous
+/// move's destination and the reply's from/to squares; this one instead keys by
+/// *which* enemy piece arrived and where our reply lands, so it learns "against
+/// a knight on f5, a quiet to d6/g6 pays" without being tied to the reply's
+/// origin square. Same gravity bound as the other history tables.
+type CounterMoveHistoryTable = [[[[i32; 64]; 64]; 6]; 2];
 
 #[derive(Clone, Copy)]
 struct SearchParams {
@@ -998,6 +1005,7 @@ struct EngineState {
     history: HistoryTable,
     counter_moves: CounterMoveTable,
     continuation_history: ContinuationHistoryTable,
+    counter_move_history: CounterMoveHistoryTable,
     corr: Box<search::CorrectionHistory>,
     search_params: SearchParams,
     lmr_table: [[i32; 64]; 64],
@@ -1034,6 +1042,7 @@ impl EngineState {
             history: [[[[[0; 64]; 64]; 2]; 2]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            counter_move_history: [[[[0; 64]; 64]; 6]; 2],
             corr: search::CorrectionHistory::new_boxed(),
             search_params: SearchParams::default(),
             lmr_table: build_lmr_table(),
@@ -1080,6 +1089,7 @@ impl EngineState {
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        self.counter_move_history = [[[[0; 64]; 64]; 6]; 2];
         self.corr.clear();
         self.searches_since_decay = 0;
         self.position_history.clear();
@@ -1116,6 +1126,10 @@ impl EngineState {
         for e in cont.iter_mut() {
             *e /= 2;
         }
+        let cmh = &mut self.counter_move_history;
+        for e in cmh.iter_mut().flatten().flatten().flatten() {
+            *e /= 2;
+        }
     }
 
     fn prepare_for_search(&mut self) {
@@ -1135,6 +1149,7 @@ impl EngineState {
             history: self.history,
             counter_moves: self.counter_moves,
             continuation_history: self.continuation_history,
+            counter_move_history: self.counter_move_history,
             corr: self.corr.clone(),
             search_params: self.search_params,
             lmr_table: self.lmr_table,
