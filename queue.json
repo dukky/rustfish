@@ -3,14 +3,19 @@
     {
       "branch": "simp2-rfp-improving-r2",
       "mode": "nonreg",
-      "passed_over": 1
-    },
-    {
-      "branch": "feat-root-lmr-quiets",
-      "mode": "stc"
+      "passed_over": 2
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-root-lmr-quiets",
+    "mode": "stc",
+    "test_id": "q-feat-root-lmr-quiets-1116-2347",
+    "sha": "0a4ed5210d2c6f7429e15186ea4fecc154c7cf51",
+    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
+    "started": "2026-11-16T23:47:03Z",
+    "bench": 394632,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
