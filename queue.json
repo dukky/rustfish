@@ -1,6 +1,13 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "ladder",
+    "test_id": "q-ladder-1116-1701",
+    "sha": "b1961e7cac379b6fa908c5a6be7c5c3086e3e2dc",
+    "base_sha": "b1961e7cac379b6fa908c5a6be7c5c3086e3e2dc",
+    "started": "2026-11-16T17:01:36Z"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
