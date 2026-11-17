@@ -663,6 +663,11 @@ impl MovePicker {
         };
         let threats = history_threats(&maps, params);
         let escape = params.threat_escape_bonus;
+        let check_bonus = if captures_only {
+            0
+        } else {
+            params.quiet_check_bonus
+        };
         let threatened = threatened_pieces(board, &maps, escape);
         let mut picker = Self {
             tt_move: None,
@@ -676,6 +681,7 @@ impl MovePicker {
         let side_hist = &history[color_index(side)];
         let cont_row = prev_move
             .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
+        let mut check_info: Option<CheckInfo> = None;
 
         for mv in move_buf.iter().copied() {
             picker.total += 1;
@@ -718,6 +724,15 @@ impl MovePicker {
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
             let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
+            // A quiet check is more forcing than its history suggests, so it
+            // sorts up among the quiets; the bonus is ordering only (the
+            // pruning exemptions are computed from history, not from here).
+            if check_bonus != 0 {
+                let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
+                if ci.gives_check(board, mv) {
+                    score += check_bonus;
+                }
+            }
             if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
                 picker.bufs.priority_quiets.push((mv, score + esc));
             } else {

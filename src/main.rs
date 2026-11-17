@@ -942,6 +942,8 @@ struct SearchParams {
     // Ordering bonus for a quiet that moves a piece attacked by a lesser
     // piece to a square no lesser piece attacks (0 = off).
     threat_escape_bonus: i32,
+    // Ordering bonus for a quiet that gives check (0 = off).
+    quiet_check_bonus: i32,
     null_reduction_depth_div: i32,
     lmp_limit_d1: usize,
     // LMR adjustments by node type (plies): + at expected cut nodes, - at PV nodes.
@@ -973,6 +975,7 @@ impl Default for SearchParams {
             null_reduction_base: 2,
             threat_history: true,
             threat_escape_bonus: 8_000,
+            quiet_check_bonus: 4_000,
             null_reduction_depth_div: 4,
             lmp_limit_d1: 6,
             lmr_cut_node: 2,
@@ -1188,6 +1191,7 @@ fn main() {
             println!("option name NullReductionBase type spin default 2 min 0 max 6");
             println!("option name ThreatHistory type check default true");
             println!("option name ThreatEscapeBonus type spin default 8000 min 0 max 30000");
+            println!("option name QuietCheckBonus type spin default 4000 min 0 max 30000");
             println!("option name NullReductionDepthDiv type spin default 4 min 1 max 12");
             println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
             println!("option name LmrCutNode type spin default 2 min 0 max 4");
