@@ -1,12 +1,6 @@
 {
   "pending": [
     {
-      "branch": "retest-ttcapture-lmr",
-      "mode": "stc",
-      "expect": 1.5,
-      "passed_over": 2
-    },
-    {
       "branch": "retest-razoring",
       "mode": "stc",
       "expect": 1.5,
