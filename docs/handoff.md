@@ -72,13 +72,18 @@ are in `docs/nnue-experiments.md`.
 ### Current state (2026-11-17)
 
 - Head shape gate: `nnue-g9h1024kb8m-head-clean` (clean replay of
-  `head-v2` onto `main`, bench 366942) is queued at stc expect +5. The old
-  `nnue-g9h1024kb8m-head` hit a queue rebase conflict; do not requeue it.
+  `head-v2` onto `main`, bench 366942) was rejected at stc: `-49.8 Elo`,
+  576 games, LLR `-3.825`, verdict H0 (2026-11-17 22:39Z). Do not requeue it;
+  the old `nnue-g9h1024kb8m-head` hit a queue rebase conflict and must stay
+  dead. `main` remains plain g9, and the queue advanced to
+  `feat-lmr-bad-captures`. Diagnosing the regression is deferred; Claude can
+  investigate when back.
 - Head inference speedup: `perf-head-fuse-screlu` (commit `2841118`) fuses the
   head's first activation into the last incremental pass; bench 366942 and
   `evalhash 248c85c4a1cc6558` byte-identical, ~2% faster on M3 depth 12.
-  Pushed but not queued until the shape gate merges. The us/them head slot
-  must follow `persp == stm`; fixed white/black order changes evalhash.
+  Pushed but parked because the head shape gate failed; do not queue it
+  against plain g9. The us/them head slot must follow `persp == stm`; fixed
+  white/black order changes evalhash.
 - CPU head trainer: `perf-trainer-head-w1-batch` (commit `66efbba`) batches W1
   gradient adds per output bucket; 31 tests pass, nets byte-identical,
   +24% H256 and ~1.8x H512 pos/s on M3. Trainer-only owner merge decision.
