@@ -29,6 +29,14 @@
       "mode": "stc",
       "expect": 1.5,
       "passed_over": 1
+    },
+    {
+      "branch": "nnue-g9h1024kb8m-head-r2",
+      "mode": "stc"
+    },
+    {
+      "branch": "retest-ttcapture-lmr-r2",
+      "mode": "stc"
     }
   ],
   "current": {
@@ -46,7 +54,7 @@
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
-  "next_seed": 250,
+  "next_seed": 251,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
