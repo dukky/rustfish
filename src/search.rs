@@ -6,6 +6,8 @@ const MIN_PARALLEL_DEPTH: i32 = 6;
 // Singular extensions: minimum depth, and singular-beta margin per ply of depth.
 const SE_MIN_DEPTH: i32 = 8;
 const SE_MARGIN_PER_DEPTH: i32 = 2;
+// Recapture extension: extend a good recapture by one ply up to this depth.
+const RECAPTURE_MAX_DEPTH: i32 = 8;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
@@ -1311,6 +1313,7 @@ fn search_root(
                 rep_stack,
                 child_key,
                 Some(mv),
+                undo.captured.is_some(),
                 true,
                 None,
                 false,
@@ -1332,6 +1335,7 @@ fn search_root(
                 rep_stack,
                 child_key,
                 Some(mv),
+                undo.captured.is_some(),
                 true,
                 None,
                 true,
@@ -1350,6 +1354,7 @@ fn search_root(
                     rep_stack,
                     child_key,
                     Some(mv),
+                    undo.captured.is_some(),
                     true,
                     None,
                     true,
@@ -1367,6 +1372,7 @@ fn search_root(
                     rep_stack,
                     child_key,
                     Some(mv),
+                    undo.captured.is_some(),
                     true,
                     None,
                     false,
@@ -1447,6 +1453,9 @@ fn negamax(
     rep_stack: &mut Vec<u64>,
     key: u64,
     prev_move: Option<Move>,
+    // Whether `prev_move` captured a piece (kept by the caller: the capture
+    // bit is not in `Move`, and the captured piece is gone from the board).
+    prev_capture: bool,
     allow_null: bool,
     // Whether the side to move is in check, when the caller already knows.
     known_in_check: Option<bool>,
@@ -1623,6 +1632,7 @@ fn negamax(
                 child_key,
                 None,
                 false,
+                false,
                 None,
                 !cut_node,
             );
@@ -1703,6 +1713,7 @@ fn negamax(
                         rep_stack,
                         child_key,
                         Some(mv),
+                        undo.captured.is_some(),
                         true,
                         None,
                         !cut_node,
@@ -1789,6 +1800,7 @@ fn negamax(
                         rep_stack,
                         key,
                         prev_move,
+                        prev_capture,
                         false,
                         Some(in_check),
                         cut_node,
@@ -1810,6 +1822,19 @@ fn negamax(
                     }
                 }
             }
+        }
+        // Recapture extension: the opponent just captured on this square and
+        // this move takes it back, so the position is forced enough to spend a
+        // full ply on. Skipped when SEE says the recapture loses material, and
+        // never stacked on a singular extension (extension stays 0).
+        if extension == 0
+            && !in_check
+            && depth <= RECAPTURE_MAX_DEPTH
+            && prev_capture
+            && prev_move.is_some_and(|prev| mv.to == prev.to)
+            && see_ge(board, mv, 0)
+        {
+            extension = 1;
         }
         let quiet = match stage {
             Stage::Tt => !is_capture_move(board, mv),
@@ -1909,6 +1934,7 @@ fn negamax(
                 rep_stack,
                 child_key,
                 Some(mv),
+                undo.captured.is_some(),
                 true,
                 Some(gives_check),
                 !pv_node && !cut_node,
@@ -1954,7 +1980,7 @@ fn negamax(
                 0
             };
             let reduced = reduction > 0;
-            let reduced_depth = (depth - 1 - reduction).max(0);
+            let reduced_depth = (depth - 1 - reduction + extension).max(0);
 
             score = -negamax(
                 board,
@@ -1967,6 +1993,7 @@ fn negamax(
                 rep_stack,
                 child_key,
                 Some(mv),
+                undo.captured.is_some(),
                 true,
                 Some(gives_check),
                 reduced || !cut_node,
@@ -1975,7 +2002,7 @@ fn negamax(
             if reduced && score > alpha {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    depth - 1 + extension,
                     -alpha - 1,
                     -alpha,
                     ply + 1,
@@ -1984,6 +2011,7 @@ fn negamax(
                     rep_stack,
                     child_key,
                     Some(mv),
+                    undo.captured.is_some(),
                     true,
                     Some(gives_check),
                     !cut_node,
@@ -1993,7 +2021,7 @@ fn negamax(
             if score > alpha && score < beta {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    depth - 1 + extension,
                     -beta,
                     -alpha,
                     ply + 1,
@@ -2002,6 +2030,7 @@ fn negamax(
                     rep_stack,
                     child_key,
                     Some(mv),
+                    undo.captured.is_some(),
                     true,
                     Some(gives_check),
                     false,
