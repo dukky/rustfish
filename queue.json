@@ -41,17 +41,7 @@
       "expect": 1.5
     }
   ],
-  "current": {
-    "branch": "feat-cont2-ply",
-    "mode": "stc",
-    "expect": 2.0,
-    "test_id": "q-feat-cont2-ply-1117-2019",
-    "sha": "6c74b7fec5bc9ab753eb394dcb973aecdefd891a",
-    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
-    "started": "2026-11-17T20:19:37Z",
-    "bench": 364159,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
