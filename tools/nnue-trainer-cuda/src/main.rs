@@ -243,6 +243,7 @@ struct Kernels {
     forward: Handle,
     forward_half: Handle,
     to_half: Handle,
+    compute_dacc: Handle,
     backward_ft: Handle,
     plan_masks: Handle,
     backward_rest: Handle,
@@ -283,6 +284,9 @@ struct GpuTrainer {
     /// `--head`: per-sample head scratch (z1, z2, dz1, dz2; `HS` floats) and
     /// the per-chunk head gradient partials `[chunk][bucket][head_len]`.
     hsc: DBuf<f32>,
+    /// `--head`: dacc[j * 2H + cc] cached once per batch, so both backward
+    /// kernels can read the head term instead of recomputing it per lane.
+    dacc: DBuf<f32>,
     phead: DBuf<f32>,
     slots: [Slot; 2],
     /// Per range of R pairs: per-feature bitmasks of its pairs (plan_masks).
@@ -333,6 +337,7 @@ impl GpuTrainer {
             forward: get("forward"),
             forward_half: get("forward_half"),
             to_half: get("to_half"),
+            compute_dacc: get("compute_dacc"),
             backward_ft: get("backward_ft"),
             plan_masks: get("plan_masks"),
             backward_rest: get("backward_rest"),
@@ -377,6 +382,7 @@ impl GpuTrainer {
             acc: DBuf::new(b * 2 * h),
             gout: DBuf::new(b),
             hsc: DBuf::new(if sh.hd > 0 { b * HS } else { 0 }),
+            dacc: DBuf::new(if sh.hd > 0 { b * 2 * h } else { 0 }),
             phead: DBuf::new(if sh.hd > 0 { chunks * sh.buckets * sh.head_len() } else { 0 }),
             slots: [Slot::new(b, max_items, max_ranges, sh.kb, rows), Slot::new(b, max_items, max_ranges, sh.kb, rows)],
             masks: DBuf::new(max_ranges * INPUTS * (R / 32)),
@@ -563,16 +569,21 @@ impl Backend for GpuTrainer {
         let (fwd, wt) = if self.half { (k.forward_half, self.wth.ptr) } else { (k.forward, self.wt.ptr) };
         let hd = sh.hd as i32;
         launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), P(self.hsc.ptr), I(hd)]);
+        if sh.hd > 0 {
+            // One sample-parallel pass over all lanes; both backward kernels
+            // then read dacc instead of recomputing the head's dense e sum.
+            launch(k.compute_dacc, ((2 * h).div_ceil(256) as u32, n as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.hsc.ptr), P(self.dacc.ptr), I(hi), I(bi), I(nn)]);
+        }
         launch(k.plan_masks, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.masks.ptr), I(nr as i32)]);
         launch(
             k.backward_ft,
             ((h / 32) as u32, ni as u32),
             1024,
             st,
-            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.masks.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), P(self.hsc.ptr), I(hd), I(bi)],
+            &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.masks.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), P(self.hsc.ptr), P(self.dacc.ptr), I(hd), I(bi)],
         );
         let chunks = n.div_ceil(CH);
-        launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn), P(self.hsc.ptr), I(hd)]);
+        launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn), P(self.hsc.ptr), P(self.dacc.ptr), I(hd)]);
         launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
         if sh.hd > 0 {
             // Head gradients: W1 per (lane, bucket, chunk), the small layers

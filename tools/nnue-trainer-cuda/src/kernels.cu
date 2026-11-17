@@ -182,6 +182,33 @@ extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order
     forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
 }
 
+// --------------------------------------------------------- cached dacc (--head)
+
+// Both backward branches need the same dacc[(j, cc)] for every sample j and
+// flattened lane cc = side * H + col: cache it here instead of redoing the
+// dense 16-term e sum twice. Same expression and operation order as the old
+// head branches; sample-major/lane-minor order, no atomics.
+extern "C" __global__ void __launch_bounds__(256) compute_dacc(const GSample *ss, const float *acc,
+                                                               const float *gout, const float *rest,
+                                                               const float *hs, float *dacc, int H,
+                                                               int buckets, int n) {
+    int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y;
+    if (cc >= 2 * H || j >= n) return;
+    size_t at = (size_t)j * 2 * H + cc;
+    int b = ss[j].bucket;
+    float x = acc[at];
+    float c = fminf(fmaxf(x, 0.f), 1.f);
+    const float *ow = rest + H;
+    float w = ow[b * 2 * H + cc];
+    const float *w1 = head_of(rest, H, buckets, b) + cc;
+    const float *dz = hs + (size_t)j * HS + H1 + H2;
+    float e = 0.0f;
+#pragma unroll
+    for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
+    dacc[at] = (x > 0.f && x < 1.f) ? (gout[j] * w + e) * 2.0f * c : 0.0f;
+}
+
 // ---------------------------------------------------------------- FT backward
 
 // Block = (32-column tile, work item = up to WI pairs of one king bucket),
@@ -219,7 +246,7 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
                                                               const Item *items, const uint32_t *masks,
                                                               const float *acc, const float *gout,
                                                               const float *rest, float *part, int H,
-                                                              const float *hs, int hd, int buckets) {
+                                                              const float *hs, const float *dacc, int hd, int buckets) {
     __shared__ float sd[2][R][32];
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int col = blockIdx.x * 32 + lane;
@@ -241,13 +268,8 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[s.bucket * 2 * H + side * H + col];
             if (hd) {
-                // As train_sample: e = sum_q dz1[q] W1[q][i], dacc = (g w + e) 2 a.
-                const float *w1 = head_of(rest, H, buckets, s.bucket) + side * H + col;
-                const float *dz = hs + (size_t)j * HS + H1 + H2;
-                float e = 0.0f;
-#pragma unroll
-                for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
-                sd[buf][r][lane] = (x > 0.f && x < 1.f) ? (gout[j] * w + e) * 2.0f * c : 0.0f;
+                // Cached by compute_dacc: same lane as acc[(j, side, col)].
+                sd[buf][r][lane] = dacc[((size_t)j * 2 + side) * H + col];
             } else {
                 sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
             }
@@ -282,7 +304,8 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
 // sample order. pr layout per chunk: ow (B * 2H) | bias (2H) | ob (B).
 #define CH 256
 extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, const float *gout, const float *rest,
-                                         float *pr, int H, int buckets, int n, const float *hs, int hd) {
+                                         float *pr, int H, int buckets, int n, const float *hs, const float *dacc,
+                                         int hd) {
     int cc = blockIdx.x * blockDim.x + threadIdx.x;  // side * H + col
     int chunk = blockIdx.y;
     int j0 = chunk * CH, j1 = min(j0 + CH, n);
@@ -301,12 +324,7 @@ extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, co
             for (int k = 0; k < 8; k++)
                 if (k == b) gw[k] += gg * c * c;
             if (hd) {
-                const float *w1 = head_of(rest, H, buckets, b) + cc;
-                const float *dz = hs + (size_t)j * HS + H1 + H2;
-                float e = 0.0f;
-#pragma unroll
-                for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
-                gb += (x > 0.f && x < 1.f) ? (gg * w + e) * 2.0f * c : 0.0f;
+                gb += dacc[(size_t)j * 2 * H + cc];
             } else {
                 gb += (x > 0.f && x < 1.f) ? gg * w * 2.0f * c : 0.0f;
             }
