@@ -359,21 +359,23 @@ extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int
 
 // ---------------------------------------------------------------- head backward (--head)
 
-// Partials of chunk `chunk` (CH samples) in the head's own layout:
+// Partials of chunk `chunk` (up to CH samples) in the head's own layout:
 // ph[chunk][bucket][head_len]. W1: thread = lane cc of 2H, grid.y = chunk *
-// buckets + bucket; each thread walks the chunk's samples of its bucket in
-// sample order (gW1[q][cc] += dz1[q] * a^2, as train_sample).
-extern "C" __global__ void backward_head_w1(const GSample *ss, const float *acc, const float *hs, float *ph, int H,
-                                            int buckets, int n) {
+// buckets + bucket; bidx[bucket, chunk] lists that chunk's samples of the
+// bucket in sample order, so the sum matches the old bucket-filtered scan.
+extern "C" __global__ void backward_head_w1(const float *acc, const float *hs, float *ph, const uint32_t *bidx,
+                                             const uint32_t *bcnt, int H, int buckets, int chunks) {
     int cc = blockIdx.x * blockDim.x + threadIdx.x;
     int b = blockIdx.y % buckets, chunk = blockIdx.y / buckets;
     if (cc >= 2 * H) return;
-    int j0 = chunk * CH, j1 = min(j0 + CH, n);
+    int bi = b * chunks + chunk;
+    const uint32_t *js = bidx + (size_t)bi * CH;
+    int nj = bcnt[bi];
     float g[H1];
 #pragma unroll
     for (int q = 0; q < H1; q++) g[q] = 0.0f;
-    for (int j = j0; j < j1; j++) {
-        if (ss[j].bucket != b) continue;
+    for (int z = 0; z < nj; z++) {
+        int j = js[z];
         float c = fminf(fmaxf(acc[(size_t)j * 2 * H + cc], 0.f), 1.f);
         float a2 = c * c;
         const float *dz = hs + (size_t)j * HS + H1 + H2;
@@ -386,15 +388,17 @@ extern "C" __global__ void backward_head_w1(const GSample *ss, const float *acc,
 }
 
 // b1, W2, b2, W3, b3 (HSMALL params per bucket, thread = param), grid
-// (buckets, chunks); as head_small_grads.
-extern "C" __global__ void backward_head_small(const GSample *ss, const float *gout, const float *hs, float *ph, int H,
-                                               int buckets, int n) {
+// (buckets, chunks); the same per-bucket sample list as backward_head_w1.
+extern "C" __global__ void backward_head_small(const float *gout, const float *hs, float *ph, const uint32_t *bidx,
+                                                const uint32_t *bcnt, int H, int buckets, int chunks) {
     int b = blockIdx.x, chunk = blockIdx.y, t = threadIdx.x;
     if (t >= HSMALL) return;
-    int j0 = chunk * CH, j1 = min(j0 + CH, n);
+    int bi = b * chunks + chunk;
+    const uint32_t *js = bidx + (size_t)bi * CH;
+    int nj = bcnt[bi];
     float sm = 0.0f;
-    for (int j = j0; j < j1; j++) {
-        if (ss[j].bucket != b) continue;
+    for (int z = 0; z < nj; z++) {
+        int j = js[z];
         const float *z = hs + (size_t)j * HS;
         const float *z1 = z, *z2 = z + H1, *dz1 = z + H1 + H2, *dz2 = z + 2 * H1 + H2;
         float g = gout[j];

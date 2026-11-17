@@ -131,6 +131,9 @@ struct Slot {
     hilo: HBuf<i32>,
     hrs: HBuf<i32>,
     hrb: HBuf<i32>,
+    /// --head: per (output bucket, chunk) sample indices, in sample order.
+    hbidx: HBuf<u32>,
+    hbcnt: HBuf<u32>,
     hact: HBuf<u8>,
     hloss: HBuf<f32>,
     ss: DBuf<GSample>,
@@ -141,6 +144,8 @@ struct Slot {
     /// Ranges: first pair (and one past the last), king bucket.
     rs: DBuf<i32>,
     rb: DBuf<i32>,
+    bidx: DBuf<u32>,
+    bcnt: DBuf<u32>,
     active: DBuf<u8>,
     loss: DBuf<f32>,
     /// Recorded on the compute stream after this slot's batch (and its loss
@@ -150,7 +155,8 @@ struct Slot {
 }
 
 impl Slot {
-    fn new(b: usize, max_items: usize, max_ranges: usize, kb: usize, rows: usize) -> Self {
+    fn new(b: usize, max_items: usize, max_ranges: usize, kb: usize, buckets: usize, rows: usize) -> Self {
+        let chunks = b.div_ceil(CH);
         let (mut done, mut copied) = (std::ptr::null_mut(), std::ptr::null_mut());
         // CU_EVENT_DISABLE_TIMING (2): cheaper events.
         ck(unsafe { cuEventCreate(&mut done, 2) }, "event");
@@ -163,6 +169,8 @@ impl Slot {
             hilo: HBuf::new(kb + 1),
             hrs: HBuf::new(max_ranges + 1),
             hrb: HBuf::new(max_ranges),
+            hbidx: HBuf::new(buckets * chunks * CH),
+            hbcnt: HBuf::new(buckets * chunks),
             hact: HBuf::new(rows),
             hloss: HBuf::new(b),
             ss: DBuf::new(b),
@@ -172,6 +180,8 @@ impl Slot {
             ilo: DBuf::new(kb + 1),
             rs: DBuf::new(max_ranges + 1),
             rb: DBuf::new(max_ranges),
+            bidx: DBuf::new(buckets * chunks * CH),
+            bcnt: DBuf::new(buckets * chunks),
             active: DBuf::new(rows),
             loss: DBuf::new(b),
             done,
@@ -384,7 +394,7 @@ impl GpuTrainer {
             hsc: DBuf::new(if sh.hd > 0 { b * HS } else { 0 }),
             dacc: DBuf::new(if sh.hd > 0 { b * 2 * h } else { 0 }),
             phead: DBuf::new(if sh.hd > 0 { chunks * sh.buckets * sh.head_len() } else { 0 }),
-            slots: [Slot::new(b, max_items, max_ranges, sh.kb, rows), Slot::new(b, max_items, max_ranges, sh.kb, rows)],
+            slots: [Slot::new(b, max_items, max_ranges, sh.kb, sh.buckets, rows), Slot::new(b, max_items, max_ranges, sh.kb, sh.buckets, rows)],
             masks: DBuf::new(max_ranges * INPUTS * (R / 32)),
             slot: 0,
             pending: None,
@@ -477,6 +487,17 @@ impl Backend for GpuTrainer {
             });
         }
         let hs = &sl.hs.slice()[..n];
+        let chunks = n.div_ceil(CH);
+        if sh.hd > 0 {
+            let (bidx_h, bcnt_h) = (sl.hbidx.slice(), sl.hbcnt.slice());
+            bcnt_h[..sh.buckets * chunks].fill(0);
+            for (j, s) in hs.iter().enumerate() {
+                let bi = s.bucket as usize * chunks + j / CH;
+                let at = bi * CH + bcnt_h[bi] as usize;
+                bidx_h[at] = j as u32;
+                bcnt_h[bi] += 1;
+            }
+        }
         let kbk = |s: &GSample, side: usize| if s.n == 0 { 0 } else { s.f[side][0] as usize / INPUTS };
         // Forward order: by (side-to-move bucket, other bucket); pairs and
         // work items by king bucket (stable counting sorts).
@@ -547,6 +568,10 @@ impl Backend for GpuTrainer {
         sl.ilo.up_async(&sl.hilo, kb + 1, cs);
         sl.rs.up_async(&sl.hrs, nr + 1, cs);
         sl.rb.up_async(&sl.hrb, nr, cs);
+        if sh.hd > 0 {
+            sl.bidx.up_async(&sl.hbidx, sh.buckets * chunks * CH, cs);
+            sl.bcnt.up_async(&sl.hbcnt, sh.buckets * chunks, cs);
+        }
         if wd_active {
             sl.active.up_async(&sl.hact, sl.hact.n, cs);
         }
@@ -582,16 +607,15 @@ impl Backend for GpuTrainer {
             st,
             &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.masks.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), P(self.hsc.ptr), P(self.dacc.ptr), I(hd), I(bi)],
         );
-        let chunks = n.div_ceil(CH);
         launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn), P(self.hsc.ptr), P(self.dacc.ptr), I(hd)]);
         launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
         if sh.hd > 0 {
             // Head gradients: W1 per (lane, bucket, chunk), the small layers
             // per (bucket, chunk), then summed in chunk order into gr.
             let (bu, ch) = (sh.buckets as u32, chunks as u32);
-            launch(k.backward_head_w1, ((2 * h).div_ceil(256) as u32, ch * bu), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.hsc.ptr), P(self.phead.ptr), I(hi), I(bi), I(nn)]);
+            launch(k.backward_head_w1, ((2 * h).div_ceil(256) as u32, ch * bu), 256, st, &[P(self.acc.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32)]);
             let small = sh.head_len() - H1 * 2 * h;
-            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(sl.ss.ptr), P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), I(hi), I(bi), I(nn)]);
+            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32)]);
             let nh = sh.buckets * sh.head_len();
             launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
         }
