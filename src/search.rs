@@ -482,6 +482,11 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// bonus and gravity, the same number of net same-depth cutoffs lands at
 /// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
 const LMR_HISTORY_THRESHOLD: i32 = 14_000;
+/// LMR: a quiet non-priority move in a non-PV node reduces one ply less when
+/// the correction history moved the eval by more than this (cp). A large
+/// correction means the net's raw eval is locally unreliable, so the reduced
+/// search is less trustworthy and deserves a little more depth.
+const LMR_CORR_UNCERTAIN_CP: i32 = 80;
 
 fn history_bonus(depth: i32) -> i32 {
     (16 * depth * depth).min(HISTORY_BONUS_MAX)
@@ -1535,6 +1540,8 @@ fn negamax(
     };
     let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
     let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
+    // How far the learned correction moved the net's raw eval this node.
+    let corr_uncertainty = raw_static_eval.zip(corr_eval).map(|(raw, ce)| (ce - raw).abs());
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
     // Improving: our static eval beats the one from our previous move (two plies up).
@@ -1948,6 +1955,14 @@ fn negamax(
                 // Reduce more when our static eval is not improving.
                 if !improving {
                     r += params.lmr_not_improving;
+                }
+                // A large correction means the raw eval is locally uncertain,
+                // so reduce this quiet less.
+                if !priority_quiet
+                    && !pv_node
+                    && corr_uncertainty.is_some_and(|c| c > LMR_CORR_UNCERTAIN_CP)
+                {
+                    r -= 1;
                 }
                 r.clamp(0, depth - 2)
             } else {
