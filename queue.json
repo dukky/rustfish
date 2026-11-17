@@ -1,16 +1,6 @@
 {
   "pending": [],
-  "current": {
-    "branch": "simp2-rfp-improving-r2",
-    "mode": "nonreg",
-    "passed_over": 2,
-    "test_id": "q-simp2-rfp-improving-r2-1117-0120",
-    "sha": "93a3543c71602f738f831690b3ad24e36ea90d1e",
-    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
-    "started": "2026-11-17T01:20:33Z",
-    "bench": 408402,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
