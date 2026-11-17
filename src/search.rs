@@ -32,6 +32,8 @@ const RFP_MAX_DEPTH: i32 = 7;
 const RFP_DEEP_STEP: i32 = 100;
 // Static-eval stack sentinel for nodes searched in check.
 const NO_EVAL: i32 = i32::MIN;
+// Search-only eval damping starts this many plies before the 50-move draw.
+const FIFTY_MOVE_DAMP_START: i32 = 80;
 
 // ---- Correction history ----------------------------------------------------
 // The static eval has errors that depend on parts of the position the net
@@ -518,6 +520,17 @@ fn apply_continuation_history_delta(
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
+}
+
+/// Search-only: fades a raw eval to zero as the 50-move draw approaches.
+/// Cache/TT values keep the undamped eval; only search decisions use this.
+#[inline]
+fn damp_fifty_move_eval(raw: i32, halfmove_clock: u32) -> i32 {
+    if (halfmove_clock as i64) < FIFTY_MOVE_DAMP_START as i64 {
+        return raw;
+    }
+    let clock = (halfmove_clock as i64).min(100);
+    ((raw as i64 * (100 - clock)) / 20) as i32
 }
 
 /// Tightens a static eval with the TT entry's score bound, if not a mate score.
@@ -1522,8 +1535,8 @@ fn negamax(
     }
 
     // raw_static_eval: the net's eval (TT field or eval cache); the TT stores this.
-    // corr_eval: raw + correction history. static_eval: corr_eval tightened by
-    // the TT bound; drives every pruning decision below.
+    // Search uses the 50-move-damped value: corr_eval adds correction history,
+    // then static_eval tightens it with the TT bound for pruning decisions.
     let raw_static_eval = if in_check {
         None
     } else {
@@ -1533,8 +1546,9 @@ fn negamax(
                 .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
-    let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
-    let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
+    let damped_eval = raw_static_eval.map(|raw| damp_fifty_move_eval(raw, board.halfmove_clock));
+    let corr_idx = damped_eval.map(|_| CorrIdx::new(board, prev_move));
+    let corr_eval = damped_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
     // Improving: our static eval beats the one from our previous move (two plies up).
@@ -2155,8 +2169,9 @@ fn quiescence(
                 .unwrap_or_else(|| engine.eval_cache.eval(board, key)),
         )
     };
-    // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
+    // Stand pat on the damped, corrected eval; the TT keeps the raw one (see negamax).
     let static_eval = raw_static_eval
+        .map(|raw| damp_fifty_move_eval(raw, board.halfmove_clock))
         .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
     if let Some(stand_pat) = static_eval {
@@ -2867,6 +2882,16 @@ pub(crate) fn piece_value(kind: PieceType) -> i32 {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn fifty_move_damp_factor() {
+        assert_eq!(damp_fifty_move_eval(1000, 79), 1000);
+        assert_eq!(damp_fifty_move_eval(1000, 80), 1000);
+        assert_eq!(damp_fifty_move_eval(1000, 90), 500);
+        assert_eq!(damp_fifty_move_eval(1000, 100), 0);
+        assert_eq!(damp_fifty_move_eval(-1000, 90), -500);
+        assert_eq!(damp_fifty_move_eval(1000, 120), 0);
+    }
 
     /// The board with only the given [colour][kind] bitboards kept.
     fn bb_subset(bb: &crate::bitboard::BoardBB, keep: impl Fn(usize, usize) -> bool) -> crate::bitboard::BoardBB {
