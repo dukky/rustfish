@@ -397,8 +397,8 @@ extern "C" __global__ void backward_head_small(const float *gout, const float *h
     const uint32_t *js = bidx + (size_t)bi * CH;
     int nj = bcnt[bi];
     float sm = 0.0f;
-    for (int z = 0; z < nj; z++) {
-        int j = js[z];
+    for (int u = 0; u < nj; u++) {
+        int j = js[u];
         const float *z = hs + (size_t)j * HS;
         const float *z1 = z, *z2 = z + H1, *dz1 = z + H1 + H2, *dz2 = z + 2 * H1 + H2;
         float g = gout[j];
