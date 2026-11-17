@@ -248,11 +248,12 @@ for packed-data.
 - Bigger nets (1024+ wide, king buckets); AVX-512 inference paths for
   them (`nnue-avx512`).
 - **Deeper head** (design: `docs/nnue-deeper-head.md`): FT -> 16 -> 32 -> 1
-  per output bucket instead of width, cheaper in the engine (~5-10% NPS vs
-  H 1024's 20-28%) and keeps the FT CPU-trainable. Step 1: CPU-trainer
-  `--head` + small CPU signal tests (H 256/512, ~300M positions, head vs
-  none); step 2: full-size H 512 kb8m + head vs main's H 1024 on the 1080
-  Ti (needs the CUDA port); engine work only if step 2 reaches H 1024's loss.
+  per output bucket instead of width, cheaper in the engine (~9% NPS at H 512
+  vs ~19% for H 1024 head). CPU+CUDA trainers work. Bulk plain FT stays
+  CPU-friendly; head training is dense and stays on the 1080 Ti for
+  production runs (CPU H512 head 84-104k pos/s vs GPU H1024 head ~960k after
+  bucket-indexed backward). Optional future work: sparse/int8 CPU head L1
+  and head-only freezing; neither is needed for the current pipeline.
 - Multi-billion-position pools with opening diversity; better data
   (deeper/softnode search, rescoring, filtering).
 - Novel ideas only offline and cheap until a clear wall: uncertainty head,
@@ -371,3 +372,12 @@ merging (the queue does that).
 - 2026-11-06: audit; trainer v2; 3429 on g3.
 - 2026-11-07: g4, king buckets, LMR features: 3463.
 - 2026-11-08..10: g7kb8m, LMR batch: 3508-3510 (top-100 line).
+- 2026-11-17: head gate replayed cleanly onto main as
+  `nnue-g9h1024kb8m-head-clean` (bench 366942, queued stc expect +5) after
+  the original shape gate hit a rebase conflict; net/docs records on
+  `docs-net-records-1117`. CUDA head perf (on `head-v2`): `dacc` 670k -> 766k
+  pos/s, `rowwarp` -> 878k, `bucket-backward` -> 960k, all byte-identical;
+  fuse/warp-for-all-rows experiments were slower and are parked. Generic
+  `speed-cuda` plain FT 2.05M -> 2.36M remains an owner merge decision.
+  Datagen3 runs g9 with 10 threads on D2020-D2023 (1M games each, 5000
+  nodes); D2020 at ~42 games/s, ~27h for the whole sweep.

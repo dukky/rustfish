@@ -73,15 +73,20 @@ no FMA contraction, so integers throughout are the safer choice.
   (`tools/nnue-trainer-cuda`), Metal (`tools/nnue-trainer-metal`). Start with
   CPU + CUDA. The `Backend` trait already separates the data / checkpoint /
   export code from the kernels.
-- **Cost:** per sample, the head adds ~2 x 16k multiply-adds (forward +
-  backward) at H 512, the same order as the FT's sparse work (~60 rows x H,
-  forward and backward). GPU: small. CPU: maybe +30-60% per sample at H 512
-  until the dense L1 kernels are vectorised like the FT ones. That is still
-  far faster than H 1024 kb8m on the CPU.
+- **Cost (measured 2026-11-17):** per sample, the head adds ~2 x 16k
+  multiply-adds (forward + backward) at H 512, the same order as the FT's
+  sparse work (~60 rows x H), but dense and with little reuse. CPU H512 head
+  is **84-104k pos/s** on 12 desktop threads; GPU H1024 head is **~960k
+  pos/s** after the bucket-indexed backward kernels. Plain FT is different:
+  CPU H512 ~2.2M pos/s (near GPU parity), H1024 kb8m 0.64-0.77M vs GPU
+  2.05-2.36M. Production split: bulk plain generations stay CPU-friendly;
+  the short head fine-tune runs on the GPU. H512 head also cuts engine NPS
+  cost (~9% on M3 vs ~19% for H1024 head).
 - **Gradients:** dense layers per output bucket need deterministic sums over
-  the batch's samples of that bucket (sort samples by output bucket, fixed
-  order). The CUDA trainer's chunked `backward_rest` already does this for
-  today's output layer and generalises.
+  the batch's samples of that bucket. The CUDA trainer builds per-(output
+  bucket, chunk) sample lists in sample order; `backward_head_w1` and
+  `backward_head_small` walk only those samples, giving byte-identical nets
+  to the old bucket-filtered scan.
 - **Warm start:** FT from an existing net (g8: copy the FT), head initialised
   so its skip path reproduces the old output layer and the non-linear part
   starts small; then fine-tune. Start loss close to the source net, the
