@@ -1537,8 +1537,16 @@ fn negamax(
     let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
-    // Improving: our static eval beats the one from our previous move (two plies up).
+    // Material change vs rejected ply-4-only idea: keep the ply-2 signal and
+    // compare against its average with ply-4 when both evals exist, adding a
+    // slower trend instead of replacing ply-2.
     let improving = match static_eval {
+        Some(se) if ply >= 4
+            && search.static_evals[ply - 2] != NO_EVAL
+            && search.static_evals[ply - 4] != NO_EVAL =>
+        {
+            se > (search.static_evals[ply - 2] + search.static_evals[ply - 4]) / 2
+        }
         Some(se) if ply >= 2 && search.static_evals[ply - 2] != NO_EVAL => {
             se > search.static_evals[ply - 2]
         }
