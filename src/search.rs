@@ -91,32 +91,44 @@ static CK_MUL: [[u64; 6]; 2] = [
     [0x1854234621EBEA3B, 0x64374F030C657BB7, 0x8D6E3FF40D57462F, 0x99A4FA061C160B2B, 0x07F4651D4E08B4EF, 0xE2D49E4A4CAE7BE7],
 ];
 
+/// Folds one bitboard into a key component. Without the fold, a piece on a
+/// high square would set only the top few product bits, the same ones for
+/// every multiplier.
+#[inline(always)]
+fn corr_hash(b: u64, m: u64) -> u64 {
+    (b ^ (b >> 29)).wrapping_mul(m)
+}
+
+/// The pawn-structure key: the CK_PAWN component of `corr_keys`, with both
+/// colours folded together. Shared by correction history and the pawn history
+/// table so both see the same structure; side to move is not part of it.
+#[inline(always)]
+pub(crate) fn pawn_key(board: &Board) -> u64 {
+    let p = &board.bb.pieces;
+    let m: &[[u64; 6]; 2] = std::hint::black_box(&CK_MUL);
+    corr_hash(p[0][0], m[0][0]) ^ corr_hash(p[1][0], m[1][0])
+}
+
 /// The per-slice keys of a position, from its bitboards.
 #[inline(always)]
 fn corr_keys(bb: &crate::bitboard::BoardBB) -> [u64; CK_COUNT] {
-    // Without the fold, a piece on a high square would set only the top few
-    // product bits, the same ones for every multiplier.
-    #[inline(always)]
-    fn h(b: u64, m: u64) -> u64 {
-        (b ^ (b >> 29)).wrapping_mul(m)
-    }
     let p = &bb.pieces;
     let m: &[[u64; 6]; 2] = std::hint::black_box(&CK_MUL);
     let (wp, wn, wb, wr, wq, wk) = (
-        h(p[0][0], m[0][0]),
-        h(p[0][1], m[0][1]),
-        h(p[0][2], m[0][2]),
-        h(p[0][3], m[0][3]),
-        h(p[0][4], m[0][4]),
-        h(p[0][5], m[0][5]),
+        corr_hash(p[0][0], m[0][0]),
+        corr_hash(p[0][1], m[0][1]),
+        corr_hash(p[0][2], m[0][2]),
+        corr_hash(p[0][3], m[0][3]),
+        corr_hash(p[0][4], m[0][4]),
+        corr_hash(p[0][5], m[0][5]),
     );
     let (bp, bn, bbi, br, bq, bk) = (
-        h(p[1][0], m[1][0]),
-        h(p[1][1], m[1][1]),
-        h(p[1][2], m[1][2]),
-        h(p[1][3], m[1][3]),
-        h(p[1][4], m[1][4]),
-        h(p[1][5], m[1][5]),
+        corr_hash(p[1][0], m[1][0]),
+        corr_hash(p[1][1], m[1][1]),
+        corr_hash(p[1][2], m[1][2]),
+        corr_hash(p[1][3], m[1][3]),
+        corr_hash(p[1][4], m[1][4]),
+        corr_hash(p[1][5], m[1][5]),
     );
     let (wminor, bminor, wmajor, bmajor) = (wn ^ wb, bn ^ bbi, wr ^ wq, br ^ bq);
     let mut keys = [0u64; CK_COUNT];
@@ -238,6 +250,86 @@ fn update_correction(
         _ => {}
     }
     engine.corr.update(idx, depth, best - corr_eval);
+}
+
+// ---- Pawn history ----------------------------------------------------------
+// Quiet move ordering and LMR also learn from pawn structure: the table is
+// [pawn slot][moving piece kind][destination] and holds the same gravity-
+// bounded scores as the butterfly history. Structure is the part of the
+// position that changes slowest, so one entry pools many positions and ranks
+// moves that the exact from-square history has rarely seen.
+//
+// Key: `pawn_key` (the CK_PAWN component of `corr_keys`, both colours
+// combined). Side to move is not in the index; the table is small and the
+// side is already implied by whose pawns can be the mover most of the time.
+// Memory: 2^12 slots * 6 kinds * 64 destinations * 4 bytes = 6 MiB.
+pub(crate) const PAWN_HISTORY_BITS: u32 = 12;
+pub(crate) const PAWN_HISTORY_SIZE: usize = 1 << PAWN_HISTORY_BITS;
+const PAWN_HISTORY_LEN: usize = PAWN_HISTORY_SIZE * 6 * 64;
+// Quiet ordering divides by this so the pawn term stays a conservative third
+// term after butterfly and continuation history.
+const PAWN_HISTORY_ORDER_DIV: i32 = 4;
+// LMR adds a pawn-history penalty only this far from zero (priority quiets
+// already reduce one ply less for any positive pawn history).
+const PAWN_HISTORY_LMR_THRESHOLD: i32 = 8_000;
+
+#[derive(Clone)]
+pub(crate) struct PawnHistory {
+    table: Box<[i32]>,
+}
+
+impl PawnHistory {
+    pub(crate) fn new_boxed() -> Box<Self> {
+        Box::new(Self { table: vec![0i32; PAWN_HISTORY_LEN].into_boxed_slice() })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.table.fill(0);
+    }
+
+    pub(crate) fn decay(&mut self) {
+        for e in self.table.iter_mut() {
+            *e /= 2;
+        }
+    }
+
+    #[inline(always)]
+    fn index(pawn_key: u64, kind: usize, to: u8) -> usize {
+        let slot = (pawn_key >> (64 - PAWN_HISTORY_BITS)) as usize;
+        (slot * 6 + kind) * 64 + to as usize
+    }
+
+    #[inline(always)]
+    fn get(&self, pawn_key: u64, kind: usize, to: u8) -> i32 {
+        self.table[Self::index(pawn_key, kind, to)]
+    }
+
+    #[inline(always)]
+    fn update(&mut self, pawn_key: u64, kind: usize, to: u8, delta: i32) {
+        apply_gravity(&mut self.table[Self::index(pawn_key, kind, to)], delta);
+    }
+}
+
+/// Pawn-history score for an ordinary quiet move (0 for promotions).
+#[inline(always)]
+fn pawn_history_score(engine: &EngineState, key: u64, board: &Board, mv: Move) -> i32 {
+    if mv.promotion.is_some() {
+        return 0;
+    }
+    let Some(piece) = board.squares[mv.from as usize] else {
+        return 0;
+    };
+    engine.pawn_history.get(key, piece.kind as usize, mv.to)
+}
+
+fn apply_pawn_history_delta(engine: &mut EngineState, key: u64, board: &Board, mv: Move, delta: i32) {
+    if mv.promotion.is_some() {
+        return;
+    }
+    let Some(piece) = board.squares[mv.from as usize] else {
+        return;
+    };
+    engine.pawn_history.update(key, piece.kind as usize, mv.to, delta);
 }
 
 // Stop requests from the stdin reader (uci.rs). Each `go` the reader forwards
@@ -616,6 +708,9 @@ struct MovePicker {
     total: usize,
     /// Opponent attack mask the quiet history was read with (see `history_threats`).
     threats: u64,
+    /// The node's pawn-structure key, read once for every quiet score and
+    /// reused by the pawn-history updates on a cutoff.
+    pawn_key: u64,
 }
 
 impl Drop for MovePicker {
@@ -650,6 +745,7 @@ impl MovePicker {
                 bufs,
                 total: 0,
                 threats: 0,
+                pawn_key: 0,
             };
         }
 
@@ -664,12 +760,14 @@ impl MovePicker {
         let threats = history_threats(&maps, params);
         let escape = params.threat_escape_bonus;
         let threatened = threatened_pieces(board, &maps, escape);
+        let pawn_key = if captures_only { 0 } else { pawn_key(board) };
         let mut picker = Self {
             tt_move: None,
             tt_yielded: false,
             bufs,
             total: 0,
             threats,
+            pawn_key,
         };
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
@@ -698,10 +796,11 @@ impl MovePicker {
             let (tf, tt) = threat_slot(threats, mv);
             let h = side_hist[tf][tt][mv.from as usize][mv.to as usize];
             let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
+            let ph = pawn_history_score(engine, pawn_key, board, mv) / PAWN_HISTORY_ORDER_DIV;
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
             let is_counter = Some(mv) == counter_move;
-            let mut score = h + ch / 2;
+            let mut score = h + ch / 2 + ph;
             if is_k0 {
                 score += 30_000;
             } else if is_counter {
@@ -718,10 +817,10 @@ impl MovePicker {
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
             let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
-            if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
+            if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 || ph > 0 {
                 picker.bufs.priority_quiets.push((mv, score + esc));
             } else {
-                picker.bufs.quiets.push((mv, score.max(h) + esc));
+                picker.bufs.quiets.push((mv, score.max(h + ph) + esc));
             }
         }
 
@@ -1749,6 +1848,7 @@ fn negamax(
     }
 
     let threats = picker.threats;
+    let pawn_key = picker.pawn_key;
     let mut best = -INF;
     let mut best_move = None;
     let side = board.side_to_move;
@@ -1826,12 +1926,18 @@ fn negamax(
         } else {
             0
         };
+        let quiet_pawn = if quiet {
+            pawn_history_score(engine, pawn_key, board, mv)
+        } else {
+            0
+        };
         let priority_quiet = quiet
             && (Some(mv) == killers[0]
                 || Some(mv) == killers[1]
                 || Some(mv) == counter_move
                 || quiet_history > 0
-                || quiet_continuation > 0);
+                || quiet_continuation > 0
+                || quiet_pawn > 0);
 
         if quiet && !priority_quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
             let limit = match depth {
@@ -1945,6 +2051,13 @@ fn negamax(
                 if quiet_history < -LMR_HISTORY_THRESHOLD {
                     r += 1;
                 }
+                // Pawn history: a strongly good structure move reduces less,
+                // a strongly bad one more (priority quiets already get -1).
+                if quiet_pawn > PAWN_HISTORY_LMR_THRESHOLD {
+                    r -= 1;
+                } else if quiet_pawn < -PAWN_HISTORY_LMR_THRESHOLD {
+                    r += 1;
+                }
                 // Reduce more when our static eval is not improving.
                 if !improving {
                     r += params.lmr_not_improving;
@@ -2036,10 +2149,12 @@ fn negamax(
                 }
                 apply_history_delta(engine, side, threats, mv, bonus);
                 apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                apply_pawn_history_delta(engine, pawn_key, board, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
                         apply_history_delta(engine, side, threats, tried, -bonus);
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_pawn_history_delta(engine, pawn_key, board, tried, -bonus);
                     }
                 }
             }
@@ -2251,6 +2366,7 @@ fn order_moves(
     history: &HistoryTable,
 ) {
     let maps = node_threat_maps(board, &engine.search_params);
+    let pawn_key = pawn_key(board);
     moves.sort_by_cached_key(|m| {
         Reverse(move_order_score(
             board,
@@ -2262,6 +2378,7 @@ fn order_moves(
             killers,
             history,
             &maps,
+            pawn_key,
         ))
     });
 }
@@ -2818,6 +2935,7 @@ fn move_order_score(
     killers: &[Option<Move>; 2],
     history: &HistoryTable,
     maps: &ThreatMaps,
+    pawn_key: u64,
 ) -> i32 {
     if Some(mv) == tt_move {
         return 2_000_000;
@@ -2849,7 +2967,13 @@ fn move_order_score(
     let threats = history_threats(maps, params);
     let bonus = params.threat_escape_bonus;
     let escape = threat_escape_bonus(board, maps, threatened_pieces(board, maps, bonus), mv, bonus);
-    history_score(history, board.side_to_move, threats, mv) + continuation / 2 + promo + castle + escape
+    let pawn = pawn_history_score(engine, pawn_key, board, mv) / PAWN_HISTORY_ORDER_DIV;
+    history_score(history, board.side_to_move, threats, mv)
+        + continuation / 2
+        + pawn
+        + promo
+        + castle
+        + escape
 }
 
 pub(crate) fn piece_value(kind: PieceType) -> i32 {
@@ -2971,6 +3095,37 @@ mod tests {
         let distinct = pawn_structs.values().collect::<std::collections::HashSet<_>>().len() as f64;
         let expected = CORR_SIZE as f64 * (1.0 - (-n / CORR_SIZE as f64).exp());
         assert!(n > 2000.0 && distinct > 0.97 * expected, "n {n} distinct {distinct} expected {expected}");
+    }
+
+    #[test]
+    fn pawn_history_index_uses_structure_piece_and_destination() {
+        let mut start = Board::new();
+        start.set_startpos();
+        let mut e4 = Board::new();
+        e4.set_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+
+        let k_start = pawn_key(&start);
+        assert_eq!(k_start, corr_keys(&start.bb)[CK_PAWN]);
+        let k_e4 = pawn_key(&e4);
+        assert_ne!(k_start, k_e4, "a pawn move changes the structure key");
+
+        let pawn = PieceType::Pawn as usize;
+        let knight = PieceType::Knight as usize;
+        let e4_sq = 28u8;
+        let e2_sq = 12u8;
+        // Same move, different structure: different slot.
+        assert_ne!(
+            PawnHistory::index(k_start, pawn, e4_sq),
+            PawnHistory::index(k_e4, pawn, e4_sq)
+        );
+        // Piece kind and destination separate entries under one structure.
+        let idx = PawnHistory::index(k_start, pawn, e4_sq);
+        assert_ne!(idx, PawnHistory::index(k_start, knight, e4_sq));
+        assert_ne!(idx, PawnHistory::index(k_start, pawn, e2_sq));
+        // The e2-e4 move after startpos indexes (pawn, e4) exactly.
+        let mv = Move { from: e2_sq, to: e4_sq, promotion: None, is_en_passant: false, is_castle: false };
+        let kind = start.squares[mv.from as usize].unwrap().kind as usize;
+        assert_eq!(PawnHistory::index(k_start, kind, mv.to), idx);
     }
 
     #[test]
