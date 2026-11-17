@@ -2431,6 +2431,19 @@ fn is_capture_move(board: &Board, mv: Move) -> bool {
     mv.is_en_passant || board.squares[mv.to as usize].is_some()
 }
 
+/// Ordering score for a capture inside the bucket its `see_score` sign selects
+/// (see `MovePicker::new`).
+///
+/// Winning captures go MVV-first: victim value, then the SEE margin, then the
+/// cheapest attacker. The dearest victim is the most forcing winning capture
+/// even when a cheaper one has the larger SEE margin -- an equal trade of
+/// queens is a better first try than winning a pawn outright -- and SEE's
+/// centipawn margin is only as exact as its swap sequence and order, so it
+/// refines the order rather than choosing which piece to take.
+///
+/// Losing captures keep the opposite spirit: how close the trade is to equal
+/// first (SEE nearest zero), then MVV/LVA. They are yielded after the quiets,
+/// where the move worth trying is the sacrifice that is nearly sound.
 fn capture_stage_score_from_see(board: &Board, mv: Move, see_score: i32) -> i32 {
     let victim = if mv.is_en_passant {
         piece_value(PieceType::Pawn)
@@ -2442,7 +2455,15 @@ fn capture_stage_score_from_see(board: &Board, mv: Move, see_score: i32) -> i32 
     let attacker = board.squares[mv.from as usize]
         .map(|p| piece_value(p.kind))
         .unwrap_or(piece_value(PieceType::Pawn));
-    see_score * 16 + victim - attacker
+    if see_score >= 0 {
+        // 16x leaves SEE able to reorder only the 10cp knight/bishop step, so
+        // it refines inside a victim tier; 1024x makes the attacker a pure
+        // tie-break, capped below one SEE unit (the king value would other-
+        // wise overflow it).
+        (victim * 16 + see_score) * 1024 - attacker.min(1023)
+    } else {
+        see_score * 16 + victim - attacker
+    }
 }
 
 /// Mailbox-scan SEE (the see-fix scalar version), kept only as the
@@ -3572,5 +3593,40 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// Score of capture `from`->`to` in `fen`, with the SEE it was scored from.
+    fn capture_see_and_score(fen: &str, from: u8, to: u8) -> (i32, i32) {
+        let mut board = Board::new();
+        board.set_fen(fen);
+        let mut moves = Vec::new();
+        board.generate_legal_moves(true, &mut moves);
+        let mv = *moves
+            .iter()
+            .find(|m| m.from == from && m.to == to)
+            .unwrap_or_else(|| panic!("no capture {from}->{to} in {fen}"));
+        let see_score = see(&board, mv);
+        let score = capture_stage_score_from_see(&board, mv, see_score);
+        (see_score, score)
+    }
+
+    /// Winning captures are ordered by victim value, not by SEE margin: an
+    /// even queen trade outranks winning a pawn outright. Losing captures stay
+    /// ordered by how close the trade is to equal.
+    #[test]
+    fn capture_ordering_prefers_the_dearest_victim_among_winning_captures() {
+        // Qd1xd5 (0 after ...exd5) vs f2xg3 (+100, that pawn hangs).
+        let fen = "4k3/8/4p3/3q4/8/6p1/5P2/3QK3 w - - 0 1";
+        let (queen_see, queen_score) = capture_see_and_score(fen, 3, 35);
+        let (pawn_see, pawn_score) = capture_see_and_score(fen, 13, 22);
+        assert_eq!((queen_see, pawn_see), (0, 100));
+        assert!(queen_score > pawn_score, "{queen_score} vs {pawn_score}");
+
+        // Nf3xg5 (-220 after ...hxg5) vs Ra1xa5 (-400 after ...bxa5).
+        let fen = "4k3/8/1p5p/p5p1/8/5N2/8/R3K3 w - - 0 1";
+        let (knight_see, knight_score) = capture_see_and_score(fen, 21, 38);
+        let (rook_see, rook_score) = capture_see_and_score(fen, 0, 32);
+        assert_eq!((knight_see, rook_see), (-220, -400));
+        assert!(knight_score > rook_score, "{knight_score} vs {rook_score}");
     }
 }
