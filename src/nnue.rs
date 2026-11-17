@@ -42,8 +42,8 @@ pub(crate) const SCALE: i32 = 400;
 pub(crate) const BUCKETS: usize = 8;
 /// Deeper head (`src/nnue_head.rs`, docs/nnue-deeper-head.md): `true`
 /// expects nets from `nnue-trainer --head` (2H -> 16 -> 32 -> 1 per output
-/// bucket, added to the linear output). Default off: format and eval as before.
-pub(crate) const HEAD: bool = false;
+/// bucket, added to the linear output). Enabled for the head-net gate.
+pub(crate) const HEAD: bool = true;
 
 #[path = "nnue_head.rs"]
 pub(crate) mod head;
