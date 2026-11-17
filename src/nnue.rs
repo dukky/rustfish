@@ -706,10 +706,11 @@ impl<L: Layout> NnueState<L> {
             let b = bucket(pieces);
             let mut stack = self.stack.borrow_mut();
             let (lo, hi) = stack.split_at_mut(self.top);
-            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b);
+            let mut prep = head::Prepared::new();
+            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b, Some(&mut prep));
             self.computed.set(self.top);
             if HEAD {
-                return finish_head(net, b, sum, &hi[0].acc, stm);
+                return finish_head(net, b, sum, &prep);
             }
             return finish(net, b, sum);
         }
@@ -723,7 +724,7 @@ impl<L: Layout> NnueState<L> {
 /// pass; a perspective marked for refresh is rebuilt from the finny table.
 #[inline(always)]
 fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
-    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0);
+    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0, None);
 }
 
 /// `apply_delta`, and with `EVAL` also the output sum of the result for
@@ -737,7 +738,9 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
     cache: &RefCell<Vec<CacheEntry>>,
     stm: Color,
     b: usize,
+    mut prep: Option<&mut head::Prepared>,
 ) -> i64 {
+    debug_assert_eq!(EVAL, prep.is_some());
     let d = dst.delta;
     let mut sum = 0i64;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
@@ -749,6 +752,8 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
             refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
             if EVAL {
                 sum += simd::screlu_dot(&dst.acc.v[pi], w);
+                let slot = if persp == stm { 0 } else { 1 };
+                prep.as_deref_mut().expect("EVAL without prepared head").push(&dst.acc.v[pi], slot);
             }
             continue;
         }
@@ -756,9 +761,11 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
         let a0 = f(d.add[0]);
         let s0 = f(d.sub[0]);
         let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
-        let run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
+        let mut run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
             if EVAL {
-                simd::update_dot(o, s, adds, subs, w)
+                let p = prep.as_deref_mut().expect("EVAL without prepared head");
+                let slot = if persp == stm { 0 } else { 1 };
+                update_dot_head(o, s, adds, subs, w, &mut p.x[slot * H..(slot + 1) * H], &mut p.nnz, &mut p.n, slot * H / 4)
             } else {
                 update(o, s, adds, subs);
                 0
@@ -804,20 +811,18 @@ pub(crate) fn evaluate_acc(net: &Network, acc: &Accumulator, stm: Color, pieces:
     };
     let b = bucket(pieces);
     if HEAD {
-        return finish_head(net, b, output_sum(net, b, us, them), acc, stm);
+        let mut prep = head::Prepared::new();
+        prep.push(us, 0);
+        prep.push(them, 1);
+        return finish_head(net, b, output_sum(net, b, us, them), &prep);
     }
     finish(net, b, output_sum(net, b, us, them))
 }
 
-/// `HEAD`: `finish` plus the deeper head on the accumulators (the one hook
-/// into `src/nnue_head.rs`).
+/// `HEAD`: `finish` plus the deeper head (the one hook into `src/nnue_head.rs`).
 #[inline(always)]
-fn finish_head(net: &Network, b: usize, sum: i64, acc: &Accumulator, stm: Color) -> i32 {
-    let (us, them) = match stm {
-        Color::White => (&acc.v[0], &acc.v[1]),
-        Color::Black => (&acc.v[1], &acc.v[0]),
-    };
-    let h = net.head.as_ref().expect("HEAD net without head").forward(b, us, them);
+fn finish_head(net: &Network, b: usize, sum: i64, prep: &head::Prepared) -> i32 {
+    let h = net.head.as_ref().expect("HEAD net without head").forward_prepared(b, prep);
     head::finish(net.out_b[b], sum, h, EVAL_LIMIT)
 }
 
@@ -837,6 +842,30 @@ fn output_sum(net: &Network, b: usize, us: &[i16; H], them: &[i16; H]) -> i64 {
 #[inline(always)]
 fn update(out: &mut [i16; H], src: &[i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]) {
     simd::update(out, src, adds, subs)
+}
+
+#[inline(always)]
+fn update_dot_head(
+    out: &mut [i16; H],
+    src: &[i16; H],
+    adds: &[&[i16; H]],
+    subs: &[&[i16; H]],
+    w: &[i16; H],
+    x: &mut [u8],
+    nnz: &mut [u16; head::NNZ_BUF],
+    n: &mut usize,
+    base: usize,
+) -> i64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        simd::update_dot_head(out, src, adds, subs, w, x, nnz, n, base)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let sum = simd::update_dot(out, src, adds, subs, w);
+        *n = head::activate_into(out, x, base, nnz, *n);
+        sum
+    }
 }
 
 pub(crate) mod scalar {
@@ -982,6 +1011,7 @@ pub(crate) mod simd {
 
     /// `update` and `screlu_dot(out, w)` in one pass (|w| <= 127): the
     /// output arithmetic overlaps the update's loads and stores.
+    #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn update_dot(
         out: &mut [i16; H],
@@ -1006,6 +1036,66 @@ pub(crate) mod simd {
                     s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c));
                     s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c);
                 }
+                i += 32;
+            }
+            s.iter().map(|&x| vaddlvq_s32(x)).sum()
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn act_pair(a: int16x8_t, b: int16x8_t, zero: int16x8_t, qa: int16x8_t) -> uint8x16_t {
+        unsafe {
+            let lo = vminq_s16(vmaxq_s16(a, zero), qa);
+            let hi = vminq_s16(vmaxq_s16(b, zero), qa);
+            let (lo, hi) = (vqrdmulhq_s16(vshlq_n_s16::<3>(lo), vshlq_n_s16::<3>(lo)), vqrdmulhq_s16(vshlq_n_s16::<3>(hi), vshlq_n_s16::<3>(hi)));
+            vuzp1q_u8(vreinterpretq_u8_s16(lo), vreinterpretq_u8_s16(hi))
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn act_mask(v: uint8x16_t, bits: uint32x4_t) -> u32 {
+        unsafe {
+            let v = vreinterpretq_u32_u8(v);
+            vaddvq_u32(vandq_u32(vtstq_u32(v, v), bits))
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn update_dot_head(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        n: &mut usize,
+        base: usize,
+    ) -> i64 {
+        debug_assert_eq!(x.len(), H);
+        unsafe {
+            let zero = vdupq_n_s16(0);
+            let qa = vdupq_n_s16(QA as i16);
+            let bits = vld1q_u32([1u32, 2, 4, 8].as_ptr());
+            let mut s = [vdupq_n_s32(0); 8];
+            let mut i = 0;
+            while i < H {
+                let v = delta4(src.as_ptr(), adds, subs, i);
+                st4(out.as_mut_ptr().add(i), v);
+                let wv = ld4(w.as_ptr().add(i));
+                for j in 0..4 {
+                    let c = vminq_s16(vmaxq_s16(v[j], zero), qa);
+                    let cw = vmulq_s16(c, wv[j]);
+                    s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c));
+                    s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c);
+                }
+                let p01 = act_pair(v[0], v[1], zero, qa);
+                vst1q_u8(x.as_mut_ptr().add(i), p01);
+                let p23 = act_pair(v[2], v[3], zero, qa);
+                vst1q_u8(x.as_mut_ptr().add(i + 16), p23);
+                let mask = act_mask(p01, bits) | (act_mask(p23, bits) << 4);
+                *n = super::head::append_nnz(nnz, *n, base + i / 4, mask & 15);
+                *n = super::head::append_nnz(nnz, *n, base + i / 4 + 4, mask >> 4);
                 i += 32;
             }
             s.iter().map(|&x| vaddlvq_s32(x)).sum()
@@ -1727,6 +1817,48 @@ mod tests {
         // ((22500*3 - 65025*2 + 400*7)/255 + 11)*400/16320 = (-234+11)*400/16320
         assert_eq!(want_w, -5);
         assert_eq!(want_b, -12);
+    }
+
+    #[test]
+    fn fused_head_input_matches_scalar() {
+        let mut r = rng(20261117);
+        let mut src = [0i16; H];
+        let mut w = [0i16; H];
+        let mut adds = vec![[0i16; H]; 2];
+        let mut subs = vec![[0i16; H]; 2];
+        for i in 0..H {
+            src[i] = (r() % 1201) as i16 - 600;
+            w[i] = (r() % 255) as i16 - 127;
+            for a in &mut adds {
+                a[i] = (r() % 401) as i16 - 200;
+            }
+            for s in &mut subs {
+                s[i] = (r() % 401) as i16 - 200;
+            }
+        }
+        let adds: Vec<&[i16; H]> = adds.iter().collect();
+        let subs: Vec<&[i16; H]> = subs.iter().collect();
+
+        let mut out_s = [0i16; H];
+        scalar::update(&mut out_s, &src, &adds, &subs);
+        let sum_s = scalar::screlu_dot(&out_s, &w);
+
+        for slot in 0..2 {
+            let base = slot * H / 4;
+            let mut out_f = [0i16; H];
+            let mut prep_f = head::Prepared::new();
+            let sum_f = update_dot_head(&mut out_f, &src, &adds, &subs, &w, &mut prep_f.x[slot * H..(slot + 1) * H], &mut prep_f.nnz, &mut prep_f.n, base);
+
+            let mut x_s = [0u8; H];
+            let mut nnz_s = [0u16; head::NNZ_BUF];
+            let n_s = head::activate_into(&out_s, &mut x_s, base, &mut nnz_s, 0);
+
+            assert_eq!(out_f, out_s, "slot {slot}");
+            assert_eq!(sum_f, sum_s, "slot {slot}");
+            assert_eq!(prep_f.n, n_s, "slot {slot}");
+            assert_eq!(prep_f.x[slot * H..(slot + 1) * H], x_s, "slot {slot}");
+            assert_eq!(prep_f.nnz[..prep_f.n], nnz_s[..n_s], "slot {slot}");
+        }
     }
 
     #[test]

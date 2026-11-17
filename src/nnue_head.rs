@@ -41,7 +41,7 @@ const HEAD_Q: i64 = 8192;
 /// Trainer weight clip, in export units (1.98 * 8192).
 const CLIP_Q: i64 = 16220;
 /// L1 inputs (both perspectives) and their 4-byte chunks.
-const N_IN: usize = 2 * H;
+pub(crate) const N_IN: usize = 2 * H;
 const CHUNKS: usize = N_IN / 4;
 /// i16 words per bucket in the file.
 const BUCKET_WORDS: usize = H1 * N_IN + H1 + H2 * H1 + H2 + H2 + 1;
@@ -56,8 +56,28 @@ const QO: u32 = 24;
 #[derive(Clone)]
 struct W1Bucket([i8; CHUNKS * H1 * 4]);
 
+#[allow(dead_code)]
 #[repr(C, align(64))]
 struct Input([u8; N_IN]);
+
+pub(crate) struct Prepared {
+    pub(crate) x: [u8; N_IN],
+    pub(crate) nnz: [u16; NNZ_BUF],
+    pub(crate) n: usize,
+}
+
+impl Prepared {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self { x: [0; N_IN], nnz: [0; NNZ_BUF], n: 0 }
+    }
+
+    #[inline(always)]
+    pub(crate) fn push(&mut self, acc: &[i16; H], pi: usize) {
+        debug_assert!(pi < 2 && acc.len() == H);
+        self.n = kernels::activate(acc, &mut self.x[pi * H..(pi + 1) * H], pi * H / 4, &mut self.nnz, self.n);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct HeadNet {
@@ -155,13 +175,18 @@ impl HeadNet {
     }
 
     /// The head's output for bucket `b` at `2^QO` (= 1.0 in trainer units).
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn forward(&self, b: usize, us: &[i16; H], them: &[i16; H]) -> i32 {
-        let mut x = Input([0; N_IN]);
-        let mut nnz = [0u16; NNZ_BUF];
-        let n = kernels::activate(us, &mut x.0[..H], 0, &mut nnz, 0);
-        let n = kernels::activate(them, &mut x.0[H..], H / 4, &mut nnz, n);
-        let mut z1 = kernels::l1(&self.w1[b].0, &x.0, &nnz[..n]);
+        let mut p = Prepared::new();
+        p.push(us, 0);
+        p.push(them, 1);
+        self.forward_prepared(b, &p)
+    }
+
+    #[inline]
+    pub(crate) fn forward_prepared(&self, b: usize, p: &Prepared) -> i32 {
+        let mut z1 = kernels::l1(&self.w1[b].0, &p.x, &p.nnz[..p.n]);
         self.rest(b, &mut z1)
     }
 
@@ -204,7 +229,7 @@ impl HeadNet {
 }
 
 /// The nonzero-chunk index list, with room for a 4-index store past the end.
-const NNZ_BUF: usize = CHUNKS + 8;
+pub(crate) const NNZ_BUF: usize = CHUNKS + 8;
 
 /// For a 4-bit mask of nonzero chunks, their positions as four packed u16
 /// (unused slots 0): the SIMD kernels add the group's first chunk index to
@@ -235,6 +260,17 @@ fn push_nnz(nnz: &mut [u16; NNZ_BUF], n: usize, c0: usize, mask: u32) -> usize {
     unsafe { (nnz.as_mut_ptr().add(n) as *mut u64).write_unaligned(v.to_le()) };
     // A nibble table, not count_ones (which goes through the vector unit on aarch64).
     n + (0x4332_3221_3221_2110u64 >> (4 * mask) & 15) as usize
+}
+
+#[allow(dead_code)]
+#[inline(always)]
+pub(crate) fn activate_into(acc: &[i16; H], x: &mut [u8], base: usize, nnz: &mut [u16; NNZ_BUF], n: usize) -> usize {
+    kernels::activate(acc, x, base, nnz, n)
+}
+
+#[inline(always)]
+pub(crate) fn append_nnz(nnz: &mut [u16; NNZ_BUF], n: usize, base: usize, mask: u32) -> usize {
+    push_nnz(nnz, n, base, mask)
 }
 
 /// Linear output sum (`output_sum`) + head output -> clamped centipawns,
