@@ -243,7 +243,6 @@ struct Kernels {
     forward: Handle,
     forward_half: Handle,
     to_half: Handle,
-    compute_dacc: Handle,
     backward_ft: Handle,
     plan_masks: Handle,
     backward_rest: Handle,
@@ -337,7 +336,6 @@ impl GpuTrainer {
             forward: get("forward"),
             forward_half: get("forward_half"),
             to_half: get("to_half"),
-            compute_dacc: get("compute_dacc"),
             backward_ft: get("backward_ft"),
             plan_masks: get("plan_masks"),
             backward_rest: get("backward_rest"),
@@ -568,12 +566,7 @@ impl Backend for GpuTrainer {
         let k = &self.k;
         let (fwd, wt) = if self.half { (k.forward_half, self.wth.ptr) } else { (k.forward, self.wt.ptr) };
         let hd = sh.hd as i32;
-        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), P(self.hsc.ptr), I(hd)]);
-        if sh.hd > 0 {
-            // One sample-parallel pass over all lanes; both backward kernels
-            // then read dacc instead of recomputing the head's dense e sum.
-            launch(k.compute_dacc, ((2 * h).div_ceil(256) as u32, n as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.hsc.ptr), P(self.dacc.ptr), I(hi), I(bi), I(nn)]);
-        }
+        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), P(self.hsc.ptr), P(self.dacc.ptr), I(hd)]);
         launch(k.plan_masks, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.masks.ptr), I(nr as i32)]);
         launch(
             k.backward_ft,

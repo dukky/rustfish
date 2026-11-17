@@ -58,7 +58,7 @@ __device__ __forceinline__ float4 row4(const __half *wt, size_t at) {
 template <typename W>
 __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *order, const W *wt, const float *rest,
                                              float *acc, float *gout, float *loss, int H, int buckets, float *hs,
-                                             int hd) {
+                                             float *dacc, int hd) {
     int sample = order[blockIdx.x];
     const GSample &s = ss[sample];
     int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
@@ -102,6 +102,8 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
         // fixed-order reduction: warp shuffle tree, then warps in order.
         __shared__ float hred[32][H1];
         __shared__ float z1s[H1], dz2s[H2];
+        __shared__ float gout_s;
+        __shared__ float dz1s[H1];
         const float *hp = head_of(rest, H, buckets, s.bucket);
         const float *w1 = hp + side * H + c;
         float a0 = x0 * x0, a1 = x1 * x1, a2 = x2 * x2, a3 = x3 * x3;
@@ -142,6 +144,7 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
                 loss[sample] = err * err;
             }
             g = __shfl_sync(0xffffffff, g, 0);
+            gout_s = g;
             // Head backward (as head_backward): dz2 = g W3 dsq(z2),
             // dz1 = dsq(z1) sum_m dz2[m] W2[m][k].
             float dz2 = g * w3[t] * dsq01(z2);
@@ -155,8 +158,25 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
                 for (int m = 0; m < H2; m++) sm += dz2s[m] * w2[m * H1 + t];
                 hsp[t] = z1;
                 hsp[H1 + H2 + t] = sm * dsq01(z1);
+                dz1s[t] = sm * dsq01(z1);
             }
         }
+        __syncthreads();
+        // Cached dacc, fused here so every lane writes its own four columns.
+        float e0 = 0.f, e1 = 0.f, e2 = 0.f, e3 = 0.f;
+#pragma unroll
+        for (int q = 0; q < H1; q++) {
+            float dz = dz1s[q];
+            e0 += dz * w1[(size_t)q * 2 * H];
+            e1 += dz * w1[(size_t)q * 2 * H + 1];
+            e2 += dz * w1[(size_t)q * 2 * H + 2];
+            e3 += dz * w1[(size_t)q * 2 * H + 3];
+        }
+        size_t at = ((size_t)sample * 2 + side) * H + c;
+        dacc[at] = (a0 > 0.f && x0 < 1.f) ? (gout_s * w[0] + e0) * 2.0f * x0 : 0.f;
+        dacc[at + 1] = (a1 > 0.f && x1 < 1.f) ? (gout_s * w[1] + e1) * 2.0f * x1 : 0.f;
+        dacc[at + 2] = (a2 > 0.f && x2 < 1.f) ? (gout_s * w[2] + e2) * 2.0f * x2 : 0.f;
+        dacc[at + 3] = (a3 > 0.f && x3 < 1.f) ? (gout_s * w[3] + e3) * 2.0f * x3 : 0.f;
         return;
     }
     __syncthreads();
@@ -172,41 +192,16 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
 }
 
 extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
-                                   float *acc, float *gout, float *loss, int H, int buckets, float *hs, int hd) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
+                                   float *acc, float *gout, float *loss, int H, int buckets, float *hs, float *dacc,
+                                   int hd) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, dacc, hd);
 }
 
 // `--half`: the same with the fp16 copy of the merged FT rows.
 extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order, const __half *wt, const float *rest,
-                                        float *acc, float *gout, float *loss, int H, int buckets, float *hs, int hd) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
-}
-
-// --------------------------------------------------------- cached dacc (--head)
-
-// Both backward branches need the same dacc[(j, cc)] for every sample j and
-// flattened lane cc = side * H + col: cache it here instead of redoing the
-// dense 16-term e sum twice. Same expression and operation order as the old
-// head branches; sample-major/lane-minor order, no atomics.
-extern "C" __global__ void __launch_bounds__(256) compute_dacc(const GSample *ss, const float *acc,
-                                                               const float *gout, const float *rest,
-                                                               const float *hs, float *dacc, int H,
-                                                               int buckets, int n) {
-    int cc = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y;
-    if (cc >= 2 * H || j >= n) return;
-    size_t at = (size_t)j * 2 * H + cc;
-    int b = ss[j].bucket;
-    float x = acc[at];
-    float c = fminf(fmaxf(x, 0.f), 1.f);
-    const float *ow = rest + H;
-    float w = ow[b * 2 * H + cc];
-    const float *w1 = head_of(rest, H, buckets, b) + cc;
-    const float *dz = hs + (size_t)j * HS + H1 + H2;
-    float e = 0.0f;
-#pragma unroll
-    for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
-    dacc[at] = (x > 0.f && x < 1.f) ? (gout[j] * w + e) * 2.0f * c : 0.0f;
+                                        float *acc, float *gout, float *loss, int H, int buckets, float *hs,
+                                        float *dacc, int hd) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, dacc, hd);
 }
 
 // ---------------------------------------------------------------- FT backward
@@ -268,7 +263,7 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[s.bucket * 2 * H + side * H + col];
             if (hd) {
-                // Cached by compute_dacc: same lane as acc[(j, side, col)].
+                // Cached by forward: same lane as acc[(j, side, col)].
                 sd[buf][r][lane] = dacc[((size_t)j * 2 + side) * H + col];
             } else {
                 sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
