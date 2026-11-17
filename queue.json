@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "feat-caphist-see",
-      "mode": "stc",
-      "expect": 1.0
-    },
-    {
       "branch": "retest-ttcapture-lmr",
       "mode": "stc",
       "expect": 1.5
@@ -14,6 +9,11 @@
       "branch": "retest-razoring",
       "mode": "stc",
       "expect": 1.5
+    },
+    {
+      "branch": "feat-recapture-ext",
+      "mode": "stc",
+      "expect": 1.0
     }
   ],
   "current": {
@@ -30,7 +30,7 @@
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
-  "next_seed": 243,
+  "next_seed": 244,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
