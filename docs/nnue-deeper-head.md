@@ -76,10 +76,11 @@ no FMA contraction, so integers throughout are the safer choice.
 - **Cost (measured 2026-11-17):** per sample, the head adds ~2 x 16k
   multiply-adds (forward + backward) at H 512, the same order as the FT's
   sparse work (~60 rows x H), but dense and with little reuse. CPU H512 head
-  is **84-104k pos/s** on 12 desktop threads; GPU H1024 head is **~960k
-  pos/s** after the bucket-indexed backward kernels. Plain FT is different:
-  CPU H512 ~2.2M pos/s (near GPU parity), H1024 kb8m 0.64-0.77M vs GPU
-  2.05-2.36M. Production split: bulk plain generations stay CPU-friendly;
+  is **84-104k pos/s** on 12 desktop threads; GPU H1024 head is **~1.05M
+  pos/s** after the bucket-indexed backward kernels plus `speed-cuda`'s
+  incidence-list FT backward. Plain FT is different: CPU H512 ~2.2M pos/s
+  (near GPU parity), H1024 kb8m 0.64-0.77M vs GPU **2.48M**. Production
+  split: bulk plain generations stay CPU-friendly;
   the short head fine-tune runs on the GPU. H512 head also cuts engine NPS
   cost (~9% on M3 vs ~19% for H1024 head).
 - **Gradients:** dense layers per output bucket need deterministic sums over

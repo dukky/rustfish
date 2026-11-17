@@ -69,6 +69,24 @@ in `net/experiments.jsonl`. `netloop.py auto` runs unattended but only
 ingests data now (its short fine-tunes never won). The protocol and results
 are in `docs/nnue-experiments.md`.
 
+### Current state (2026-11-17)
+
+- Head shape gate: `nnue-g9h1024kb8m-head-clean` (clean replay of
+  `head-v2` onto `main`, bench 366942) is queued at stc expect +5. The old
+  `nnue-g9h1024kb8m-head` hit a queue rebase conflict; do not requeue it.
+- Datagen3 runs the frozen g9/10-thread binary on D2020-D2023 (1M games
+  each, 5000 nodes) in tmux `datagen3` on the desktop. Do not start another
+  datagen run on those seeds.
+- CUDA trainer perf stack (trainer-only, no engine gate):
+  `perf-head-cuda-dacc` (766k pos/s head), `perf-head-rowwarp` (878k),
+  `perf-head-bucket-backward` (960k), `perf-head-speed-cuda` (**1.05M head,
+  2.48M plain**, byte-identical nets). `perf-head-fuse-dacc` and
+  `perf-head-warp` were slower and are parked; `speed-cuda` alone is the
+  plain-FT part of the same change.
+- CPU/GPU split: bulk plain FT stays on the desktop CPU; head training is
+  dense and stays on the 1080 Ti. CPU sparse/int8 head kernels and head-only
+  freezing are optional future work, not blockers.
+
 ### Net naming
 
 | Name | Meaning |

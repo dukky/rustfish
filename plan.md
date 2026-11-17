@@ -375,9 +375,12 @@ merging (the queue does that).
 - 2026-11-17: head gate replayed cleanly onto main as
   `nnue-g9h1024kb8m-head-clean` (bench 366942, queued stc expect +5) after
   the original shape gate hit a rebase conflict; net/docs records on
-  `docs-net-records-1117`. CUDA head perf (on `head-v2`): `dacc` 670k -> 766k
-  pos/s, `rowwarp` -> 878k, `bucket-backward` -> 960k, all byte-identical;
-  fuse/warp-for-all-rows experiments were slower and are parked. Generic
-  `speed-cuda` plain FT 2.05M -> 2.36M remains an owner merge decision.
-  Datagen3 runs g9 with 10 threads on D2020-D2023 (1M games each, 5000
-  nodes); D2020 at ~42 games/s, ~27h for the whole sweep.
+  `docs-net-records-1117`.   CUDA head perf (on `head-v2`): `dacc` 670k -> 766k
+  pos/s, `rowwarp` -> 878k, `bucket-backward` -> 960k, then
+  `perf-head-speed-cuda` cherry-picks `speed-cuda` into the head stack:
+  **1.05M head / 2.48M plain**, all byte-identical to their baselines;
+  `backward_ft` 3.35ms -> 1.67ms/batch. fuse/warp-for-all-rows experiments
+  were slower and are parked. The combined branch supersedes standalone
+  `speed-cuda` for the head stack; both are trainer-only owner merge
+  decisions. Datagen3 runs g9 with 10 threads on D2020-D2023 (1M games
+  each, 5000 nodes); D2020 at ~42 games/s, ~27h for the whole sweep.
