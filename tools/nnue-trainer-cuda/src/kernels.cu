@@ -98,31 +98,29 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
     __shared__ float red[32];
     if ((t & 31) == 0) red[t >> 5] = part;
     if (hd) {
-        // Head L1 partials of this thread's 4 columns, per z1 row q, then a
-        // fixed-order reduction: warp shuffle tree, then warps in order.
-        __shared__ float hred[32][H1];
-        __shared__ float z1s[H1], dz2s[H2];
-        const float *hp = head_of(rest, H, buckets, s.bucket);
-        const float *w1 = hp + side * H + c;
-        float a0 = x0 * x0, a1 = x1 * x1, a2 = x2 * x2, a3 = x3 * x3;
-#pragma unroll
-        for (int q = 0; q < H1; q++) {
-            const float *r = w1 + (size_t)q * 2 * H;
-            float pq = a0 * r[0] + a1 * r[1] + a2 * r[2] + a3 * r[3];
-            for (int o = 16; o; o >>= 1) pq += __shfl_down_sync(0xffffffff, pq, o);
-            if ((t & 31) == 0) hred[t >> 5][q] = pq;
-        }
         __syncthreads();
+        __shared__ float z1s[H1], dz2s[H2];
         if (t < 32) {
             int nw = blockDim.x >> 5;
+            const float *hp = head_of(rest, H, buckets, s.bucket);
+            const float *w1 = hp;
             const float *b1 = hp + H1 * 2 * H, *w2 = b1 + H1, *b2 = w2 + H2 * H1, *w3 = b2 + H2, *b3 = w3 + H2;
-            float z1 = 0.0f;
-            if (t < H1) {
-                z1 = b1[t];
-                for (int i = 0; i < nw; i++) z1 += hred[i][t];
-                z1s[t] = z1;
+            float z[H1] = {0.f};
+            for (int lane = t; lane < 2 * H; lane += 32) {
+                float av = acc[((size_t)sample * 2) * H + lane];
+                float a = sq01(av);
+#pragma unroll
+                for (int q = 0; q < H1; q++) z[q] += a * w1[(size_t)q * 2 * H + lane];
+            }
+#pragma unroll
+            for (int q = 0; q < H1; q++) {
+                float v = z[q];
+                for (int o = 16; o; o >>= 1) v += __shfl_down_sync(0xffffffff, v, o);
+                if (t == 0) z1s[q] = b1[q] + v;
             }
             __syncwarp();
+            float z1 = 0.0f;
+            if (t < H1) z1 = z1s[t];
             // Lane m: z2[m] and its L3 term.
             float z2 = b2[t];
 #pragma unroll
