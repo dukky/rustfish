@@ -5,16 +5,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "order-quiet-check",
-    "mode": "stc",
-    "test_id": "q-order-quiet-check-1117-1019",
-    "sha": "ffd2de0e1604a70fcd7ab5f1ecf588812312d007",
-    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
-    "started": "2026-11-17T10:19:14Z",
-    "bench": 348930,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
