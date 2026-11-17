@@ -4,44 +4,43 @@
       "branch": "retest-ttcapture-lmr",
       "mode": "stc",
       "expect": 1.5,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "retest-razoring",
       "mode": "stc",
       "expect": 1.5,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "feat-recapture-ext",
       "mode": "stc",
       "expect": 1.0,
-      "passed_over": 1
+      "passed_over": 2
     },
     {
       "branch": "feat-corr-lmr",
       "mode": "stc",
-      "expect": 1.0
+      "expect": 1.0,
+      "passed_over": 1
     },
     {
       "branch": "retest-improving-ply4-smoothed",
       "mode": "stc",
-      "expect": 1.0
+      "expect": 1.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-50move-eval-damp",
       "mode": "stc",
-      "expect": 0.5
+      "expect": 0.5,
+      "passed_over": 1
     },
     {
       "branch": "feat-lmr-bad-captures",
       "mode": "stc",
-      "expect": 1.5
-    },
-    {
-      "branch": "nnue-g9h1024kb8m-head",
-      "mode": "stc",
-      "expect": 5.0
+      "expect": 1.5,
+      "passed_over": 1
     }
   ],
   "current": null,
