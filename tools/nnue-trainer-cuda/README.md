@@ -191,10 +191,20 @@ fills the 48 KB); same with 768 / 512 threads 3.1 / 2.9. Fewer, larger
 ranges win: the per-feature loop and the barrier per range cost more than
 the adds.
 
+Head training on the same net/shape (H 1024 kb8m `--half`, batch 16384,
+2 CPU threads, 300 batches, byte-identical nets at every step): cached
+`dacc` 766k pos/s, one warp per z1 row 878k, per-bucket sample lists 960k,
+plus the `speed-cuda` incidence-list FT backward **1.05M pos/s**. Plain
+training on the final branch is **2.48M pos/s** (from 2.09M with the older
+bitmask path). Head profile at batch 16384: `forward_half` 6.38 ms,
+`compute_dacc` 3.34 ms, `backward_ft` 1.67 ms (3.35 ms before incidence
+lists), `backward_head_w1` 1.32 ms, `adam_ft` 0.87 ms. The CPU head trainer
+is 84-104k pos/s even at H 512, so bulk head runs stay on the GPU.
+
 Approaches that lost (1080 Ti, kb8m):
 - Smaller output-gradient chunks (`CH` 64 / 32 instead of 256): no gain.
 - A per-pair record (accumulator row, output-weight offset, gradient)
-  written by `plan_masks` so `backward_ft`'s staging skips the sample load:
+  written by `plan_csr` so `backward_ft`'s staging skips the sample load:
   -8% at H 1024 `--half` (byte-identical, just slower).
 - Larger work items (`WI` 1024 / 4096): no change.
 - Bigger redesigns of `backward_ft` (64-column tiles, register prefetch of
