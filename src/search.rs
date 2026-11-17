@@ -1885,6 +1885,15 @@ fn negamax(
             continue;
         }
 
+        // "LMR for bad captures" backlog item: compute negative SEE once for
+        // captures eligible for a one-ply reduction at non-PV zero-window nodes.
+        let bad_capture = !pv_node
+            && beta - alpha <= 1
+            && depth >= 3
+            && extension == 0
+            && !quiet
+            && !see_ge(board, mv, 0);
+
         if quiet {
             quiets_tried.push(mv);
         }
@@ -1950,6 +1959,8 @@ fn negamax(
                     r += params.lmr_not_improving;
                 }
                 r.clamp(0, depth - 2)
+            } else if bad_capture && !gives_check {
+                1
             } else {
                 0
             };
