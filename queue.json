@@ -3,22 +3,20 @@
     {
       "branch": "retest-ttcapture-lmr",
       "mode": "stc",
-      "expect": 1.5
+      "expect": 1.5,
+      "passed_over": 1
     },
     {
       "branch": "retest-razoring",
       "mode": "stc",
-      "expect": 1.5
+      "expect": 1.5,
+      "passed_over": 1
     },
     {
       "branch": "feat-recapture-ext",
       "mode": "stc",
-      "expect": 1.0
-    },
-    {
-      "branch": "feat-pawn-history",
-      "mode": "stc",
-      "expect": 2.0
+      "expect": 1.0,
+      "passed_over": 1
     },
     {
       "branch": "feat-corr-lmr",
@@ -41,7 +39,17 @@
       "expect": 1.5
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-pawn-history",
+    "mode": "stc",
+    "expect": 2.0,
+    "test_id": "q-feat-pawn-history-1117-2056",
+    "sha": "473fd9038f1d9ff94848806f3b569a28522e2d4b",
+    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
+    "started": "2026-11-17T20:56:13Z",
+    "bench": 381052,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
