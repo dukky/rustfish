@@ -14,6 +14,16 @@
       "branch": "feat-recapture-ext",
       "mode": "stc",
       "expect": 1.0
+    },
+    {
+      "branch": "feat-pawn-history",
+      "mode": "stc",
+      "expect": 2.0
+    },
+    {
+      "branch": "feat-corr-lmr",
+      "mode": "stc",
+      "expect": 1.0
     }
   ],
   "current": {
@@ -30,7 +40,7 @@
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
-  "next_seed": 244,
+  "next_seed": 245,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
