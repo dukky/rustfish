@@ -1,6 +1,6 @@
 # Design note: a deeper NNUE head (FT -> 16 -> 32 -> 1)
 
-Status: implemented on `head-v2`; engine+net gate `nnue-g9h1024kb8m-head-clean` queued at stc (2026-11-17). The original proposal text below is kept for history.
+Status: implemented on `head-v2`; engine+net gate `nnue-g9h1024kb8m-head-clean` queued at stc (2026-11-17). Fused inference (`perf-head-fuse-screlu`) and batched CPU-trainer W1 gradients (`perf-trainer-head-w1-batch`) are pushed as pending perf follow-ups, both byte-identical. The original proposal text below is kept for history.
 
 ## Why
 
@@ -80,9 +80,17 @@ no FMA contraction, so integers throughout are the safer choice.
   pos/s** after the bucket-indexed backward kernels plus `speed-cuda`'s
   incidence-list FT backward. Plain FT is different: CPU H512 ~2.2M pos/s
   (near GPU parity), H1024 kb8m 0.64-0.77M vs GPU **2.48M**. Production
-  split: bulk plain generations stay CPU-friendly;
-  the short head fine-tune runs on the GPU. H512 head also cuts engine NPS
-  cost (~9% on M3 vs ~19% for H1024 head).
+   split: bulk plain generations stay CPU-friendly;
+   the short head fine-tune runs on the GPU. H512 head also cuts engine NPS
+   cost (~9% on M3 vs ~19% for H1024 head).
+- **Perf follow-ups (2026-11-17, M3 only):** engine
+   `perf-head-fuse-screlu` folds the head's first activation into the last
+   incremental pass, keeping bench 366942 and evalhash
+   `248c85c4a1cc6558` unchanged and gaining ~2% at depth 12. CPU trainer
+   `perf-trainer-head-w1-batch` keeps per-parameter sample order but groups
+   samples by output bucket so W1 gradient adds stay in registers: 31 tests
+   pass, nets byte-identical, +24% at H256 and ~1.8x at H512. Do not bench
+   on the desktop while datagen3 is running; AVX paths remain unmeasured.
 - **Gradients:** dense layers per output bucket need deterministic sums over
   the batch's samples of that bucket. The CUDA trainer builds per-(output
   bucket, chunk) sample lists in sample order; `backward_head_w1` and

@@ -384,3 +384,9 @@ merging (the queue does that).
   `speed-cuda` for the head stack; both are trainer-only owner merge
   decisions. Datagen3 runs g9 with 10 threads on D2020-D2023 (1M games
   each, 5000 nodes); D2020 at ~42 games/s, ~27h for the whole sweep.
+  Head inference follow-up `perf-head-fuse-screlu` (2841118) fuses SCReLU
+  into the last accumulator pass: bench 366942 and evalhash unchanged,
+  ~2% faster on M3 depth 12; parked behind the shape gate. CPU trainer
+  `perf-trainer-head-w1-batch` (66efbba) batches W1 gradient adds by output
+  bucket: 31 tests pass, byte-identical nets, +24% H256 / ~1.8x H512 pos/s
+  on M3; trainer-only owner merge decision. M3 only while datagen runs.

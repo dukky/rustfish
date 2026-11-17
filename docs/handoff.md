@@ -74,6 +74,14 @@ are in `docs/nnue-experiments.md`.
 - Head shape gate: `nnue-g9h1024kb8m-head-clean` (clean replay of
   `head-v2` onto `main`, bench 366942) is queued at stc expect +5. The old
   `nnue-g9h1024kb8m-head` hit a queue rebase conflict; do not requeue it.
+- Head inference speedup: `perf-head-fuse-screlu` (commit `2841118`) fuses the
+  head's first activation into the last incremental pass; bench 366942 and
+  `evalhash 248c85c4a1cc6558` byte-identical, ~2% faster on M3 depth 12.
+  Pushed but not queued until the shape gate merges. The us/them head slot
+  must follow `persp == stm`; fixed white/black order changes evalhash.
+- CPU head trainer: `perf-trainer-head-w1-batch` (commit `66efbba`) batches W1
+  gradient adds per output bucket; 31 tests pass, nets byte-identical,
+  +24% H256 and ~1.8x H512 pos/s on M3. Trainer-only owner merge decision.
 - Datagen3 runs the frozen g9/10-thread binary on D2020-D2023 (1M games
   each, 5000 nodes) in tmux `datagen3` on the desktop. Do not start another
   datagen run on those seeds.
@@ -85,7 +93,9 @@ are in `docs/nnue-experiments.md`.
   plain-FT part of the same change.
 - CPU/GPU split: bulk plain FT stays on the desktop CPU; head training is
   dense and stays on the 1080 Ti. CPU sparse/int8 head kernels and head-only
-  freezing are optional future work, not blockers.
+  freezing are optional future work, not blockers. Do not benchmark on the
+  desktop while datagen3 runs; M3 is fine (no AVX, so AVX paths stay
+  unmeasured until the desktop is idle).
 
 ### Net naming
 
