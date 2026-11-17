@@ -328,12 +328,13 @@ impl BatchTrainer {
         let sb = if sb == 0 { ((2 << 20) / (8 * sh.h)).clamp(128, 2048) } else { sb };
         let sb = sb.div_ceil(FB) * FB;
         let rows = sh.kb * INPUTS;
+        let tiles = sh.h / TB;
         let blank = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
         assert!(sh.kb <= MAX_KB);
         BatchTrainer {
             sh,
             rows,
-            tiles: sh.h / TB,
+            tiles,
             sb,
             isa: Isa::detect(),
             exact,
@@ -965,22 +966,16 @@ unsafe fn bwd_impl<V: Simd>(a: &BwdArgs) {
     let ow0 = a.p.as_ptr().add(sh.out_w());
     let two = V::splat(2.0);
     let head = sh.hd > 0;
-    let rest_len = sh.len() - sh.ft_b();
+    if head {
+        bwd_head_batch::<V>(a);
+        return;
+    }
     for (j, s) in a.ss.iter().enumerate() {
         let g = a.grad[j];
-        let scr: &[f32; HS] = if head { &*(a.hs.add(j * HS) as *const [f32; HS]) } else { &[0.0; HS] };
         if a.c == 0 {
             *gob.add(s.bucket) += g;
         }
-        if head {
-            // W2 rows spread over the column units (unit c: rows m = c mod tiles).
-            head_small_grads(sh, s.bucket, g, scr, std::slice::from_raw_parts_mut(a.grest, rest_len), sh.ft_b(), a.c, sh.h / TB);
-        }
         let gs = V::splat(g);
-        if head {
-            bwd_head_sample::<V>(a, j, s, g, scr);
-            continue;
-        }
         for side in 0..2 {
             let off = s.bucket * 2 * h + side * h + col;
             let x0 = a.acc.add(j * 2 * h + side * h + col);
@@ -1006,70 +1001,121 @@ unsafe fn bwd_impl<V: Simd>(a: &BwdArgs) {
     }
 }
 
-/// `bwd_impl` for one sample of a `--head` net: the same per-element
-/// float operations in the same order as `train_sample` (so batch ==
-/// reference bit for bit), but with the head's 16-term loop outermost:
-/// both sides' column vectors give 2 * TB / W independent chains for the
-/// W1 gradient and for `e = sum_q dz1[q] W1[q][i]` (with q innermost they
-/// were 16-long dependent chains, the CPU trainer's main `--head` cost).
 #[inline(always)]
-unsafe fn bwd_head_sample<V: Simd>(a: &BwdArgs, j: usize, s: &Sample, g: f32, scr: &[f32; HS]) {
+unsafe fn bwd_head_batch<V: Simd>(a: &BwdArgs) {
     let sh = a.sh;
     let h = sh.h;
     let n = TB / V::W;
     let col = a.c * TB;
     let gtile = a.gft.add(a.c * a.rows * TB);
     let gb = a.grest.add(col);
+    let gob = a.grest.add(sh.out_b() - sh.ft_b());
     let gow0 = a.grest.add(sh.out_w() - sh.ft_b());
     let ow0 = a.p.as_ptr().add(sh.out_w());
     let two = V::splat(2.0);
-    let gs = V::splat(g);
-    let w1 = head_offs(sh, s.bucket)[0];
-    let mut x = [[V::zero(); 16]; 2];
-    let mut c = [[V::zero(); 16]; 2];
-    let mut a2 = [[V::zero(); 16]; 2];
-    let mut e = [[V::zero(); 16]; 2];
-    for side in 0..2 {
-        let off = s.bucket * 2 * h + side * h + col;
-        let x0 = a.acc.add(j * 2 * h + side * h + col);
-        for k in 0..n {
-            x[side][k] = V::load(x0.add(k * V::W));
-            c[side][k] = x[side][k].clamp01();
-            let go = gow0.add(off + k * V::W);
-            V::load(go).add(gs.mul(c[side][k]).mul(c[side][k])).store(go);
-            a2[side][k] = c[side][k].mul(c[side][k]);
+
+    const CH: usize = 16;
+    let mut x = [[[V::zero(); 16]; 2]; CH];
+    let mut a2 = [[[V::zero(); 16]; 2]; CH];
+    let mut groups: Vec<Vec<u16>> = vec![Vec::with_capacity(CH); sh.buckets];
+    let len = a.ss.len();
+    let mut s0 = 0;
+    while s0 < len {
+        let m = CH.min(len - s0);
+        for g in &mut groups {
+            g.clear();
         }
-    }
-    // As train_sample: gW1[q][i] += dz1[q] * a^2, e = sum_q dz1[q] W1[q][i] (q ascending).
-    for q in 0..H1 {
-        let dz = V::splat(scr[H1 + H2 + q]);
-        for side in 0..2 {
-            let at0 = w1 + q * 2 * h + side * h + col;
-            let gq0 = a.grest.add(at0 - sh.ft_b());
-            let w0 = a.p.as_ptr().add(at0);
-            for k in 0..n {
-                let gq = gq0.add(k * V::W);
-                V::load(gq).add(dz.mul(a2[side][k])).store(gq);
-                e[side][k] = e[side][k].add(dz.mul(V::load(w0.add(k * V::W))));
+        for j in 0..m {
+            let idx = s0 + j;
+            let s = &a.ss[idx];
+            let g = a.grad[idx];
+            let gs = V::splat(g);
+            groups[s.bucket].push(j as u16);
+            if a.c == 0 {
+                *gob.add(s.bucket) += g;
+            }
+            head_small_grads(sh, s.bucket, g, &*(a.hs.add(idx * HS) as *const [f32; HS]), std::slice::from_raw_parts_mut(a.grest, sh.len() - sh.ft_b()), sh.ft_b(), a.c, sh.h / TB);
+            for side in 0..2 {
+                let off = s.bucket * 2 * h + side * h + col;
+                let x0 = a.acc.add(idx * 2 * h + side * h + col);
+                for k in 0..n {
+                    let xv = V::load(x0.add(k * V::W));
+                    let c = xv.clamp01();
+                    let av = c.mul(c);
+                    x[j][side][k] = xv;
+                    a2[j][side][k] = av;
+                    let go = gow0.add(off + k * V::W);
+                    V::load(go).add(gs.mul(c).mul(c)).store(go);
+                }
             }
         }
-    }
-    for side in 0..2 {
-        let off = s.bucket * 2 * h + side * h + col;
-        let mut d = [V::zero(); 16];
-        for k in 0..n {
-            let w = V::load(ow0.add(off + k * V::W));
-            d[k] = V::select_in01(x[side][k], gs.mul(w).add(e[side][k]).mul(two).mul(c[side][k]));
-            let b = gb.add(k * V::W);
-            V::load(b).add(d[k]).store(b);
-        }
-        for &f in &s.f[side][..s.n] {
-            let row = gtile.add(f as usize * TB);
-            for k in 0..n {
-                let q = row.add(k * V::W);
-                V::load(q).add(d[k]).store(q);
+        for b in 0..sh.buckets {
+            let group = &groups[b];
+            if group.is_empty() {
+                continue;
+            }
+            let w1 = head_offs(sh, b)[0];
+            for q in 0..H1 {
+                let mut dzs = [0.0f32; CH];
+                for &j in group {
+                    dzs[j as usize] = *a.hs.add((s0 + j as usize) * HS + H1 + H2 + q);
+                }
+                for side in 0..2 {
+                    let gq0 = a.grest.add(w1 + q * 2 * h + side * h + col - sh.ft_b());
+                    let mut gacc = [V::zero(); 16];
+                    for k in 0..n {
+                        gacc[k] = V::load(gq0.add(k * V::W));
+                    }
+                    for &j in group {
+                        let j = j as usize;
+                        let dz = V::splat(dzs[j]);
+                        for k in 0..n {
+                            gacc[k] = gacc[k].add(dz.mul(a2[j][side][k]));
+                        }
+                    }
+                    for k in 0..n {
+                        gacc[k].store(gq0.add(k * V::W));
+                    }
+                }
             }
         }
+        for j in 0..m {
+            let idx = s0 + j;
+            let s = &a.ss[idx];
+            let g = a.grad[idx];
+            let gs = V::splat(g);
+            let scr = &*(a.hs.add(idx * HS) as *const [f32; HS]);
+            let w1 = head_offs(sh, s.bucket)[0];
+            let mut e = [[V::zero(); 16]; 2];
+            for q in 0..H1 {
+                let dz = V::splat(scr[H1 + H2 + q]);
+                for side in 0..2 {
+                    let w0 = a.p.as_ptr().add(w1 + q * 2 * h + side * h + col);
+                    for k in 0..n {
+                        e[side][k] = e[side][k].add(dz.mul(V::load(w0.add(k * V::W))));
+                    }
+                }
+            }
+            for side in 0..2 {
+                let off = s.bucket * 2 * h + side * h + col;
+                let mut d = [V::zero(); 16];
+                for k in 0..n {
+                    let w = V::load(ow0.add(off + k * V::W));
+                    let c = x[j][side][k].clamp01();
+                    d[k] = V::select_in01(x[j][side][k], gs.mul(w).add(e[side][k]).mul(two).mul(c));
+                    let b = gb.add(k * V::W);
+                    V::load(b).add(d[k]).store(b);
+                }
+                for &f in &s.f[side][..s.n] {
+                    let row = gtile.add(f as usize * TB);
+                    for k in 0..n {
+                        let p = row.add(k * V::W);
+                        V::load(p).add(d[k]).store(p);
+                    }
+                }
+            }
+        }
+        s0 += m;
     }
 }
 
