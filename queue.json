@@ -4,34 +4,39 @@
       "branch": "feat-recapture-ext",
       "mode": "stc",
       "expect": 1.0,
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "feat-corr-lmr",
       "mode": "stc",
       "expect": 1.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "retest-improving-ply4-smoothed",
       "mode": "stc",
       "expect": 1.0,
-      "passed_over": 3
+      "passed_over": 4
     },
     {
       "branch": "feat-50move-eval-damp",
       "mode": "stc",
       "expect": 0.5,
-      "passed_over": 3
-    },
-    {
-      "branch": "feat-lmr-bad-captures",
-      "mode": "stc",
-      "expect": 1.5,
-      "passed_over": 3
+      "passed_over": 4
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "feat-lmr-bad-captures",
+    "mode": "stc",
+    "expect": 1.5,
+    "passed_over": 3,
+    "test_id": "q-feat-lmr-bad-captures-1117-2240",
+    "sha": "26bb241af84569b065ebe1bbe3250abea539aef4",
+    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
+    "started": "2026-11-17T22:40:05Z",
+    "bench": 398065,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
