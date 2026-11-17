@@ -1,6 +1,6 @@
 # Design note: a deeper NNUE head (FT -> 16 -> 32 -> 1)
 
-Status: proposal (2026-11-12, desktop session). Nothing implemented.
+Status: implemented on `head-v2`; engine+net gate `nnue-g9h1024kb8m-head-clean` queued at stc (2026-11-17). The original proposal text below is kept for history.
 
 ## Why
 
