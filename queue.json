@@ -19,18 +19,7 @@
       "passed_over": 4
     }
   ],
-  "current": {
-    "branch": "feat-recapture-ext",
-    "mode": "stc",
-    "expect": 1.0,
-    "passed_over": 5,
-    "test_id": "q-feat-recapture-ext-1117-2316",
-    "sha": "81ff1f67c579077e55e736658620786c5786309e",
-    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
-    "started": "2026-11-17T23:16:04Z",
-    "bench": 479561,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
