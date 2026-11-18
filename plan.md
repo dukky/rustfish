@@ -207,6 +207,18 @@ Ladder queued.
 - **Gen 10 starting tonight** (`~/rustfish-data/gen10-prep.sh` -> `gen10.sh`):
   pool10 = pool8 + ci9 + D2004-D2022 (D2021/D2022 tails = **val-g10**, 1M,
   held out), gen-9 chain, --half; screened on val-g10 / valL1008 / val.bin.
+- **Desktop seeds D2016-D2019 are burned** (runlong-2016.sh, e3390ac engine,
+  12 threads): no output files survive, most likely lost in the ~14 Nov
+  reboot. Never reuse 2016-2019; next free desktop seed is **2024**. Datagen
+  and the GPU queue should resume automatically after a reboot (needs a
+  Windows startup task, with the 180 W power cap).
+- **Net-shape test before gen 10** (owner, 2026-11-18): H256 / H512 / H1024
+  kb8m, each with and without the head, on the same 1.27B newest positions
+  (D2004-D2022), short recipe (plain 4, m1 1, kb8m 2, head 2), new CUDA
+  trainer (`perf-head-speed-cuda`, verified byte-identical, +10% plain /
+  +20% kb8m). Loss first, then games (speed counts; head arms after the
+  engine head fix). Gen 10 follows automatically. Laptop datagen: L1010 on
+  main 738abec, 6 threads.
 - Overfitting sweep final (M3, pool7 H512, best-scale valL1008 / val.bin):
   base 0.024591 / 0.026185; wd 0.01 0.024590 / 0.026116; mirror 0.024671 /
   0.026248 (worse); **lambda 0.7 0.024469 / 0.026595** (better on current
