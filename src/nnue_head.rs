@@ -19,15 +19,25 @@
 //! Quantisation (integer throughout, so every SIMD kernel matches its
 //! scalar twin bit for bit):
 //!
-//! - L1 input: `x = (clamp(acc, 0, 255)^2 + 256) >> 9` in 0..=127 (u8),
-//!   i.e. `sq(a) * 65025 / 512` rounded. 0..127 keeps `maddubs` from saturating and
-//!   lets NEON use a signed `sdot`.
-//! - W1: i8 at `2^s1 * 65536 / 65025`, `s1` chosen per net at load (the
-//!   largest power of two that keeps every |W1| <= 127: trained W1 are
-//!   small, ~0.02 mean, ~0.07 max), so `Σ x w` is `z1` at `2^p1`,
-//!   `p1 = 7 + s1`. b1 in i32 at `2^p1`.
+//! - L1 input: `x = (clamp(acc, 0, 255)^2 + 128) >> 8` in 0..=254 (u8),
+//!   i.e. `sq(a) * 65025 / 256` rounded.
+//! - W1: i16 at `2^s1 * 65536 / 65025`, so `Σ x w` is `z1` at `2^p1`,
+//!   `p1 = 8 + s1`; b1 in i32 at `2^p1`. `s1` is the largest value <= 14
+//!   with every |w| <= 127 * 256 + 127 (so the NEON hi/lo split fits i8)
+//!   and, per neuron, `255 * Σ_i (|w_i| + 128) < 2^30` (no partial sum of
+//!   any kernel, nor z1 + b1, can wrap). Trained nets clip at 1.98, which
+//!   gives `s1` = 13: a step of ~1/8256, as fine as the file's 1/8192.
+//!   (The first version used an i8 W1 at a per-net power-of-two scale:
+//!   fully trained W1 reach the 1.98 clip but have a median |w| of ~0.04,
+//!   so that scale was 2^6 and most weights kept 2-3 levels; it cost
+//!   8.2 cp mean / 88 cp max against the trainer on g9h1024kb8m-head.)
+//! - Kernels: NEON splits W1 into `hi * 256 + lo` (both i8) and uses two
+//!   `usdot` (u8 x i8, FEAT_I8MM); AVX2 widens the 4 input bytes to i16
+//!   and uses `madd` on the i16 W1; both are exact, so all targets agree.
 //! - Sparse L1: the input is scanned in 4-byte chunks and only nonzero
 //!   chunks are multiplied (most SCReLU outputs are 0).
+//! - Final: linear + head meet at a common denominator and are rounded
+//!   to the nearest centipawn.
 //! - L2 / L3 in i32: activations at 2^12, weights at 2^12, sums (z2, the
 //!   head output) at 2^24. Bounds: |W| <= 1.98 (trainer clip), so
 //!   16 * 2^12 * 8110 and 32 * 2^12 * 8110 stay below 2^31.
@@ -54,15 +64,39 @@ const QO: u32 = 24;
 
 #[repr(C, align(64))]
 #[derive(Clone)]
-struct W1Bucket([i8; CHUNKS * H1 * 4]);
+struct W1Bucket([i16; CHUNKS * H1 * 4]);
+
+/// `W1Bucket` split into `hi * 256 + lo` (NEON `usdot`), interleaved per
+/// chunk so that one chunk's weights are one 128-byte line:
+/// `.0[c*128 + k*4 + j]` = hi, `.0[c*128 + 64 + k*4 + j]` = lo.
+#[repr(C, align(128))]
+#[derive(Clone)]
+struct W1Bytes([i8; CHUNKS * H1 * 8]);
 
 #[repr(C, align(64))]
 struct Input([u8; N_IN]);
+
+/// Per-thread L1 input and nonzero-chunk buffers (not zeroed per eval).
+struct Scratch {
+    x: Input,
+    nnz: [u16; NNZ_BUF],
+}
+
+thread_local! {
+    static SCRATCH: std::cell::UnsafeCell<Scratch> =
+        const { std::cell::UnsafeCell::new(Scratch { x: Input([0; N_IN]), nnz: [0; NNZ_BUF] }) };
+}
+
+/// Largest |W1| in engine units for which `hi = round(w / 256)` fits i8.
+const W1_MAX: i64 = 127 * 256 + 127;
 
 #[derive(Clone)]
 pub(crate) struct HeadNet {
     /// Per bucket, chunk-major: `w1[b].0[c*64 + k*4 + j]` = W1[k][4c + j].
     w1: Vec<W1Bucket>,
+    /// The same, as `w1 = 256 * hi + lo` (see `W1Bytes`).
+    #[allow(dead_code)] // aarch64 only
+    w1hl: Vec<W1Bytes>,
     b1: [[i32; H1]; BUCKETS],
     /// z1 scale is `2^p1`.
     p1: u32,
@@ -89,21 +123,26 @@ impl HeadNet {
     pub(crate) fn from_words(raw: Vec<i16>) -> Self {
         assert_eq!(raw.len(), HEAD_WORDS);
         let q = |x: i16| (x as i64).clamp(-CLIP_Q, CLIP_Q);
-        let mut max_w1 = 0i64;
-        for b in 0..BUCKETS {
-            for &x in &raw[b * BUCKET_WORDS..b * BUCKET_WORDS + H1 * N_IN] {
-                max_w1 = max_w1.max(q(x).abs());
-            }
-        }
         // W1 file value v -> v * 2^s1 * 65536 / (65025 * 8192).
         let w1_of = |v: i64, s1: u32| round_div(v << (s1 + 16), 65025 * HEAD_Q);
+        // The largest s1 <= 14 with every |w| <= W1_MAX and, per neuron,
+        // 255 * Σ (|w| + 128) < 2^31 (see the module docs).
+        let fits = |s1: u32| {
+            (0..BUCKETS * H1).all(|n| {
+                let row = &raw[(n / H1) * BUCKET_WORDS + (n % H1) * N_IN..][..N_IN];
+                let w: Vec<i64> = row.iter().map(|&x| w1_of(q(x), s1).abs()).collect();
+                w.iter().all(|&a| a <= W1_MAX) && 255 * w.iter().map(|a| a + 128).sum::<i64>() < 1 << 30
+            })
+        };
         let mut s1 = 14u32;
-        while s1 > 6 && w1_of(max_w1, s1) > 127 {
+        while s1 > 4 && !fits(s1) {
             s1 -= 1;
         }
-        let p1 = 7 + s1;
+        assert!(fits(s1), "head W1 too large for the i32 L1");
+        let p1 = 8 + s1;
         let mut h = Self {
             w1: vec![W1Bucket([0; CHUNKS * H1 * 4]); BUCKETS],
+            w1hl: vec![W1Bytes([0; CHUNKS * H1 * 8]); BUCKETS],
             b1: [[0; H1]; BUCKETS],
             p1,
             w2: [[[0; H2]; H1]; BUCKETS],
@@ -124,8 +163,14 @@ impl HeadNet {
             let mut it = raw[b * BUCKET_WORDS..(b + 1) * BUCKET_WORDS].iter().map(|&x| q(x));
             for k in 0..H1 {
                 for i in 0..N_IN {
-                    let w = w1_of(it.next().unwrap(), s1).clamp(-127, 127);
-                    h.w1[b].0[(i / 4) * H1 * 4 + k * 4 + i % 4] = w as i8;
+                    let w = w1_of(it.next().unwrap(), s1);
+                    let at = (i / 4) * H1 * 4 + k * 4 + i % 4;
+                    // lo in -128..=127; |w| <= W1_MAX keeps |hi| <= 127.
+                    let hi = (w + 128) >> 8;
+                    h.w1[b].0[at] = w as i16;
+                    let at2 = (i / 4) * H1 * 8 + k * 4 + i % 4;
+                    h.w1hl[b].0[at2] = hi as i8;
+                    h.w1hl[b].0[at2 + H1 * 4] = (w - 256 * hi) as i8;
                 }
             }
             for k in 0..H1 {
@@ -157,12 +202,15 @@ impl HeadNet {
     /// The head's output for bucket `b` at `2^QO` (= 1.0 in trainer units).
     #[inline]
     pub(crate) fn forward(&self, b: usize, us: &[i16; H], them: &[i16; H]) -> i32 {
-        let mut x = Input([0; N_IN]);
-        let mut nnz = [0u16; NNZ_BUF];
-        let n = kernels::activate(us, &mut x.0[..H], 0, &mut nnz, 0);
-        let n = kernels::activate(them, &mut x.0[H..], H / 4, &mut nnz, n);
-        let mut z1 = kernels::l1(&self.w1[b].0, &x.0, &nnz[..n]);
-        self.rest(b, &mut z1)
+        SCRATCH.with(|s| {
+            // SAFETY: the only borrow of this thread's scratch; forward
+            // does not re-enter.
+            let s = unsafe { &mut *s.get() };
+            let n = kernels::activate(us, &mut s.x.0[..H], 0, &mut s.nnz, 0);
+            let n = kernels::activate(them, &mut s.x.0[H..], H / 4, &mut s.nnz, n);
+            let mut z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..n]);
+            self.rest(b, &mut z1)
+        })
     }
 
     /// Scalar twin of `forward` (tests).
@@ -172,7 +220,7 @@ impl HeadNet {
         let mut nnz = [0u16; NNZ_BUF];
         let n = scalar::activate(us, &mut x.0[..H], 0, &mut nnz, 0);
         let n = scalar::activate(them, &mut x.0[H..], H / 4, &mut nnz, n);
-        let mut z1 = scalar::l1(&self.w1[b].0, &x.0, &nnz[..n]);
+        let mut z1 = scalar::l1(self, b, &x.0, &nnz[..n]);
         self.rest(b, &mut z1)
     }
 
@@ -239,12 +287,13 @@ fn push_nnz(nnz: &mut [u16; NNZ_BUF], n: usize, c0: usize, mask: u32) -> usize {
 
 /// Linear output sum (`output_sum`) + head output -> clamped centipawns,
 /// replacing `nnue::finish` when the head is on: the two terms meet at a
-/// common denominator before the one truncating division.
+/// common denominator before the one rounding division (the trainer's
+/// float eval is matched to the nearest centipawn, not truncated).
 #[inline(always)]
 pub(crate) fn finish(lin_b: i16, sum: i64, head: i32, limit: i32) -> i32 {
     let qq = QA as i64 * QB as i64;
     let num = (sum / QA as i64 + lin_b as i64) * (1i64 << QO) + head as i64 * qq;
-    let raw = num * SCALE as i64 / (qq << QO);
+    let raw = round_div(num * SCALE as i64, qq << QO);
     raw.clamp(-limit as i64, limit as i64) as i32
 }
 
@@ -260,7 +309,7 @@ pub(crate) mod scalar {
     pub(crate) fn activate(acc: &[i16; H], out: &mut [u8], base: usize, nnz: &mut [u16; NNZ_BUF], mut n: usize) -> usize {
         for (o, &a) in out.iter_mut().zip(acc.iter()) {
             let c = (a as i32).clamp(0, 255);
-            *o = ((c * c + 256) >> 9) as u8;
+            *o = ((c * c + 128) >> 8) as u8;
         }
         for c in 0..H / 4 {
             if out[4 * c..4 * c + 4] != [0; 4] {
@@ -272,7 +321,8 @@ pub(crate) mod scalar {
     }
 
     #[inline(always)]
-    pub(crate) fn l1(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+    pub(crate) fn l1(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+        let w = &net.w1[b].0;
         let mut z = [0i32; H1];
         for &c in nnz {
             let c = c as usize;
@@ -305,11 +355,10 @@ mod kernels {
                 let mut m = vdupq_n_u32(0);
                 for g in 0..4 {
                     let p = acc.as_ptr().add(i + 16 * g);
-                    // t = 8c: sqrdmulh(t, t) = (128 c^2 + 2^15) >> 16 = (c^2 + 256) >> 9.
-                    let a = vshlq_n_s16::<3>(vminq_s16(vmaxq_s16(vld1q_s16(p), lo), hi));
-                    let b = vshlq_n_s16::<3>(vminq_s16(vmaxq_s16(vld1q_s16(p.add(8)), lo), hi));
-                    let (a, b) = (vqrdmulhq_s16(a, a), vqrdmulhq_s16(b, b));
-                    let v = vuzp1q_u8(vreinterpretq_u8_s16(a), vreinterpretq_u8_s16(b));
+                    // c^2 <= 65025 fits u16; rshrn = (c^2 + 128) >> 8.
+                    let a = vreinterpretq_u16_s16(vminq_s16(vmaxq_s16(vld1q_s16(p), lo), hi));
+                    let b = vreinterpretq_u16_s16(vminq_s16(vmaxq_s16(vld1q_s16(p.add(8)), lo), hi));
+                    let v = vrshrn_high_n_u16::<8>(vrshrn_n_u16::<8>(vmulq_u16(a, a)), vmulq_u16(b, b));
                     vst1q_u8(out.as_mut_ptr().add(i + 16 * g), v);
                     let v32 = vreinterpretq_u32_u8(v);
                     m = vorrq_u32(m, vshlq_u32(vandq_u32(vtstq_u32(v32, v32), bits), vdupq_n_s32(4 * g as i32)));
@@ -323,62 +372,75 @@ mod kernels {
         n
     }
 
-    /// `acc += Σ_j w[4l+j] * x[4l+j]` per i32 lane (`sdot`).
-    #[cfg(target_feature = "dotprod")]
     #[inline(always)]
-    unsafe fn dot4(mut acc: int32x4_t, w: int8x16_t, x: int8x16_t) -> int32x4_t {
-        // SAFETY: register-only instruction; dotprod is enabled.
+    fn i8mm() -> bool {
+        if cfg!(target_feature = "i8mm") {
+            return true;
+        }
+        static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HAVE.get_or_init(|| std::arch::is_aarch64_feature_detected!("i8mm"))
+    }
+
+    #[inline(always)]
+    pub(super) fn l1(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+        if i8mm() {
+            // SAFETY: FEAT_I8MM is available.
+            unsafe { l1_usdot(&net.w1hl[b].0, x, nnz) }
+        } else {
+            scalar::l1(net, b, x, nnz)
+        }
+    }
+
+    /// `acc += Σ_j x[4l+j] * w[4l+j]` per i32 lane, x unsigned (`usdot`).
+    #[inline(always)]
+    unsafe fn usdot(mut acc: int32x4_t, x: uint8x16_t, w: int8x16_t) -> int32x4_t {
+        // SAFETY: register-only instruction; callers enable i8mm.
         unsafe {
-            std::arch::asm!("sdot {0:v}.4s, {1:v}.16b, {2:v}.16b", inout(vreg) acc, in(vreg) w, in(vreg) x, options(pure, nomem, nostack));
+            std::arch::asm!("usdot {0:v}.4s, {1:v}.16b, {2:v}.16b", inout(vreg) acc, in(vreg) x, in(vreg) w, options(pure, nomem, nostack));
         }
         acc
     }
 
-    #[cfg(not(target_feature = "dotprod"))]
-    #[inline(always)]
-    unsafe fn dot4(acc: int32x4_t, w: int8x16_t, x: int8x16_t) -> int32x4_t {
-        // |products| <= 127 * 127, pair sums fit i16.
-        unsafe {
-            let lo = vmull_s8(vget_low_s8(w), vget_low_s8(x));
-            let hi = vmull_high_s8(w, x);
-            vpadalq_s16(acc, vpaddq_s16(lo, hi))
-        }
-    }
-
-    #[inline(always)]
-    pub(super) fn l1(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+    /// z = 256 * Σ x hi + Σ x lo; both partial sums are bounded by the
+    /// load-time check, so neither wraps.
+    #[target_feature(enable = "i8mm")]
+    unsafe fn l1_usdot(w: &[i8; CHUNKS * H1 * 8], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         // SAFETY: every chunk index is < CHUNKS, so all loads are in bounds.
         unsafe {
-            // Four independent accumulator sets (16 registers) hide sdot latency.
+            // Two chunks in flight: 16 accumulators hide the usdot latency.
             let z = vdupq_n_s32(0);
-            let mut a = [[z; 4]; 4];
+            let (mut h, mut l) = ([[z; 4]; 2], [[z; 4]; 2]);
             let xp = x.as_ptr() as *const u32;
             let wp = w.as_ptr();
             let mut i = 0;
-            while i + 3 < nnz.len() {
-                for s in 0..4 {
+            while i + 1 < nnz.len() {
+                for s in 0..2 {
                     let c = nnz[i + s] as usize;
-                    let xv = vreinterpretq_s8_u32(vdupq_n_u32(xp.add(c).read_unaligned()));
-                    let wc = wp.add(c * 64);
+                    let xv = vreinterpretq_u8_u32(vdupq_n_u32(xp.add(c).read_unaligned()));
+                    let (hc, lc) = (wp.add(c * 128), wp.add(c * 128 + 64));
+                    let (wh, wl) = (vld1q_s8_x4(hc), vld1q_s8_x4(lc));
+                    let (wh, wl) = ([wh.0, wh.1, wh.2, wh.3], [wl.0, wl.1, wl.2, wl.3]);
                     for r in 0..4 {
-                        a[s][r] = dot4(a[s][r], vld1q_s8(wc.add(16 * r)), xv);
+                        h[s][r] = usdot(h[s][r], xv, wh[r]);
+                        l[s][r] = usdot(l[s][r], xv, wl[r]);
                     }
                 }
-                i += 4;
+                i += 2;
             }
-            while i < nnz.len() {
+            if i < nnz.len() {
                 let c = nnz[i] as usize;
-                let xv = vreinterpretq_s8_u32(vdupq_n_u32(xp.add(c).read_unaligned()));
-                let wc = wp.add(c * 64);
+                let xv = vreinterpretq_u8_u32(vdupq_n_u32(xp.add(c).read_unaligned()));
+                let (hc, lc) = (wp.add(c * 128), wp.add(c * 128 + 64));
                 for r in 0..4 {
-                    a[0][r] = dot4(a[0][r], vld1q_s8(wc.add(16 * r)), xv);
+                    h[0][r] = usdot(h[0][r], xv, vld1q_s8(hc.add(16 * r)));
+                    l[0][r] = usdot(l[0][r], xv, vld1q_s8(lc.add(16 * r)));
                 }
-                i += 1;
             }
             let mut out = [0i32; H1];
             for r in 0..4 {
-                let v = vaddq_s32(vaddq_s32(a[0][r], a[1][r]), vaddq_s32(a[2][r], a[3][r]));
-                vst1q_s32(out.as_mut_ptr().add(4 * r), v);
+                let hv = vaddq_s32(h[0][r], h[1][r]);
+                let lv = vaddq_s32(l[0][r], l[1][r]);
+                vst1q_s32(out.as_mut_ptr().add(4 * r), vaddq_s32(vshlq_n_s32::<8>(hv), lv));
             }
             out
         }
@@ -410,12 +472,12 @@ mod kernels {
     }
 
     #[inline(always)]
-    pub(super) fn l1(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+    pub(super) fn l1(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         if avx2() {
             // SAFETY: AVX2 is available.
-            unsafe { l1_avx2(w, x, nnz) }
+            unsafe { l1_avx2(&net.w1[b].0, x, nnz) }
         } else {
-            scalar::l1(w, x, nnz)
+            scalar::l1(net, b, x, nnz)
         }
     }
 
@@ -428,10 +490,12 @@ mod kernels {
             for i in (0..H).step_by(32) {
                 let a = _mm256_loadu_si256(acc.as_ptr().add(i) as *const __m256i);
                 let b = _mm256_loadu_si256(acc.as_ptr().add(i + 16) as *const __m256i);
-                // t = 8c: mulhrs(t, t) = (64 c^2 + 2^14) >> 15 = (c^2 + 256) >> 9.
-                let a = _mm256_slli_epi16::<3>(_mm256_min_epi16(_mm256_max_epi16(a, lo), hi));
-                let b = _mm256_slli_epi16::<3>(_mm256_min_epi16(_mm256_max_epi16(b, lo), hi));
-                let (a, b) = (_mm256_mulhrs_epi16(a, a), _mm256_mulhrs_epi16(b, b));
+                // c^2 <= 65025 is exact as u16 (mullo), + 128 <= 65153: (c^2 + 128) >> 8.
+                let a = _mm256_min_epi16(_mm256_max_epi16(a, lo), hi);
+                let b = _mm256_min_epi16(_mm256_max_epi16(b, lo), hi);
+                let r = _mm256_set1_epi16(128);
+                let a = _mm256_srli_epi16::<8>(_mm256_add_epi16(_mm256_mullo_epi16(a, a), r));
+                let b = _mm256_srli_epi16::<8>(_mm256_add_epi16(_mm256_mullo_epi16(b, b), r));
                 // packus interleaves 128-bit lanes; restore the order.
                 let p = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(a, b));
                 _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, p);
@@ -445,41 +509,40 @@ mod kernels {
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn l1_avx2(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+    unsafe fn l1_avx2(w: &[i16; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         // SAFETY: every chunk index is < CHUNKS, so all loads are in bounds.
-        // maddubs: u8 (<= 127) x i8 pairs <= 2 * 127 * 127, no saturation.
+        // The chunk's 4 input bytes widen to i16 and repeat in every 64-bit
+        // lane; madd against W1[k][4c..4c+4] (4 neurons per vector) leaves
+        // neuron 4r + l/2's two half sums in lanes l of a[r]. Products
+        // <= 254 * 32767, pair sums fit i32.
         unsafe {
-            let ones = _mm256_set1_epi16(1);
-            let mut a = [_mm256_setzero_si256(); 2];
-            let mut b = [_mm256_setzero_si256(); 2];
+            let mut a = [_mm256_setzero_si256(); 4];
+            let mut b = [_mm256_setzero_si256(); 4];
             let xp = x.as_ptr() as *const i32;
             let wp = w.as_ptr() as *const __m256i;
+            let widen = |c: usize| _mm256_broadcastq_epi64(_mm_cvtepu8_epi16(_mm_cvtsi32_si128(xp.add(c).read_unaligned())));
             let mut i = 0;
             while i + 1 < nnz.len() {
                 let (c0, c1) = (nnz[i] as usize, nnz[i + 1] as usize);
-                let x0 = _mm256_set1_epi32(xp.add(c0).read_unaligned());
-                let x1 = _mm256_set1_epi32(xp.add(c1).read_unaligned());
-                for r in 0..2 {
-                    let p0 = _mm256_maddubs_epi16(x0, _mm256_load_si256(wp.add(c0 * 2 + r)));
-                    let p1 = _mm256_maddubs_epi16(x1, _mm256_load_si256(wp.add(c1 * 2 + r)));
-                    a[r] = _mm256_add_epi32(a[r], _mm256_madd_epi16(p0, ones));
-                    b[r] = _mm256_add_epi32(b[r], _mm256_madd_epi16(p1, ones));
+                let (x0, x1) = (widen(c0), widen(c1));
+                for r in 0..4 {
+                    a[r] = _mm256_add_epi32(a[r], _mm256_madd_epi16(x0, _mm256_load_si256(wp.add(c0 * 4 + r))));
+                    b[r] = _mm256_add_epi32(b[r], _mm256_madd_epi16(x1, _mm256_load_si256(wp.add(c1 * 4 + r))));
                 }
                 i += 2;
             }
             if i < nnz.len() {
                 let c0 = nnz[i] as usize;
-                let x0 = _mm256_set1_epi32(xp.add(c0).read_unaligned());
-                for r in 0..2 {
-                    let p0 = _mm256_maddubs_epi16(x0, _mm256_load_si256(wp.add(c0 * 2 + r)));
-                    a[r] = _mm256_add_epi32(a[r], _mm256_madd_epi16(p0, ones));
+                let x0 = widen(c0);
+                for r in 0..4 {
+                    a[r] = _mm256_add_epi32(a[r], _mm256_madd_epi16(x0, _mm256_load_si256(wp.add(c0 * 4 + r))));
                 }
             }
-            let mut out = [0i32; H1];
-            for r in 0..2 {
-                _mm256_storeu_si256(out.as_mut_ptr().add(8 * r) as *mut __m256i, _mm256_add_epi32(a[r], b[r]));
+            let mut t = [0i32; 2 * H1];
+            for r in 0..4 {
+                _mm256_storeu_si256(t.as_mut_ptr().add(8 * r) as *mut __m256i, _mm256_add_epi32(a[r], b[r]));
             }
-            out
+            std::array::from_fn(|k| t[2 * k] + t[2 * k + 1])
         }
     }
 }
@@ -590,18 +653,24 @@ mod tests {
         let a = scalar::activate(&acc, &mut s, 7, &mut ns, 3);
         let b = kernels::activate(&acc, &mut v, 7, &mut nv, 3);
         assert_eq!(s, v);
-        assert_eq!(s[1], 127);
+        assert_eq!(s[1], 254);
         assert_eq!((a, &ns[3..a]), (b, &nv[3..b]));
         assert!(a > 3 + H / 8 && a < 3 + H / 4);
     }
 
     #[test]
     fn finish_combines_exactly() {
-        // Head of exactly 1.0 = 400 cp; linear part as nnue::finish.
+        // Head of exactly 1.0 = 400 cp; linear part as nnue::finish, but
+        // rounded to the nearest centipawn.
         assert_eq!(finish(0, 0, 1 << QO, 20000), 400);
+        assert_eq!(finish(0, 0, -(1 << QO), 20000), -400);
         let sum = 123_456_789i64;
-        let lin = (sum / QA as i64 + 77) * SCALE as i64 / (QA as i64 * QB as i64);
-        assert_eq!(finish(77, sum, 0, 20000) as i64, lin);
+        let lin = (sum / QA as i64 + 77) as f64 * SCALE as f64 / (QA as i64 * QB as i64) as f64;
+        assert_eq!(finish(77, sum, 0, 20000) as i64, lin.round() as i64);
+        assert_eq!(finish(77, -sum, 0, 20000) as i64, ((-sum / QA as i64 + 77) as f64 * SCALE as f64 / (QA * QB) as f64).round() as i64);
+        // Half a centipawn of head rounds away from zero.
+        let half = ((1i64 << QO) + 799) / 800;
+        assert_eq!(finish(0, 0, half as i32, 20000), 1);
     }
 
     /// How sparse the L1 input would be on the embedded net's accumulators
@@ -680,10 +749,14 @@ mod tests {
     }
 }
 
-/// Engine vs trainer on a real `--head` net: needs a `HEAD = true` build
-/// (the net embedded, or `RUSTFISH_HEAD_NET`) and a fixture of
-/// `<FEN> | <trainer cp>` lines from `nnue-trainer fen-eval`;
-/// `scripts/head_check.py` sets all of that up. Skipped otherwise.
+/// Engine vs trainer on a real `--head` net. The gate for head nets: with
+/// `HEAD = true`, `cargo test` (CI, the queue, `netloop.py embed`) fails
+/// unless `net/head_fixture.txt` holds the trainer's float evals of the
+/// embedded net (`<FEN> | <cp>` lines from `nnue-trainer fen-eval`, 2000
+/// validation positions; `scripts/head_check.py --write-fixture` makes it)
+/// and the engine agrees with them: mean |diff| < 1 cp, p95 < 3 cp, max
+/// < 10 cp. `RUSTFISH_HEAD_FIXTURE` / `RUSTFISH_HEAD_NET` override the
+/// fixture / net.
 #[cfg(test)]
 mod fixture {
     use super::super::{Accumulator, Active, Network, NnueState, HEAD, H};
@@ -691,19 +764,23 @@ mod fixture {
     use crate::Board;
     use std::sync::Arc;
 
+    const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/net/head_fixture.txt");
+
     #[test]
     fn head_matches_trainer_fixture() {
-        let Ok(path) = std::env::var("RUSTFISH_HEAD_FIXTURE") else {
-            eprintln!("RUSTFISH_HEAD_FIXTURE not set: skipped");
+        if !HEAD {
             return;
-        };
-        assert!(HEAD, "the fixture check needs a HEAD = true build");
+        }
+        let path = std::env::var("RUSTFISH_HEAD_FIXTURE").unwrap_or_else(|_| FIXTURE.to_string());
         let net = match std::env::var("RUSTFISH_HEAD_NET") {
             Ok(p) => Network::load(&p).unwrap(),
             Err(_) => Network::from_bytes(crate::EMBEDDED_NET).unwrap(),
         };
         let net = Arc::new(net);
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{path}: {e}. A HEAD net cannot be gated without the trainer's evals of it: scripts/head_check.py --write-fixture")
+        });
+        let head = net.head.as_ref().unwrap();
         let (mut sum, mut worst, mut worst_fen) = (0.0f64, 0.0f64, String::new());
         let mut diffs = Vec::new();
         let mut nnz_sum = 0usize;
@@ -717,6 +794,11 @@ mod fixture {
             let acc = Accumulator::refresh(&net, &board);
             let (mut x, mut idx) = ([0u8; H], [0u16; NNZ_BUF]);
             nnz_sum += scalar::activate(&acc.v[0], &mut x, 0, &mut idx, 0) + scalar::activate(&acc.v[1], &mut x, 0, &mut idx, 0);
+            // The SIMD kernels match the scalar reference on real accumulators.
+            let b = super::super::bucket(board.bb.occ_all().count_ones());
+            let (u, t) = (&acc.v[0], &acc.v[1]);
+            assert_eq!(head.forward(b, u, t), head.forward_scalar(b, u, t), "{fen}");
+            assert_eq!(head.forward(b, t, u), head.forward_scalar(b, t, u), "{fen}");
             // The engine clamps at EVAL_LIMIT; compare the unclamped range.
             if want.abs() < 15_000.0 {
                 let d = got - want;
@@ -729,7 +811,7 @@ mod fixture {
             }
         }
         let n = diffs.len();
-        assert!(n >= 10, "fixture has {n} usable positions");
+        assert!(n >= 1000, "fixture has {n} usable positions (want 2000)");
         let mean = sum / n as f64;
         let bias = diffs.iter().sum::<f64>() / n as f64;
         diffs.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
@@ -737,8 +819,128 @@ mod fixture {
         let nnz = nnz_sum as f64 / diffs.len() as f64;
         eprintln!("head fixture: nonzero L1 input chunks {nnz:.0} of {CHUNKS} ({:.0}%)", 100.0 * nnz / CHUNKS as f64);
         eprintln!("head fixture: {n} positions, |engine - trainer| mean {mean:.2} cp, p95 {p95:.2}, max {worst:.2}, bias {bias:+.2}; worst {worst_fen}");
-        // The engine truncates to whole centipawns (bias ~ -0.5) and
-        // quantises FT-free head inputs to 7 bits.
-        assert!(mean < 1.5 && p95 < 4.0 && worst < 12.0, "engine and trainer disagree beyond quantisation error");
+        // Expected: ~0.5 cp mean (half of it the rounding to whole cp, most
+        // of the rest the 8-bit L1 input), p95 ~1.3, max ~6 (g9h1024kb8m-head).
+        assert!(mean < 1.0 && p95 < 3.0 && worst < 10.0, "engine and trainer disagree beyond quantisation error");
+    }
+
+    /// Per-stage error budget on the fixture's positions (diagnostic):
+    /// `cargo test --release head_error_budget -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn head_error_budget() {
+        use super::super::{QA, QB, SCALE};
+        use super::{HeadNet, BUCKET_WORDS, H1, H2, HEAD_Q, N_IN, QO};
+        let path = std::env::var("RUSTFISH_HEAD_FIXTURE").unwrap_or_else(|_| FIXTURE.to_string());
+        let net = Arc::new(Network::from_bytes(crate::EMBEDDED_NET).unwrap());
+        let head: &HeadNet = net.head.as_ref().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let sq = |x: f64| x.clamp(0.0, 1.0).powi(2);
+        let names = ["float-vs-trainer", "lin int-vs-float", "in-quant only", "W1-engine only", "L2/L3 int only", "engine head", "engine total"];
+        let mut errs: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+        let mut extra: Vec<Vec<f64>> = vec![Vec::new(); 4];
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let (fen, cp) = line.rsplit_once('|').unwrap();
+            let want: f64 = cp.trim().parse().unwrap();
+            if want.abs() > 15000.0 {
+                continue;
+            }
+            let mut board = Board::new();
+            board.set_fen(fen.trim());
+            let acc = Accumulator::refresh(&net, &board);
+            let (us, them) = match board.side_to_move {
+                crate::Color::White => (&acc.v[0], &acc.v[1]),
+                crate::Color::Black => (&acc.v[1], &acc.v[0]),
+            };
+            let b = super::super::bucket(board.bb.occ_all().count_ones());
+            let ow = &net.out_w[b * 2 * H..(b + 1) * 2 * H];
+            let a: Vec<f64> = us.iter().chain(them.iter()).map(|&x| sq(x as f64 / QA as f64)).collect();
+            let lin_f = net.out_b[b] as f64 / (QA * QB) as f64 + a.iter().zip(ow.iter()).map(|(x, &w)| x * w as f64 / QB as f64).sum::<f64>();
+            let sum = super::super::output_sum(&net, b, us, them);
+            let lin_i = ((sum / QA as i64 + net.out_b[b] as i64) * SCALE as i64 / (QA as i64 * QB as i64)) as f64;
+            let p: Vec<f64> = head.raw[b * BUCKET_WORDS..(b + 1) * BUCKET_WORDS].iter().map(|&x| x as f64 / HEAD_Q as f64).collect();
+            let (w1, rest) = p.split_at(H1 * N_IN);
+            let (b1, rest) = rest.split_at(H1);
+            let (w2, rest) = rest.split_at(H2 * H1);
+            let (b2, rest) = rest.split_at(H2);
+            let (w3, b3) = rest.split_at(H2);
+            let s1 = head.p1 as i32 - 8;
+            let k1 = 2f64.powi(s1) * 65536.0 / 65025.0;
+            let w1q = |w: f64| (w * k1).round() / k1;
+            let aq: Vec<f64> = us
+                .iter()
+                .chain(them.iter())
+                .map(|&x| {
+                    let c = (x as i32).clamp(0, 255);
+                    ((c * c + 128) >> 8) as f64 * 256.0 / 65025.0
+                })
+                .collect();
+            let z1 = |inp: &[f64], wq: bool| -> Vec<f64> {
+                (0..H1).map(|k| b1[k] + (0..N_IN).map(|i| (if wq { w1q(w1[k * N_IN + i]) } else { w1[k * N_IN + i] }) * inp[i]).sum::<f64>()).collect()
+            };
+            let tail = |z1: &[f64]| -> f64 {
+                let mut out = b3[0];
+                for m in 0..H2 {
+                    let z2 = b2[m] + (0..H1).map(|k| w2[m * H1 + k] * sq(z1[k])).sum::<f64>();
+                    out += w3[m] * sq(z2);
+                }
+                out
+            };
+            let tail_int = |z1: &[f64]| -> f64 {
+                let mut zi = [0i32; H1];
+                for k in 0..H1 {
+                    zi[k] = ((z1[k] - b1[k]) * 2f64.powi(head.p1 as i32)).round() as i32;
+                }
+                head.rest(b, &mut zi) as f64 / (1u64 << QO) as f64
+            };
+            let zf = z1(&a, false);
+            let hf = tail(&zf);
+            let s = SCALE as f64;
+            let hq = head.forward(b, us, them) as f64 / (1u64 << QO) as f64;
+            let got = NnueState::<Active>::new(net.clone(), &board).evaluate(board.side_to_move, board.bb.occ_all().count_ones()) as f64;
+            // Candidate designs: W1 exact, input c^2 >> k (rounded), engine
+            // L2/L3, linear integer sum, final round-to-nearest.
+            for (j, k) in [9u32, 8, 7, 6].into_iter().enumerate() {
+                let ak: Vec<f64> = us
+                    .iter()
+                    .chain(them.iter())
+                    .map(|&x| {
+                        let c = (x as i32).clamp(0, 255);
+                        ((c * c + (1 << (k - 1))) >> k) as f64 * (1 << k) as f64 / 65025.0
+                    })
+                    .collect();
+                let h = tail_int(&z1(&ak, false));
+                let lin = (sum / QA as i64 + net.out_b[b] as i64) as f64 / (QA * QB) as f64;
+                let tot = ((lin + h) * s).round();
+                extra[j].push(tot - want);
+            }
+            let v = [
+                (lin_f + hf) * s - want,
+                lin_i - lin_f * s,
+                (tail(&z1(&aq, false)) - hf) * s,
+                (tail(&z1(&a, true)) - hf) * s,
+                (tail_int(&zf) - hf) * s,
+                (hq - hf) * s,
+                got - want,
+            ];
+            for (e, x) in errs.iter_mut().zip(v) {
+                e.push(x);
+            }
+        }
+        let xn = ["W1 exact in>>9 round", "W1 exact in>>8 round", "W1 exact in>>7 round", "W1 exact in>>6 round"];
+        for (n, e) in xn.iter().zip(extra.iter_mut()) {
+            let k = e.len();
+            let bias = e.iter().sum::<f64>() / k as f64;
+            e.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
+            let mean = e.iter().map(|x| x.abs()).sum::<f64>() / k as f64;
+            eprintln!("budget {n:>18}: mean {mean:7.3} p95 {:7.3} max {:7.3} bias {bias:+.3}", e[k * 95 / 100].abs(), e[k - 1].abs());
+        }
+        for (n, e) in names.iter().zip(errs.iter_mut()) {
+            let k = e.len();
+            let bias = e.iter().sum::<f64>() / k as f64;
+            e.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
+            let mean = e.iter().map(|x| x.abs()).sum::<f64>() / k as f64;
+            eprintln!("budget {n:>18}: mean {mean:7.3} p95 {:7.3} max {:7.3} bias {bias:+.3}", e[k * 95 / 100].abs(), e[k - 1].abs());
+        }
     }
 }
