@@ -1,19 +1,24 @@
 {
   "pending": [
     {
-      "branch": "retest-improving-ply4-smoothed",
-      "mode": "stc",
-      "expect": 1.0,
-      "passed_over": 4
-    },
-    {
       "branch": "feat-50move-eval-damp",
       "mode": "stc",
       "expect": 0.5,
       "passed_over": 4
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "retest-improving-ply4-smoothed",
+    "mode": "stc",
+    "expect": 1.0,
+    "passed_over": 4,
+    "test_id": "q-retest-improving-ply4-smoothed-1118-0202",
+    "sha": "de8b2d69e2d317cdf081b4184449979fc259670d",
+    "base_sha": "1d94b84f67513311ca7ffd7166c130b3d49c47ad",
+    "started": "2026-11-18T02:02:28Z",
+    "bench": 383313,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "0f6fda65bdd636290cc3537e8fc4ecf651d0acda",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
