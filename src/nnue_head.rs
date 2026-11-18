@@ -202,6 +202,9 @@ impl HeadNet {
     /// The head's output for bucket `b` at `2^QO` (= 1.0 in trainer units).
     #[inline]
     pub(crate) fn forward(&self, b: usize, us: &[i16; H], them: &[i16; H]) -> i32 {
+        if diag::on() {
+            diag::record(us, them);
+        }
         SCRATCH.with(|s| {
             // SAFETY: the only borrow of this thread's scratch; forward
             // does not re-enter.
@@ -942,5 +945,100 @@ mod fixture {
             let mean = e.iter().map(|x| x.abs()).sum::<f64>() / k as f64;
             eprintln!("budget {n:>18}: mean {mean:7.3} p95 {:7.3} max {:7.3} bias {bias:+.3}", e[k * 95 / 100].abs(), e[k - 1].abs());
         }
+    }
+}
+
+/// DIAGNOSTIC (branch diag-head-sparsity only): L1 input sparsity counters,
+/// enabled by env HEAD_SPARSITY=1. Index 0 = side to move, 1 = other.
+pub(crate) mod diag {
+    use super::H;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::OnceLock;
+    // per persp: evals, zero bytes, zero4, zero8, saturated bytes (x=254),
+    // pair nonzero products, pair zero4 chunks, x histogram (8 bins)
+    pub(crate) static C: [[AtomicU64; 16]; 2] = [const { [const { AtomicU64::new(0) }; 16] }; 2];
+    pub(crate) fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("HEAD_SPARSITY").is_ok())
+    }
+    pub(crate) fn record(us: &[i16; H], them: &[i16; H]) {
+        for (p, acc) in [us, them].into_iter().enumerate() {
+            let mut x = [0u8; H];
+            let mut cl = [0i32; H];
+            for i in 0..H {
+                let c = (acc[i] as i32).clamp(0, 255);
+                cl[i] = c;
+                x[i] = ((c * c + 128) >> 8) as u8;
+            }
+            let zb = x.iter().filter(|&&v| v == 0).count();
+            let sat = cl.iter().filter(|&&c| c == 255).count();
+            let z4 = x.chunks(4).filter(|c| c.iter().all(|&v| v == 0)).count();
+            let z8 = x.chunks(8).filter(|c| c.iter().all(|&v| v == 0)).count();
+            // pairwise: y_i = (cl[i] * cl[i + H/2]) >> 8 for i < H/2
+            let y: Vec<i32> = (0..H / 2).map(|i| (cl[i] * cl[i + H / 2]) >> 8).collect();
+            let pnz = y.iter().filter(|&&v| v != 0).count();
+            let pz4 = y.chunks(4).filter(|c| c.iter().all(|&v| v == 0)).count();
+            let v = [1, zb, z4, z8, sat, pnz, pz4];
+            for (k, a) in v.iter().enumerate() {
+                C[p][k].fetch_add(*a as u64, Relaxed);
+            }
+            for &c in &cl {
+                let bin = if c == 0 { 0 } else if c == 255 { 7 } else { 1 + (c as usize - 1) * 5 / 254 };
+                C[p][8 + bin].fetch_add(1, Relaxed);
+            }
+        }
+    }
+    pub(crate) fn report() {
+        if !on() {
+            return;
+        }
+        for (p, name) in ["stm", "other"].iter().enumerate() {
+            let g = |k: usize| C[p][k].load(Relaxed) as f64;
+            let n = g(0);
+            if n == 0.0 {
+                continue;
+            }
+            println!(
+                "HEADSP {name}: evals {n} zero_bytes {:.1}% zero4 {:.1}% zero8 {:.1}% nnz4/persp {:.1}/256 sat {:.1}% | pairwise nonzero {:.1}% zero4 {:.1}% nnz4/persp {:.1}/128",
+                100.0 * g(1) / (n * H as f64),
+                100.0 * g(2) / (n * (H / 4) as f64),
+                100.0 * g(3) / (n * (H / 8) as f64),
+                (H / 4) as f64 - g(2) / n,
+                100.0 * g(4) / (n * H as f64),
+                100.0 * g(5) / (n * (H / 2) as f64),
+                100.0 * g(6) / (n * (H / 8) as f64),
+                (H / 8) as f64 - g(6) / n,
+            );
+            let h: Vec<String> = (0..8).map(|b| format!("{:.1}", 100.0 * g(8 + b) / (n * H as f64))).collect();
+            println!("HEADSP {name}: c hist [0 | 1-51 | 52-102 | 103-153 | 154-204 | 205-254 | - | 255] % = {}", h.join(" "));
+        }
+    }
+    pub(crate) fn reset() {
+        for p in &C {
+            for a in p {
+                a.store(0, Relaxed);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    /// HEAD_SPARSITY=1 FENS=file cargo test --release diag_fens -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diag_fens() {
+        use super::super::{Accumulator, Network};
+        let net = Network::from_bytes(crate::EMBEDDED_NET).unwrap();
+        let path = std::env::var("FENS").unwrap();
+        super::diag::reset();
+        for f in std::fs::read_to_string(path).unwrap().lines() {
+            let mut b = crate::Board::new();
+            b.set_fen(f);
+            let acc = Accumulator::refresh(&net, &b);
+            let stm = if f.split(' ').nth(1) == Some("b") { 1 } else { 0 };
+            super::diag::record(&acc.v[stm], &acc.v[1 - stm]);
+        }
+        super::diag::report();
     }
 }

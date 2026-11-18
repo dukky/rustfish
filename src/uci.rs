@@ -585,6 +585,7 @@ pub(crate) fn handle_bench(cmd: &str, board: &mut Board, engine: &mut EngineStat
     println!("Nodes searched  : {}", total_nodes);
     println!("Nodes/second    : {}", total_nodes * 1000 / ms);
     println!("NNUE SIMD       : {}", crate::nnue::simd_name());
+    crate::nnue::head::diag::report();
     flush_stdout();
 }
 
