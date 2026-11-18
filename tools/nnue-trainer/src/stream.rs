@@ -368,7 +368,7 @@ pub fn cmd_shuffle_check(args: &[String]) {
 /// --epoch-size <positions>` (the positions count is printed on stderr).
 pub fn cmd_stream(args: &[String]) {
     use std::io::Write;
-    let (mut data, mut cap, mut threads, mut seed) = (Vec::new(), DEFAULT_BUFFER, 1usize, 1u64);
+    let (mut data, mut cap, mut threads, mut seed, mut stride) = (Vec::new(), DEFAULT_BUFFER, 1usize, 1u64, 1u64);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| panic!("missing value for {a}")).clone();
@@ -377,10 +377,11 @@ pub fn cmd_stream(args: &[String]) {
             "--shuffle-buffer" => cap = v().parse().unwrap(),
             "--threads" => threads = v().parse().unwrap(),
             "--seed" => seed = v().parse().unwrap(),
+            "--stream-stride" => stride = v().parse().unwrap(),
             other => panic!("unknown option {other}"),
         }
     }
-    let mut s = Stream::open(&data, cap, threads, seed);
+    let mut s = Stream::with_stride(open_sources(&data), cap, threads, seed, stride);
     eprintln!("stream: {} positions per pass, shuffle buffer {cap}", s.positions);
     let mut out = std::io::BufWriter::with_capacity(1 << 22, std::io::stdout().lock());
     let mut recs = Vec::new();
