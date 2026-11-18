@@ -51,7 +51,7 @@ const HEAD_Q: i64 = 8192;
 /// Trainer weight clip, in export units (1.98 * 8192).
 const CLIP_Q: i64 = 16220;
 /// L1 inputs (both perspectives) and their 4-byte chunks.
-const N_IN: usize = 2 * H;
+pub(crate) const N_IN: usize = 2 * H;
 const CHUNKS: usize = N_IN / 4;
 /// i16 words per bucket in the file.
 const BUCKET_WORDS: usize = H1 * N_IN + H1 + H2 * H1 + H2 + H2 + 1;
@@ -74,17 +74,28 @@ struct W1Bucket([i16; CHUNKS * H1 * 4]);
 struct W1Bytes([i8; CHUNKS * H1 * 8]);
 
 #[repr(C, align(64))]
-struct Input([u8; N_IN]);
+#[derive(Clone)]
+pub(crate) struct Input(pub(crate) [u8; N_IN]);
 
-/// Per-thread L1 input and nonzero-chunk buffers (not zeroed per eval).
-struct Scratch {
-    x: Input,
-    nnz: [u16; NNZ_BUF],
+/// The L1 input (stm half first) and its nonzero-chunk list: filled by
+/// `activate` or, fused into the accumulator update, by
+/// `nnue::update_dot_act`, then consumed by `forward_scratch`. Not zeroed
+/// per eval; only `nnz[..n]` and the chunks it lists are read.
+#[derive(Clone)]
+pub(crate) struct Scratch {
+    pub(crate) x: Input,
+    pub(crate) nnz: [u16; NNZ_BUF],
+    pub(crate) n: usize,
+}
+
+impl Scratch {
+    pub(crate) const fn new() -> Self {
+        Self { x: Input([0; N_IN]), nnz: [0; NNZ_BUF], n: 0 }
+    }
 }
 
 thread_local! {
-    static SCRATCH: std::cell::UnsafeCell<Scratch> =
-        const { std::cell::UnsafeCell::new(Scratch { x: Input([0; N_IN]), nnz: [0; NNZ_BUF] }) };
+    static SCRATCH: std::cell::UnsafeCell<Scratch> = const { std::cell::UnsafeCell::new(Scratch::new()) };
 }
 
 /// Largest |W1| in engine units for which `hi = round(w / 256)` fits i8.
@@ -121,7 +132,19 @@ fn round_div(n: i64, d: i64) -> i64 {
 impl HeadNet {
     /// From the trainer's `HEAD_WORDS` i16 words (at `HEAD_Q`).
     pub(crate) fn from_words(raw: Vec<i16>) -> Self {
+        Self::from_words_permuted(raw, &[])
+    }
+
+    /// `from_words` for accumulators whose lane `j` is the file's lane
+    /// `perm[j]` (`nnue::lane_order`; empty = file order): W1's input
+    /// columns move with the lanes, in both halves.
+    pub(crate) fn from_words_permuted(raw: Vec<i16>, perm: &[usize]) -> Self {
         assert_eq!(raw.len(), HEAD_WORDS);
+        assert!(perm.is_empty() || perm.len() == H);
+        let mut inv: Vec<usize> = (0..H).collect();
+        for (j, &old) in perm.iter().enumerate() {
+            inv[old] = j;
+        }
         let q = |x: i16| (x as i64).clamp(-CLIP_Q, CLIP_Q);
         // W1 file value v -> v * 2^s1 * 65536 / (65025 * 8192).
         let w1_of = |v: i64, s1: u32| round_div(v << (s1 + 16), 65025 * HEAD_Q);
@@ -162,8 +185,9 @@ impl HeadNet {
         for b in 0..BUCKETS {
             let mut it = raw[b * BUCKET_WORDS..(b + 1) * BUCKET_WORDS].iter().map(|&x| q(x));
             for k in 0..H1 {
-                for i in 0..N_IN {
+                for f in 0..N_IN {
                     let w = w1_of(it.next().unwrap(), s1);
+                    let i = f / H * H + inv[f % H];
                     let at = (i / 4) * H1 * 4 + k * 4 + i % 4;
                     // lo in -128..=127; |w| <= W1_MAX keeps |hi| <= 127.
                     let hi = (w + 128) >> 8;
@@ -207,10 +231,16 @@ impl HeadNet {
             // does not re-enter.
             let s = unsafe { &mut *s.get() };
             let n = kernels::activate(us, &mut s.x.0[..H], 0, &mut s.nnz, 0);
-            let n = kernels::activate(them, &mut s.x.0[H..], H / 4, &mut s.nnz, n);
-            let mut z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..n]);
-            self.rest(b, &mut z1)
+            s.n = kernels::activate(them, &mut s.x.0[H..], H / 4, &mut s.nnz, n);
+            self.forward_scratch(b, s)
         })
+    }
+
+    /// The head's output from an already filled `Scratch`.
+    #[inline(always)]
+    pub(crate) fn forward_scratch(&self, b: usize, s: &Scratch) -> i32 {
+        let mut z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..s.n]);
+        self.rest(b, &mut z1)
     }
 
     /// Scalar twin of `forward` (tests).
@@ -251,38 +281,70 @@ impl HeadNet {
     }
 }
 
-/// The nonzero-chunk index list, with room for a 4-index store past the end.
-const NNZ_BUF: usize = CHUNKS + 8;
+/// The nonzero-chunk index list, with room for an 8-index store past the end.
+pub(crate) const NNZ_BUF: usize = CHUNKS + 8;
 
-/// For a 4-bit mask of nonzero chunks, their positions as four packed u16
-/// (unused slots 0): the SIMD kernels add the group's first chunk index to
-/// all four lanes at once (no carries: indices < 2^16) and store 8 bytes.
-const NNZ_LUT: [u64; 16] = {
-    let mut t = [0u64; 16];
+/// For an 8-bit mask of nonzero chunks, their positions (unused slots 0)
+/// and their count: the kernels add the group's first chunk index to all
+/// eight lanes and store 16 bytes, so appending 8 chunks is one load, add
+/// and store, and the count's dependency chain is one add per 8 chunks.
+#[repr(C, align(64))]
+#[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), allow(dead_code))]
+struct Lut8([[u16; 8]; 256], [u8; 256]);
+
+#[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), allow(dead_code))]
+static NNZ_LUT8: Lut8 = {
+    let mut t = Lut8([[0u16; 8]; 256], [0u8; 256]);
     let mut m = 0;
-    while m < 16 {
+    while m < 256 {
         let (mut j, mut n) = (0, 0);
-        while j < 4 {
+        while j < 8 {
             if m >> j & 1 == 1 {
-                t[m] |= (j as u64) << (16 * n);
+                t.0[m][n] = j as u16;
                 n += 1;
             }
             j += 1;
         }
+        t.1[m] = n as u8;
         m += 1;
     }
     t
 };
 
-/// Append the nonzero chunks among `mask` (4 bits, chunks `c0..c0 + 4`).
+/// The L1 input of one perspective into `out` (H bytes), its nonzero chunks
+/// (numbered from `base`) appended to `nnz[n..]`; returns the new count.
 #[inline(always)]
-fn push_nnz(nnz: &mut [u16; NNZ_BUF], n: usize, c0: usize, mask: u32) -> usize {
-    let v = NNZ_LUT[mask as usize] + (c0 as u64) * 0x0001_0001_0001_0001;
-    debug_assert!(n + 4 <= NNZ_BUF);
-    // SAFETY: n <= CHUNKS, so n + 4 <= NNZ_BUF.
-    unsafe { (nnz.as_mut_ptr().add(n) as *mut u64).write_unaligned(v.to_le()) };
-    // A nibble table, not count_ones (which goes through the vector unit on aarch64).
-    n + (0x4332_3221_3221_2110u64 >> (4 * mask) & 15) as usize
+pub(crate) fn activate(acc: &[i16; H], out: &mut [u8], base: usize, nnz: &mut [u16; NNZ_BUF], n: usize) -> usize {
+    kernels::activate(acc, out, base, nnz, n)
+}
+
+/// Append the nonzero chunks among `mask` (8 bits, chunks `c0..c0 + 8`)
+/// to `nnz[n..]`; returns the new count.
+#[inline(always)]
+#[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), allow(dead_code))]
+pub(crate) fn push_nnz8(nnz: &mut [u16; NNZ_BUF], n: usize, c0: usize, mask: u32) -> usize {
+    debug_assert!(mask < 256 && n + 8 <= NNZ_BUF);
+    let m = mask as usize & 255;
+    // SAFETY: at most CHUNKS - 8 chunks precede these 8, so n + 8 <= NNZ_BUF.
+    unsafe {
+        let dst = nnz.as_mut_ptr().add(n);
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            vst1q_u16(dst, vaddq_u16(vld1q_u16(NNZ_LUT8.0[m].as_ptr()), vdupq_n_u16(c0 as u16)));
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::*;
+            let v = _mm_add_epi16(_mm_loadu_si128(NNZ_LUT8.0[m].as_ptr() as *const __m128i), _mm_set1_epi16(c0 as i16));
+            _mm_storeu_si128(dst as *mut __m128i, v);
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        for j in 0..8 {
+            *dst.add(j) = NNZ_LUT8.0[m][j] + c0 as u16;
+        }
+    }
+    n + NNZ_LUT8.1[m] as usize
 }
 
 /// Linear output sum (`output_sum`) + head output -> clamped centipawns,
@@ -364,9 +426,8 @@ mod kernels {
                     m = vorrq_u32(m, vshlq_u32(vandq_u32(vtstq_u32(v32, v32), bits), vdupq_n_s32(4 * g as i32)));
                 }
                 let mask = vaddvq_u32(m);
-                for g in 0..4 {
-                    n = push_nnz(nnz, n, base + i / 4 + 4 * g, mask >> (4 * g) & 15);
-                }
+                n = push_nnz8(nnz, n, base + i / 4, mask & 255);
+                n = push_nnz8(nnz, n, base + i / 4 + 8, mask >> 8);
             }
         }
         n
@@ -501,8 +562,7 @@ mod kernels {
                 _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, p);
                 let zero = _mm256_cmpeq_epi32(p, lo);
                 let mask = !(_mm256_movemask_ps(_mm256_castsi256_ps(zero)) as u32) & 0xFF;
-                n = push_nnz(nnz, n, base + i / 4, mask & 15);
-                n = push_nnz(nnz, n, base + i / 4 + 4, mask >> 4);
+                n = push_nnz8(nnz, n, base + i / 4, mask);
             }
         }
         n
@@ -824,6 +884,101 @@ mod fixture {
         assert!(mean < 1.0 && p95 < 3.0 && worst < 10.0, "engine and trainer disagree beyond quantisation error");
     }
 
+    /// Experiment: nonzero-chunk density under lane permutations.
+    #[test]
+    #[ignore]
+    fn head_perm_density() {
+        let net = Arc::new(Network::from_bytes(crate::EMBEDDED_NET).unwrap());
+        let text = std::fs::read_to_string(FIXTURE).unwrap();
+        let mut samples: Vec<Vec<bool>> = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let (fen, _) = line.rsplit_once('|').unwrap();
+            let mut board = Board::new();
+            board.set_fen(fen.trim());
+            let acc = Accumulator::refresh(&net, &board);
+            for v in &acc.v {
+                samples.push(v.iter().map(|&a| a >= 12).collect());
+            }
+        }
+        let (train, test): (Vec<_>, Vec<_>) = samples.iter().enumerate().partition(|(i, _)| (i / 2) % 2 == 0);
+        let train: Vec<&Vec<bool>> = train.into_iter().map(|x| x.1).collect();
+        let test: Vec<&Vec<bool>> = test.into_iter().map(|x| x.1).collect();
+        let density = |perm: &[usize], set: &[&Vec<bool>]| -> f64 {
+            let mut ch = 0usize;
+            for s in set {
+                for c in 0..H / 4 {
+                    if (0..4).any(|j| s[perm[4 * c + j]]) {
+                        ch += 1;
+                    }
+                }
+            }
+            ch as f64 / (set.len() * H / 4) as f64
+        };
+        let ident: Vec<usize> = (0..H).collect();
+        let freq: Vec<usize> = (0..H).map(|i| train.iter().filter(|s| s[i]).count()).collect();
+        let mut by_freq = ident.clone();
+        by_freq.sort_by_key(|&i| std::cmp::Reverse(freq[i]));
+        // Greedy co-activation: seed with the most frequent remaining lane,
+        // add the lanes that grow the chunk's active set least.
+        let words = train.len().div_ceil(64);
+        let bits: Vec<Vec<u64>> = (0..H)
+            .map(|i| {
+                let mut b = vec![0u64; words];
+                for (k, s) in train.iter().enumerate() {
+                    if s[i] {
+                        b[k / 64] |= 1 << (k % 64);
+                    }
+                }
+                b
+            })
+            .collect();
+        let mut left: Vec<usize> = by_freq.clone();
+        let mut greedy = Vec::new();
+        while !left.is_empty() {
+            let seed = left.remove(0);
+            let mut set = bits[seed].clone();
+            greedy.push(seed);
+            for _ in 0..3 {
+                let (bi, _) = left
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &i)| (k, set.iter().zip(&bits[i]).map(|(a, b)| (a | b).count_ones()).sum::<u32>()))
+                    .min_by_key(|x| x.1)
+                    .unwrap();
+                let i = left.remove(bi);
+                for (a, b) in set.iter_mut().zip(&bits[i]) {
+                    *a |= b;
+                }
+                greedy.push(i);
+            }
+        }
+        // Jaccard matching, twice: lanes -> pairs -> quads.
+        let jac = |a: &[u64], b: &[u64]| -> f64 {
+            let (i, u) = a.iter().zip(b).fold((0u32, 0u32), |(i, u), (x, y)| (i + (x & y).count_ones(), u + (x | y).count_ones()));
+            if u == 0 { 1.0 } else { i as f64 / u as f64 }
+        };
+        let mut groups: Vec<(Vec<usize>, Vec<u64>)> = by_freq.iter().map(|&i| (vec![i], bits[i].clone())).collect();
+        for _ in 0..2 {
+            let mut next = Vec::new();
+            while !groups.is_empty() {
+                let (g, b) = groups.remove(0);
+                let (k, _) = groups.iter().enumerate().map(|(k, (_, b2))| (k, jac(&b, b2))).max_by(|x, y| x.1.partial_cmp(&y.1).unwrap()).unwrap();
+                let (g2, b2) = groups.remove(k);
+                let u: Vec<u64> = b.iter().zip(&b2).map(|(x, y)| x | y).collect();
+                next.push(([g, g2].concat(), u));
+            }
+            next.sort_by_key(|(_, b)| std::cmp::Reverse(b.iter().map(|x| x.count_ones()).sum::<u32>()));
+            groups = next;
+        }
+        let jperm: Vec<usize> = groups.into_iter().flat_map(|(g, _)| g).collect();
+        let el = test.iter().map(|s| s.iter().filter(|&&b| b).count()).sum::<usize>() as f64 / (test.len() * H) as f64;
+        eprintln!("elements {:.3}; chunks: identity {:.3}, by-freq {:.3}, greedy {:.3}, jaccard {:.3} (train: {:.3} {:.3} {:.3} {:.3})",
+            el, density(&ident, &test), density(&by_freq, &test), density(&greedy, &test), density(&jperm, &test),
+            density(&ident, &train), density(&by_freq, &train), density(&greedy, &train), density(&jperm, &train));
+        let dead = freq.iter().filter(|&&f| f == 0).count();
+        eprintln!("dead lanes (never active in train): {dead}");
+    }
+
     /// Per-stage error budget on the fixture's positions (diagnostic):
     /// `cargo test --release head_error_budget -- --ignored --nocapture`.
     #[test]
@@ -854,8 +1009,15 @@ mod fixture {
             };
             let b = super::super::bucket(board.bb.occ_all().count_ones());
             let ow = &net.out_w[b * 2 * H..(b + 1) * 2 * H];
-            let a: Vec<f64> = us.iter().chain(them.iter()).map(|&x| sq(x as f64 / QA as f64)).collect();
-            let lin_f = net.out_b[b] as f64 / (QA * QB) as f64 + a.iter().zip(ow.iter()).map(|(x, &w)| x * w as f64 / QB as f64).sum::<f64>();
+            let a_lin: Vec<f64> = us.iter().chain(them.iter()).map(|&x| sq(x as f64 / QA as f64)).collect();
+            let lin_f = net.out_b[b] as f64 / (QA * QB) as f64 + a_lin.iter().zip(ow.iter()).map(|(x, &w)| x * w as f64 / QB as f64).sum::<f64>();
+            // The accumulators in file order, for the head's file weights.
+            let (mut usf, mut thf) = ([0i16; H], [0i16; H]);
+            for j in 0..H {
+                usf[net.file_lane(j)] = us[j];
+                thf[net.file_lane(j)] = them[j];
+            }
+            let a: Vec<f64> = usf.iter().chain(thf.iter()).map(|&x| sq(x as f64 / QA as f64)).collect();
             let sum = super::super::output_sum(&net, b, us, them);
             let lin_i = ((sum / QA as i64 + net.out_b[b] as i64) * SCALE as i64 / (QA as i64 * QB as i64)) as f64;
             let p: Vec<f64> = head.raw[b * BUCKET_WORDS..(b + 1) * BUCKET_WORDS].iter().map(|&x| x as f64 / HEAD_Q as f64).collect();
@@ -867,9 +1029,9 @@ mod fixture {
             let s1 = head.p1 as i32 - 8;
             let k1 = 2f64.powi(s1) * 65536.0 / 65025.0;
             let w1q = |w: f64| (w * k1).round() / k1;
-            let aq: Vec<f64> = us
+            let aq: Vec<f64> = usf
                 .iter()
-                .chain(them.iter())
+                .chain(thf.iter())
                 .map(|&x| {
                     let c = (x as i32).clamp(0, 255);
                     ((c * c + 128) >> 8) as f64 * 256.0 / 65025.0
@@ -901,9 +1063,9 @@ mod fixture {
             // Candidate designs: W1 exact, input c^2 >> k (rounded), engine
             // L2/L3, linear integer sum, final round-to-nearest.
             for (j, k) in [9u32, 8, 7, 6].into_iter().enumerate() {
-                let ak: Vec<f64> = us
+                let ak: Vec<f64> = usf
                     .iter()
-                    .chain(them.iter())
+                    .chain(thf.iter())
                     .map(|&x| {
                         let c = (x as i32).clamp(0, 255);
                         ((c * c + (1 << (k - 1))) >> k) as f64 * (1 << k) as f64 / 65025.0

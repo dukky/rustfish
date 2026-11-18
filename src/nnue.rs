@@ -267,6 +267,9 @@ pub(crate) struct Network {
     small_out: bool,
     /// `HEAD`: the deeper head (None otherwise).
     head: Option<Box<head::HeadNet>>,
+    /// Accumulator lane `j` holds the file's hidden neuron `perm[j]`
+    /// (`lane_order`); empty = file order.
+    perm: Vec<usize>,
 }
 
 impl Network {
@@ -296,7 +299,12 @@ impl Network {
         }
         let mut net = Self::from_parts(ft_w, ft_b, out_w, out_b);
         if HEAD {
-            net.head = Some(Box::new(head::HeadNet::from_words(words.collect())));
+            let head_words: Vec<i16> = words.collect();
+            net.head = Some(Box::new(head::HeadNet::from_words(head_words.clone())));
+            if kb == KB {
+                let perm = lane_order(&net);
+                net.permute_lanes(perm, Some(head_words));
+            }
         }
         Ok(net)
     }
@@ -308,7 +316,31 @@ impl Network {
         let small_out = out_w.iter().all(|w| (-127..=127).contains(w));
         // HEAD: a zero head (output 0) until the caller supplies one.
         let head = HEAD.then(|| Box::new(head::HeadNet::from_words(vec![0; head::HEAD_WORDS])));
-        Self { ft_w: AlignedI16::new(&ft_w), kb, ft_b, out_w: AlignedI16::new(&out_w), out_b, small_out, head }
+        Self { ft_w: AlignedI16::new(&ft_w), kb, ft_b, out_w: AlignedI16::new(&out_w), out_b, small_out, head, perm: Vec::new() }
+    }
+
+    /// Reorder the hidden lanes: lane `j` takes the file's neuron
+    /// `perm[j]` in the feature transformer, the linear output weights
+    /// (both halves) and the head's W1 columns (`head_words`, the file's
+    /// head). A relabelling only: every kernel sums exact integers over
+    /// the lanes, so all outputs are unchanged.
+    fn permute_lanes(&mut self, perm: Vec<usize>, head_words: Option<Vec<i16>>) {
+        assert!(self.perm.is_empty() && perm.len() == H);
+        let gather = |src: &[i16]| -> Vec<i16> { src.chunks_exact(H).flat_map(|r| perm.iter().map(move |&p| r[p])).collect() };
+        self.ft_w = AlignedI16::new(&gather(&self.ft_w));
+        self.ft_b = gather(&self.ft_b).try_into().unwrap();
+        self.out_w = AlignedI16::new(&gather(&self.out_w));
+        if let Some(words) = head_words {
+            self.head = Some(Box::new(head::HeadNet::from_words_permuted(words, &perm)));
+        }
+        self.perm = perm;
+    }
+
+    /// The lane `j` of an accumulator of this net in file order
+    /// (`perm[j]`); identity for an unpermuted net.
+    #[cfg(test)]
+    pub(crate) fn file_lane(&self, j: usize) -> usize {
+        if self.perm.is_empty() { j } else { self.perm[j] }
     }
 
     pub(crate) fn load(path: &str) -> Result<Self, String> {
@@ -319,7 +351,18 @@ impl Network {
     #[cfg(test)]
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(net_bytes(self.kb));
-        let all = self.ft_w.iter().chain(self.ft_b.iter()).chain(self.out_w.iter());
+        // Back to file order.
+        let scatter = |src: &[i16]| -> Vec<i16> {
+            let mut v = src.to_vec();
+            for (r, d) in src.chunks_exact(H).zip(v.chunks_exact_mut(H)) {
+                for (j, &p) in self.perm.iter().enumerate() {
+                    d[p] = r[j];
+                }
+            }
+            v
+        };
+        let (ft_w, ft_b, out_w) = (scatter(&self.ft_w), scatter(&self.ft_b), scatter(&self.out_w));
+        let all = ft_w.iter().chain(ft_b.iter()).chain(out_w.iter());
         let head = self.head.as_ref().map(|h| h.words()).unwrap_or(&[]);
         for w in all.chain(self.out_b.iter()).chain(head.iter()) {
             out.extend_from_slice(&w.to_le_bytes());
@@ -361,6 +404,72 @@ impl Network {
     fn row(&self, f: usize) -> &[i16; H] {
         self.ft_w[f * H..(f + 1) * H].try_into().unwrap()
     }
+}
+
+/// Positions whose accumulators `lane_order` samples (the head fixture's:
+/// validation positions of real games).
+const LANE_SAMPLE: &str = include_str!("../net/head_fixture.txt");
+
+/// `HEAD`: an order of the hidden lanes that puts lanes whose head inputs
+/// are nonzero in the same positions into the same 4-lane chunk, so the
+/// sparse L1 multiplies fewer chunks (g9h1024kb8m-head on held-out
+/// fixture positions: 33.5% of chunks nonzero in file order, 23.0% so;
+/// 9.8% of single inputs). Greedy matching on the Jaccard similarity of
+/// the lanes' activity over the sample, lanes into pairs, pairs into
+/// chunks; deterministic. Any order gives the same outputs.
+fn lane_order(net: &Network) -> Vec<usize> {
+    // x = (c^2 + 128) >> 8 is nonzero iff the clamped lane c >= 12.
+    let mut boards = Vec::new();
+    for line in LANE_SAMPLE.lines() {
+        if let Some((fen, _)) = line.rsplit_once('|') {
+            let mut b = Board::new();
+            b.set_fen(fen.trim());
+            boards.push(b);
+        }
+    }
+    let samples = 2 * boards.len();
+    let words = samples.div_ceil(64).max(1);
+    let mut bits = vec![0u64; H * words];
+    for (n, b) in boards.iter().enumerate() {
+        let acc = Accumulator::refresh_with::<Active>(net, b);
+        for (pi, v) in acc.v.iter().enumerate() {
+            let k = 2 * n + pi;
+            for (j, &a) in v.iter().enumerate() {
+                if a >= 12 {
+                    bits[j * words + k / 64] |= 1 << (k % 64);
+                }
+            }
+        }
+    }
+    let count = |b: &[u64]| b.iter().map(|x| x.count_ones() as u64).sum::<u64>();
+    // (lanes, activity bitset), most active first.
+    let mut groups: Vec<(Vec<usize>, Vec<u64>)> = (0..H).map(|j| (vec![j], bits[j * words..(j + 1) * words].to_vec())).collect();
+    groups.sort_by_key(|(_, b)| std::cmp::Reverse(count(b)));
+    for _ in 0..2 {
+        let mut next = Vec::with_capacity(groups.len() / 2);
+        let mut rest = std::collections::VecDeque::from(groups);
+        while let Some((g, b)) = rest.pop_front() {
+            // The partner with the largest |a & b| / |a | b| (an empty union counts as 1).
+            let (mut best, mut bi, mut bu) = (0usize, 0u64, 0u64);
+            for (k, (_, b2)) in rest.iter().enumerate() {
+                let (mut i, mut u) = (0u64, 0u64);
+                for (x, y) in b.iter().zip(b2) {
+                    i += (x & y).count_ones() as u64;
+                    u += (x | y).count_ones() as u64;
+                }
+                let (i, u) = if u == 0 { (1, 1) } else { (i, u) };
+                if k == 0 || i * bu > bi * u {
+                    (best, bi, bu) = (k, i, u);
+                }
+            }
+            let (g2, b2) = rest.remove(best).expect("H is a multiple of 4");
+            let u: Vec<u64> = b.iter().zip(&b2).map(|(x, y)| x | y).collect();
+            next.push(([g, g2].concat(), u));
+        }
+        next.sort_by_key(|(_, b)| std::cmp::Reverse(count(b)));
+        groups = next;
+    }
+    groups.into_iter().flat_map(|(g, _)| g).collect()
 }
 
 /// Feature of piece `p` on `sq` for perspective `persp`, whose king context is `k`.
@@ -580,6 +689,8 @@ pub(crate) struct NnueState<L: Layout = Active> {
     /// Finny table, `[perspective][bucket * 2 + mirrored]`; empty unless
     /// `L::REFRESH`.
     cache: RefCell<Vec<CacheEntry>>,
+    /// `HEAD`: the head's L1 input, written by the fused update in `evaluate`.
+    scratch: RefCell<Box<head::Scratch>>,
     _layout: PhantomData<L>,
 }
 
@@ -607,6 +718,7 @@ impl<L: Layout> NnueState<L> {
             computed: Cell::new(0),
             top: 0,
             cache: RefCell::new(cache),
+            scratch: RefCell::new(Box::new(head::Scratch::new())),
             _layout: PhantomData,
         };
         s.refresh(board);
@@ -706,11 +818,18 @@ impl<L: Layout> NnueState<L> {
             let b = bucket(pieces);
             let mut stack = self.stack.borrow_mut();
             let (lo, hi) = stack.split_at_mut(self.top);
-            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b);
-            self.computed.set(self.top);
             if HEAD {
-                return finish_head(net, b, sum, &hi[0].acc, stm);
+                // The update also writes the head's L1 input (no separate
+                // activation pass over the accumulators).
+                let mut sc = self.scratch.borrow_mut();
+                sc.n = 0;
+                let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b, Some(&mut sc));
+                self.computed.set(self.top);
+                let h = net.head.as_ref().expect("HEAD net without head").forward_scratch(b, &sc);
+                return head::finish(net.out_b[b], sum, h, EVAL_LIMIT);
             }
+            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b, None);
+            self.computed.set(self.top);
             return finish(net, b, sum);
         }
         self.materialise();
@@ -723,12 +842,14 @@ impl<L: Layout> NnueState<L> {
 /// pass; a perspective marked for refresh is rebuilt from the finny table.
 #[inline(always)]
 fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
-    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0);
+    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0, None);
 }
 
 /// `apply_delta`, and with `EVAL` also the output sum of the result for
 /// side to move `stm` and output bucket `b` (requires `net.small_out`),
-/// fused into the update pass. Without `EVAL` it returns 0.
+/// fused into the update pass. Without `EVAL` it returns 0. With `EVAL` and
+/// `act` (`HEAD`), also the head's L1 input of the result into `act` (stm
+/// half first; `act.n` starts at 0).
 #[inline(always)]
 fn apply_delta_with<L: Layout, const EVAL: bool>(
     net: &Network,
@@ -737,6 +858,7 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
     cache: &RefCell<Vec<CacheEntry>>,
     stm: Color,
     b: usize,
+    mut act: Option<&mut head::Scratch>,
 ) -> i64 {
     let d = dst.delta;
     let mut sum = 0i64;
@@ -749,6 +871,10 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
             refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
             if EVAL {
                 sum += simd::screlu_dot(&dst.acc.v[pi], w);
+                if let Some(a) = act.as_deref_mut() {
+                    let half = if persp == stm { 0 } else { 1 };
+                    a.n = head::activate(&dst.acc.v[pi], &mut a.x.0[half * H..(half + 1) * H], half * H / 4, &mut a.nnz, a.n);
+                }
             }
             continue;
         }
@@ -756,9 +882,18 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
         let a0 = f(d.add[0]);
         let s0 = f(d.sub[0]);
         let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
-        let run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
+        let mut run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
             if EVAL {
-                simd::update_dot(o, s, adds, subs, w)
+                match act.as_deref_mut() {
+                    Some(a) => {
+                        let half = if persp == stm { 0 } else { 1 };
+                        let x = &mut a.x.0[half * H..(half + 1) * H];
+                        let (sum, n) = simd::update_dot_act(o, s, adds, subs, w, x, &mut a.nnz, a.n, half * H / 4);
+                        a.n = n;
+                        sum
+                    }
+                    None => simd::update_dot(o, s, adds, subs, w),
+                }
             } else {
                 update(o, s, adds, subs);
                 0
@@ -899,6 +1034,25 @@ pub(crate) mod scalar {
         screlu_dot(out, w)
     }
 
+    /// `update_dot`, and the head's L1 input of `out` into `x` (H bytes)
+    /// with its nonzero chunks, numbered from `base`, appended to `nnz[n..]`
+    /// (`head::activate`); returns the sum and the new count.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn update_dot_act(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        let sum = update_dot(out, src, adds, subs, w);
+        (sum, super::head::scalar::activate(out, x, base, nnz, n))
+    }
+
     /// Requires |w| <= 127 (see `Network::small_out`): each product fits i32.
     #[allow(dead_code)]
     pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
@@ -1012,6 +1166,60 @@ pub(crate) mod simd {
         }
     }
 
+    /// `update_dot` and the head's L1 input (`scalar::update_dot_act`) in
+    /// one pass: the input `(c^2 + 128) >> 8` reuses the clamped `c`.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(crate) fn update_dot_act(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        mut n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        const { assert!(QA == 255) };
+        assert!(x.len() == H);
+        // SAFETY: as in `update_dot`; x covers H bytes.
+        unsafe {
+            let zero = vdupq_n_s16(0);
+            let qa = vdupq_n_s16(QA as i16);
+            let blo = vld1q_u32([1u32, 2, 4, 8].as_ptr());
+            let bhi = vld1q_u32([16u32, 32, 64, 128].as_ptr());
+            let mut s = [vdupq_n_s32(0); 8];
+            let mut i = 0;
+            while i < H {
+                let v = delta4(src.as_ptr(), adds, subs, i);
+                st4(out.as_mut_ptr().add(i), v);
+                let wv = ld4(w.as_ptr().add(i));
+                let mut c = [zero; 4];
+                for j in 0..4 {
+                    c[j] = vminq_s16(vmaxq_s16(v[j], zero), qa);
+                    let cw = vmulq_s16(c[j], wv[j]);
+                    s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c[j]));
+                    s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c[j]);
+                }
+                // c^2 <= 65025 fits u16; rshrn = (c^2 + 128) >> 8.
+                let sq = |a: int16x8_t| {
+                    let u = vreinterpretq_u16_s16(a);
+                    vmulq_u16(u, u)
+                };
+                let p01 = vrshrn_high_n_u16::<8>(vrshrn_n_u16::<8>(sq(c[0])), sq(c[1]));
+                let p23 = vrshrn_high_n_u16::<8>(vrshrn_n_u16::<8>(sq(c[2])), sq(c[3]));
+                vst1q_u8(x.as_mut_ptr().add(i), p01);
+                vst1q_u8(x.as_mut_ptr().add(i + 16), p23);
+                let (t01, t23) = (vreinterpretq_u32_u8(p01), vreinterpretq_u32_u8(p23));
+                let m = vorrq_u32(vandq_u32(vtstq_u32(t01, t01), blo), vandq_u32(vtstq_u32(t23, t23), bhi));
+                n = super::head::push_nnz8(nnz, n, base + i / 4, vaddvq_u32(m));
+                i += 32;
+            }
+            (s.iter().map(|&x| vaddlvq_s32(x)).sum(), n)
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn screlu_dot(acc: &[i16; H], w: &[i16; H]) -> i64 {
         // SAFETY: as above. c in [0,255], |w| <= 127 so c*w fits i16; each
@@ -1095,6 +1303,27 @@ pub(crate) mod simd {
         }
         // SAFETY: AVX2 is enabled at compile time (cfg).
         unsafe { super::avx2_kernels::update_dot(out, src, adds, subs, w) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(crate) fn update_dot_act(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::update_dot_act(out, src, adds, subs, w, x, nnz, n, base) };
+        }
+        // SAFETY: AVX2 is enabled at compile time (cfg).
+        unsafe { super::avx2_kernels::update_dot_act(out, src, adds, subs, w, x, nnz, n, base) }
     }
 
     #[inline(always)]
@@ -1318,6 +1547,75 @@ pub(crate) mod avx512 {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    unsafe fn update_dot_act_n<const NA: usize, const NS: usize>(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        mut n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        // As `update_dot_n`, plus the head input as in `avx2_kernels::update_dot_act`.
+        const { assert!(QA == 255) };
+        assert!(x.len() == H);
+        let zero = _mm512_setzero_si512();
+        let qa = _mm512_set1_epi16(QA as i16);
+        let r = _mm512_set1_epi16(128);
+        // packus interleaves 128-bit lanes (a0 b0 a1 b1 ..); restore a0..a3 b0..b3.
+        let order = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
+        let mut s = [_mm512_setzero_si512(); 2];
+        let mut i = 0;
+        while i < H {
+            let mut sq = [zero; 2];
+            for j in 0..2 {
+                let o = i + 32 * j;
+                let v = _mm512_loadu_si512(src.as_ptr().add(o) as *const __m512i);
+                let v = if NA == 0 && NS == 0 { delta_dyn(v, adds, subs, o) } else { delta::<NA, NS>(v, adds, subs, o) };
+                _mm512_storeu_si512(out.as_mut_ptr().add(o) as *mut __m512i, v);
+                let c = _mm512_min_epi16(_mm512_max_epi16(v, zero), qa);
+                let wv = _mm512_loadu_si512(w.as_ptr().add(o) as *const __m512i);
+                s[j] = _mm512_add_epi32(s[j], _mm512_madd_epi16(_mm512_mullo_epi16(c, wv), c));
+                sq[j] = _mm512_srli_epi16::<8>(_mm512_add_epi16(_mm512_mullo_epi16(c, c), r));
+            }
+            let p = _mm512_permutexvar_epi64(order, _mm512_packus_epi16(sq[0], sq[1]));
+            _mm512_storeu_si512(x.as_mut_ptr().add(i) as *mut __m512i, p);
+            let mask = _mm512_test_epi32_mask(p, p) as u32;
+            n = super::head::push_nnz8(nnz, n, base + i / 4, mask & 255);
+            n = super::head::push_nnz8(nnz, n, base + i / 4 + 8, mask >> 8);
+            i += 64;
+        }
+        (reduce2(s[0], s[1]), n)
+    }
+
+    /// `update_dot` and the head's L1 input in one pass (`scalar::update_dot_act`).
+    /// # Safety
+    /// The CPU must support AVX-512F and AVX-512BW.
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(crate) unsafe fn update_dot_act(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        match (adds.len(), subs.len()) {
+            (1, 1) => update_dot_act_n::<1, 1>(out, src, adds, subs, w, x, nnz, n, base),
+            (1, 2) => update_dot_act_n::<1, 2>(out, src, adds, subs, w, x, nnz, n, base),
+            (2, 2) => update_dot_act_n::<2, 2>(out, src, adds, subs, w, x, nnz, n, base),
+            _ => update_dot_act_n::<0, 0>(out, src, adds, subs, w, x, nnz, n, base),
+        }
+    }
+
     #[inline(always)]
     unsafe fn reduce2(a: __m512i, b: __m512i) -> i64 {
         let wide = |v: __m512i| {
@@ -1480,11 +1778,68 @@ mod avx2_kernels {
         _mm256_storeu_si256(lanes.as_mut_ptr().add(8) as *mut __m256i, sum[1]);
         lanes.iter().map(|&x| x as i64).sum()
     }
+
+    /// `update_dot` and the head's L1 input (`scalar::update_dot_act`) in
+    /// one pass: the input `(c^2 + 128) >> 8` reuses the clamped `c`.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(super) unsafe fn update_dot_act(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        mut n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        const { assert!(H % 32 == 0 && QA == 255) };
+        assert!(x.len() == H);
+        let zero = _mm256_setzero_si256();
+        let qa = _mm256_set1_epi16(QA as i16);
+        let r = _mm256_set1_epi16(128);
+        let mut sum = [_mm256_setzero_si256(); 2];
+        let mut i = 0;
+        while i < H {
+            let mut sq = [zero; 2];
+            for j in 0..2 {
+                let o = i + 16 * j;
+                let mut v = _mm256_loadu_si256(src.as_ptr().add(o) as *const __m256i);
+                for a in adds {
+                    v = _mm256_add_epi16(v, _mm256_loadu_si256(a.as_ptr().add(o) as *const __m256i));
+                }
+                for s in subs {
+                    v = _mm256_sub_epi16(v, _mm256_loadu_si256(s.as_ptr().add(o) as *const __m256i));
+                }
+                _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
+                let c = _mm256_min_epi16(_mm256_max_epi16(v, zero), qa);
+                let wv = _mm256_loadu_si256(w.as_ptr().add(o) as *const __m256i);
+                let cw = _mm256_mullo_epi16(c, wv);
+                sum[j] = _mm256_add_epi32(sum[j], _mm256_madd_epi16(cw, c));
+                // c^2 <= 65025 is exact as u16, + 128 <= 65153: (c^2 + 128) >> 8.
+                sq[j] = _mm256_srli_epi16::<8>(_mm256_add_epi16(_mm256_mullo_epi16(c, c), r));
+            }
+            // packus interleaves 128-bit lanes; restore the order.
+            let p = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(sq[0], sq[1]));
+            _mm256_storeu_si256(x.as_mut_ptr().add(i) as *mut __m256i, p);
+            let mask = !(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(p, zero))) as u32) & 0xFF;
+            n = super::head::push_nnz8(nnz, n, base + i / 4, mask);
+            i += 32;
+        }
+        let mut lanes = [0i32; 16];
+        _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, sum[0]);
+        _mm256_storeu_si256(lanes.as_mut_ptr().add(8) as *mut __m256i, sum[1]);
+        (lanes.iter().map(|&x| x as i64).sum(), n)
+    }
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) mod simd {
-    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update, update_dot, update_dual};
+    pub(crate) use super::scalar::{screlu_dot, screlu_dot_wide, update, update_dot, update_dot_act, update_dual};
 }
 
 /// x86-64 builds without AVX2 enabled at compile time (the default
@@ -1550,6 +1905,47 @@ pub(crate) mod simd {
         } else {
             super::scalar::update_dot(out, src, adds, subs, w)
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(crate) fn update_dot_act(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        if super::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            return unsafe { super::avx512::update_dot_act(out, src, adds, subs, w, x, nnz, n, base) };
+        }
+        if avx2() {
+            // SAFETY: detected above.
+            unsafe { update_dot_act_avx2(out, src, adds, subs, w, x, nnz, n, base) }
+        } else {
+            super::scalar::update_dot_act(out, src, adds, subs, w, x, nnz, n, base)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx2")]
+    unsafe fn update_dot_act_avx2(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        nnz: &mut [u16; super::head::NNZ_BUF],
+        n: usize,
+        base: usize,
+    ) -> (i64, usize) {
+        super::avx2_kernels::update_dot_act(out, src, adds, subs, w, x, nnz, n, base)
     }
 
     /// # Safety
@@ -2018,6 +2414,55 @@ mod tests {
         }
     }
 
+    /// The fused update + output sum + head input against `scalar::update`,
+    /// `screlu_dot` and `head::scalar::activate`, dense and sparse, for the
+    /// dispatched kernel and (where present) AVX-512 called directly.
+    #[test]
+    fn update_dot_act_matches_scalar() {
+        type Kernel = fn(&mut [i16; H], &[i16; H], &[&[i16; H]], &[&[i16; H]], &[i16; H], &mut [u8], &mut [u16; head::NNZ_BUF], usize, usize) -> (i64, usize);
+        #[allow(unused_mut)]
+        let mut kernels: Vec<(&str, Kernel)> = vec![("simd", simd::update_dot_act)];
+        #[cfg(target_arch = "x86_64")]
+        if avx512::supported() {
+            // SAFETY: AVX-512F/BW checked.
+            kernels.push(("avx512", |o, s, a, b, w, x, z, n, base| unsafe { avx512::update_dot_act(o, s, a, b, w, x, z, n, base) }));
+        }
+        let mut next = rng(20261118);
+        for iter in 0..600 {
+            // Sources from mostly negative (sparse input) to dense, small deltas.
+            let (lo, hi) = [(-3000, 40), (-400, 300), (-50, 600), (-32767, 32767)][iter % 4];
+            let mut rand_vec = |lo: i32, hi: i32| -> [i16; H] {
+                let mut v = [0i16; H];
+                for x in v.iter_mut() {
+                    *x = (lo + (next() % (hi - lo + 1) as u64) as i32) as i16;
+                }
+                v
+            };
+            let src = rand_vec(lo, hi);
+            let (a0, a1, s0, s1) = (rand_vec(-60, 60), rand_vec(-60, 60), rand_vec(-60, 60), rand_vec(-60, 60));
+            let w = rand_vec(-127, 127);
+            for (adds, subs) in [(vec![&a0], vec![&s0]), (vec![&a0], vec![&s0, &s1]), (vec![&a0, &a1], vec![&s0, &s1])] {
+                let mut want = [0i16; H];
+                scalar::update(&mut want, &src, &adds, &subs);
+                let want_sum = scalar::screlu_dot(&want, &w);
+                for half in 0..2 {
+                    let (base, n0) = (half * H / 4 + 3, iter % 5);
+                    let mut x_s = [0u8; H];
+                    let mut nnz_s = [0u16; head::NNZ_BUF];
+                    let n_s = head::scalar::activate(&want, &mut x_s, base, &mut nnz_s, n0);
+                    for (name, k) in &kernels {
+                        let mut out = [0i16; H];
+                        let mut x = [0xAAu8; H];
+                        let mut nnz = [0u16; head::NNZ_BUF];
+                        let (sum, n) = k(&mut out, &src, &adds, &subs, &w, &mut x, &mut nnz, n0, base);
+                        assert!(out == want && sum == want_sum, "{name} update/sum, iter {iter}");
+                        assert!(x == x_s && n == n_s && nnz[n0..n] == nnz_s[n0..n_s], "{name} head input, iter {iter}");
+                    }
+                }
+            }
+        }
+    }
+
     /// The AVX-512 kernels against scalar, called directly (so it holds even
     /// with `RUSTFISH_NO_AVX512` set); skipped on hosts without AVX-512.
     #[cfg(target_arch = "x86_64")]
@@ -2090,6 +2535,19 @@ mod tests {
     fn rejects_wrong_size() {
         assert!(Network::from_bytes(&[0u8; 10]).is_err());
         assert!(Network::from_bytes(&vec![0u8; NET_BYTES]).is_ok());
+    }
+
+    /// The lane order is a permutation and `to_bytes` undoes it exactly.
+    #[test]
+    fn lane_order_roundtrips() {
+        let net = Network::from_bytes(crate::EMBEDDED_NET).unwrap();
+        assert!(net.to_bytes() == crate::EMBEDDED_NET);
+        if HEAD {
+            let mut p = net.perm.clone();
+            assert!(p.len() == H && p.iter().enumerate().any(|(j, &l)| j != l));
+            p.sort_unstable();
+            assert!(p.iter().enumerate().all(|(j, &l)| j == l));
+        }
     }
 
     /// Throughput report: `cargo test --release nnue_throughput -- --ignored --nocapture`.
