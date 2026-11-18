@@ -12,7 +12,7 @@ results, strength chart) is on the dashboard, **https://rustfish-dash.dev.duk.im
 
 | | |
 |---|---|
-| Strength | **3547 CCRL Blitz** (ladder 2026-11-12 20:07, CI 3528-3567, `419d29b`, g8h1024kb8m): **top 100 cleared** (3506). Before: **~3508**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
+| Strength | **3581 CCRL Blitz** (ladder 2026-11-16, CI 3563-3599, `b1961e7`: g9 + corrhist + futility + speed work). Before: 3562 (11-13), **3547 CCRL Blitz** (ladder 2026-11-12 20:07, CI 3528-3567, `419d29b`, g8h1024kb8m): **top 100 cleared** (3506). Before: **~3508**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
 | Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ (2026-11-06); **mid term top 100 = 3506**: at the line (~3508), needs a clear margin; **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
 | Eval | NNUE **g7kb8m** (merged +30.6, 2026-11-08): (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. g7 from scratch on pool7 (1.72B positions), m1 copy, kb8m factoriser warm start. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR (cut-node, not-improving, quiet checks reduced one ply less, root moves), IIR, SEE, killers, counter-moves, history + threat-aware history with escape bonus, 1-ply continuation history, ProbCut, singular extensions + multi-cut + negative extension, check extension; node-fraction time management. |
@@ -189,6 +189,36 @@ of x86 time (55% on the M3) and the AVX2 kernels are load-bound, not
 spilling; next x86 costs: MovePicker::new 13%, movegen 9%, SEE 8%.
 SPSA cancelled (nothing in nine rounds); lanes back to 18 shards.
 Ladder queued.
+**Audit 2026-11-18 (back after the weekly limit):**
+- **Head gate -49.8 was an engine bug, not the head:** the gated build's
+  eval disagrees with the trainer by **8.2 cp mean, p95 24.5, max 88**
+  (2000 valL1008 positions; worst: engine -250 vs trainer -162), against
+  ~0.5 cp on head-v2's small test heads: the i8 W1 quantisation / clamps
+  don't survive a fully trained head. The head net itself is the biggest
+  loss step yet (valL1008 0.021993 vs g9 0.022553). Subagent fixing the
+  engine path (`head-fix`); rule: no head net is gated without passing the
+  engine-vs-trainer check (< 1 cp mean).
+- **GPU idle 13 Nov 16:52 -> 18 Nov 20:00** (5 days) while datagen ran:
+  the chain had nothing queued after the head fine-tune and the desktop
+  rebooted (~14 Nov; also resets the 1080 Ti power cap and killed the
+  dashboard status loop, restarted). Need a standing GPU job queue.
+- **Desktop disk 95% full** (13 GB free). Fix running: pack game-ordered
+  sources to .rfp (ci9, local D20xx; lossless, verified), then gen 10.
+- **Gen 10 starting tonight** (`~/rustfish-data/gen10-prep.sh` -> `gen10.sh`):
+  pool10 = pool8 + ci9 + D2004-D2022 (D2021/D2022 tails = **val-g10**, 1M,
+  held out), gen-9 chain, --half; screened on val-g10 / valL1008 / val.bin.
+- Overfitting sweep final (M3, pool7 H512, best-scale valL1008 / val.bin):
+  base 0.024591 / 0.026185; wd 0.01 0.024590 / 0.026116; mirror 0.024671 /
+  0.026248 (worse); **lambda 0.7 0.024469 / 0.026595** (better on current
+  data, worse on old; needs a game test before use).
+- 13-17 Nov (other session): merged perf-see-ge (speedup), **per-move
+  futility +8.8**; rejected formula LMP -6.9, capture-history-SEE +1.6
+  (20k games, H0), cont2-ply x2, countermove history, root LMR quiets,
+  rfp-improving simp, quiet-check ordering, capture ordering +2.1 (H0),
+  pawn history, razoring, ttcapture-lmr, LMR bad captures, recapture ext,
+  correction-LMR, improving-ply4 smoothed, 50-move damping. Cheap search
+  ideas look exhausted; nets/architecture are the lever.
+
 **Midday 2026-11-13:** ladder **3562.4** [3545, 3580] (gen 9 + speed work).
 **feat-corrhist-v2 merged +12.8** [6.9, 18.6] (multi-table correction
 history, used in qsearch too, ~1% cycles). simp2-qs-failsoft merged
