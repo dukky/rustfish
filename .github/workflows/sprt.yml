@@ -134,10 +134,13 @@ jobs:
           SHARD: ${{ matrix.shard }}
           SEED: ${{ github.run_id }}${{ matrix.shard }}
         run: |
+          # A tc of the form "nodes=N" (ci.py sprt --nodes, diagnostic only)
+          # plays fixed nodes per move with no clock.
+          case "$TC" in nodes=*) LIMIT="$TC" ;; *) LIMIT="tc=$TC" ;; esac
           engines/fastchess \
             -engine cmd=engines/cand name=candidate \
             -engine cmd=engines/base name=base \
-            -each proto=uci tc="$TC" option.Hash="$HASH" option.OwnBook=false \
+            -each proto=uci "$LIMIT" option.Hash="$HASH" option.OwnBook=false \
             -rounds "$ROUNDS" -repeat \
             -concurrency "$(nproc)" \
             -openings file="$BOOK" format=epd order=random \
@@ -231,7 +234,8 @@ jobs:
               for k, v in fields.items():
                   cmd += ["-f", f"{k}={v}"]
               subprocess.run(cmd, check=True)
-          elif cfg.get("callback") == "queue":
+          elif cfg.get("callback") == "queue" and not str(cfg["tc"]).startswith("nodes="):
+              # (fixed-nodes runs are diagnostics and never reach the queue)
               # Tests started by the merge queue hand their verdict back to it.
               subprocess.run(["gh", "workflow", "run", "queue.yml", "--ref", os.environ["REF"],
                               "-f", f"result={json.dumps(res)}"], check=True)

@@ -14,6 +14,11 @@ Examples:
   python3 scripts/ci.py sprt refactor-movegen --nonreg      # must not lose [-5, 0]
   python3 scripts/ci.py sprt my-branch --no-wait            # dispatch and exit
   python3 scripts/ci.py sprt --resume <test_id>             # re-attach to a test
+  python3 scripts/ci.py sprt my-net --nodes 200000          # DIAGNOSTIC: fixed nodes per move
+
+--nodes N plays both engines at N nodes per move (no clock): it separates eval
+quality from speed. It is a diagnostic only, never an acceptance test: the run
+and log entry are labelled fixed-nodes, and the queue never uses it.
 """
 import argparse
 import datetime
@@ -148,6 +153,13 @@ def cmd_sprt(args):
         nonreg = args.nonreg or (args.ltc and not args.gainer)
         elo0, elo1 = (-5, 0) if nonreg else (args.elo0, args.elo1)
         settings.update(elo0=elo0, elo1=elo1, max_waves=args.max_waves)
+        if args.nodes:
+            # Diagnostic: fixed nodes per move instead of a clock. The workflow
+            # passes a tc of the form "nodes=N" to fastchess as-is.
+            if args.ltc:
+                sys.exit("--nodes and --ltc are exclusive")
+            settings["tc"] = f"nodes={args.nodes}"
+            profile = f"DIAG-nodes{args.nodes}"
         # Pin both refs to SHAs now: a test may sit queued for hours, and main
         # (or the candidate branch) moving meanwhile must not change what it tests.
         cand_sha = remote.split()[0]
@@ -165,9 +177,13 @@ def cmd_sprt(args):
             print(f"re-attach later with: python3 scripts/ci.py sprt --resume {test_id}")
             return
     res = follow_sprt(test_id)
+    if str(res.get("tc", "")).startswith("nodes="):
+        res["diagnostic"] = "fixed-nodes"
     res["logged_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     append_log("sprt-log.jsonl", res)
     verdict = {"H1": "PASSED", "H0": "FAILED"}.get(res["status"], res["status"].upper())
+    if res.get("diagnostic"):
+        verdict = f"DIAGNOSTIC {res['tc']} (not an acceptance test) {verdict}"
     print(f"\n{verdict}: {res['candidate']} vs {res['base']}  Elo {res['elo']:+.1f} "
           f"(95% CI {res['elo_ci95'][0]:+.1f} .. {res['elo_ci95'][1]:+.1f}), {res['games']} games")
     print("logged to tests/sprt-log.jsonl")
@@ -217,6 +233,8 @@ def main():
     # Return to --elo1 5 once typical patches get small.
     sp.add_argument("--elo1", type=float, default=10)
     sp.add_argument("--max-waves", type=int, default=10)
+    sp.add_argument("--nodes", type=int, metavar="N",
+                    help="DIAGNOSTIC ONLY: fixed N nodes per move instead of a clock; never an acceptance test")
     sp.add_argument("--no-wait", action="store_true")
     sp.add_argument("--resume", metavar="TEST_ID")
     sp.set_defaults(func=cmd_sprt)
