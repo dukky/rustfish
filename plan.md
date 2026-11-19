@@ -41,6 +41,7 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
     Pruning error rates are 0-1.2% and reduced searches fail high only 0.3-1.5%: margins are
     conservative, single-knob tweaks don't pay, so a **long SPSA** (sum combine; the old
     400-iteration run used mean, which applied one chain's steps per round) is running.
+  - **Bug audit (19-20 Nov):** three proven long-standing bugs, each queued `:stc`: repetition check looked past null moves (61/368 bench draws false); ep square hashed after every double push even when no capture possible (one position, several keys); quiet queen promotions pruned/reduced as quiets (624/2843 pruned). Node counts within noise, so SPRT decides. NPS 'drop' is only the first second (flat 1.41-1.45M from depth 15-27): not a bug.
   - In the queue: `prune-exempt-killers` (only killers/counter exempt from move-loop
     pruning; nodes -9.6%). Next: PV stability at depth (X3), reduction/extension balance at depth.
   - Tooling: `diag-search-stats` (feature `stats`, `stats-verify`), `scripts/search_stats.py`,
@@ -521,7 +522,7 @@ merging (the queue does that).
 | Pairwise head revival: init / pair-order experiments, else an FT trained for pairwise in a full chain | paused (budget); decide at gen 11/12 |
 | Merge the verified faster CUDA trainer (perf-head-speed-cuda) into main | next free agent slot (independent of the pairwise decision) |
 | Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10+ engine: D2027 + L1012 tails), then build pool11 (~6.7B, newest seeds 2x) | D2027 done (~Sat 21 Nov early) |
-| Profile rustfish's NPS drop in longer searches (Clover comparison: not hash size); fix if cheap | after the search-diagnosis agent reports (it owns search.rs instrumentation) |
+| Bug audit fixes in the merge queue (`rep-null-guard`, `ep-hash-capturable`, `queen-promo-tactical`, all `:stc`); unverified suspects listed in docs/search-diagnosis (Bug audit) | queue results (auto-merge on pass) |
 | Search: next experiments from round 3 (X3 PV stability; reduction/extension balance at depth); gauge = 200k-node Clover match after each batch | after prune-exempt-killers' verdict |
 | D2026 (gen-9 engine) -> D2027-D2030 on the TT-fixed engine (`rustfish-6daf892-native` is a symlink to `rustfish-f7d7a51-native`) | automatic: `runlong-2027.sh` in tmux `datagen5` on the desktop |
 | Long SPSA (run 44631902925, 605b560, 6 shards x 40 rounds, sum combine, ~2 days): restore queue to 18 shards and lanes 1/1 (scripts/queue-settings.json), then queue the tuned values `:stc`, then `:ltc-check` | last round's merge job finishes (round 40/40); theta = its `spsa-result` artifact |
