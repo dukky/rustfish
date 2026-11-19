@@ -5,7 +5,7 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-19 (UK)._ Live state (current test, queue,
+_Last updated: 2026-11-19 23:30 (UK)._ Live state (current test, queue,
 results, strength chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
@@ -27,7 +27,38 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
 
 ## Plan
 
-**Short term (2026-11-19, next ~24-48 h): pairwise head, then gen 11.**
+**Short term (updated 2026-11-19 23:30): search parity is now the main lever; nets keep running.**
+- **Search (biggest lever).** Clover 9.1 (3725, same net class) as a black-box gauge: we are
+  +91 at depth 1 (eval fine) but -197 at 200k fixed nodes (was -213 before the TT fix),
+  and we search ~3.1x its nodes to depth 14. Depth sweep on main: +564 d5, +32 d8,
+  **-51 d14** (quality erodes with depth, not only node count). Losses are slow
+  middlegame squeezes; our eval is ~1 pawn more optimistic than Clover's in lost positions.
+  Owner rule: other engines are benchmarks only, never code sources (memory: independent-development).
+  - **Merged: `tt-failow-nomove` +16.7** [7.9, 25.6] (`f7d7a51`): fail-low nodes store no TT
+    move (it cut only 5-26% as first move); nodes -33%, EBF 1.73 -> 1.66.
+  - Failed: history-bonus-linear +2.6, cut-relabel -0.6, iir-depth3 -6.9. Dropped before CI
+    (stats did not move): move-count pruning d4-6, counter-move first, fail-low hint.
+    Pruning error rates are 0-1.2% and reduced searches fail high only 0.3-1.5%: margins are
+    conservative, single-knob tweaks don't pay, so a **long SPSA** (sum combine; the old
+    400-iteration run used mean, which applied one chain's steps per round) is running.
+  - In the queue: `prune-exempt-killers` (only killers/counter exempt from move-loop
+    pruning; nodes -9.6%). Next: PV stability at depth (X3), reduction/extension balance at depth.
+  - Tooling: `diag-search-stats` (feature `stats`, `stats-verify`), `scripts/search_stats.py`,
+    `scripts/diag-mid300.txt`; Clover matches via `peer-match.yml`. New candidates go through
+    the merge queue (`queue.py add <b>:stc`), not manual `ci.py sprt`.
+- **Data: more beats newer.** Window test (same recipe/compute, val-g10 / valL1008):
+  newest 1.27B only 0.023470 / 0.022888; whole 6.08B pool 0.023336 / 0.022723; whole pool
+  with newest 2x **0.023299 / 0.022690**. Keep growing, don't drop old seeds, weight the
+  newest 2x. **Running:** `gen10w.sh` = gen 10 recipe with newest 2x (GPU, 22:44 -> ~09:30
+  20 Nov); gate it if it beats g10.
+- **Pairwise head: the head never trained** (W1 = its random init after 3 epochs). From the
+  g9 warm start only ~1% of pairwise inputs are nonzero, so the head gets no gradient. QAT
+  and CUDA are not the cause. Likely needs an FT trained for pairwise (full chain), so it
+  is parked until gen 11/12; init/pair-order experiments are on `trainer-head-pairwise`
+  206880a. The CUDA pairwise-head trainer is 2.2x faster byte-identical (`perf-cuda-pairwise`, WIP).
+- **Usage:** weekly budget tight (50% by Thu 19 Nov); at most 1-2 subagents, poll rarely.
+
+**Earlier short-term notes (2026-11-19 daytime):**
 - **Gen 10 merged +12.2** [2.9, 21.6] (net-gate, `2d945ec`, g10h1024kb8m):
   pool10 6.08B (pool8 + ci9 + D2004-D2022; D2000/D2001 out; D2021/D2022
   tails = val-g10), gen-9 chain all `--half` (plain 10 ep 1e-3 -> 1e-5, m1 1
@@ -485,14 +516,13 @@ merging (the queue does that).
 ## Deferred actions (each has a trigger; re-check this list whenever a job finishes)
 | Action | Trigger (armed) |
 |---|---|
-| Pairwise head: loss vs head-fix/g9, then embed + fixture, stc and fixed-nodes games vs pre-g10 main (`--base`) | `gpu-jobs/pairwise.log` ends "done" (~18:30 19 Nov); watcher in the main session |
-| Recent-data window test (arms B, C vs shape-test A) | `gpu-jobs/window-test.sh` chained after pairwise.sh; watcher on `gpu-jobs/window/summary.log` |
-| Clover 9.1 comparison (stc / fixed nodes / fixed depth / NPS) and the Stash 35 anchor fix | running in a subagent (started 19 Nov ~14:30) |
-| CUDA pairwise-head trainer speed (`perf-cuda-pairwise`) | running in a subagent |
-| Merge the verified faster CUDA trainer (perf-head-speed-cuda) and the trainer-head-pairwise branch into main | after the pairwise result decides which trainer lineage is kept |
-| Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10 engine: D2027 + L1012 tails), then build pool11 (~6.7B) | D2027 done (~Sat 21 Nov early); gen 11 = pool11 (+ pairwise head if it wins) |
+| gen10w (newest 2x): evals vs g10, net-gate if better | watcher on `gpu-jobs/gen10w.log` (~09:30 20 Nov) |
+| CUDA pairwise-head trainer speed (`perf-cuda-pairwise`): full-speed table on a free GPU, README, squash | next free GPU window (after gen10w); paused subagent |
+| Pairwise head revival: init / pair-order experiments, else an FT trained for pairwise in a full chain | paused (budget); decide at gen 11/12 |
+| Merge the verified faster CUDA trainer (perf-head-speed-cuda) into main | next free agent slot (independent of the pairwise decision) |
+| Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10+ engine: D2027 + L1012 tails), then build pool11 (~6.7B, newest seeds 2x) | D2027 done (~Sat 21 Nov early) |
 | Profile rustfish's NPS drop in longer searches (Clover comparison: not hash size); fix if cheap | after the search-diagnosis agent reports (it owns search.rs instrumentation) |
-| Search self-diagnosis -> own coordinated ordering/pruning experiments; gauge: rerun the 200k-node Clover match after changes | running in a subagent (started 19 Nov 17:20) |
-| D2026 (gen-9 engine) -> D2027-D2030 on the gen-10 engine | automatic: `runlong-2027.sh` in tmux `datagen5` on the desktop |
+| Search: next experiments from round 3 (X3 PV stability; reduction/extension balance at depth); gauge = 200k-node Clover match after each batch | after prune-exempt-killers' verdict |
+| D2026 (gen-9 engine) -> D2027-D2030 on the TT-fixed engine (`rustfish-6daf892-native` is a symlink to `rustfish-f7d7a51-native`) | automatic: `runlong-2027.sh` in tmux `datagen5` on the desktop |
 | Long SPSA (run 44631902925, 605b560, 6 shards x 40 rounds, sum combine, ~2 days): restore queue to 18 shards and lanes 1/1 (scripts/queue-settings.json), then queue the tuned values `:stc`, then `:ltc-check` | last round's merge job finishes (round 40/40); theta = its `spsa-result` artifact |
 | Search diagnosis round 3 (docs/search-diagnosis-2026-11-19.md): `prune-exempt-killers:stc` queued (nodes -9.6%); next X3 = PV-stability measurement | queue result |
