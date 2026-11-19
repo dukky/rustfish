@@ -1,6 +1,6 @@
 {
   "_comment": "Peer engines for diagnostic head-to-head matches (.github/workflows/peer-match.yml), not rating anchors, though the schema matches scripts/anchors*.json, so the CCRL ladder can play them too (-f anchors_file=scripts/peers.json). clover-9.1: CCRL Blitz 3725 (per docs/peer-analysis-2026-11-19.md; no ccrl_err recorded, so the ladder assumes +-20), rustfish's net class (single layer, king buckets, 8 output buckets, FT 1280). Its net (src/quantised.nnue, 13.8 MB) is in the tag and embedded with incbin, so there is no net download. Built with build_flag=avx2 (-march=core-avx2, no AVX-512), matching rustfish's x86-64-v3 SPRT builds. Clover subtracts a fixed 100 ms move overhead from its clock and has no option for it.",
   "anchors": [
-    {"name": "clover-9.1", "ccrl": 3725, "repo": "lucametehau/CloverEngine", "ref": "v9.1", "kind": "make", "dir": "src", "make_args": "build_flag=avx2 EXE=anchor", "out": "src/anchor-avx2", "options": []}
+    {"name": "clover-9.1", "ccrl": 3725, "repo": "lucametehau/CloverEngine", "ref": "v9.1", "kind": "make", "dir": "src", "make_args": "build_flag=avx2 EXE=anchor", "out": "src/anchor", "options": []}
   ]
 }
