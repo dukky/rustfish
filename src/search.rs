@@ -356,6 +356,9 @@ pub(crate) struct Search {
     /// the current path (0 when there is none); repetition lookahead must
     /// not reach behind it.
     null_idx: usize,
+    /// `stats-verify`: ply whose node-level prunes are disabled for a re-search.
+    #[cfg(feature = "stats-verify")]
+    pub(crate) st_skip_ply: usize,
 }
 
 impl Search {
@@ -371,6 +374,8 @@ impl Search {
             move_buf: Vec::with_capacity(256),
             root_nodes: Vec::new(),
             null_idx: 0,
+            #[cfg(feature = "stats-verify")]
+            st_skip_ply: usize::MAX,
         }
     }
 
@@ -1502,20 +1507,30 @@ fn negamax(
 
     let alpha_orig = alpha;
     let pv_node = beta - alpha > 1;
+    #[cfg(feature = "stats")]
+    let st_nt: usize = if pv_node { 0 } else if cut_node { 1 } else { 2 };
     // Singular verification search: same node, minus this move. The TT entry
     // describes the full node, so it must not cut off or be overwritten here.
     let excluded = search.excluded[ply];
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
+    st! { if excluded.is_none() {
+        crate::stats::inc("nm_nodes", crate::stats::nd(st_nt, depth));
+        if let Some(e) = tt_entry {
+            crate::stats::inc("tt_hit", crate::stats::nd(st_nt, depth));
+            if e.best.is_some() { crate::stats::inc("tt_hit_move", crate::stats::nd(st_nt, depth)); }
+            if e.depth as i32 >= depth { crate::stats::inc("tt_hit_deep", crate::stats::nd(st_nt, depth)); }
+        }
+    } }
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
         if excluded.is_none() && entry.depth as i32 >= depth {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
-                Bound::Exact => return tt_score,
-                Bound::Lower if tt_score >= beta => return tt_score,
-                Bound::Upper if tt_score <= alpha => return tt_score,
+                Bound::Exact => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
+                Bound::Lower if tt_score >= beta => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
+                Bound::Upper if tt_score <= alpha => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
                 _ => {}
             }
         }
@@ -1548,14 +1563,27 @@ fn negamax(
     let params = engine.search_params;
 
     if let Some(se) = static_eval {
-        if beta - alpha <= 1 && depth <= 2 {
+        if beta - alpha <= 1 && depth <= 2 && st_allow!(search, ply) {
             let margin = if depth == 1 {
                 params.futility_margin_d1
             } else {
                 params.futility_margin_d2
             };
+            st!{ if excluded.is_none() { crate::stats::inc("razor_try", crate::stats::nd(st_nt, depth)); } }
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+                let q = quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+                st!{ if excluded.is_none() {
+                    crate::stats::inc("razor_fire", crate::stats::nd(st_nt, depth));
+                    if q > alpha { crate::stats::inc("razor_q_above", crate::stats::nd(st_nt, depth)); }
+                } }
+                #[cfg(feature = "stats-verify")]
+                if q <= alpha && excluded.is_none() && !search.stop {
+                    if let Some(v) = st_verify_node(board, depth, alpha, ply, search, engine, rep_stack, key, prev_move, cut_node) {
+                        st_record("vrazor", depth, v > alpha);
+                        st_verify_end();
+                    }
+                }
+                return q;
             }
         }
 
@@ -1563,7 +1591,9 @@ fn negamax(
             && beta - alpha <= 1
             && depth <= RFP_MAX_DEPTH
             && beta.abs() < MATE_SCORE - 1000
+            && st_allow!(search, ply)
         {
+            st!{ crate::stats::inc("rfp_try", crate::stats::nd(st_nt, depth)); }
             let mut margin = match depth {
                 1 => params.reverse_futility_margin_d1,
                 2 => params.reverse_futility_margin_d2,
@@ -1573,6 +1603,14 @@ fn negamax(
                 margin -= margin / 4;
             }
             if se - margin >= beta {
+                st!{ crate::stats::inc("rfp_fire", crate::stats::nd(st_nt, depth)); }
+                #[cfg(feature = "stats-verify")]
+                if !search.stop {
+                    if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
+                        st_record("vrfp", depth, v < beta);
+                        st_verify_end();
+                    }
+                }
                 return se;
             }
         }
@@ -1584,6 +1622,7 @@ fn negamax(
     // (and IIR_MIN_DEPTH > 3 keeps them from triggering on reduced depth here),
     // but before null move so its reduction and the main loop use the cheaper depth.
     if tt_move.is_none() && depth >= IIR_MIN_DEPTH {
+        st!{ if excluded.is_none() { crate::stats::inc("iir", crate::stats::nd(st_nt, depth)); } }
         depth -= 1;
     }
 
@@ -1591,7 +1630,8 @@ fn negamax(
         let side_c = color_index(board.side_to_move);
         let side_pcs = &board.bb.pieces[side_c];
         let has_non_pawn = (side_pcs[1] | side_pcs[2] | side_pcs[3] | side_pcs[4]) != 0;
-        if has_non_pawn && static_eval.is_some_and(|se| se >= beta) {
+        if has_non_pawn && static_eval.is_some_and(|se| se >= beta) && st_allow!(search, ply) {
+            st!{ crate::stats::inc("nmp_try", crate::stats::nd(st_nt, depth)); }
             let old_ep = board.en_passant;
             let old_halfmove = board.halfmove_clock;
             let old_fullmove = board.fullmove_number;
@@ -1638,6 +1678,14 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
+                st!{ crate::stats::inc("nmp_fire", crate::stats::nd(st_nt, depth)); }
+                #[cfg(feature = "stats-verify")]
+                {
+                    if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
+                        st_record("vnmp", depth, v < beta);
+                        st_verify_end();
+                    }
+                }
                 return score;
             }
         }
@@ -1657,7 +1705,8 @@ fn negamax(
                 e.depth as i32 >= depth - 3 && score_from_tt(e.score, ply) < probcut_beta
             })
             .unwrap_or(false);
-        if let (false, Some(se)) = (tt_says_no, static_eval) {
+        if let (false, Some(se), true) = (tt_says_no, static_eval, st_allow!(search, ply)) {
+            st!{ if excluded.is_none() { crate::stats::inc("probcut_try", crate::stats::nd(st_nt, depth)); } }
             let see_threshold = probcut_beta - se;
             let mut picker = MovePicker::new(
                 board,
@@ -1722,6 +1771,14 @@ fn negamax(
                         Bound::Lower,
                         Some(mv),
                     );
+                    st!{ if excluded.is_none() { crate::stats::inc("probcut_fire", crate::stats::nd(st_nt, depth)); } }
+                    #[cfg(feature = "stats-verify")]
+                    if excluded.is_none() {
+                        if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
+                            st_record("vprobcut", depth, v < beta);
+                            st_verify_end();
+                        }
+                    }
                     return score;
                 }
             }
@@ -1749,12 +1806,19 @@ fn negamax(
     }
 
     let threats = picker.threats;
+    st!{ if excluded.is_none() {
+        crate::stats::inc("loop_nodes", crate::stats::nd(st_nt, depth));
+        if tt_move.is_some() { crate::stats::inc("loop_ttmove", crate::stats::nd(st_nt, depth)); }
+        crate::stats::add("loop_legal", crate::stats::nd(st_nt, depth), picker.total as u64);
+    } }
     let mut best = -INF;
     let mut best_move = None;
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
     let mut idx = 0usize;
     let mut check_info: Option<CheckInfo> = None;
+    #[cfg(feature = "stats")]
+    let mut st_first_cls: usize = 0;
 
     while let Some((mv, stage)) = picker.next() {
         if Some(mv) == excluded {
@@ -1797,13 +1861,17 @@ fn negamax(
                     if search.stop {
                         return 0;
                     }
+                    st!{ crate::stats::inc("se_try", crate::stats::nd(st_nt, depth)); }
                     if s < singular_beta {
+                        st!{ crate::stats::inc("se_ext", crate::stats::nd(st_nt, depth)); }
                         extension = 1;
                     } else if singular_beta >= beta && beta - alpha <= 1 {
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
+                        st!{ crate::stats::inc("se_multicut", crate::stats::nd(st_nt, depth)); }
                         return singular_beta;
                     } else if tt_score >= beta {
+                        st!{ crate::stats::inc("se_neg", crate::stats::nd(st_nt, depth)); }
                         // Negative extension: not singular, and the TT score
                         // already beats beta, so an alternative likely cuts too.
                         extension = -params.se_negative_extension;
@@ -1833,6 +1901,20 @@ fn negamax(
                 || quiet_history > 0
                 || quiet_continuation > 0);
 
+        #[cfg(feature = "stats")]
+        let st_cls: usize = match stage {
+            Stage::Tt => 0,
+            Stage::GoodCapture => if see(board, mv) > 0 { 1 } else { 8 },
+            Stage::PriorityQuiet => {
+                if Some(mv) == killers[0] { 2 } else if Some(mv) == counter_move { 3 } else if Some(mv) == killers[1] { 4 } else { 5 }
+            }
+            Stage::Quiet => 6,
+            Stage::BadCapture => 7,
+        };
+        st!{ if excluded.is_none() {
+            crate::stats::inc("gen_stage", crate::stats::ndk(st_nt, depth, st_cls));
+        } }
+
         if quiet && !priority_quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
             let limit = match depth {
                 1 => params.lmp_limit_d1,
@@ -1840,6 +1922,9 @@ fn negamax(
                 _ => params.lmp_limit_d3,
             };
             if idx >= limit {
+                st!{ if excluded.is_none() { crate::stats::inc("lmp", crate::stats::nd(st_nt, depth)); } }
+                #[cfg(feature = "stats-verify")]
+                st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, "vlmp");
                 continue;
             }
         }
@@ -1856,6 +1941,9 @@ fn negamax(
         {
             let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
             if !ci.gives_check(board, mv) {
+                st!{ if excluded.is_none() { crate::stats::inc("fut_move", crate::stats::nd(st_nt, depth)); } }
+                #[cfg(feature = "stats-verify")]
+                st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, "vfut");
                 continue;
             }
         }
@@ -1871,6 +1959,9 @@ fn negamax(
             && best > -(MATE_SCORE - 1000)
             && !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth)
         {
+            st!{ if excluded.is_none() { crate::stats::inc("see_quiet", crate::stats::nd(st_nt, depth)); } }
+            #[cfg(feature = "stats-verify")]
+            st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, "vseeq");
             continue;
         }
 
@@ -1882,12 +1973,22 @@ fn negamax(
             && best > -(MATE_SCORE - 1000)
             && !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth)
         {
+            st!{ if excluded.is_none() { crate::stats::inc("see_cap", crate::stats::nd(st_nt, depth)); } }
+            #[cfg(feature = "stats-verify")]
+            st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, "vseec");
             continue;
         }
 
         if quiet {
             quiets_tried.push(mv);
         }
+        st!{ if excluded.is_none() {
+            crate::stats::inc("searched_stage", crate::stats::ndk(st_nt, depth, st_cls));
+            if idx == 0 {
+                st_first_cls = st_cls;
+                crate::stats::inc("first_stage", crate::stats::ndk(st_nt, depth, st_cls));
+            }
+        } }
 
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
@@ -1954,6 +2055,14 @@ fn negamax(
                 0
             };
             let reduced = reduction > 0;
+            st!{ if excluded.is_none() {
+                crate::stats::inc(if quiet { "nw_quiet" } else { "nw_noisy" }, crate::stats::nd(st_nt, depth));
+                if reduced {
+                    crate::stats::inc("lmr_applied", crate::stats::nd(st_nt, depth));
+                    crate::stats::add("lmr_rsum", crate::stats::nd(st_nt, depth), reduction as u64);
+                    crate::stats::inc("lmr_r_hist", crate::stats::ndk(st_nt, depth, reduction as usize));
+                }
+            } }
             let reduced_depth = (depth - 1 - reduction).max(0);
 
             score = -negamax(
@@ -1972,6 +2081,9 @@ fn negamax(
                 reduced || !cut_node,
             );
 
+            st!{ if excluded.is_none() && reduced && score > alpha && !search.stop {
+                crate::stats::inc("lmr_fh", crate::stats::nd(st_nt, depth));
+            } }
             if reduced && score > alpha {
                 score = -negamax(
                     board,
@@ -1988,8 +2100,14 @@ fn negamax(
                     Some(gives_check),
                     !cut_node,
                 );
+                st!{ if excluded.is_none() && score > alpha && !search.stop {
+                    crate::stats::inc("lmr_confirm", crate::stats::nd(st_nt, depth));
+                } }
             }
 
+            st!{ if excluded.is_none() && score > alpha && score < beta && !search.stop {
+                crate::stats::inc("pvs_research", crate::stats::nd(st_nt, depth));
+            } }
             if score > alpha && score < beta {
                 score = -negamax(
                     board,
@@ -2024,6 +2142,16 @@ fn negamax(
             alpha = score;
         }
         if alpha >= beta {
+            st!{ if excluded.is_none() {
+                crate::stats::inc("fh_nodes", crate::stats::nd(st_nt, depth));
+                crate::stats::inc("cut_idx", crate::stats::ndk(st_nt, depth, idx));
+                crate::stats::inc("cut_stage", crate::stats::ndk(st_nt, depth, st_cls));
+                if idx == 0 { crate::stats::inc("first_cut", crate::stats::ndk(st_nt, depth, st_cls)); } else {
+                    crate::stats::inc("late_cut_first", crate::stats::ndk(st_nt, depth, st_first_cls));
+                    crate::stats::inc("late_cut_stage", crate::stats::ndk(st_nt, depth, st_cls));
+                }
+                crate::stats::add("fh_searched", crate::stats::nd(st_nt, depth), idx as u64 + 1);
+            } }
             if quiet {
                 let bonus = history_bonus(depth);
                 if let Some(prev) = prev_move {
@@ -2071,6 +2199,10 @@ fn negamax(
     } else {
         Bound::Exact
     };
+    st!{
+        crate::stats::inc(if bound == Bound::Upper { "fl_nodes" } else { "ex_nodes" }, crate::stats::nd(st_nt, depth));
+        crate::stats::add(if bound == Bound::Upper { "fl_searched" } else { "ex_searched" }, crate::stats::nd(st_nt, depth), idx as u64);
+    }
     if let (Some(ce), Some(ci)) = (corr_eval, corr_idx) {
         update_correction(engine, board, &ci, depth, best, best_move, ce, bound);
     }
@@ -2079,6 +2211,86 @@ fn negamax(
         .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
 
     best
+}
+
+// ---- stats-verify: sampled re-searches of pruned nodes and moves ----------
+// A pruned node is re-searched at the same depth with its node-level prunes
+// disabled (st_skip_ply); a pruned move is searched at depth - 1 with a null
+// window on alpha. Verification nodes are not counted (stats SUSPEND) and the
+// node counter is restored; the TT and histories are still touched, so stats
+// from a verify build describe a slightly perturbed search.
+#[cfg(feature = "stats-verify")]
+const ST_VERIFY_RATE: u64 = 16;
+
+#[cfg(feature = "stats-verify")]
+#[allow(clippy::too_many_arguments)]
+fn st_verify_node(
+    board: &mut Board,
+    depth: i32,
+    a: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    prev_move: Option<Move>,
+    cut_node: bool,
+) -> Option<i32> {
+    if crate::stats::suspended() || search.stop || !crate::stats::sample(ST_VERIFY_RATE) {
+        return None;
+    }
+    crate::stats::SUSPEND.with(|c| c.set(c.get() + 1));
+    let (nodes, skip) = (search.nodes, search.st_skip_ply);
+    search.st_skip_ply = ply;
+    let v = negamax(board, depth, a, a + 1, ply, search, engine, rep_stack, key, prev_move, false, Some(false), cut_node);
+    search.st_skip_ply = skip;
+    search.nodes = nodes;
+    crate::stats::SUSPEND.with(|c| c.set(c.get() - 1));
+    if search.stop { None } else { Some(v) }
+}
+
+#[cfg(feature = "stats-verify")]
+fn st_verify_end() {}
+
+#[cfg(feature = "stats-verify")]
+fn st_record(key: &'static str, depth: i32, err: bool) {
+    crate::stats::inc(key, crate::stats::db(depth) * 2);
+    if err {
+        crate::stats::inc(key, crate::stats::db(depth) * 2 + 1);
+    }
+}
+
+#[cfg(feature = "stats-verify")]
+#[allow(clippy::too_many_arguments)]
+fn st_verify_move(
+    board: &mut Board,
+    mv: Move,
+    depth: i32,
+    alpha: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    name: &'static str,
+) {
+    if crate::stats::suspended() || search.stop || !crate::stats::sample(ST_VERIFY_RATE) {
+        return;
+    }
+    crate::stats::SUSPEND.with(|c| c.set(c.get() + 1));
+    let nodes = search.nodes;
+    let undo = board.make_move(mv);
+    let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
+    rep_stack.push(child_key);
+    let gives_check = board.is_in_check(board.side_to_move);
+    let v = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1, search, engine, rep_stack, child_key, Some(mv), true, Some(gives_check), false);
+    rep_stack.pop();
+    board.undo_move(mv, undo);
+    search.nodes = nodes;
+    crate::stats::SUSPEND.with(|c| c.set(c.get() - 1));
+    if !search.stop {
+        st_record(name, depth, v > alpha);
+    }
 }
 
 /// |quiescence - static eval| for the side to move; 0 means the position is quiet.
@@ -2131,6 +2343,7 @@ fn quiescence(
     let alpha_orig = alpha;
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
+    st!{ crate::stats::inc("q_nodes", 0); if tt_entry.is_some() { crate::stats::inc("q_tt_hit", 0); } }
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
         if entry.depth >= 0 {
