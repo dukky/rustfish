@@ -2212,9 +2212,14 @@ fn negamax(
     if let (Some(ce), Some(ci)) = (corr_eval, corr_idx) {
         update_correction(engine, board, &ci, depth, best, best_move, ce, bound);
     }
+    // A fail-low node's best move is only the highest of scores that all
+    // failed low; as a TT move it cut 5-26% of the time against 83-93% for
+    // fail-high moves (docs/search-diagnosis-2026-11-19.md). Store none, so
+    // the slot keeps an older proven move or the next visit orders afresh.
+    let tt_best = if bound == Bound::Upper { None } else { best_move };
     engine
         .tt
-        .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, best_move);
+        .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, tt_best);
 
     best
 }
