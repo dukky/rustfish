@@ -432,6 +432,78 @@ features (rustfish's own idea, which also feeds item 2).
 **Not levers at 1-CPU CCRL Blitz:** NUMA, SMP tuning, Syzygy and DFRC.
 Peers ship them, but none of their 1-thread SPRTs credits them.
 
+## Step 0 results: rustfish vs Clover 9.1 (2026-11-19)
+
+Measured on GitHub runners with `.github/workflows/peer-match.yml`: rustfish
+main at `8aa1c9c` (x86-64-v3) against Clover 9.1 built from its tag with its
+own net (avx2), each with 1 thread and the same hash, using sprt.yml's
+fastchess setup and adjudication. Elo is pentanomial from rustfish's view,
+with 95% CIs. Clover is used only as a benchmark here, and everything below
+is our own measurement.
+
+| Limit | Book | Hash | Games | W/D/L | Elo (95% CI) |
+|---|---|---:|---:|---|---|
+| 10+0.1 | UHO | 16 | 792 | 18/345/429 | **-200** (-212 .. -188) |
+| 10+0.1 | 8moves_v3 | 16 | 792 | 12/348/432 | **-205** (-222 .. -189) |
+| 10+0.1 | UHO | 64 | 792 | 21/335/436 | **-202** (-215 .. -190) |
+| 60+0.6 | UHO | 64 | 396 | 11/176/209 | **-191** (-205 .. -177) |
+| 200k nodes | UHO | 16 | 792 | 39/282/471 | **-213** (-228 .. -198) |
+| 1M nodes | UHO | 16 | 396 | 14/166/216 | **-196** (-212 .. -180) |
+| depth 11 | UHO | 16 | 792 | 244/364/184 | **+26** (+11 .. +42) |
+| depth 1 | UHO | 16 | 792 | 461/72/259 | **+91** (+68 .. +114) |
+
+Speed on the 50-position OpenBench bench set (`scripts/peer_nps.py`, 1 thread,
+Hash 16, ucinewgame before each position, engine order alternated over 2
+repeats):
+
+| Machine | Engine | Nodes to depth 12 | Time to depth 12 | NPS at `go movetime 1000` |
+|---|---|---:|---:|---:|
+| CI (EPYC 7763) | rustfish | 8,509,009 | 4.41 s | 1,525,515 |
+| CI (EPYC 7763) | Clover 9.1 | 2,251,203 | 1.36 s | 1,800,411 |
+| 9600X (datagen paused, GPU trainer running) | rustfish | 8,509,009 | 2.25 s | 2,628,172 |
+| 9600X | Clover 9.1 | 2,251,203 | 0.75 s | 3,315,752 |
+
+**Interpretation.**
+- **Eval is not the gap.** At depth 1 (essentially eval plus qsearch)
+  rustfish wins by +91, and at depth 11 by +26. Fixed depth is not an equal
+  measure, since each engine defines and prunes "depth" differently, but
+  nothing here points to the net being weaker.
+- **The gap is per-node search efficiency.** At equal nodes rustfish loses
+  by -213 at 200k and -196 at 1M, about the same as at 10+0.1 (-200) and
+  60+0.6 (-191). Rustfish needs **3.8x as many nodes** to reach depth 12,
+  and its 4x larger tree at equal depth buys only +26. The other engine
+  searches far more selectively and gets more out of each node. That means
+  pruning, reductions and move ordering, not eval.
+- **Raw speed is a small part.** Clover is 18% faster at 1 s per move on
+  the runner and 26% faster on the 9600X, worth about 20-30 Elo at these
+  time controls. The time-control results match the fixed-nodes results, so
+  time management is not a visible factor either. Nor is hash: Hash 64 (as
+  in the ladder and the LTC SPRTs) gives -202 at 10+0.1, against -200 at 16.
+- **Rustfish's NPS falls in longer searches:** about 1.9M in the
+  depth-12 runs (around 90 ms per position) but 1.53M at 1 s per move on the
+  runner, and 3.8M against 2.6M on the 9600X. Hash size does not explain
+  it: 16 and 256 MB give the same movetime NPS on the M3. Worth profiling.
+- **Head-to-head is larger than the rating gap.** All time controls,
+  books and hash sizes give -190 to -205, against the ~137 implied by
+  CCRL 3725 vs the ~3588 ladder estimate. Engine pairs are not transitive,
+  and the ladder estimate has its own error, so read this as "about 140-200",
+  not as a correction to the ladder.
+
+**Caveats.** Engines count nodes in their own way (both count one node per
+negamax and per qsearch entry, so the counts are roughly comparable, though
+not exactly), so fixed-node Elo is indicative only. Fixed-depth Elo depends
+on each engine's definition of depth. All results are head-to-head against
+one engine.
+
+**What next.** The levers are search selectivity, not the net: (1) find
+where rustfish's extra nodes go (a node-count breakdown by node type and
+move number at fixed depth on the bench set, and how many nodes LMR, LMP,
+futility and NMP save); (2) SPSA the existing pruning and reduction
+tunables at fixed nodes and at STC; (3) test more aggressive reduction and
+pruning ideas from the route list as normal SPRTs; (4) profile the NPS drop
+in longer searches. Repeat this match (`gh workflow run peer-match.yml -f
+limit=nodes=200000`) after search changes as a cheap progress gauge.
+
 ## Caveats
 
 - Architectures were read from master unless a tag is named. For Berserk
