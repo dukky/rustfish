@@ -1,5 +1,18 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "rep-null-guard",
+      "mode": "stc"
+    },
+    {
+      "branch": "ep-hash-capturable",
+      "mode": "stc"
+    },
+    {
+      "branch": "queen-promo-tactical",
+      "mode": "stc"
+    }
+  ],
   "current": {
     "branch": "prune-exempt-killers",
     "mode": "stc",
