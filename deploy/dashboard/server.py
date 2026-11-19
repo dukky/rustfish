@@ -202,6 +202,9 @@ def build_generations(nets):
             "best_scale_val": bs_val, "best_scale_val17x2": bs_17, "baseline": g.get("baseline"),
             "notes": g.get("notes"), "mode": g.get("mode"), "tc": g.get("tc"), "status": g.get("status"),
             "elo": g.get("elo"), "ci": g.get("ci"), "games": g.get("games"), "games_est": g.get("games_est"),
+            "recipe": g.get("recipe"), "trainer": g.get("trainer"), "trained": g.get("trained"),
+            "best_scale": g.get("best_scale"), "best_scale_set": g.get("best_scale_set"),
+            "pool_desc": g.get("pool_desc"), "merged_commit": g.get("merged_commit"), "ladder": g.get("ladder"),
             "reason": g.get("reason"), "when": g.get("when") or g.get("first_at"), "run_url": g.get("run_url"),
             "current": False})
     # Grouped by generation (newest generation first; the E series before gen
@@ -224,7 +227,9 @@ NET_V1_AUDIT = "docs/nnue-experiments.md#audit-of-the-v1-chain-2026-11-06"
 EXPERIMENT_REFS = ("main", "netloop")
 # Optional experiments.jsonl fields passed through when a row has them.
 NET_EXTRA_FIELDS = ("king_buckets", "mean_abs_eval", "best_scale_val", "best_scale_val17x2",
-                    "best_scale_factor", "output_scale", "init", "train_data", "threats", "inputs")
+                    "best_scale_factor", "output_scale", "init", "train_data", "threats", "inputs",
+                    "recipe", "trainer", "trained", "best_scale", "best_scale_set", "pool_desc",
+                    "merged_commit", "ladder")
 
 
 class Cache:

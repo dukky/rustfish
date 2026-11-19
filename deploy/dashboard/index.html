@@ -390,6 +390,18 @@ function shapeText(r) {
   if (r.threats) parts.push(`threats ${esc(r.threats)}${inf("threats")}`);
   return parts.length ? parts.join(" · ") : "–";
 }
+// Compact training record: "plain 10 1e-3→1e-5 → m1 1 → kb8m 4 f · half · cuda".
+function recipeText(r) {
+  const lr = (x) => x == null ? "" : Number(x).toExponential(0).replace("e-", "e-");
+  const st = (r.recipe || []).map((s) => `${esc(s.stage)} ${s.epochs != null ? s.epochs + "ep" : "?"}` +
+    (s.lr ? ` ${lr(s.lr[0])}→${lr(s.lr[1])}` : "") + (s.factorise ? " fact" : "") + (s.keep_best ? " kb" : ""));
+  const parts = [];
+  if (st.length) parts.push(st.join(" → ") + ((r.recipe || []).some((s) => s.half) ? " · half" : ""));
+  if (r.trainer) parts.push(esc(r.trainer.split(" ")[0]));
+  if (r.trained) parts.push(esc(r.trained));
+  if (r.ladder && r.ladder.rating != null) parts.push(`ladder ${fmt(r.ladder.rating, 0)}`);
+  return parts.join(" · ");
+}
 function renderGenerations(s) {
   const rows = s.generations || [];
   const el = $("generations");
@@ -418,9 +430,13 @@ function renderGenerations(s) {
     const name = `<b class="mono">${esc(r.name)}</b>${r.current ? ` <span class="badge b-good">on main</span>` : ""}` +
       `<div class="meta hide-sm">${r.branch && !r.local ? netBranchLink(r.branch) : r.local ? "local only" : ""}</div>` +
       (r.training_record ? "" : `<span class="badge b-warn" title="No row for this branch in net/experiments.jsonl">no training record</span>`) +
-      `<div class="meta show-sm">${k !== "other" ? esc(k) + " · " : ""}${shapeText(r)}</div>`;
+      `<div class="meta show-sm">${k !== "other" ? esc(k) + " · " : ""}${shapeText(r)}</div>` +
+      (recipeText(r) ? `<div class="meta mono hide-sm" style="font-size:11.5px">${recipeText(r)}</div>` : "");
     const pool = r.pool != null ? `${shortNum(r.pool)}${r.train_data ? `<div class="meta">${esc(r.train_data.replace(/\.bin$/, ""))}</div>` : ""}` : "–";
-    const bs = r.best_scale_val != null || r.best_scale_val17x2 != null
+    const bsTitle = r.best_scale ? Object.entries(r.best_scale).map(([k, v]) => `${k} ${Number(v).toFixed(6)}`).join(", ") : "";
+    const bs = r.best_scale && r.best_scale_set && r.best_scale[r.best_scale_set] != null
+      ? `<span title="${esc(bsTitle)}">${Number(r.best_scale[r.best_scale_set]).toFixed(6)}</span><div class="meta">${esc(r.best_scale_set)}</div>`
+      : r.best_scale_val != null || r.best_scale_val17x2 != null
       ? `${r.best_scale_val != null ? Number(r.best_scale_val).toFixed(6) : "–"}<div class="meta">${r.best_scale_val17x2 != null ? Number(r.best_scale_val17x2).toFixed(6) : "–"}</div>`
       : r.val_loss != null ? `<span class="meta" title="Raw val loss (no best-scale figure recorded)">raw ${Number(r.val_loss).toFixed(6)}</span>` : "–";
     const elo = r.elo != null ? `${signed(r.elo)}${r.ci ? `<div class="meta">±${fmt((r.ci[1] - r.ci[0]) / 2, 1)}</div>` : ""}`
