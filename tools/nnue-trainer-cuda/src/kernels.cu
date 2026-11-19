@@ -34,7 +34,8 @@ __device__ __forceinline__ float q_w1(float w) { return fminf(fmaxf(roundf(w * 6
 __device__ __forceinline__ float pw_in(float a, float b) {
     float p = fminf(fmaxf(a, 0.f), 1.f) * fminf(fmaxf(b, 0.f), 1.f);
     // No fma contraction: round the product first, as the CPU trainer.
-    return floorf(__fmul_rn(p, PW_QX) + 0.5f) / PW_QX;
+    // + 1/1024: exact ties of integer accumulators round up (nnue_trainer::PW_HALF).
+    return floorf(__fmul_rn(p, PW_QX) + 0.5009765625f) / PW_QX;
 }
 // Pairwise input i (0..H) of one sample's accumulators `as` (2H).
 __device__ __forceinline__ float pw_at(const float *as, int H, int i) {

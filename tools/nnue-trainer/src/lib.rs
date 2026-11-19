@@ -387,6 +387,11 @@ pub struct Shape {
 /// - Optional `--ft-l1 L`: adds `L * sum(p)` per sample to the loss (FT
 ///   activation sparsity for the sparse engine L1), default 0.
 pub const PW_QX: f32 = 65025.0 / 512.0;
+/// The rounding offset of `pw_in`: a half plus 1/1024, so that inputs
+/// from integer accumulators (`eval` / `fen-eval` of a quantised net) round
+/// their exact ties (`c1 c2 = 512 k + 256`) up, as the engine does, despite
+/// float error (~1e-5 here; the nearest non-tie is 1/512 away).
+pub const PW_HALF: f32 = 0.5 + 1.0 / 1024.0;
 /// W1 scale of pairwise heads (i8 in the engine).
 pub const PW_W1Q: f32 = 64.0;
 
@@ -432,7 +437,7 @@ pub fn pw_in(a: f32, b: f32) -> f32 {
     if !qat() {
         return p;
     }
-    (p * PW_QX + 0.5).floor() / PW_QX
+    (p * PW_QX + PW_HALF).floor() / PW_QX
 }
 
 /// Pairwise input `i` (0..H) of the 2H accumulators `acc`.
@@ -3162,10 +3167,13 @@ mod tests {
             // No linear output and a zero skip neuron: the start is out_b.
             assert_eq!(forward(&p, sh, &s, &mut a), p[sh.out_b() + s.bucket]);
         }
-        // Inputs: x / PW_QX with x = the engine's (c1 c2 + 256) >> 9.
-        for (c1, c2) in [(0, 9), (255, 255), (17, 31), (200, 3), (128, 2), (37, 101)] {
+        // Inputs: x / PW_QX with x = the engine's (c1 c2 + 256) >> 9,
+        // exact ties (c1 c2 = 512 k + 256) included.
+        for c1 in 0..=255 {
+          for c2 in 0..=255 {
             let want = ((c1 * c2 + 256) >> 9) as f32 / PW_QX;
             assert_eq!(pw_in(c1 as f32 / 255.0, c2 as f32 / 255.0), want, "{c1} {c2}");
+          }
         }
         assert_eq!(q_w1(1.98), 127.0 / 64.0);
         assert_eq!(q_w1(-0.0234), -1.0 / 64.0);
