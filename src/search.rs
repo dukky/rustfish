@@ -739,7 +739,9 @@ impl MovePicker {
                 continue;
             }
 
-            if is_capture_move(board, mv) {
+            // Queen promotions are tactical: ordered (and pruned) with the
+            // captures by SEE, never treated as quiets.
+            if is_tactical_move(board, mv) {
                 let see_score = see(board, mv);
                 let score = capture_stage_score_from_see(board, mv, see_score)
                     + if captures_only { 0 } else { capture_history_score(engine, side, board, mv) / CAPTURE_HISTORY_DIV };
@@ -1936,7 +1938,7 @@ fn negamax_body(
             }
         }
         let quiet = match stage {
-            Stage::Tt => !is_capture_move(board, mv),
+            Stage::Tt => !is_tactical_move(board, mv),
             Stage::GoodCapture | Stage::BadCapture => false,
             Stage::PriorityQuiet | Stage::Quiet => true,
         };
@@ -2429,6 +2431,13 @@ fn order_moves(
 
 fn is_capture_move(board: &Board, mv: Move) -> bool {
     mv.is_en_passant || board.squares[mv.to as usize].is_some()
+}
+
+/// Captures and queen promotions: the moves the picker stages by SEE and the
+/// quiet-move pruning, LMR and history leave alone.
+#[inline]
+fn is_tactical_move(board: &Board, mv: Move) -> bool {
+    mv.promotion == Some(PieceType::Queen) || is_capture_move(board, mv)
 }
 
 /// Ordering score for a capture inside the bucket its `see_score` sign selects
