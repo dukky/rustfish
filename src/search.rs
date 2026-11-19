@@ -981,6 +981,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         .unwrap_or_else(|| depth >= MIN_PARALLEL_DEPTH);
 
     for d in 1..=depth.max(1) {
+        st!{ crate::stats::ROOT_DEPTH.with(|r| r.set(d)); }
         let use_threads = threaded && parallel_allowed && d >= MIN_PARALLEL_DEPTH;
         if !use_threads && search.should_stop() {
             break;
@@ -1486,6 +1487,7 @@ fn negamax(
 
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
     if in_check {
+        st!{ crate::stats::inc("check_ext", crate::stats::db(depth)); }
         depth += 1;
     }
 
@@ -1502,6 +1504,7 @@ fn negamax(
     }
 
     if depth <= 0 {
+        st!{ crate::stats::inc("leaf_ply_excess", (ply as i64 - crate::stats::ROOT_DEPTH.with(|r| r.get()) as i64 + 8).clamp(0, 40) as usize); }
         return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
     }
 
@@ -1819,6 +1822,8 @@ fn negamax(
     let mut check_info: Option<CheckInfo> = None;
     #[cfg(feature = "stats")]
     let mut st_first_cls: usize = 0;
+    #[cfg(feature = "stats")]
+    let mut st_tt_k: usize = 0;
 
     while let Some((mv, stage)) = picker.next() {
         if Some(mv) == excluded {
@@ -1987,6 +1992,7 @@ fn negamax(
             if idx == 0 {
                 st_first_cls = st_cls;
                 crate::stats::inc("first_stage", crate::stats::ndk(st_nt, depth, st_cls));
+                if st_cls == 0 { if let Some(e) = tt_entry { let bk = match e.bound { Bound::Exact => 0, Bound::Lower => 1, Bound::Upper => 2 }; let df = depth - e.depth as i32; let db_ = if df <= 0 { 0 } else if df == 1 { 1 } else if df <= 3 { 2 } else { 3 }; st_tt_k = bk * 4 + db_; crate::stats::inc("ttfirst_n", crate::stats::ndk(st_nt, depth, st_tt_k)); } }
             }
         } }
 
@@ -2146,7 +2152,7 @@ fn negamax(
                 crate::stats::inc("fh_nodes", crate::stats::nd(st_nt, depth));
                 crate::stats::inc("cut_idx", crate::stats::ndk(st_nt, depth, idx));
                 crate::stats::inc("cut_stage", crate::stats::ndk(st_nt, depth, st_cls));
-                if idx == 0 { crate::stats::inc("first_cut", crate::stats::ndk(st_nt, depth, st_cls)); } else {
+                if idx == 0 { crate::stats::inc("first_cut", crate::stats::ndk(st_nt, depth, st_cls)); if st_cls == 0 { crate::stats::inc("ttfirst_cut", crate::stats::ndk(st_nt, depth, st_tt_k)); } } else {
                     crate::stats::inc("late_cut_first", crate::stats::ndk(st_nt, depth, st_first_cls));
                     crate::stats::inc("late_cut_stage", crate::stats::ndk(st_nt, depth, st_cls));
                 }

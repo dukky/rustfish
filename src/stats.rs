@@ -17,6 +17,8 @@ thread_local! {
     /// > 0 while a verification search runs: its nodes are not counted.
     pub static SUSPEND: Cell<u32> = const { Cell::new(0) };
     static RNG: Cell<u64> = const { Cell::new(0x9e37_79b9_7f4a_7c15) };
+    /// Current iterative-deepening depth (for the leaf ply-excess histogram).
+    pub static ROOT_DEPTH: Cell<i32> = const { Cell::new(0) };
 }
 
 #[inline]

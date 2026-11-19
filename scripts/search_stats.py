@@ -141,6 +141,15 @@ def report(st):
                 rows.append([d, len(r), "%.2f" % gm])
         out.append("\nEBF (geometric mean of cumulative nodes(d)/nodes(d-1)):\n")
         out.append(table(rows, ["iter depth", "searches", "EBF"]))
+    if "leaf_ply_excess" in st:
+        v = st["leaf_ply_excess"]
+        tot = sum(v)
+        cells = []
+        for lo, hi, lab in ((0, 8, "<0"), (8, 9, "0"), (9, 10, "+1"), (10, 11, "+2"), (11, 13, "+3..4"), (13, 41, "+5 or more")):
+            cells.append("%s %s" % (lab, pct(sum(v[lo:hi]), tot)))
+        out.append("\nHorizon (qsearch entry from negamax) ply minus iteration depth: " + ", ".join(cells) + "\n")
+        ce = st.get("check_ext", [])
+        out.append("Check extensions: %d (%s of negamax nodes)\n" % (sum(ce), pct(sum(ce), nm)))
     out.append("\n### Node outcomes (move-loop nodes)\n")
     rows = []
     for n in range(3):
@@ -201,6 +210,18 @@ def report(st):
             rows.append([nm_, pct(S(st, "late_cut_first", [1], alld, k), lc), pct(S(st, "late_cut_stage", [1], alld, k), lc)])
         out.append("Late cutoffs at CUT nodes (cutoff at idx>=1, %d): class of the failed first move vs class of the cutting move\n" % lc)
         out.append(table(rows, ["class", "failed first move", "late cutting move"]))
+    if "ttfirst_n" in st:
+        out.append("\n### TT move as first move at CUT / ALL nodes: cut rate by entry bound and depth deficit (depth - entry depth)\n")
+        rows = []
+        for n in (1, 2):
+            for b, bn in enumerate(["exact", "lower", "upper"]):
+                r = [NT[n], bn]
+                for dfi in range(4):
+                    k = b * 4 + dfi
+                    c, t = S(st, "ttfirst_cut", [n], alld, k), S(st, "ttfirst_n", [n], alld, k)
+                    r.append("%s (%d)" % (pct(c, t), t) if t else "-")
+                rows.append(r)
+        out.append(table(rows, ["type", "bound", "deficit <=0", "1", "2-3", ">=4"]))
     out.append("\n### Late move reductions (null-window moves after the first)\n")
     rows = []
     for name, ds in GROUPS:
@@ -265,7 +286,62 @@ def report(st):
     return "\n".join(out)
 
 
+def load(path):
+    st = json.load(open(path))
+    st["_iters"] = [{int(k): v for k, v in i.items()} for i in st.get("_iters", [])]
+    return st
+
+
+def key_metrics(st):
+    A, alld = [0, 1, 2], list(range(DB))
+    nm, q = S(st, "nm_nodes", A, alld), g(st, "q_nodes", 0)
+    fh = S(st, "fh_nodes", A, alld)
+    cfh = S(st, "fh_nodes", [1], alld)
+    shallow = [1, 2, 3]
+    sfh = S(st, "fh_nodes", A, shallow)
+    iters = st.get("_iters", [])
+    tot = {}
+    for d in (10, 12, 14):
+        v = [i[d] for i in iters if d in i]
+        tot[d] = sum(v) / len(v) if v else 0
+    ebf = []
+    for d in range(10, 15):
+        r = [i[d] / i[d - 1] for i in iters if d in i and d - 1 in i]
+        if r:
+            ebf.append(math.exp(sum(math.log(x) for x in r) / len(r)))
+    late = sum(S(st, "cut_idx", A, alld, k) for k in range(4, K))
+    qcls = (5, 6)
+    qs = sum(S(st, "searched_stage", A, alld, k) for k in qcls)
+    qc = sum(S(st, "cut_stage", A, alld, k) for k in qcls)
+    return [
+        ("total nodes (nm + q)", "%d" % (nm + q)),
+        ("mean nodes to depth 12 / 14", "%d / %d" % (tot[12], tot[14])),
+        ("EBF d10-14 (geo mean)", "%.3f" % (math.exp(sum(map(math.log, ebf)) / len(ebf)) if ebf else 0)),
+        ("qsearch share", pct(q, nm + q)),
+        ("first-move cutoff, all / CUT / d1-3", "%s / %s / %s" % (
+            pct(S(st, "cut_idx", A, alld, 0), fh), pct(S(st, "cut_idx", [1], alld, 0), cfh),
+            pct(S(st, "cut_idx", A, shallow, 0), sfh))),
+        ("cutoffs at idx >= 4", pct(late, fh)),
+        ("avg moves searched at fail-high", f2(S(st, "fh_searched", A, alld), fh)),
+        ("CUT-node fail-low rate", pct(S(st, "fl_nodes", [1], alld), S(st, "loop_nodes", [1], alld))),
+        ("history quiets (hist>0 + plain): cut rate", pct(qc, qs)),
+        ("killer1 cut rate", pct(S(st, "cut_stage", A, alld, 2), S(st, "searched_stage", A, alld, 2))),
+        ("priority share of visited quiets", pct(sum(S(st, "gen_stage", A, alld, k) for k in (2, 3, 4, 5)),
+                                                 sum(S(st, "gen_stage", A, alld, k) for k in (2, 3, 4, 5, 6)))),
+        ("LMR reduced fails high", pct(S(st, "lmr_fh", A, alld), S(st, "lmr_applied", A, alld))),
+    ]
+
+
+def compare(files):
+    cols = [key_metrics(load(f)) for f in files]
+    rows = [[cols[0][i][0]] + [c[i][1] for c in cols] for i in range(len(cols[0]))]
+    return table(rows, ["metric"] + [os.path.basename(f).replace(".json", "") for f in files])
+
+
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "compare":
+        print(compare(sys.argv[2:]))
+        return
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["bench", "positions", "report"])
     ap.add_argument("--engine")
@@ -278,7 +354,7 @@ def main():
     ap.add_argument("--json", help="report mode: stats JSON written by --out")
     args = ap.parse_args()
     if args.mode == "report":
-        st = json.load(open(args.json))
+        st = load(args.json)
     else:
         st = run(args)
         if args.out:
