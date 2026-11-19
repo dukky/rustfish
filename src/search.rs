@@ -1832,8 +1832,12 @@ fn negamax(
                 || Some(mv) == counter_move
                 || quiet_history > 0
                 || quiet_continuation > 0);
+        // Only killers and the counter-move are exempt from the move-count,
+        // futility and SEE prunes; a merely positive history is not.
+        let prune_exempt = quiet
+            && (Some(mv) == killers[0] || Some(mv) == killers[1] || Some(mv) == counter_move);
 
-        if quiet && !priority_quiet && !in_check && beta - alpha <= 1 && depth <= 3 {
+        if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3 {
             let limit = match depth {
                 1 => params.lmp_limit_d1,
                 2 => params.lmp_limit_d2,
@@ -1847,7 +1851,7 @@ fn negamax(
         // Per-move futility: a late quiet that cannot raise static eval to
         // alpha, and does not give check, is uninteresting at a zero window.
         if quiet
-            && !priority_quiet
+            && !prune_exempt
             && !in_check
             && beta - alpha <= 1
             && depth <= 8
@@ -1863,7 +1867,7 @@ fn negamax(
         // Quiet SEE pruning: skip late, unremarkable quiets that hang material
         // by more than a depth-scaled margin.
         if quiet
-            && !priority_quiet
+            && !prune_exempt
             && !in_check
             && beta - alpha <= 1
             && idx > 0
