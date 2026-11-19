@@ -202,11 +202,12 @@ class Rows(unittest.TestCase):
 class EmbedRecords(unittest.TestCase):
     """cmd_embed with git/cargo/engine mocked: the row is pushed after the branch."""
 
-    def embed(self, *extra):
+    def embed(self, *extra, log=True):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            (d / "e9.log").write_text(LOG.replace("king-buckets=kb8m (KB=8) factorised ", "")
-                                      .replace("H=512 buckets=8", "H=16 buckets=1"))
+            if log:
+                (d / "e9.log").write_text(LOG.replace("king-buckets=kb8m (KB=8) factorised ", "")
+                                        .replace("H=512 buckets=8", "H=16 buckets=1"))
             net = d / "e9.bin"
             net.write_bytes(b"\0" * nl.net_bytes(16, 1))
             calls, pushed = [], []
@@ -248,6 +249,15 @@ class EmbedRecords(unittest.TestCase):
         self.assertEqual((row["id"], row["branch"], row["baseline"], row["notes"], row["seeds"]),
                          ("e9", "nnue-e9", "g3f", "hello", [4, 5]))
         self.assertEqual((row["hidden"], row["buckets"], row["val_loss"]), (16, 1, 0.026456))
+
+    def test_no_log_needs_record_flags(self):
+        with mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                self.embed(log=False)
+            row = self.embed("--pool-desc", "pool10", "--recipe", '[{"stage":"plain","epochs":4}]',
+                             "--trainer-desc", "cuda", log=False)[1][0][0]
+            self.assertEqual((row["pool_desc"], row["recipe"][0]["epochs"], row["trainer"]), ("pool10", 4, "cuda"))
+            self.assertEqual(len(self.embed("--allow-incomplete-record", log=False)[1]), 1)
 
     def test_no_record_and_no_push(self):
         self.assertEqual(self.embed("--no-record")[1], [])

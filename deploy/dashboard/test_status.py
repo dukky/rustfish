@@ -39,6 +39,22 @@ DATAGEN = run(6, "datagen.yml", "in_progress", "Datagen main seed 200", "2026-11
 DONE = run(7, "sprt.yml", "completed", "SPRT q-feat-x-1112-2305 wave 2", "2026-11-12T23:11:46Z")
 
 
+class NetRecordsTest(unittest.TestCase):
+    """Every net branch in the repo's experiments file is covered (offline: the
+    branch list itself comes from scripts/check_net_records.py on a checkout)."""
+
+    def test_missing_lists_unrecorded(self):
+        sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts"))
+        import check_net_records as c
+        rows = [{"id": "g1", "branch": "nnue-g1"}, {"id": "G2"}]
+        self.assertEqual(c.missing({"nnue-g1", "nnue-g2", "nnue-g3"}, rows), ["nnue-g3"])
+
+    def test_record_status_settles_needs_human(self):
+        qlog = [{"branch": "nnue-x", "mode": "stc", "outcome": "needs-human", "logged_at": "2026-11-15T00:00:00Z"}]
+        ng = server.build_net_gates(qlog, {}, [{"id": "x", "branch": "nnue-x", "gate_status": "rejected"}], set())
+        self.assertEqual(ng["v2"][0]["status"], "rejected")
+
+
 class RunnerUsageTest(unittest.TestCase):
     def test_grouping(self):
         u = server.build_runner_usage(

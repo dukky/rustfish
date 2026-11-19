@@ -311,8 +311,27 @@ def rescale_to(trainer_bin, net, out, *, buckets, layout, ref, ref_buckets, ref_
             "achieved": float(a.group(1)) if a else None, "text": r.stdout.strip()}
 
 
+def missing_record(args):
+    """What the experiments row would lack: no training log and no flags for it."""
+    if getattr(args, "no_record", False) or getattr(args, "no_push", False):
+        return []
+    d = Path(args.data_dir).expanduser()
+    log = Path(args.log).expanduser() if getattr(args, "log", None) else d / f"{args.name}.log"
+    if log.exists():
+        return []
+    return [f for f, v in (("--pool-desc", args.pool_desc), ("--recipe", args.recipe),
+                           ("--trainer-desc", args.trainer_desc)) if not v]
+
+
 def cmd_embed(args):
     d = Path(args.data_dir).expanduser()
+    gaps = missing_record(args)
+    if gaps:
+        msg = (f"no training log for {args.name} and no {', '.join(gaps)}: the net/experiments.jsonl "
+               "row would be mostly null. Pass --log, or those flags (plus --best-scale), ")
+        if not args.allow_incomplete_record:
+            die(msg + "or --allow-incomplete-record to embed anyway.")
+        print("WARNING: " + msg + "embedding anyway (--allow-incomplete-record).", file=sys.stderr)
     net = Path(args.net).expanduser()
     if not net.exists():
         die(f"missing net {net}")
@@ -597,6 +616,12 @@ def row_from_args(args, name, branch, *, net=None):
         if getattr(args, key, None) is not None and p[key] is None:
             p[key] = getattr(args, key)
     extra = {}
+    if getattr(args, "pool_desc", None):
+        extra["pool_desc"] = args.pool_desc
+    if getattr(args, "recipe", None):
+        extra["recipe"] = json.loads(args.recipe)
+    if getattr(args, "trainer_desc", None):
+        extra["trainer"] = args.trainer_desc
     if getattr(args, "best_scale", False):
         net = Path(net or d / f"{name}.bin").expanduser()
         val = Path(args.best_scale_val).expanduser() if args.best_scale_val else default_val(d)
@@ -1289,6 +1314,11 @@ def record_flags(p, baseline_default):
                    help="also record best_scale_val / best_scale_factor (nnue-trainer eval --best-scale); "
                         "default off")
     p.add_argument("--best-scale-val", help="positions for --best-scale (default <data-dir>/val-current.bin, else val.bin)")
+    p.add_argument("--pool-desc", help="training data, e.g. 'pool10 6.08B: pool8 + ci9 + D2004-D2022'")
+    p.add_argument("--recipe", help='stages as JSON, e.g. \'[{"stage":"plain","epochs":10,"lr":[1e-3,1e-5]}]\'')
+    p.add_argument("--trainer-desc", help="trainer and machine, e.g. 'cuda (GTX 1080 Ti)'")
+    p.add_argument("--allow-incomplete-record", action="store_true",
+                   help="embed even without a training log or --pool-desc/--recipe/--trainer-desc (row gets nulls)")
 
 
 def main():
