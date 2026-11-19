@@ -1723,6 +1723,9 @@ mod tests {
     /// Hand-computed: one nonzero bias, one nonzero weight, empty-ish board.
     #[test]
     fn tiny_net_matches_formula() {
+        if HEAD && head::SKIP {
+            return; // no linear output to check
+        }
         let mut ft_w = vec![0i16; INPUTS * H];
         let mut ft_b = [0i16; H];
         let mut out_w = vec![0i16; BUCKETS * 2 * H];

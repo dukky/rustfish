@@ -192,6 +192,8 @@ impl HeadNet {
         }
         let w2 = &self.w2[b];
         let mut z2 = self.b2[b];
+        // (Skipping inactive neurons, ~8 of 16 on trained nets, measured no
+        // faster: the dense loop vectorises.)
         for k in 0..KA {
             let c = z[k].clamp(0.0, 1.0);
             let u = c * c;
