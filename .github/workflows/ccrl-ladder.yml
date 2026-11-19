@@ -126,7 +126,10 @@ jobs:
             echo "$NET_SHA256  anchor-src/$NET_PATH" | sha256sum -c -
           fi
           case "$KIND" in
-            stash) make -C anchor-src/src -j"$(nproc)" EXE=anchor && cp anchor-src/src/anchor "engines/$NAME" ;;
+            # Stash builds with -Werror and its Makefile appends to CFLAGS. The
+            # runners' glibc (C23 const-preserving strchr) makes stash-35.0's
+            # board.c trip -Wdiscarded-qualifiers; the warning is harmless there.
+            stash) CFLAGS=-Wno-discarded-qualifiers make -C anchor-src/src -j"$(nproc)" EXE=anchor && cp anchor-src/src/anchor "engines/$NAME" ;;
             # MAKE_ARGS is intentionally unquoted: it holds a target and VAR=value words.
             make)  make -C "anchor-src/$DIR" -j"$(nproc)" $MAKE_ARGS && cp "anchor-src/$OUT" "engines/$NAME" ;;
             go)    (cd anchor-src && go build -o "../engines/$NAME" "$PKG") ;;
