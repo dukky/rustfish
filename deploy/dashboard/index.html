@@ -134,6 +134,9 @@ details summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 .empty { color: var(--muted); font-size: 14px; }
 @media (max-width: 640px) { .hide-sm { display: none; } }
 .show-sm { display: none; }
+#generations td { overflow-wrap: anywhere; }
+.recipe { font-size: 11.5px; overflow-wrap: anywhere; }
+.gate-sm { margin-top: 4px; }
 @media (max-width: 640px) { .show-sm { display: inline; } div.show-sm { display: block; } }
 .note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
 .lperfs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 4px 0 14px; }
@@ -431,26 +434,28 @@ function renderGenerations(s) {
       `<div class="meta hide-sm">${r.branch && !r.local ? netBranchLink(r.branch) : r.local ? "local only" : ""}</div>` +
       (r.training_record ? "" : `<span class="badge b-warn" title="No row for this branch in net/experiments.jsonl">no training record</span>`) +
       `<div class="meta show-sm">${k !== "other" ? esc(k) + " · " : ""}${shapeText(r)}</div>` +
-      (recipeText(r) ? `<div class="meta mono hide-sm" style="font-size:11.5px">${recipeText(r)}</div>` : "");
+      (recipeText(r) ? `<div class="meta mono recipe">${recipeText(r)}</div>` : "");
     const pool = r.pool != null ? `${shortNum(r.pool)}${r.train_data ? `<div class="meta">${esc(r.train_data.replace(/\.bin$/, ""))}</div>` : ""}` : "–";
-    const bsTitle = r.best_scale ? Object.entries(r.best_scale).map(([k, v]) => `${k} ${Number(v).toFixed(6)}`).join(", ") : "";
-    const bs = r.best_scale && r.best_scale_set && r.best_scale[r.best_scale_set] != null
-      ? `<span title="${esc(bsTitle)}">${Number(r.best_scale[r.best_scale_set]).toFixed(6)}</span><div class="meta">${esc(r.best_scale_set)}</div>`
-      : r.best_scale_val != null || r.best_scale_val17x2 != null
-      ? `${r.best_scale_val != null ? Number(r.best_scale_val).toFixed(6) : "–"}<div class="meta">${r.best_scale_val17x2 != null ? Number(r.best_scale_val17x2).toFixed(6) : "–"}</div>`
+    // Every number names its set: record best_scale (all sets), else legacy val.bin / val17x2.
+    const sets = r.best_scale ? Object.entries(r.best_scale) : [["val.bin", r.best_scale_val], ["val17x2", r.best_scale_val17x2]].filter(([, v]) => v != null);
+    if (r.best_scale && r.best_scale_set) sets.sort(([a], [b]) => (b === r.best_scale_set) - (a === r.best_scale_set));
+    const bs = sets.length
+      ? sets.slice(0, 2).map(([k, v], i) => `<div${i ? ' class="meta"' : ""} title="${esc(sets.map(([a, b]) => `${a} ${Number(b).toFixed(6)}`).join(", "))}">${Number(v).toFixed(6)} <span class="meta">${esc(k)}</span></div>`).join("")
       : r.val_loss != null ? `<span class="meta" title="Raw val loss (no best-scale figure recorded)">raw ${Number(r.val_loss).toFixed(6)}</span>` : "–";
     const elo = r.elo != null ? `${signed(r.elo)}${r.ci ? `<div class="meta">±${fmt((r.ci[1] - r.ci[0]) / 2, 1)}</div>` : ""}`
       : r.status === "testing" ? `<span class="meta">${r.run_url ? `<a href="${esc(r.run_url)}">running</a>` : "running"}</span>` : "–";
     const games = r.games != null ? fmt(r.games) : r.games_est != null ? `≈ ${fmt(r.games_est)}` : "";
-    const gate = `${elo}<div class="meta hide-sm">${r.mode ? esc(r.mode) : ""}${games ? ` · ${games} g` : ""}</div><div class="show-sm">${gateBadge(r.status)}</div>`;
+    const diag = r.diag && r.diag.elo != null ? `<div class="meta" title="Diagnostic, not a gate">${esc(r.diag.mode || "diag")} ${signed(r.diag.elo)}</div>` : "";
+    const gate = `${elo}<div class="meta">${r.mode ? esc(r.mode) : ""}${games ? ` · ${games} g` : ""}</div>${diag}`;
+    const gateSm = `<div class="show-sm gate-sm">${gateBadge(r.status)} ${elo.replace(/<div.*$/, "")}${r.mode ? ` <span class="meta">${esc(r.mode)}</span>` : ""}${diag}</div>`;
     const status = gateBadge(r.status) + (r.when ? `<div class="meta">${shortDate(r.when)}</div>` : "");
     return `<tr${cls ? ` class="${cls}"` : ""} title="${esc(r.notes || "")}"><td class="hide-sm">${genCell}</td><td>${name}</td>
       <td class="hide-sm mono" style="font-size:12.5px">${shapeText(r)}</td><td class="num hide-sm">${pool}</td>
-      <td class="num">${bs}</td><td class="num">${gate}</td><td class="hide-sm">${status}</td></tr>`;
+      <td class="num">${bs}${gateSm}</td><td class="num hide-sm">${gate}</td><td class="hide-sm">${status}</td></tr>`;
   }).join("");
   el.innerHTML = `<div class="${wrapClass("gens")}"><table><thead><tr><th class="hide-sm">Gen</th><th>Net</th><th class="hide-sm">Shape</th><th class="num hide-sm">Pool</th>
-    <th class="num" title="Loss at the loss-optimal output scale, on val.bin (top) and val17x2 (below)">Best-scale val<div class="meta">val.bin / val17x2</div></th>
-    <th class="num">Gate Elo</th><th class="hide-sm">Status</th></tr></thead><tbody>${body}</tbody></table></div>` +
+    <th class="num" title="Loss at the loss-optimal output scale; each number names its validation set (hover for all sets)">Best-scale val<div class="meta hide-sm">set named per value</div><div class="meta show-sm">+ gate</div></th>
+    <th class="num hide-sm">Gate Elo</th><th class="hide-sm">Status</th></tr></thead><tbody>${body}</tbody></table></div>` +
     moreButton("gens", rows.length, nShown, "nets");
   const ng = s.net_gates || {};
   const missing = rows.filter((r) => !r.training_record && !r.local).map((r) => r.name);

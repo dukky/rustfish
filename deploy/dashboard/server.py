@@ -204,7 +204,7 @@ def build_generations(nets):
             "elo": g.get("elo"), "ci": g.get("ci"), "games": g.get("games"), "games_est": g.get("games_est"),
             "recipe": g.get("recipe"), "trainer": g.get("trainer"), "trained": g.get("trained"),
             "best_scale": g.get("best_scale"), "best_scale_set": g.get("best_scale_set"),
-            "pool_desc": g.get("pool_desc"), "merged_commit": g.get("merged_commit"), "ladder": g.get("ladder"),
+            "pool_desc": g.get("pool_desc"), "merged_commit": g.get("merged_commit"), "ladder": g.get("ladder"), "diag": g.get("diag"),
             "reason": g.get("reason"), "when": g.get("when") or g.get("first_at"), "run_url": g.get("run_url"),
             "current": False})
     # Grouped by generation (newest generation first; the E series before gen
@@ -229,7 +229,7 @@ EXPERIMENT_REFS = ("main", "netloop")
 NET_EXTRA_FIELDS = ("king_buckets", "mean_abs_eval", "best_scale_val", "best_scale_val17x2",
                     "best_scale_factor", "output_scale", "init", "train_data", "threats", "inputs",
                     "recipe", "trainer", "trained", "best_scale", "best_scale_set", "pool_desc",
-                    "merged_commit", "ladder")
+                    "merged_commit", "ladder", "diag")
 
 
 class Cache:
@@ -399,6 +399,9 @@ def build_net_gates(qlog, queue, experiments, v1_branches):
             if g.get("elo") is None and sprt.get("elo") is not None:
                 g.update(elo=sprt.get("elo"), ci=sprt.get("ci"), games=sprt.get("games"),
                          mode=g.get("mode") or sprt.get("mode"), gate_from="experiments.jsonl")
+            # The record settles a gate the queue left open (needs-human, not gated).
+            if e.get("gate_status") and g.get("status") in (None, "needs-human", "not gated"):
+                g["status"] = e["gate_status"]
         old = g["branch"] in v1_branches or (g.get("first_at") or "9999") < NET_PIVOT
         (v1 if old and not e else v2).append(g)
     order = lambda g: g.get("first_at") or "9999"  # queued, never dispatched: newest
