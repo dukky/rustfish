@@ -2383,8 +2383,10 @@ fn quiescence(
     let static_eval = raw_static_eval
         .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
+    st!{ if in_check { crate::stats::inc("q_incheck", 0); } }
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
+            st!{ crate::stats::inc("q_standpat_cut", 0); }
             return stand_pat;
         }
         if stand_pat > alpha {
@@ -2410,6 +2412,8 @@ fn quiescence(
         return alpha;
     }
 
+    #[cfg(feature = "stats")]
+    let mut st_qidx: usize = 0;
     while let Some((mv, stage)) = picker.next() {
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
         engine.tt.prefetch(early);
@@ -2431,6 +2435,7 @@ fn quiescence(
         engine.eval_cache.prefetch(child_key);
         rep_stack.push(child_key);
         let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv));
+        st!{ crate::stats::inc("q_searched", in_check as usize); st_qidx += 1; }
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -2449,6 +2454,7 @@ fn quiescence(
                     Bound::Lower,
                     Some(mv),
                 );
+            st!{ crate::stats::inc("q_cut_idx", (in_check as usize) * 16 + (st_qidx - 1).min(15)); }
             return score;
         }
         if score > alpha {

@@ -270,6 +270,14 @@ def report(st):
                      pct(S(st, "tt_hit_deep", [n], alld), nn), pct(S(st, "tt_cut", [n], alld), nn)])
     out.append(table(rows, ["type", "nodes", "hit", "hit w/ move", "hit depth>=d", "TT cutoff"]))
     out.append("\nqsearch TT hit rate %s\n" % pct(g(st, "q_tt_hit", 0), q))
+    if "q_searched" in st:
+        qc = st.get("q_cut_idx", [])
+        cut_n = sum(qc[:16]); cut_c = sum(qc[16:32])
+        out.append("\n### qsearch\n")
+        out.append("nodes %d; in check %s; stand-pat cutoff %s; children searched: not in check %d, in check %d\n" % (
+            q, pct(g(st, "q_incheck", 0), q), pct(g(st, "q_standpat_cut", 0), q), g(st, "q_searched", 0), g(st, "q_searched", 1)))
+        out.append("move cutoffs: not in check %d (idx0 %s), in check %d (idx0 %s)\n" % (
+            cut_n, pct(qc[0] if qc else 0, cut_n), cut_c, pct(qc[16] if len(qc) > 16 else 0, cut_c)))
     vk = [k for k in ("vrazor", "vrfp", "vnmp", "vprobcut", "vlmp", "vfut", "vseeq", "vseec") if k in st]
     if vk:
         out.append("\n### Pruning error rate (sampled re-searches; error = full search disagrees)\n")
