@@ -25,7 +25,7 @@ const SCORE_DROP_MARGIN: i32 = 40;
 // average comes out near 0.95x, so this redistributes time, not adds it.
 const NODE_TM_MIN_DEPTH: i32 = 8;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
-const IIR_MIN_DEPTH: i32 = 4;
+const IIR_MIN_DEPTH: i32 = 3;
 // Reverse futility pruning applies up to this depth; beyond the tunable d1..d3
 // margins it grows by RFP_DEEP_STEP per ply, and shrinks by a quarter when improving.
 const RFP_MAX_DEPTH: i32 = 7;
@@ -1580,9 +1580,9 @@ fn negamax(
 
     // IIR: with no TT move the node is likely poorly ordered and unexplored, so
     // search it one ply shallower instead of paying for an IID pre-search. It sits
-    // after futility/RFP so those prunes are decided on the node's true depth
-    // (and IIR_MIN_DEPTH > 3 keeps them from triggering on reduced depth here),
-    // but before null move so its reduction and the main loop use the cheaper depth.
+    // after futility/RFP so those prunes are decided on the node's true depth, but
+    // before null move so its reduction and the main loop use the cheaper depth
+    // (from depth 3 that also skips null move, which needs depth 3).
     if tt_move.is_none() && depth >= IIR_MIN_DEPTH {
         depth -= 1;
     }
