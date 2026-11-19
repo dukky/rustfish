@@ -481,3 +481,14 @@ merging (the queue does that).
   `perf-trainer-head-w1-batch` (66efbba) batches W1 gradient adds by output
   bucket: 31 tests pass, byte-identical nets, +24% H256 / ~1.8x H512 pos/s
   on M3; trainer-only owner merge decision. M3 only while datagen runs.
+
+## Deferred actions (each has a trigger; re-check this list whenever a job finishes)
+| Action | Trigger (armed) |
+|---|---|
+| Pairwise head: loss vs head-fix/g9, then embed + fixture, stc and fixed-nodes games vs pre-g10 main (`--base`) | `gpu-jobs/pairwise.log` ends "done" (~18:30 19 Nov); watcher in the main session |
+| Recent-data window test (arms B, C vs shape-test A) | `gpu-jobs/window-test.sh` chained after pairwise.sh; watcher on `gpu-jobs/window/summary.log` |
+| Clover 9.1 comparison (stc / fixed nodes / fixed depth / NPS) and the Stash 35 anchor fix | running in a subagent (started 19 Nov ~14:30) |
+| CUDA pairwise-head trainer speed (`perf-cuda-pairwise`) | running in a subagent |
+| Merge the verified faster CUDA trainer (perf-head-speed-cuda) and the trainer-head-pairwise branch into main | after the pairwise result decides which trainer lineage is kept |
+| Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10 engine: D2027 + L1012 tails), then build pool11 (~6.7B) | D2027 done (~Sat 21 Nov early); gen 11 = pool11 (+ pairwise head if it wins) |
+| D2026 (gen-9 engine) -> D2027-D2030 on the gen-10 engine | automatic: `runlong-2027.sh` in tmux `datagen5` on the desktop |
