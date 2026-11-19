@@ -1,4 +1,17 @@
+// Search statistics (feature `stats`): `st!{...}` compiles to nothing without it.
+#[cfg(feature = "stats")]
+macro_rules! st { ($($e:tt)*) => { { $($e)* } } }
+#[cfg(not(feature = "stats"))]
+macro_rules! st { ($($e:tt)*) => {} }
+// Node-level prune gate for `stats-verify` re-searches (always true without it).
+#[cfg(feature = "stats-verify")]
+macro_rules! st_allow { ($s:expr, $p:expr) => { $s.st_skip_ply != $p } }
+#[cfg(not(feature = "stats-verify"))]
+macro_rules! st_allow { ($s:expr, $p:expr) => { true } }
+
 mod bitboard;
+#[cfg(feature = "stats")]
+mod stats;
 mod book;
 mod datagen;
 mod eval;
@@ -1264,6 +1277,17 @@ fn main() {
         if cmd.starts_with("evalhash") {
             handle_evalhash(cmd, &mut board, engine.active_net());
             continue;
+        }
+        #[cfg(feature = "stats")]
+        {
+            if cmd == "statsreset" {
+                stats::reset();
+                continue;
+            }
+            if let Some(path) = cmd.strip_prefix("statsdump ") {
+                stats::dump(path.trim());
+                continue;
+            }
         }
         if cmd.starts_with("bench") {
             handle_bench(cmd, &mut board, &mut engine);

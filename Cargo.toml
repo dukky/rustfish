@@ -3,6 +3,12 @@ name = "rustfish"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Search statistics for diagnosis (docs/search-diagnosis-2026-11-19.md).
+stats = []
+# Also re-search a sample of pruned nodes/moves to estimate pruning error rates.
+stats-verify = ["stats"]
+
 [profile.release]
 lto = true
 codegen-units = 1
