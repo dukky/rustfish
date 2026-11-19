@@ -422,6 +422,55 @@ iterations), which is why 400 "iterations" moved nothing. Read the
 merged theta from the last round's `spsa-result` artifact
 (`gh run download <id> -n spsa-result`; the job summary has the table).
 
+## Bug audit (2026-11-19, late)
+
+Read through `search.rs`, `tt.rs`, the picker and the history code looking
+for code that does not do what its comments/design say. Proofs used
+throwaway counters on `bench 14` (13 positions) and depth-19 searches;
+node effects are total nodes to depth 13 over `diag-mid300.txt` vs `main`.
+
+**Proven and fixed** (one branch each, queued `:stc`):
+
+| branch | bug | proof | bench | nodes d13 |
+|---|---|---|---|---|
+| `rep-null-guard` | `is_repetition` scanned past the last null move on the path, so null / x / null / x-back scored a false draw (`upcoming_repetition` already stopped at `null_idx`) | 61 of 368 repetition draws in bench 14 crossed a null move | unchanged (316654; first hit is deeper than bench depth) | -0.1% |
+| `ep-hash-capturable` | the ep square was set (and hashed) after every double push, so one position had several keys (1.d4 Nf6 2.e4 vs 1.e4 Nf6 2.d4) and transpositions/repetitions were missed; FEN parsing likewise | unit test (fails on `main`: two keys); 92.5% of double pushes had no capturer beside them | 304996 | +0.1% |
+| `queen-promo-tactical` | non-capture queen promotions were staged as quiets: LMP- and futility-pruned (futility assumes the move cannot gain ~800 cp), LMR-reduced, fed into quiet history | bench 14: 624 of 2843 queen promotions reaching quiet pruning were pruned unsearched, 491 more reduced | 319206 | -0.7% |
+
+Node effects are within noise; these are correctness fixes, so the SPRT is
+the judge.
+
+**Checked and clean / harmless as is:** TT bounds and mate-ply adjustment
+both ways; lockless key check; replacement; qsearch TT; side/castling
+hashing; cut-node labelling; LMR re-search chain; singular exclusion (TT
+not stored, null move off); correction-history conditions; history
+gravity and maluses; killers quiet-only; counter-move indexing.
+Root fail-low also stores its "best" move as the TT move (the same pattern
+as the fixed bug), but in 19 fail-low re-searches the stored move was the
+previous best every time, so it is harmless today.
+
+**Unverified / design questions (not bugs as shown):**
+- ProbCut is not guarded against singular-verification searches (it could
+  search the excluded move and store into the node's TT slot), but
+  `tt_says_no` blocks it whenever `2 * depth < PROBCUT_MARGIN`; 0 hits at
+  depth 19. Worth an explicit `excluded.is_none()` for safety.
+- Null move returns unproven mate scores (no clamp to beta / below mate).
+- PV nodes take TT cutoffs (truncated PVs; a design choice).
+- Root ordering puts every capture, SEE-losing ones included, ahead of
+  killers and quiets (the picker puts bad captures last).
+- Aspiration widening is linear (+-70 cp per fail), not exponential; fail
+  re-searches are rare (8-19 per 10 depth-19 searches).
+- The LMR table is built for 1-based move numbers but indexed with the
+  0-based searched-move count (an offset SPSA can absorb).
+- Non-priority quiets are scored `max(h + ch/2, h)`, so negative
+  continuation history is ignored for them.
+- Qsearch has no quiet queen promotions; pre-root positions count as
+  draws on a 2-fold repetition.
+- **NPS vs search length:** one 20 s search: 1.73M nps at depth 12, then flat
+  at 1.41-1.45M from depth 15 (0.7 s) to 27 (17 s). The drop happens in the
+  first second (tree outgrows the caches); nothing found that grows with
+  search length (pools, history, TT age, root counters are all bounded).
+
 ## Reproduce
 
 ```bash
