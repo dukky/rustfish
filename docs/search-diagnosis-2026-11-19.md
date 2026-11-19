@@ -233,7 +233,7 @@ positions at depth 14.
 
 | # | experiment | measured effect | status |
 |---|---|---|---|
-| E3a | **Fail-low nodes store no TT move** (`tt.store` keeps an older move for the same key; otherwise the next visit orders afresh and IIR applies) | nodes -33%, depth-14 nodes 663k -> 450k, EBF 1.729 -> 1.662; upper-bound TT-move-first loops 1.87M -> 185k, and those left (older proven moves) cut 20-57% instead of 5-26%. OB50 depth 12: 8.51M -> 6.40M (Clover 2.25M; the ratio goes from 3.8x to 2.8x). Bench 398177 -> 316654 | **SPRT running**: branch `tt-failow-nomove`, `tt-failow-nomove-stc-1119-1752` |
+| E3a | **Fail-low nodes store no TT move** (`tt.store` keeps an older move for the same key; otherwise the next visit orders afresh and IIR applies) | nodes -33%, depth-14 nodes 663k -> 450k, EBF 1.729 -> 1.662; upper-bound TT-move-first loops 1.87M -> 185k, and those left (older proven moves) cut 20-57% instead of 5-26%. OB50 depth 12: 8.51M -> 6.40M (Clover 2.25M; the ratio goes from 3.8x to 2.8x). Bench 398177 -> 316654 | **PASSED +16.7 [7.9, 25.6]**, 1728 games; merged as f7d7a51 |
 | E2 | **Linear history bonus** 160*d (cap 1536 unchanged) | first-move cut 83.9 -> 84.0%, nodes +0.4%, EBF 1.729 -> 1.717 (96*d: similar) | **SPRT running** as a low-prior test: `history-bonus-linear`, `history-bonus-linear-stc-1119-1753` |
 | E3b | Order fail-low TT moves like normal moves, keep them in the TT | nodes +14%, first-move cut -0.5 pt | dropped before CI: the opposite of E3a, so skipping IIR is not what costs; keeping the move in the TT does |
 | E1 | Equal captures (SEE = 0) after killer 1, before the counter-move | nodes +3%, first-move cut -0.4 pt (killer 1 promoted into those nodes cuts 64.6%, not 69.5%) | dropped before CI: prediction failed |
@@ -269,6 +269,49 @@ it.
 Re-run `scripts/search_stats.py` (and `compare`) on each candidate: the
 metric to watch is depth-14 nodes and EBF at an equal or better first-move
 cutoff rate, plus the `stats-verify` error table for any new pruning.
+
+## Round 2 (on top of tt-failow-nomove)
+
+Baseline "F" = main + tt-failow-nomove (stats build on branch `diag-failow`).
+Same 300 positions, depth 14; error rates from `stats-verify` at depth 13.
+
+| metric | F | E5 LMP d4-6 ALL | E7 cut relabel | IIR from d3 | E4 near-miss hint |
+|---|---|---|---|---|---|
+| total nodes | 107.9M | 108.0M | 105.5M | **96.1M** | 156.8M |
+| mean nodes to depth 14 | 450k | 451k | 440k | **401k** | 651k |
+| EBF d10-14 | 1.662 | 1.674 | 1.660 | 1.668 | 1.728 |
+| first-move cutoff all / CUT / d1-3 | 83.8 / 86.1 / 83.2% | 83.6 / 85.9 / 83.0% | 84.2 / 86.6 / 83.6% | 84.2 / 86.5 / 83.7% | 83.7 / 85.9 / 83.2% |
+| CUT-node fail-low rate | 10.9% | 11.0% | 9.6% | 10.2% | 11.1% |
+
+- **E5, move-count pruning at depth 4-6, expected ALL nodes, not improving,
+  plain quiets** (limits continue the 6/10/14 progression by 4 per ply:
+  18/22/26). It fires on 1.85M moves at depth 4-5 (18% of plain quiets) with
+  an error rate of 0.2% (d6-8: 0.1%), so it is locally safe. But total nodes
+  are unchanged and EBF is slightly worse. Those moves were already reduced
+  by LMR to near-zero cost. The prediction (-15-25% nodes) failed: **dropped**.
+- **E7, after 4 searched moves without a cutoff an expected cut node is
+  treated as ALL for the rest of its moves** (no +2 cut-node LMR term,
+  ALL-node child flags). Nodes -2.2%, first-move cutoff +0.4 pt, CUT
+  fail-low rate 10.9 -> 9.6%, CUT reduced fails-high 1.4 -> 1.3%. Moved as
+  predicted: **SPRT** `cut-relabel-stc-1119-1825` (vs tt-failow-nomove).
+- **E6, counter-move first in shallow no-TT cut nodes**: not built. The
+  counter-move as first move cuts 50%, below equal captures (56%), and E1
+  showed these per-class rates do not carry over to other nodes.
+  The measurement does not support it.
+- **E4, fail-low move as a hint** (a cheap variant with no TT format change:
+  keep the fail-low move only when best >= alpha - 16): those moves still
+  cut only 6-24% as first moves, and nodes rose 45%. **Dropped.** A
+  separate hint field would need a TT format change, and this data gives
+  no reason to expect it to pay.
+- **New: IIR from depth 3** (was 4). After tt-failow more shallow nodes
+  arrive without a TT move. Nodes -11%, first-move cutoff +0.4 pt, CUT
+  fail-low 10.2%. At depth 3 the reduced node also skips null move. **SPRT**
+  `iir-depth3` (vs main = tt-failow).
+- **qsearch is not bloated.** Of 58.4M qsearch nodes, 49.6% end in a
+  stand-pat cutoff and only 2.3% are in check (evasions). They search 28M
+  children (0.43 per node), and the first move makes 87.7% of the cutoffs
+  (90.7% in check). The 53% share is just leaf count: half the leaves are
+  one-eval stand-pat nodes. No check, evasion or bad-capture excess shows up.
 
 ## Reproduce
 
