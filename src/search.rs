@@ -255,6 +255,8 @@ fn stop_requested() -> bool {
 }
 // Quiet SEE pruning: at depth <= this, a non-priority quiet in a non-PV node
 // is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
+/// Searched moves after which an expected cut node without a cutoff is relabelled ALL.
+const CUT_RELABEL_MOVES: usize = 4;
 const SEE_QUIET_MAX_DEPTH: i32 = 8;
 const SEE_QUIET_MARGIN: i32 = 20;
 // Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
@@ -1914,6 +1916,9 @@ fn negamax(
                 !pv_node && !cut_node,
             );
         } else {
+            // An expected cut node that has searched CUT_RELABEL_MOVES moves
+            // without a cutoff is treated as an ALL node from here on.
+            let cut_now = cut_node && idx < CUT_RELABEL_MOVES;
             let reduction = if quiet
                 && !in_check
                 && depth >= params.lmr_min_depth
@@ -1935,7 +1940,7 @@ fn negamax(
                     r -= 1;
                 }
                 // Node type: expected cut nodes reduce more, PV nodes less.
-                if cut_node {
+                if cut_now {
                     r += params.lmr_cut_node;
                 }
                 if pv_node {
@@ -1969,7 +1974,7 @@ fn negamax(
                 Some(mv),
                 true,
                 Some(gives_check),
-                reduced || !cut_node,
+                reduced || !cut_now,
             );
 
             if reduced && score > alpha {
@@ -1986,7 +1991,7 @@ fn negamax(
                     Some(mv),
                     true,
                     Some(gives_check),
-                    !cut_node,
+                    !cut_now,
                 );
             }
 
