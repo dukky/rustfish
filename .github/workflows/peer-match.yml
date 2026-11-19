@@ -1,0 +1,293 @@
+name: Peer match
+
+# Diagnostic head-to-head: rustfish (a ref, default main) against one peer
+# engine from scripts/peers.json (or any anchors file), at a clock, fixed
+# nodes or fixed depth, with pentanomial Elo and a 95% CI. Not an acceptance
+# test: nothing is logged and nothing calls the queue. Same fastchess, book,
+# adjudication and single-thread setup as sprt.yml. Optionally also measures
+# both engines' NPS and nodes-to-depth on one runner (scripts/peer_nps.py).
+#
+#   gh workflow run peer-match.yml -f opponent=clover-9.1 -f limit=tc=10+0.1 -f games=800
+#   gh workflow run peer-match.yml -f opponent=clover-9.1 -f limit=nodes=200000
+#   gh workflow run peer-match.yml -f opponent=clover-9.1 -f limit=depth=11
+
+run-name: "Peer match ${{ inputs.opponent }} ${{ inputs.limit }} ${{ inputs.games }}g"
+
+on:
+  workflow_dispatch:
+    inputs:
+      opponent:
+        description: "Engine name in peers_file"
+        default: "clover-9.1"
+      peers_file:
+        default: "scripts/peers.json"
+      rustfish_ref:
+        description: "rustfish ref to play (branch, tag or SHA)"
+        default: "main"
+      limit:
+        description: "fastchess limit: tc=10+0.1, nodes=200000 or depth=11"
+        default: "tc=10+0.1"
+      games:
+        description: "Total games (split over shards; pairs of games per opening)"
+        default: "800"
+      shards:
+        default: "6"
+      hash:
+        description: "Hash MB for both engines"
+        default: "16"
+      book:
+        description: "Opening book (official-stockfish/books); epd or pgn"
+        default: "UHO_Lichess_4852_v1.epd"
+      nps:
+        description: "Also run scripts/peer_nps.py on one runner"
+        type: boolean
+        default: false
+      nps_depth:
+        default: "12"
+
+permissions:
+  contents: read
+
+env:
+  FASTCHESS_VERSION: v1.8.2-alpha
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      rounds: ${{ steps.plan.outputs.rounds }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          REF: ${{ inputs.rustfish_ref }}
+          SHARDS: ${{ inputs.shards }}
+          GAMES: ${{ inputs.games }}
+        run: |
+          sha=$(git rev-parse --verify --quiet "origin/$REF^{commit}" || git rev-parse --verify "$REF^{commit}")
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "shards=$(python3 -c "import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$SHARDS")" >> "$GITHUB_OUTPUT"
+          echo "rounds=$(( GAMES / (2 * SHARDS) > 0 ? GAMES / (2 * SHARDS) : 1 ))" >> "$GITHUB_OUTPUT"
+      - id: peer
+        env:
+          PEERS_FILE: ${{ inputs.peers_file }}
+          OPPONENT: ${{ inputs.opponent }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          peers = {a["name"]: a for a in json.load(open(os.environ["PEERS_FILE"]))["anchors"]}
+          p = peers.get(os.environ["OPPONENT"])
+          if p is None:
+              raise SystemExit(f"unknown opponent; have {sorted(peers)}")
+          for k in ("repo", "ref", "kind", "pkg", "bin", "dir", "make_args", "out", "net_url", "net_sha256", "net_path"):
+              print(f"{k}={p.get(k, '')}")
+          print("options=" + " ".join(p["options"]))
+          EOF
+      - name: Build rustfish
+        env:
+          # x86-64-v3 as in sprt.yml: runs on every runner, AVX2, no AVX-512.
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+          SHA: ${{ steps.plan.outputs.sha }}
+        run: |
+          mkdir -p engines
+          git worktree add --detach wt "$SHA"
+          cargo build --release --manifest-path wt/Cargo.toml
+          cp wt/target/release/rustfish engines/rustfish
+          printf 'bench\nquit\n' | engines/rustfish | grep 'Nodes searched'
+      - name: Build ${{ inputs.opponent }}
+        env:
+          NAME: peer
+          REPO: ${{ steps.peer.outputs.repo }}
+          REF: ${{ steps.peer.outputs.ref }}
+          KIND: ${{ steps.peer.outputs.kind }}
+          PKG: ${{ steps.peer.outputs.pkg }}
+          BIN: ${{ steps.peer.outputs.bin }}
+          DIR: ${{ steps.peer.outputs.dir }}
+          MAKE_ARGS: ${{ steps.peer.outputs.make_args }}
+          OUT: ${{ steps.peer.outputs.out }}
+          NET_URL: ${{ steps.peer.outputs.net_url }}
+          NET_SHA256: ${{ steps.peer.outputs.net_sha256 }}
+          NET_PATH: ${{ steps.peer.outputs.net_path }}
+        run: |
+          # Same build kinds as ccrl-ladder.yml (go is not set up here).
+          git clone --quiet --depth 1 --branch "$REF" "https://github.com/$REPO.git" peer-src
+          if [ -n "$NET_URL" ]; then
+            mkdir -p "$(dirname "peer-src/$NET_PATH")"
+            curl -sSfL -o "peer-src/$NET_PATH" "$NET_URL"
+            echo "$NET_SHA256  peer-src/$NET_PATH" | sha256sum -c -
+          fi
+          case "$KIND" in
+            stash) CFLAGS=-Wno-discarded-qualifiers make -C peer-src/src -j"$(nproc)" EXE=anchor && cp peer-src/src/anchor "engines/$NAME" ;;
+            make)  make -C "peer-src/$DIR" -j"$(nproc)" $MAKE_ARGS && cp "peer-src/$OUT" "engines/$NAME" ;;
+            cargo) RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --manifest-path peer-src/Cargo.toml -p "$PKG" \
+                     && cp "peer-src/target/release/$BIN" "engines/$NAME" ;;
+            *)     echo "unsupported kind $KIND"; exit 1 ;;
+          esac
+          out=$( (printf 'uci\nisready\nucinewgame\nisready\nposition startpos\ngo depth 4\n'; sleep 2; printf 'quit\n') | "engines/$NAME" 2>&1 ) \
+            || echo "engine exited with status $?"
+          grep bestmove <<<"$out" || { echo "no bestmove; engine said:"; echo "$out"; exit 1; }
+          grep '^option' <<<"$out" | head -20
+          echo "${{ steps.peer.outputs.options }}" > engines/peer-options
+      - name: Fetch fastchess and openings
+        env:
+          BOOK: ${{ inputs.book }}
+        run: |
+          curl -sSL -o fastchess.tar "https://github.com/Disservin/fastchess/releases/download/$FASTCHESS_VERSION/fastchess-linux-x86-64.tar"
+          mkdir fastchess-dist && tar -xf fastchess.tar -C fastchess-dist
+          install -m 755 "$(find fastchess-dist -type f -name fastchess | head -1)" engines/fastchess
+          curl -sSfL -o book.zip "https://github.com/official-stockfish/books/raw/master/$BOOK.zip"
+          unzip -q book.zip -d engines
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engines
+          path: engines
+          retention-days: 3
+
+  nps:
+    needs: build
+    if: ${{ inputs.nps }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: engines
+          path: engines
+      - name: NPS and nodes-to-depth (same runner, alternating order)
+        env:
+          HASH: ${{ inputs.hash }}
+          DEPTH: ${{ inputs.nps_depth }}
+          OPPONENT: ${{ inputs.opponent }}
+        run: |
+          chmod +x engines/rustfish engines/peer
+          lscpu | grep -E 'Model name|^CPU\(s\)' | tee -a "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "### Own bench commands" >> "$GITHUB_STEP_SUMMARY"
+          for i in 1 2; do
+            printf 'bench\nquit\n' | engines/rustfish | grep -E 'Nodes searched|Nodes/second' | tr '\n' ' ' | sed 's/^/- rustfish bench: /' | tee -a "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"
+            timeout 600 engines/peer bench 2>&1 | tail -1 | sed "s/^/- $OPPONENT bench: /" | tee -a "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "### Same 50 FENs, go depth $DEPTH and go movetime 1000, Hash $HASH, 1 thread" >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/peer_nps.py --engine rustfish=engines/rustfish --engine "$OPPONENT=engines/peer" \
+            --option Hash="$HASH" --option Threads=1 --depth "$DEPTH" --movetime 1000 --repeats 2 \
+            --summary "$GITHUB_STEP_SUMMARY" --json nps.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nps
+          path: nps.json
+
+  play:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.build.outputs.shards) }}
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: engines
+          path: engines
+      - name: Play
+        env:
+          LIMIT: ${{ inputs.limit }}
+          HASH: ${{ inputs.hash }}
+          BOOK: ${{ inputs.book }}
+          OPPONENT: ${{ inputs.opponent }}
+          ROUNDS: ${{ needs.build.outputs.rounds }}
+          SHARD: ${{ matrix.shard }}
+          SEED: ${{ github.run_id }}${{ matrix.shard }}
+        run: |
+          chmod +x engines/rustfish engines/peer engines/fastchess
+          mv "engines/$BOOK" .
+          case "$BOOK" in *.pgn) FMT=pgn ;; *) FMT=epd ;; esac
+          # PEER_OPTIONS is intentionally unquoted: space-separated option.X=Y words.
+          PEER_OPTIONS=$(cat engines/peer-options)
+          engines/fastchess \
+            -engine cmd=engines/rustfish name=rustfish option.OwnBook=false \
+            -engine cmd=engines/peer name="$OPPONENT" $PEER_OPTIONS \
+            -each proto=uci "$LIMIT" option.Hash="$HASH" option.Threads=1 \
+            -rounds "$ROUNDS" -repeat \
+            -concurrency "$(nproc)" \
+            -openings file="$BOOK" format="$FMT" order=random \
+            -srand "$SEED" \
+            -draw movenumber=40 movecount=8 score=10 \
+            -resign movecount=3 score=600 \
+            -recover \
+            -ratinginterval 0 \
+            -pgnout file="games-$SHARD.pgn" \
+            | tee "fastchess-$SHARD.log"
+          grep 'Ptnml(0-2)' "fastchess-$SHARD.log" | tail -1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            fastchess-*.log
+            games-*.pgn
+          if-no-files-found: warn
+
+  report:
+    needs: [build, play]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+      - name: Pentanomial Elo
+        env:
+          I: ${{ toJSON(inputs) }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          python3 - <<'EOF'
+          import glob, json, os, re, sys
+          sys.path.insert(0, "scripts")
+          import sprt
+          i = json.loads(os.environ["I"])
+          total = [0] * 5
+          for path in sorted(glob.glob("shards/fastchess-*.log")):
+              try:
+                  total = [a + b for a, b in zip(total, sprt.ptnml_from_fastchess_log(path))]
+              except ValueError as exc:
+                  print(f"skipping {path}: {exc}")
+          elo, lo, hi = sprt.elo_estimate(total)
+          w = l = d = 0
+          terms = {}
+          for pgn in glob.glob("shards/games-*.pgn"):
+              text = open(pgn, encoding="utf-8", errors="replace").read()
+              for white, black, result in re.findall(r'\[White "([^"]*)"\]\s*\[Black "([^"]*)"\].*?\[Result "([^"]*)"\]', text, re.S):
+                  if result == "1/2-1/2":
+                      d += 1
+                  elif (result == "1-0") == (white == "rustfish"):
+                      w += 1
+                  else:
+                      l += 1
+              for t in re.findall(r'\[Termination "([^"]*)"\]', text):
+                  terms[t] = terms.get(t, 0) + 1
+          res = dict(opponent=i["opponent"], rustfish_sha=os.environ["SHA"], limit=i["limit"], hash=i["hash"],
+                     book=i["book"], ptnml=total, games=2 * sum(total), wdl=[w, d, l],
+                     elo=round(elo, 1), elo_ci95=[round(lo, 1), round(hi, 1)], terminations=terms)
+          json.dump(res, open("peer-result.json", "w"), indent=2)
+          print(json.dumps(res, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(f"## rustfish ({os.environ['SHA'][:7]}) vs {i['opponent']}, {i['limit']}\n\n"
+                       f"- Elo **{elo:+.1f}** (95% CI {lo:+.1f} .. {hi:+.1f}), pentanomial, rustfish's view\n"
+                       f"- {res['games']} games, W/D/L {w}/{d}/{l}, ptnml {total}\n"
+                       f"- Hash {i['hash']}, 1 thread each, book {i['book']}\n"
+                       f"- terminations {terms}\n")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peer-result
+          path: peer-result.json
