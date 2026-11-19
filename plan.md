@@ -494,3 +494,5 @@ merging (the queue does that).
 | Profile rustfish's NPS drop in longer searches (Clover comparison: not hash size); fix if cheap | after the search-diagnosis agent reports (it owns search.rs instrumentation) |
 | Search self-diagnosis -> own coordinated ordering/pruning experiments; gauge: rerun the 200k-node Clover match after changes | running in a subagent (started 19 Nov 17:20) |
 | D2026 (gen-9 engine) -> D2027-D2030 on the gen-10 engine | automatic: `runlong-2027.sh` in tmux `datagen5` on the desktop |
+| Long SPSA (run 44631902925, 605b560, 6 shards x 40 rounds, sum combine, ~2 days): restore queue to 18 shards and lanes 1/1 (scripts/queue-settings.json), then queue the tuned values `:stc`, then `:ltc-check` | last round's merge job finishes (round 40/40); theta = its `spsa-result` artifact |
+| Search diagnosis round 3 (docs/search-diagnosis-2026-11-19.md): `prune-exempt-killers:stc` queued (nodes -9.6%); next X3 = PV-stability measurement | queue result |
