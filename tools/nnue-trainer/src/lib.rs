@@ -392,6 +392,10 @@ pub const PW_QX: f32 = 65025.0 / 512.0;
 /// their exact ties (`c1 c2 = 512 k + 256`) up, as the engine does, despite
 /// float error (~1e-5 here; the nearest non-tie is 1/512 away).
 pub const PW_HALF: f32 = 0.5 + 1.0 / 1024.0;
+/// Initial b1 / b2 of pairwise heads (`init_params`); `NNUE_PW_B1` /
+/// `NNUE_PW_B2` override them (experiments).
+pub const PW_B1_INIT: f32 = 0.5;
+pub const PW_B2_INIT: f32 = 0.25;
 /// W1 scale of pairwise heads (i8 in the engine).
 pub const PW_W1Q: f32 = 64.0;
 
@@ -418,7 +422,15 @@ fn qat() -> bool {
     if NO_QAT.with(|c| c.get()) {
         return false;
     }
-    true
+    *QAT_ON
+}
+
+/// `NNUE_PW_NO_QAT=1`: pairwise forward without fake quantisation
+/// (diagnostics only: such nets do not match the engine).
+static QAT_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NNUE_PW_NO_QAT").is_err());
+
+fn env_f32(name: &str, default: f32) -> f32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 /// Pairwise W1 as the forward uses it.
@@ -740,6 +752,16 @@ fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
             for x in &mut p[o..o + len] {
                 *x = rng.uniform(a);
             }
+        }
+        if sh.pw() {
+            // Pairwise inputs are sparse (~3% of chunks nonzero from a warm
+            // start), so with zero biases z1 ~ 0, sq(z1) ~ 0, z2 ~ 0 and
+            // every head gradient is ~0 (below Adam's eps): the head never
+            // starts learning (seen: 3 x 4.9B positions, W1 still at its
+            // init). Biases in the active range keep L1 and L2 alive.
+            let [_, b1, _, b2, _, _] = head_offs(sh, b);
+            p[b1..b1 + H1].fill(env_f32("NNUE_PW_B1", PW_B1_INIT));
+            p[b2..b2 + H2].fill(env_f32("NNUE_PW_B2", PW_B2_INIT));
         }
     }
     if sh.skip() {
