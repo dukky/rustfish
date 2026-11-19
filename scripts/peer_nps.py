@@ -110,7 +110,10 @@ class Engine:
         self.wait("readyok")
 
     def search(self, fen, go):
-        """Returns (last reported depth, nodes, wall ms) of one search."""
+        """Returns (last reported depth, nodes, wall ms, {depth: nodes}) of one search.
+
+        The curve keeps the last `info depth N ... nodes M` line per depth, i.e.
+        the cumulative node count when iteration N finished (or was cut)."""
         self.send("ucinewgame")
         self.ready()
         self.send(f"position fen {fen}")
@@ -119,14 +122,16 @@ class Engine:
         lines = self.wait("bestmove")
         wall = (time.perf_counter() - t0) * 1000
         depth = nodes = None
+        curve = {}
         for line in lines:
             w = line.split()
             if w[:1] != ["info"] or "nodes" not in w:
                 continue
+            nodes = int(w[w.index("nodes") + 1])
             if "depth" in w:
                 depth = int(w[w.index("depth") + 1])
-            nodes = int(w[w.index("nodes") + 1])
-        return depth, nodes or 0, wall
+                curve[depth] = nodes
+        return depth, nodes or 0, wall, curve
 
     def quit(self):
         try:
@@ -143,22 +148,25 @@ def main():
     ap.add_argument("--depth", type=int, default=12)
     ap.add_argument("--movetime", type=int, default=1000, help="ms per position; 0 skips")
     ap.add_argument("--repeats", type=int, default=2)
-    ap.add_argument("--json", help="write the per-engine totals here")
+    ap.add_argument("--json", help="write the per-engine totals and per-FEN node curves here")
     ap.add_argument("--summary", help="append a markdown table here")
     args = ap.parse_args()
 
     engines = [e.split("=", 1) for e in args.engine]
     totals = {n: {"dn": 0, "dms": 0.0, "mn": 0, "mms": 0.0} for n, _ in engines}
+    curves = {n: [] for n, _ in engines}  # per FEN: nodes at each completed depth
     for rep in range(args.repeats):
         for name, path in (engines if rep % 2 == 0 else engines[::-1]):
             eng = Engine(name, path, args.option)
             dn = dms = mn = mms = 0
             for fen in FENS:
-                _, n, ms = eng.search(fen, f"go depth {args.depth}")
+                _, n, ms, curve = eng.search(fen, f"go depth {args.depth}")
                 dn, dms = dn + n, dms + ms
+                if rep < 2:  # node counts are deterministic single-threaded
+                    curves[name].append({"fen": fen, "nodes": {str(d): c for d, c in sorted(curve.items())}})
             if args.movetime:
                 for fen in FENS:
-                    _, n, ms = eng.search(fen, f"go movetime {args.movetime}")
+                    _, n, ms, _ = eng.search(fen, f"go movetime {args.movetime}")
                     mn, mms = mn + n, mms + ms
             eng.quit()
             t = totals[name]
@@ -192,7 +200,8 @@ def main():
             fh.write("\n".join(table) + "\n\n")
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump(rows, fh, indent=2)
+            # curves: per engine, per FEN, cumulative nodes at each completed depth
+            json.dump({"rows": rows, "curves": curves}, fh)
 
 
 if __name__ == "__main__":
