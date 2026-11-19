@@ -5,16 +5,16 @@ rules live in `docs/development.md`; net experiments in
 `docs/nnue-experiments.md`; results in `tests/*.jsonl`, `net/chain.json` and
 the `queue-state` branch. Update this file whenever work starts, lands or dies.
 
-_Last updated: 2026-11-11 23:30 (UK)._ Live state (current test, queue,
+_Last updated: 2026-11-19 (UK)._ Live state (current test, queue,
 results, strength chart) is on the dashboard, **https://rustfish-dash.dev.duk.im**.
 
 ## Where we are
 
 | | |
 |---|---|
-| Strength | **3581 CCRL Blitz** (ladder 2026-11-16, CI 3563-3599, `b1961e7`: g9 + corrhist + futility + speed work). Before: 3562 (11-13), **3547 CCRL Blitz** (ladder 2026-11-12 20:07, CI 3528-3567, `419d29b`, g8h1024kb8m): **top 100 cleared** (3506). Before: **~3508**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
+| Strength | **3588 CCRL Blitz** (ladder 2026-11-19, CI 3570-3605, 400 games, `2d945ec`: gen 10, 10 anchors). Before: 3581 (ladder 2026-11-16, CI 3563-3599, `b1961e7`: g9 + corrhist + futility + speed work). Before: 3562 (11-13), **3547 CCRL Blitz** (ladder 2026-11-12 20:07, CI 3528-3567, `419d29b`, g8h1024kb8m): **top 100 cleared** (3506). Before: **~3508**: three ladders in a row at or above the top-100 line: 3510 (CI 3492-3528, 2026-11-09 04:16, g7kb8m), 3508.5 (2026-11-09 22:11), 3507.6 (CI 3490-3525, 2026-11-10 12:24, `1b3d81d`). Each CI still overlaps 3506 alone; together they put us at the line, not clearly past it. Before: 3492 (2026-11-08), 3474, 3463 (g4). |
 | Goals | CCRL Blitz single-CPU list (best versions, list of 2026-11-07; `scripts/ccrl-targets.json`): ~~short term 3400~~ (2026-11-06); **mid term top 100 = 3506**: at the line (~3508), needs a clear margin; **long term top 10 = 3751**. Stockfish (3792) is out of scope. |
-| Eval | NNUE **g7kb8m** (merged +30.6, 2026-11-08): (768 x 8 mirrored king buckets -> 512) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. g7 from scratch on pool7 (1.72B positions), m1 copy, kb8m factoriser warm start. |
+| Eval | NNUE **g10h1024kb8m** (merged +12.2, 2026-11-19): (768 x 8 mirrored king buckets -> 1024) x 2 -> 8 output buckets, SCReLU, i16; eval = net / 2. pool10 (6.08B), plain -> m1 -> kb8m factoriser, all `--half`. |
 | Search | PVS, aspiration, TT buckets, NMP, RFP, futility, LMP, LMR (cut-node, not-improving, quiet checks reduced one ply less, root moves), IIR, SEE, killers, counter-moves, history + threat-aware history with escape bonus, 1-ply continuation history, ProbCut, singular extensions + multi-cut + negative extension, check extension; node-fraction time management. |
 | Compute | **Desktop 9600X** (Zen 5, AVX-512, DDR5-6000, 180 GB free on WSL): main training + datagen machine from 2026-11-11; CPU trainer kb8m H512 2.2M pos/s (2.4M `--half`); **CUDA trainer for its 1080 Ti merged 2026-11-12** (`tools/nnue-trainer-cuda`, `netloop train --backend cuda`): kb8m H512 3.6M (4.1M `--half`), H1024 kb8m 1.9M (2.25M). `--half` = fp16 forward weights, val equal to 6 digits on 3 x pool7. **M3 laptop:** GPU (Metal) trainer for net-shape experiments on the fixed pool7. **CI (20 runners): testing only** (18 test shards, queue job 1, 1 idle background slot); CI datagen stopped 2026-11-11. |
 
@@ -27,7 +27,130 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
 
 ## Plan
 
-**Short term (next ~24-48 h): gen 8 on the desktop, 1024-wide test.**
+**Short term (2026-11-19, next ~24-48 h): pairwise head, then gen 11.**
+- **Gen 10 merged +12.2** [2.9, 21.6] (net-gate, `2d945ec`, g10h1024kb8m):
+  pool10 6.08B (pool8 + ci9 + D2004-D2022; D2000/D2001 out; D2021/D2022
+  tails = val-g10), gen-9 chain all `--half` (plain 10 ep 1e-3 -> 1e-5, m1 1
+  ep 2e-4 -> 1e-5 keep-best, kb8m factorise 4 ep 2e-4 -> 1e-6 keep-best),
+  CUDA trainer on the 1080 Ti at 125 W, 19 Nov 00:28 -> 11:02. Best-scale
+  val-g10 / valL1008 / val.bin 0.022948 / 0.022408 / 0.025551 (g9 0.023016 /
+  0.022553 / 0.025538). **Ladder ~3588** [3570, 3605] (400 games; 10
+  anchors: the Stash 35 anchor build fails in the ladder).
+- **Net-shape test done** (val-g10 best-scale; plain 4 -> m1 1 -> kb8m 2 ->
+  head 2 on the 1.27B newest positions):
+
+  | width | no head | head |
+  |---|---|---|
+  | 256 | 0.024609 | 0.023984 |
+  | 512 | 0.023924 | 0.023363 |
+  | 1024 | 0.023470 | 0.022993 |
+
+  Metal vs CUDA at 256: 0.024551 vs 0.024609 (trainers agree to 6e-5).
+  Within-recipe games: H512 vs H1024 -17.3 stc / -36.9 fixed-nodes; head at
+  512 -69.1 stc / +24.8 FN; head at 1024 -79.2 stc / +25.4 FN.
+  **1024 stays the width.** The head's eval gain is real but its speed cost
+  dominates; loss overstates the head in games, so **fixed-nodes games are
+  part of the gate** from now on.
+- **Head-fix** (exact W1): engine-vs-trainer agreement 0.47 cp; -46.7 stc,
+  **+41.8 at fixed nodes (200k)**: the head is right, just too slow. New
+  `ci.py sprt --nodes N` diagnostic mode (PR #1, labelled DIAG, never used
+  by the queue).
+- **Pairwise head** (branches `trainer-head-pairwise` 8c9ff85,
+  `nnue-head-pairwise-wip` d75267d): QAT i8 W1, inputs 0..127, linear output
+  kept. NPS -15% x86 / -19% M3 (head-fix: -45% / -41%). Pilot loss level
+  with the dense head; the skip variant was dropped (much worse, not
+  faster). **Running:** full 3-epoch fine-tune from g9, lands ~18:30 today.
+  Then games vs pre-g10 main via `--base`; if it wins, **gen 11 = pairwise
+  head on g10**. CUDA pairwise-head trainer speed work in progress
+  (`perf-cuda-pairwise`).
+- **Peer analysis** (`docs/peer-analysis-2026-11-19.md`): 15 engines in the
+  3620-3800 band. Levers in order: cheap head; threats the peer way (after
+  the head); data to 15-20B; search ideas; long SPSA. Step 0: a local Clover
+  9.1 comparison.
+- **Datagen:** D2024 done; D2025-D2027 queued on the desktop; L1011 done;
+  L1012 running on the gen-10 engine.
+- **Ops:** desktop GPU cap 125 W (set by hand, not persistent across
+  reboots; ~16% trainer cost accepted). Datagen thread test: 10 threads fine
+  at H1024; H512 is 21% CPU-bound. Tailscale SSH ~53 Mbit/s vs 75 plain TCP
+  (Tailscale in WSL is the cap). Pack sources in parallel next time.
+  Ladder: fix the Stash 35 anchor build.
+
+**Mid term (days-weeks): clear top 100, start on bigger nets.**
+- **Data decision (2026-11-12, owner): no T80 for now.** The goal is a
+  stable release as a true from-scratch engine (own self-play only). Not
+  closed: revisit at a real data-scale wall, or for a later version. Data
+  grows from desktop + laptop datagen; get more Elo per position from net
+  architecture (1024 done; threats after the speed fix; deeper head next).
+  T80 reader parked on `t80-reader` (docs/t80-data.md).
+- Net-shape experiments on the laptop GPU against fixed pool7 (results
+  compare with g7/g7m1/g7kb8m directly): 1024-wide (running), threat
+  inputs (parked at -22% NPS; re-check with AVX-512 at 1024), other
+  bucket layouts. Winners are retrained on pool8+ on the desktop. Pool7
+  results stay useful until the data changes kind or the desktop has
+  spare training capacity (~1-2 weeks).
+- SPSA of the search tunables (`spsa-nnue`) once the feature batch drains:
+  the LMR, singular and threat terms all changed in a week.
+- Search backlog: continuation history 2/4 ply (low priority: re-key was
+  neutral), quiet-check
+  and root LMR polish, qsearch polish, improving ply-4 fallback.
+- Streaming shuffle (trainers read many source files through a shuffle
+  buffer, no pool copy): halves disk; needed before pools outgrow 180 GB.
+- PGO on the desktop x86: +5% on the M3, noise on CI x86; measure on the
+  9600X (datagen games/s) before using it there.
+
+**Long term: top 10 (3751).**
+- Bigger nets (1024+ wide, king buckets); AVX-512 inference paths for
+  them (`nnue-avx512`).
+- **Deeper head** (design: `docs/nnue-deeper-head.md`): FT -> 16 -> 32 -> 1
+  per output bucket instead of width, cheaper in the engine (~9% NPS at H 512
+  vs ~19% for H 1024 head). CPU+CUDA trainers work. Bulk plain FT stays
+  CPU-friendly; head training is dense and stays on the 1080 Ti for
+  production runs (CPU H512 head 84-104k pos/s vs GPU H1024 head ~960k after
+  bucket-indexed backward). Optional future work: sparse/int8 CPU head L1
+  and head-only freezing; neither is needed for the current pipeline.
+- Multi-billion-position pools with opening diversity; better data
+  (deeper/softnode search, rescoring, filtering).
+- Novel ideas only offline and cheap until a clear wall: uncertainty head,
+  hard-example weighting, two-net disagreement.
+- CCRL submission (identity and docs ready; release and licence are the
+  owner's call), Lichess bot, Syzygy.
+
+## Status log
+
+Dated log, newest last; superseded detail is in the commit history and
+`docs/nnue-experiments.md` ("Conclusions to date").
+
+**2026-11-07**
+- simp-nmp-margin +8.2; g4 merged +26.7; g4kb8m merged +11.0 (king
+  buckets via exact factoriser warm start; from scratch is data-limited);
+  feat-lmr-cutnode +15.6; feat-se-negext-r2 +8.9; tm-ccrl-r2 nonreg.
+  Rejected: scale hypothesis (g3f/g3fs/g4ws), correction-history-r2,
+  g4l3 (lambda 0.3), feat-ttpv (-3.9). Ladder 3463.
+- Infra: queue hardening, datagen bursts, settings-driven lanes,
+  `queue.py remove`, ladder anchors to 3631 with pentanomial CIs, fast CPU
+  trainer (2x, factoriser), Metal `--keep-best`.
+
+**2026-11-08..10 (unattended)**
+- Merged: simp2-qs-delta (nonreg, +9.8), feat-threat-hist +4.7 (17.9k
+  games), **nnue-g7kb8m +30.6** (net-gate), feat-lmr-improving +5.1,
+  feat-lmr-quiet-check +12.9, feat-root-lmr +12.2; fix-ownbook-default
+  (`OwnBook` now advertises `default false`).
+- Rejected: feat-lmr-captures -3.3, simp2-razor-d1 -3.2, simp2-rfp-linear
+  -6.6; simp2-qs-failsoft removed by hand (slow, ~0). simp-lmr-extra-r2
+  still needs a redo from current main (expect ~0, -15% nodes).
+- Ladders: 3492 -> 3510 -> 3508.5 -> 3507.6.
+- Gen 7 disk fix (`shuffle --consume`, 6f71956). Desktop 9600X set up
+  (docs/desktop-9600x-setup.md): CPU trainer ~3x the M3.
+
+**2026-11-11**
+- CI datagen stopped (GitHub-hosted runners are for testing): queue
+  lanes -> 18 test shards, bursts off (0d3af12). PGO tooling merged
+  (77f0d75; opt-in, CI unchanged).
+- Laptop disk audit; pool7 -> desktop copy; g7h1024 started on the M3 GPU.
+- Hermes/DeepSeek notes on Coda, Lc0 data and compute, and the peer
+  analysis (docs/peer-analysis-2026-11-08.md) read and critiqued.
+
+**2026-11-12..18 (short-term notes, moved from the plan on 2026-11-19)**
 - **pool8 built (desktop, 2026-11-12 08:44, `~/rustfish-data/pool8.sh`): 3,201,732,989
   positions** (102 GB): pool7 (1.72B, read not consumed: the desktop's 1024 kb8m run
   trains from it) + CI seeds **119-167** except s145 (no successful run; ~1.1B, newest engine) + CI seeds
@@ -263,80 +386,6 @@ on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
 for packed-data.
 
-**Mid term (days-weeks): clear top 100, start on bigger nets.**
-- **Data decision (2026-11-12, owner): no T80 for now.** The goal is a
-  stable release as a true from-scratch engine (own self-play only). Not
-  closed: revisit at a real data-scale wall, or for a later version. Data
-  grows from desktop + laptop datagen; get more Elo per position from net
-  architecture (1024 done; threats after the speed fix; deeper head next).
-  T80 reader parked on `t80-reader` (docs/t80-data.md).
-- Net-shape experiments on the laptop GPU against fixed pool7 (results
-  compare with g7/g7m1/g7kb8m directly): 1024-wide (running), threat
-  inputs (parked at -22% NPS; re-check with AVX-512 at 1024), other
-  bucket layouts. Winners are retrained on pool8+ on the desktop. Pool7
-  results stay useful until the data changes kind or the desktop has
-  spare training capacity (~1-2 weeks).
-- SPSA of the search tunables (`spsa-nnue`) once the feature batch drains:
-  the LMR, singular and threat terms all changed in a week.
-- Search backlog: continuation history 2/4 ply (low priority: re-key was
-  neutral), quiet-check
-  and root LMR polish, qsearch polish, improving ply-4 fallback.
-- Streaming shuffle (trainers read many source files through a shuffle
-  buffer, no pool copy): halves disk; needed before pools outgrow 180 GB.
-- PGO on the desktop x86: +5% on the M3, noise on CI x86; measure on the
-  9600X (datagen games/s) before using it there.
-
-**Long term: top 10 (3751).**
-- Bigger nets (1024+ wide, king buckets); AVX-512 inference paths for
-  them (`nnue-avx512`).
-- **Deeper head** (design: `docs/nnue-deeper-head.md`): FT -> 16 -> 32 -> 1
-  per output bucket instead of width, cheaper in the engine (~9% NPS at H 512
-  vs ~19% for H 1024 head). CPU+CUDA trainers work. Bulk plain FT stays
-  CPU-friendly; head training is dense and stays on the 1080 Ti for
-  production runs (CPU H512 head 84-104k pos/s vs GPU H1024 head ~960k after
-  bucket-indexed backward). Optional future work: sparse/int8 CPU head L1
-  and head-only freezing; neither is needed for the current pipeline.
-- Multi-billion-position pools with opening diversity; better data
-  (deeper/softnode search, rescoring, filtering).
-- Novel ideas only offline and cheap until a clear wall: uncertainty head,
-  hard-example weighting, two-net disagreement.
-- CCRL submission (identity and docs ready; release and licence are the
-  owner's call), Lichess bot, Syzygy.
-
-## Status log
-
-Dated log, newest last; superseded detail is in the commit history and
-`docs/nnue-experiments.md` ("Conclusions to date").
-
-**2026-11-07**
-- simp-nmp-margin +8.2; g4 merged +26.7; g4kb8m merged +11.0 (king
-  buckets via exact factoriser warm start; from scratch is data-limited);
-  feat-lmr-cutnode +15.6; feat-se-negext-r2 +8.9; tm-ccrl-r2 nonreg.
-  Rejected: scale hypothesis (g3f/g3fs/g4ws), correction-history-r2,
-  g4l3 (lambda 0.3), feat-ttpv (-3.9). Ladder 3463.
-- Infra: queue hardening, datagen bursts, settings-driven lanes,
-  `queue.py remove`, ladder anchors to 3631 with pentanomial CIs, fast CPU
-  trainer (2x, factoriser), Metal `--keep-best`.
-
-**2026-11-08..10 (unattended)**
-- Merged: simp2-qs-delta (nonreg, +9.8), feat-threat-hist +4.7 (17.9k
-  games), **nnue-g7kb8m +30.6** (net-gate), feat-lmr-improving +5.1,
-  feat-lmr-quiet-check +12.9, feat-root-lmr +12.2; fix-ownbook-default
-  (`OwnBook` now advertises `default false`).
-- Rejected: feat-lmr-captures -3.3, simp2-razor-d1 -3.2, simp2-rfp-linear
-  -6.6; simp2-qs-failsoft removed by hand (slow, ~0). simp-lmr-extra-r2
-  still needs a redo from current main (expect ~0, -15% nodes).
-- Ladders: 3492 -> 3510 -> 3508.5 -> 3507.6.
-- Gen 7 disk fix (`shuffle --consume`, 6f71956). Desktop 9600X set up
-  (docs/desktop-9600x-setup.md): CPU trainer ~3x the M3.
-
-**2026-11-11**
-- CI datagen stopped (GitHub-hosted runners are for testing): queue
-  lanes -> 18 test shards, bursts off (0d3af12). PGO tooling merged
-  (77f0d75; opt-in, CI unchanged).
-- Laptop disk audit; pool7 -> desktop copy; g7h1024 started on the M3 GPU.
-- Hermes/DeepSeek notes on Coda, Lc0 data and compute, and the peer
-  analysis (docs/peer-analysis-2026-11-08.md) read and critiqued.
 
 ## CI efficiency
 
