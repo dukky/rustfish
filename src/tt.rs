@@ -640,6 +640,30 @@ pub(crate) fn score_from_tt(score: i32, ply: usize) -> i32 {
 mod tests {
     use super::*;
 
+    fn key_after(moves: &[&str]) -> (u64, Option<u8>) {
+        let zobrist = Zobrist::new();
+        let mut board = Board::new();
+        board.set_startpos();
+        for m in moves {
+            let mv = crate::movegen::parse_uci_move(&mut board, m).unwrap();
+            board.make_move(mv);
+        }
+        (board_hash(&board, &zobrist), board.en_passant)
+    }
+
+    #[test]
+    fn en_passant_square_only_kept_when_capturable() {
+        // Same position by two move orders, each ending with a double push
+        // nothing can capture: one key, no en passant square.
+        let a = key_after(&["d2d4", "g8f6", "e2e4"]);
+        let b = key_after(&["e2e4", "g8f6", "d2d4"]);
+        assert_eq!(a, b);
+        assert_eq!(a.1, None);
+        // A black pawn beside the pushed pawn keeps it.
+        let c = key_after(&["e2e4", "d7d5", "e4e5", "f7f5"]);
+        assert_eq!(c.1, Some(45));
+    }
+
     fn mv(from: u8, to: u8, promotion: Option<PieceType>, ep: bool, castle: bool) -> Move {
         Move { from, to, promotion, is_en_passant: ep, is_castle: castle }
     }

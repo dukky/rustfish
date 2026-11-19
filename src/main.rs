@@ -448,6 +448,12 @@ impl Board {
 
         self.eval_acc = self.recompute_eval_acc();
         self.bb = self.recompute_bb();
+        // Same rule as make_move: drop an en passant square no pawn can capture on.
+        let capturer = self.side_to_move;
+        self.en_passant = self.en_passant.filter(|&ep| {
+            let pushed = if capturer == Color::White { ep.wrapping_sub(8) } else { ep + 8 };
+            pushed < 64 && self.ep_capturable(pushed, capturer)
+        });
         if let Some(mut st) = self.nnue.take() {
             st.refresh(self);
             self.nnue = Some(st);
@@ -633,6 +639,19 @@ impl Board {
         (check_count, evasion_mask, pin_masks)
     }
 
+    /// Whether a `capturer` pawn stands beside the pawn just double-pushed to `pushed_to`.
+    fn ep_capturable(&self, pushed_to: u8, capturer: Color) -> bool {
+        let file = pushed_to % 8;
+        let mut beside = 0u64;
+        if file > 0 {
+            beside |= 1u64 << (pushed_to - 1);
+        }
+        if file < 7 {
+            beside |= 1u64 << (pushed_to + 1);
+        }
+        self.bb.pieces[color_index(capturer)][0] & beside != 0
+    }
+
     fn make_move(&mut self, mv: Move) -> Undo {
         if let Some(mut st) = self.nnue.take() {
             st.push_move(self, mv);
@@ -716,11 +735,14 @@ impl Board {
         if moving_piece.kind == PieceType::Pawn {
             let from_rank = mv.from / 8;
             let to_rank = mv.to / 8;
-            if moving_piece.color == Color::White && from_rank == 1 && to_rank == 3 {
-                self.en_passant = Some(mv.from + 8);
-            }
-            if moving_piece.color == Color::Black && from_rank == 6 && to_rank == 4 {
-                self.en_passant = Some(mv.from - 8);
+            // Only record the square when an enemy pawn stands beside the
+            // pushed pawn: otherwise no capture is possible, and keeping it
+            // would give the same position two hash keys (1.d4 .. 2.e4 vs
+            // 1.e4 .. 2.d4) and hide repetitions and transpositions.
+            let double = (moving_piece.color == Color::White && from_rank == 1 && to_rank == 3)
+                || (moving_piece.color == Color::Black && from_rank == 6 && to_rank == 4);
+            if double && self.ep_capturable(mv.to, moving_piece.color.opposite()) {
+                self.en_passant = Some((mv.from + mv.to) / 2);
             }
         }
 
