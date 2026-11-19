@@ -748,7 +748,12 @@ fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
     for b in 0..(sh.hd > 0) as usize * sh.buckets {
         let [w1, _, w2, _, w3, _] = head_offs(sh, b);
         for (o, len, fan) in [(w1, H1 * sh.head_in(), sh.head_in()), (w2, H2 * H1, H1), (w3, H2, H2)] {
-            let a = 1.0 / (fan as f32).sqrt();
+            let mut a = 1.0 / (fan as f32).sqrt();
+            if sh.pw() && o == w1 {
+                // `NNUE_PW_W1A`: W1 init amplitude (sparse inputs: the
+                // 1/sqrt(fan) default leaves z1 nearly constant).
+                a = env_f32("NNUE_PW_W1A", a);
+            }
             for x in &mut p[o..o + len] {
                 *x = rng.uniform(a);
             }
@@ -787,7 +792,12 @@ fn add_head(p: &[f32], plain: Shape, hd: usize, rng: &mut Rng) -> Vec<f32> {
     out.extend_from_slice(&fresh[sh.head_off()..]);
     for b in 0..sh.buckets {
         let [w1, b1, _, _, w3, _] = head_offs(sh, b);
-        out[w3..w3 + H2].fill(0.0);
+        // Pairwise heads may start W3 slightly off zero (`NNUE_PW_W3A`), so
+        // W1 gets a gradient at once (W3 = 0 blocks it until W3 grows).
+        let w3a = if sh.pw() { env_f32("NNUE_PW_W3A", 0.0) } else { 0.0 };
+        for x in &mut out[w3..w3 + H2] {
+            *x = if w3a > 0.0 { rng.uniform(w3a) } else { 0.0 };
+        }
         if sh.skip() {
             let n = sh.head_in();
             out[w1 + (H1 - 1) * n..w1 + H1 * n].fill(0.0);
@@ -833,6 +843,88 @@ fn cmd_fen_eval(args: &[String]) {
 /// a head, W1 columns are permuted together; the engine's integer eval is
 /// bit-identical), but active neurons share 4-byte chunks, so the engine's
 /// sparse head L1 (`src/nnue_head.rs`) skips more chunks.
+/// `pair-order --net N [--buckets B] [--king-buckets L] --data F [--n 20000] --out O`:
+/// for a plain (head-less) net used as a pairwise warm start, reorder the
+/// FT neurons so that the pairs `(j, j + H/2)` are often active (> 0)
+/// together: greedy, most active lane first, partner = the remaining lane
+/// with the most co-active positions. Same function (FT columns, FT bias
+/// and output weights move together); a warm start from an SCReLU net in
+/// file order has only ~3% of pairwise inputs nonzero.
+fn cmd_pair_order(args: &[String]) {
+    let (mut net, mut data, mut out, mut buckets, mut kl, mut n) = (None, None, None, 1usize, NO_BUCKETS, 20000usize);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--data" => data = Some(PathBuf::from(it.next().unwrap())),
+            "--out" => out = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
+            "--n" => n = it.next().unwrap().parse().unwrap(),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    assert_eq!(sh.hd, 0, "pair-order takes a plain net (the warm start)");
+    let mut recs = read_recs_n(&data.expect("--data"), n);
+    recs.truncate(n);
+    let (h, half) = (sh.h, sh.h / 2);
+    let words = (2 * recs.len()).div_ceil(64);
+    let mut bits = vec![0u64; h * words];
+    let mut acc = vec![0.0f32; 2 * h];
+    for (r, rec) in recs.iter().enumerate() {
+        let s = decode(rec, 0.5, sh.buckets, false, kl);
+        forward(&p, sh, &s, &mut acc);
+        for side in 0..2 {
+            let k = 2 * r + side;
+            for j in 0..h {
+                // Engine-active: the u8 clamp c >= 1.
+                if (acc[side * h + j] * QA).round() >= 1.0 {
+                    bits[j * words + k / 64] |= 1 << (k % 64);
+                }
+            }
+        }
+    }
+    let row = |j: usize| &bits[j * words..(j + 1) * words];
+    let pairs_on = |perm: &[usize]| -> f64 {
+        let mut c = 0u64;
+        for k in 0..half {
+            c += row(perm[k]).iter().zip(row(perm[k + half])).map(|(a, b)| (a & b).count_ones() as u64).sum::<u64>();
+        }
+        c as f64 / (half * 2 * recs.len()) as f64
+    };
+    let ident: Vec<usize> = (0..h).collect();
+    let mut order: Vec<usize> = (0..h).collect();
+    order.sort_by_key(|&j| (std::cmp::Reverse(row(j).iter().map(|x| x.count_ones()).sum::<u32>()), j));
+    let mut used = vec![false; h];
+    let (mut firsts, mut seconds) = (Vec::with_capacity(half), Vec::with_capacity(half));
+    for &j in &order {
+        if used[j] {
+            continue;
+        }
+        used[j] = true;
+        let (mut best, mut bc) = (usize::MAX, 0u64);
+        for &k in &order {
+            if used[k] {
+                continue;
+            }
+            let c: u64 = row(j).iter().zip(row(k)).map(|(a, b)| (a & b).count_ones() as u64).sum();
+            if best == usize::MAX || c > bc {
+                (best, bc) = (k, c);
+            }
+        }
+        used[best] = true;
+        firsts.push(j);
+        seconds.push(best);
+    }
+    let perm: Vec<usize> = firsts.into_iter().chain(seconds).collect();
+    println!("nonzero pairwise inputs: {:.2}% in file order -> {:.2}% after pairing", 100.0 * pairs_on(&ident), 100.0 * pairs_on(&perm));
+    let q = permute_neurons(&p, sh, &perm);
+    let out = out.expect("--out");
+    File::create(&out).unwrap().write_all(&quantize(&q, sh)).unwrap();
+    println!("wrote {}", out.display());
+}
+
 fn cmd_permute(args: &[String]) {
     let (mut net, mut data, mut out, mut buckets, mut kl, mut n) = (None, None, None, 1usize, NO_BUCKETS, 20000usize);
     let mut it = args.iter();
@@ -2352,6 +2444,7 @@ pub fn cli(gpu: Option<&MakeBackend>) {
         "eval" => cmd_eval(rest),
         "fen-eval" => cmd_fen_eval(rest),
         "permute" => cmd_permute(rest),
+        "pair-order" => cmd_pair_order(rest),
         "scalecheck" => cmd_scalecheck(rest),
         "rescale" => cmd_rescale(rest),
         "pack" => packed::cmd_pack(rest),
