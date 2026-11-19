@@ -491,4 +491,6 @@ merging (the queue does that).
 | CUDA pairwise-head trainer speed (`perf-cuda-pairwise`) | running in a subagent |
 | Merge the verified faster CUDA trainer (perf-head-speed-cuda) and the trainer-head-pairwise branch into main | after the pairwise result decides which trainer lineage is kept |
 | Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10 engine: D2027 + L1012 tails), then build pool11 (~6.7B) | D2027 done (~Sat 21 Nov early); gen 11 = pool11 (+ pairwise head if it wins) |
+| Profile rustfish's NPS drop in longer searches (Clover comparison: not hash size); fix if cheap | after the search-diagnosis agent reports (it owns search.rs instrumentation) |
+| Search self-diagnosis -> own coordinated ordering/pruning experiments; gauge: rerun the 200k-node Clover match after changes | running in a subagent (started 19 Nov 17:20) |
 | D2026 (gen-9 engine) -> D2027-D2030 on the gen-10 engine | automatic: `runlong-2027.sh` in tmux `datagen5` on the desktop |
