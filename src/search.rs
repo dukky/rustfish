@@ -1466,7 +1466,9 @@ fn negamax(
     if board.halfmove_clock >= 100 {
         return 0;
     }
-    if is_repetition(rep_stack, key, board.halfmove_clock) {
+    // A null move is not a real move: positions before it on the path
+    // cannot be repeated (same rule as the lookahead in upcoming_repetition).
+    if is_repetition(&rep_stack[search.null_idx..], key, board.halfmove_clock) {
         return 0;
     }
     if is_insufficient_material(board) {
@@ -2123,7 +2125,9 @@ fn quiescence(
         return 0;
     }
 
-    if is_repetition(rep_stack, key, board.halfmove_clock) {
+    // A null move is not a real move: positions before it on the path
+    // cannot be repeated (same rule as the lookahead in upcoming_repetition).
+    if is_repetition(&rep_stack[search.null_idx..], key, board.halfmove_clock) {
         return 0;
     }
     // ply > 0 keeps qsearch_gap (tuner, called at ply 0) unaffected.
