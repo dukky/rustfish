@@ -1,6 +1,15 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "prune-exempt-killers",
+    "mode": "stc",
+    "test_id": "q-prune-exempt-killers-1119-2314",
+    "sha": "3f8f3308b399f59c3d71f88604edc979ab1cc999",
+    "base_sha": "285288af9858c8da51fc4135d42ef29edca6816d",
+    "started": "2026-11-19T23:14:39Z",
+    "bench": 283739,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
