@@ -250,6 +250,7 @@ impl Slot {
 enum Arg {
     P(CuPtr),
     I(i32),
+    F(f32),
     C(AdamC),
 }
 
@@ -259,6 +260,7 @@ fn launch(f: Handle, grid: (u32, u32), block: u32, stream: Handle, args: &[Arg])
         .map(|a| match a {
             Arg::P(p) => p as *const CuPtr as *mut c_void,
             Arg::I(i) => i as *const i32 as *mut c_void,
+            Arg::F(x) => x as *const f32 as *mut c_void,
             Arg::C(c) => c as *const AdamC as *mut c_void,
         })
         .collect();
@@ -379,7 +381,7 @@ impl GpuTrainer {
         let sh = cfg.sh;
         assert!(sh.h % 64 == 0 && sh.h <= 2048, "nnue-trainer-cuda: --hidden must be a multiple of 64, at most 2048");
         assert!(sh.buckets <= 8 && sh.kb <= 64, "nnue-trainer-cuda: at most 8 output buckets, 64 king buckets");
-        assert!(sh.hd <= 1, "nnue-trainer-cuda: unknown head");
+        assert!(sh.hd <= 3, "nnue-trainer-cuda: unknown head");
         if sh.hd > 0 {
             eprintln!("nnue-trainer-cuda: --head is UNTESTED ON CUDA; validate against the CPU trainer first (README)");
         }
@@ -673,7 +675,7 @@ impl Backend for GpuTrainer {
         if sh.hd > 0 {
             // One sample-parallel pass over all lanes; both backward kernels
             // then read dacc instead of recomputing the head's dense e sum.
-            launch(k.compute_dacc, ((2 * h).div_ceil(256) as u32, n as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.hsc.ptr), P(self.dacc.ptr), I(hi), I(bi), I(nn)]);
+            launch(k.compute_dacc, ((2 * h).div_ceil(256) as u32, n as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.hsc.ptr), P(self.dacc.ptr), I(hi), I(bi), I(nn), I(hd), F(nnue_trainer::ft_l1())]);
         }
         mark(1);
         launch(k.plan_csr, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.csr.ptr)]);
@@ -688,16 +690,16 @@ impl Backend for GpuTrainer {
         mark(3);
         launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn), P(self.hsc.ptr), P(self.dacc.ptr), I(hd)]);
         mark(4);
-        launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+        launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32), I(hd)]);
         if sh.hd > 0 {
             // Head gradients: W1 per (lane, bucket, chunk), the small layers
             // per (bucket, chunk), then summed in chunk order into gr.
             let (bu, ch) = (sh.buckets as u32, chunks as u32);
-            launch(k.backward_head_w1, ((2 * h).div_ceil(256) as u32, ch * bu), 256, st, &[P(self.acc.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32)]);
-            let small = sh.head_len() - H1 * 2 * h;
-            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32)]);
+            launch(k.backward_head_w1, (sh.head_in().div_ceil(256) as u32, ch * bu), 256, st, &[P(self.acc.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
+            let small = sh.head_len() - H1 * sh.head_in();
+            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
             let nh = sh.buckets * sh.head_len();
-            launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+            launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32), I(hd)]);
         }
         let act = if wd_active { sl.active.ptr } else { 0 };
         mark(5);

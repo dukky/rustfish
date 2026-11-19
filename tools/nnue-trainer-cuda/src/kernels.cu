@@ -19,9 +19,27 @@
 #define H2 32
 #define HS 96
 #define HSMALL (H1 + H2 * H1 + H2 + H2 + 1)
-__device__ __forceinline__ int head_len(int H) { return H1 * 2 * H + HSMALL; }
-__device__ __forceinline__ const float *head_of(const float *rest, int H, int buckets, int b) {
-    return rest + H + buckets * 2 * H + buckets + (size_t)b * head_len(H);
+// hd: 1 = dense head (2H SCReLU inputs), 2 = pairwise (H inputs, see
+// nnue_trainer::pw_in; linear SCReLU output kept), 3 = pairwise-skip (no
+// linear output; L1 neuron 15 is added to the output, 0..15 feed L2).
+// Pairwise heads run the fake-quantised forward: W1 as q_w1, inputs as
+// pw_in (the CPU trainer's functions).
+#define PW_QX (65025.0f / 512.0f)
+__device__ __forceinline__ int head_in(int H, int hd) { return hd >= 2 ? H : 2 * H; }
+__device__ __forceinline__ int head_len(int H, int hd) { return H1 * head_in(H, hd) + HSMALL; }
+__device__ __forceinline__ const float *head_of(const float *rest, int H, int buckets, int b, int hd) {
+    return rest + H + buckets * 2 * H + buckets + (size_t)b * head_len(H, hd);
+}
+__device__ __forceinline__ float q_w1(float w) { return fminf(fmaxf(roundf(w * 64.0f), -127.0f), 127.0f) * (1.0f / 64.0f); }
+__device__ __forceinline__ float pw_in(float a, float b) {
+    float p = fminf(fmaxf(a, 0.f), 1.f) * fminf(fmaxf(b, 0.f), 1.f);
+    // No fma contraction: round the product first, as the CPU trainer.
+    return floorf(__fmul_rn(p, PW_QX) + 0.5f) / PW_QX;
+}
+// Pairwise input i (0..H) of one sample's accumulators `as` (2H).
+__device__ __forceinline__ float pw_at(const float *as, int H, int i) {
+    int half = H / 2, s = i / half, j = i % half;
+    return pw_in(as[s * H + j], as[s * H + j + half]);
 }
 __device__ __forceinline__ float sq01(float z) {
     float c = fminf(fmaxf(z, 0.f), 1.f);
@@ -101,14 +119,19 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
         __syncthreads();
         __shared__ float z1s[H1], dz2s[H2];
         int lane = t & 31, warp = t >> 5, nwarps = blockDim.x >> 5;
-        const float *hp = head_of(rest, H, buckets, s.bucket);
+        const float *hp = head_of(rest, H, buckets, s.bucket, hd);
+        const int nin = head_in(H, hd);
         const float *w1 = hp;
-        const float *b1 = hp + H1 * 2 * H;
+        const float *b1 = hp + H1 * nin;
         const float *as = acc + (size_t)sample * 2 * H;
         for (int q = warp; q < H1; q += nwarps) {
             float z = 0.f;
-            const float *r = w1 + (size_t)q * 2 * H;
-            for (int l = lane; l < 2 * H; l += 32) z += sq01(as[l]) * r[l];
+            const float *r = w1 + (size_t)q * nin;
+            if (hd >= 2) {
+                for (int l = lane; l < nin; l += 32) z += pw_at(as, H, l) * q_w1(r[l]);
+            } else {
+                for (int l = lane; l < nin; l += 32) z += sq01(as[l]) * r[l];
+            }
             for (int o = 16; o; o >>= 1) z += __shfl_down_sync(0xffffffff, z, o);
             if (lane == 0) z1s[q] = b1[q] + z;
         }
@@ -120,8 +143,8 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
             __syncwarp();
             // Lane m: z2[m] and its L3 term.
             float z2 = b2[t];
-#pragma unroll
-            for (int k = 0; k < H1; k++) z2 += sq01(z1s[k]) * w2[t * H1 + k];
+            const int ka = hd == 3 ? H1 - 1 : H1;
+            for (int k = 0; k < ka; k++) z2 += sq01(z1s[k]) * w2[t * H1 + k];
             float o3 = sq01(z2) * w3[t];
             for (int o = 16; o; o >>= 1) o3 += __shfl_down_sync(0xffffffff, o3, o);
             float g = 0.0f;
@@ -130,6 +153,7 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
                 for (int i = 0; i < nw; i++) sum += red[i];
                 float out = ob[s.bucket] + sum;
                 out += b3[0] + o3;
+                if (hd == 3) out += z1s[H1 - 1];
                 float pred = 1.0f / (1.0f + expf(-out));
                 float err = pred - s.target;
                 g = 2.0f * err * pred * (1.0f - pred);
@@ -149,7 +173,7 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
                 float sm = 0.0f;
                 for (int m = 0; m < H2; m++) sm += dz2s[m] * w2[m * H1 + t];
                 hsp[t] = z1;
-                hsp[H1 + H2 + t] = sm * dsq01(z1);
+                hsp[H1 + H2 + t] = (hd == 3 && t == H1 - 1) ? g : sm * dsq01(z1);
             }
         }
         return;
@@ -186,7 +210,7 @@ extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order
 extern "C" __global__ void __launch_bounds__(256) compute_dacc(const GSample *ss, const float *acc,
                                                                const float *gout, const float *rest,
                                                                const float *hs, float *dacc, int H,
-                                                               int buckets, int n) {
+                                                               int buckets, int n, int hd, float l1) {
     int cc = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y;
     if (cc >= 2 * H || j >= n) return;
@@ -196,8 +220,22 @@ extern "C" __global__ void __launch_bounds__(256) compute_dacc(const GSample *ss
     float c = fminf(fmaxf(x, 0.f), 1.f);
     const float *ow = rest + H;
     float w = ow[b * 2 * H + cc];
-    const float *w1 = head_of(rest, H, buckets, b) + cc;
     const float *dz = hs + (size_t)j * HS + H1 + H2;
+    if (hd >= 2) {
+        // Pairwise: lane (side, col) feeds input side * H/2 + col % (H/2)
+        // with partner col +- H/2 (nnue_trainer::pw_lane / pw_dacc).
+        int half = H / 2, side = cc / H, col = cc % H;
+        int pi = side * half + col % half;
+        int partner = col < half ? cc + half : cc - half;
+        const float *w1 = head_of(rest, H, buckets, b, hd) + pi;
+        float e = 0.0f;
+#pragma unroll
+        for (int q = 0; q < H1; q++) e += dz[q] * q_w1(w1[(size_t)q * H]);
+        float cp = fminf(fmaxf(acc[(size_t)j * 2 * H + partner], 0.f), 1.f);
+        dacc[at] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c + (e + l1) * cp : 0.0f;
+        return;
+    }
+    const float *w1 = head_of(rest, H, buckets, b, hd) + cc;
     float e = 0.0f;
 #pragma unroll
     for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
@@ -374,7 +412,7 @@ extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, co
 }
 
 // Sums the chunk partials in chunk order into the rest gradient.
-extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int buckets, int chunks) {
+extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int buckets, int chunks, int hd) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     size_t stride = (size_t)buckets * 2 * H + 2 * H + buckets;
     int nrest = H + buckets * 2 * H + buckets;
@@ -387,7 +425,9 @@ extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int
             s += b[H + i];
         }
     } else if (i < H + buckets * 2 * H) {
-        for (int k = 0; k < chunks; k++) s += pr[k * stride + (i - H)];
+        // Pairwise-skip has no linear output: its out weights stay 0.
+        if (hd != 3)
+            for (int k = 0; k < chunks; k++) s += pr[k * stride + (i - H)];
     } else {
         int b = i - H - buckets * 2 * H;
         for (int k = 0; k < chunks; k++) s += pr[k * stride + (size_t)buckets * 2 * H + 2 * H + b];
@@ -402,10 +442,11 @@ extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int
 // buckets + bucket; bidx[bucket, chunk] lists that chunk's samples of the
 // bucket in sample order, so the sum matches the old bucket-filtered scan.
 extern "C" __global__ void backward_head_w1(const float *acc, const float *hs, float *ph, const uint32_t *bidx,
-                                             const uint32_t *bcnt, int H, int buckets, int chunks) {
+                                             const uint32_t *bcnt, int H, int buckets, int chunks, int hd) {
     int cc = blockIdx.x * blockDim.x + threadIdx.x;
     int b = blockIdx.y % buckets, chunk = blockIdx.y / buckets;
-    if (cc >= 2 * H) return;
+    int nin = head_in(H, hd);
+    if (cc >= nin) return;
     int bi = b * chunks + chunk;
     const uint32_t *js = bidx + (size_t)bi * CH;
     int nj = bcnt[bi];
@@ -414,21 +455,26 @@ extern "C" __global__ void backward_head_w1(const float *acc, const float *hs, f
     for (int q = 0; q < H1; q++) g[q] = 0.0f;
     for (int z = 0; z < nj; z++) {
         int j = js[z];
-        float c = fminf(fmaxf(acc[(size_t)j * 2 * H + cc], 0.f), 1.f);
-        float a2 = c * c;
+        float a2;
+        if (hd >= 2) {
+            a2 = pw_at(acc + (size_t)j * 2 * H, H, cc);
+        } else {
+            float c = fminf(fmaxf(acc[(size_t)j * 2 * H + cc], 0.f), 1.f);
+            a2 = c * c;
+        }
         const float *dz = hs + (size_t)j * HS + H1 + H2;
 #pragma unroll
         for (int q = 0; q < H1; q++) g[q] += dz[q] * a2;
     }
-    float *out = ph + ((size_t)chunk * buckets + b) * head_len(H);
+    float *out = ph + ((size_t)chunk * buckets + b) * head_len(H, hd);
 #pragma unroll
-    for (int q = 0; q < H1; q++) out[(size_t)q * 2 * H + cc] = g[q];
+    for (int q = 0; q < H1; q++) out[(size_t)q * nin + cc] = g[q];
 }
 
 // b1, W2, b2, W3, b3 (HSMALL params per bucket, thread = param), grid
 // (buckets, chunks); the same per-bucket sample list as backward_head_w1.
 extern "C" __global__ void backward_head_small(const float *gout, const float *hs, float *ph, const uint32_t *bidx,
-                                                const uint32_t *bcnt, int H, int buckets, int chunks) {
+                                                const uint32_t *bcnt, int H, int buckets, int chunks, int hd) {
     int b = blockIdx.x, chunk = blockIdx.y, t = threadIdx.x;
     if (t >= HSMALL) return;
     int bi = b * chunks + chunk;
@@ -444,7 +490,8 @@ extern "C" __global__ void backward_head_small(const float *gout, const float *h
             sm += dz1[t];
         } else if (t < H1 + H2 * H1) {
             int m = (t - H1) / H1, k = (t - H1) % H1;
-            sm += dz2[m] * sq01(z1[k]);
+            // Pairwise-skip: the skip neuron does not feed L2.
+            if (!(hd == 3 && k == H1 - 1)) sm += dz2[m] * sq01(z1[k]);
         } else if (t < H1 + H2 * H1 + H2) {
             sm += dz2[t - H1 - H2 * H1];
         } else if (t < H1 + H2 * H1 + 2 * H2) {
@@ -453,13 +500,13 @@ extern "C" __global__ void backward_head_small(const float *gout, const float *h
             sm += g;
         }
     }
-    ph[((size_t)chunk * buckets + b) * head_len(H) + H1 * 2 * H + t] = sm;
+    ph[((size_t)chunk * buckets + b) * head_len(H, hd) + H1 * head_in(H, hd) + t] = sm;
 }
 
 // Head gradient = the chunk partials summed in chunk order.
-extern "C" __global__ void reduce_head(const float *ph, float *grest, int H, int buckets, int chunks) {
+extern "C" __global__ void reduce_head(const float *ph, float *grest, int H, int buckets, int chunks, int hd) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    size_t nh = (size_t)buckets * head_len(H);
+    size_t nh = (size_t)buckets * head_len(H, hd);
     if (i >= nh) return;
     float sm = 0.0f;
     for (int k = 0; k < chunks; k++) sm += ph[(size_t)k * nh + i];
