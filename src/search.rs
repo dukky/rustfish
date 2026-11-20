@@ -1427,6 +1427,9 @@ fn search_root(
         rep_stack.pop();
         board.undo_move(mv, undo);
         search.root_nodes[root_node_index(mv)] += search.nodes - nodes_before;
+        if off(16384) && !search.stop {
+            println!("info string rootmove {} idx {} depth {} score {} alpha {} beta {} nodes {}", move_to_uci(mv), idx, depth, score, alpha, beta, search.nodes - nodes_before);
+        }
 
         if search.stop {
             return (best_score, best_move, false);
