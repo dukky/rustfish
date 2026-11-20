@@ -227,6 +227,27 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
     }
 }
 
+/// Upper bound on the legal moves of a position (218 is the known maximum).
+const MAX_LEGAL_MOVES: usize = 256;
+
+/// Append-only writer into a `Vec<Move>`'s reserved spare capacity, without
+/// the per-push capacity check; the generator commits the length at the end.
+struct MoveSink {
+    ptr: *mut Move,
+    len: usize,
+}
+
+impl MoveSink {
+    #[inline(always)]
+    fn push(&mut self, mv: Move) {
+        assert!(self.len < MAX_LEGAL_MOVES);
+        // SAFETY: the buffer has capacity for MAX_LEGAL_MOVES moves (reserved
+        // by the generator) and len < MAX_LEGAL_MOVES.
+        unsafe { self.ptr.add(self.len).write(mv) };
+        self.len += 1;
+    }
+}
+
 /// Legal move generation: the same moves, in the same order, as
 /// `generate_pseudo_moves` followed by the legality filter, with the
 /// check/pin masks applied per piece instead of per move. En passant
@@ -245,6 +266,8 @@ pub(crate) fn generate_legal_moves_fused(
     };
 
     moves.clear();
+    moves.reserve(MAX_LEGAL_MOVES);
+    let mut sink = MoveSink { ptr: moves.as_mut_ptr(), len: 0 };
 
     let us = board.side_to_move;
     let c = color_index(us);
@@ -255,8 +278,8 @@ pub(crate) fn generate_legal_moves_fused(
     let occ = own | them;
     let target_mask = if captures_only { them } else { !own };
 
-    let push_move = |moves: &mut Vec<Move>, from: u8, to: u8| {
-        moves.push(Move {
+    let push_move = |out: &mut MoveSink, from: u8, to: u8| {
+        out.push(Move {
             from,
             to,
             promotion: None,
@@ -264,14 +287,14 @@ pub(crate) fn generate_legal_moves_fused(
             is_castle: false,
         });
     };
-    let push_promos = |moves: &mut Vec<Move>, from: u8, to: u8| {
+    let push_promos = |out: &mut MoveSink, from: u8, to: u8| {
         for promo in [
             PieceType::Queen,
             PieceType::Rook,
             PieceType::Bishop,
             PieceType::Knight,
         ] {
-            moves.push(Move {
+            out.push(Move {
                 from,
                 to,
                 promotion: Some(promo),
@@ -302,16 +325,16 @@ pub(crate) fn generate_legal_moves_fused(
             if occ & (1u64 << one) == 0 {
                 if is_promo {
                     if allowed & (1u64 << one) != 0 {
-                        push_promos(moves, sq, one);
+                        push_promos(&mut sink, sq, one);
                     }
                 } else {
                     if allowed & (1u64 << one) != 0 {
-                        push_move(moves, sq, one);
+                        push_move(&mut sink, sq, one);
                     }
                     if r == start_rank {
                         let two = if us == Color::White { sq + 16 } else { sq - 16 };
                         if occ & (1u64 << two) == 0 && allowed & (1u64 << two) != 0 {
-                            push_move(moves, sq, two);
+                            push_move(&mut sink, sq, two);
                         }
                     }
                 }
@@ -324,13 +347,13 @@ pub(crate) fn generate_legal_moves_fused(
             let to = caps.trailing_zeros() as u8;
             caps &= caps - 1;
             if is_promo {
-                push_promos(moves, sq, to);
+                push_promos(&mut sink, sq, to);
             } else {
-                push_move(moves, sq, to);
+                push_move(&mut sink, sq, to);
             }
         }
         if attacks & ep_bit != 0 && ep_legal_from & (1u64 << sq) != 0 {
-            moves.push(Move {
+            sink.push(Move {
                 from: sq,
                 to: ep_bit.trailing_zeros() as u8,
                 promotion: None,
@@ -350,7 +373,7 @@ pub(crate) fn generate_legal_moves_fused(
             while targets != 0 {
                 let to = targets.trailing_zeros() as u8;
                 targets &= targets - 1;
-                push_move(moves, sq, to);
+                push_move(&mut sink, sq, to);
             }
         }
 
@@ -368,7 +391,7 @@ pub(crate) fn generate_legal_moves_fused(
                 while targets != 0 {
                     let to = targets.trailing_zeros() as u8;
                     targets &= targets - 1;
-                    push_move(moves, sq, to);
+                    push_move(&mut sink, sq, to);
                 }
             }
         }
@@ -385,7 +408,7 @@ pub(crate) fn generate_legal_moves_fused(
             let to = targets.trailing_zeros() as u8;
             targets &= targets - 1;
             if !is_square_attacked_occ(board, to, enemy, occ_no_king) {
-                push_move(moves, sq, to);
+                push_move(&mut sink, sq, to);
             }
         }
 
@@ -404,7 +427,7 @@ pub(crate) fn generate_legal_moves_fused(
                     && !is_square_attacked(board, 6, Color::Black)
                     && !is_square_attacked_occ(board, 6, enemy, occ_no_king)
                 {
-                    moves.push(Move {
+                    sink.push(Move {
                         from: 4,
                         to: 6,
                         promotion: None,
@@ -426,7 +449,7 @@ pub(crate) fn generate_legal_moves_fused(
                     && !is_square_attacked(board, 2, Color::Black)
                     && !is_square_attacked_occ(board, 2, enemy, occ_no_king)
                 {
-                    moves.push(Move {
+                    sink.push(Move {
                         from: 4,
                         to: 2,
                         promotion: None,
@@ -449,7 +472,7 @@ pub(crate) fn generate_legal_moves_fused(
                     && !is_square_attacked(board, 62, Color::White)
                     && !is_square_attacked_occ(board, 62, enemy, occ_no_king)
                 {
-                    moves.push(Move {
+                    sink.push(Move {
                         from: 60,
                         to: 62,
                         promotion: None,
@@ -471,7 +494,7 @@ pub(crate) fn generate_legal_moves_fused(
                     && !is_square_attacked(board, 58, Color::White)
                     && !is_square_attacked_occ(board, 58, enemy, occ_no_king)
                 {
-                    moves.push(Move {
+                    sink.push(Move {
                         from: 60,
                         to: 58,
                         promotion: None,
@@ -482,6 +505,8 @@ pub(crate) fn generate_legal_moves_fused(
             }
         }
     }
+    // SAFETY: the sink wrote `sink.len` initialised moves into the reserved buffer.
+    unsafe { moves.set_len(sink.len) };
 }
 
 /// Squares attacked by `piece` standing on `sq`, given occupancy `occ`.
