@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "speed-picker-branchless",
+      "mode": "speedup",
+      "front": true
+    },
+    {
       "branch": "spsa-r14-interim",
       "mode": "stc",
       "front": true
@@ -42,10 +47,6 @@
     {
       "branch": "history-bonus-linear-r2",
       "mode": "stc"
-    },
-    {
-      "branch": "speed-picker-branchless",
-      "mode": "speedup"
     },
     {
       "branch": "speed-movegen-sink",
