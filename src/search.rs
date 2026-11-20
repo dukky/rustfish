@@ -518,6 +518,36 @@ fn apply_continuation_history_delta(
     apply_gravity(h, delta);
 }
 
+/// Capture-history slot of a capture: (moving kind, to, victim kind).
+#[inline(always)]
+fn capture_slot(board: &Board, mv: Move) -> (usize, usize, usize) {
+    let mover = board.squares[mv.from as usize]
+        .map(|p| crate::bitboard::kind_index(p.kind))
+        .unwrap_or(0);
+    let victim = if mv.is_en_passant {
+        0
+    } else {
+        board.squares[mv.to as usize]
+            .map(|p| crate::bitboard::kind_index(p.kind))
+            .unwrap_or(0)
+    };
+    (mover, mv.to as usize, victim)
+}
+
+fn capture_history_score(engine: &EngineState, side: Color, board: &Board, mv: Move) -> i32 {
+    let (m, t, v) = capture_slot(board, mv);
+    engine.capture_history[color_index(side)][m][t][v]
+}
+
+fn apply_capture_history_delta(engine: &mut EngineState, side: Color, board: &Board, mv: Move, delta: i32) {
+    let (m, t, v) = capture_slot(board, mv);
+    apply_gravity(&mut engine.capture_history[color_index(side)][m][t][v], delta);
+}
+
+/// Capture history counts this much less than one SEE unit in capture ordering
+/// (SEE is weighted 16 per centipawn, so the bound 16384 is worth ~128 cp of SEE).
+const CAPTURE_HISTORY_DIV: i32 = 8;
+
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
 }
@@ -710,7 +740,9 @@ impl MovePicker {
 
             if is_capture_move(board, mv) {
                 let see_score = see(board, mv);
-                let e = (mv, capture_stage_score_from_see(board, mv, see_score));
+                let score = capture_stage_score_from_see(board, mv, see_score)
+                    + if captures_only { 0 } else { capture_history_score(engine, side, board, mv) / CAPTURE_HISTORY_DIV };
+                let e = (mv, score);
                 let b = &mut picker.bufs;
                 push_either(&mut b.good_captures, &mut b.bad_captures, see_score >= 0, e, e);
                 continue;
@@ -1791,6 +1823,7 @@ fn negamax(
     let mut best_move = None;
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
+    let mut captures_tried = PooledMoveVec::take();
     let mut idx = 0usize;
     let mut check_info: Option<CheckInfo> = None;
 
@@ -1929,6 +1962,8 @@ fn negamax(
 
         if quiet {
             quiets_tried.push(mv);
+        } else if is_capture_move(board, mv) {
+            captures_tried.push(mv);
         }
 
         let undo = board.make_move(mv);
@@ -2069,8 +2104,16 @@ fn negamax(
             alpha = score;
         }
         if alpha >= beta {
+            let bonus = history_bonus(depth);
+            if !quiet && is_capture_move(board, mv) {
+                apply_capture_history_delta(engine, side, board, mv, bonus);
+            }
+            for tried in captures_tried.iter().copied() {
+                if tried != mv {
+                    apply_capture_history_delta(engine, side, board, tried, -bonus);
+                }
+            }
             if quiet {
-                let bonus = history_bonus(depth);
                 if let Some(prev) = prev_move {
                     engine.counter_moves[color_index(side)][prev.from as usize][prev.to as usize] =
                         Some(mv);
