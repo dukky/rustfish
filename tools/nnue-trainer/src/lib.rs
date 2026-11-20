@@ -386,6 +386,16 @@ pub struct Shape {
 ///   the quantised values (multiples of 1/64, exact at HEAD_Q).
 /// - Optional `--ft-l1 L`: adds `L * sum(p)` per sample to the loss (FT
 ///   activation sparsity for the sparse engine L1), default 0.
+/// - Optional `--ft-l1-group G`: adds `G * sum_c ||p_c||_2` per sample, `c`
+///   the aligned 4-input chunks of each perspective (the engine's L1 chunks
+///   before any permutation): a group-lasso pull that zeroes whole chunks and
+///   charges a chunk's second active input less than its first, default 0.
+/// - Optional `--qat-l2` (integer L2, `pw_l2q`): the L1 activation
+///   `u = sq(z1)` is used as `floor(127 u + 1/2) / 127` (`q_u1`, u8 0..=127)
+///   and W2 as `q_w1(W2)` (i8 at scale 64); gradients straight through
+///   (`dW2 = dz2 q_u1(u)`, `dz1 = dsq(z1) sum_m dz2 q(W2)`). Such nets carry
+///   the 8-byte trailer `NET_MAGIC` + flags (`NET_INT_L2`) so the engine runs
+///   L2 in integers; loading a net with that trailer turns `--qat-l2` on.
 pub const PW_QX: f32 = 65025.0 / 512.0;
 /// The rounding offset of `pw_in`: a half plus 1/1024, so that inputs
 /// from integer accumulators (`eval` / `fen-eval` of a quantised net) round
@@ -401,6 +411,18 @@ pub const PW_W1Q: f32 = 64.0;
 
 /// `--ft-l1` as f32 bits (set once by `cmd_train`, read by the kernels).
 pub static FT_L1: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// `--ft-l1-group` as f32 bits (as `FT_L1`).
+pub static FT_L1_GROUP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// `--qat-l2`, or a loaded net file with the `NET_INT_L2` trailer.
+pub static QAT_L2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Net file trailer (optional, after the i16 words): `NET_MAGIC` then u32 LE
+/// flags. Nets without one are the original format.
+pub const NET_MAGIC: [u8; 4] = *b"RFNT";
+pub const NET_TRAILER: usize = 8;
+/// Trailer flag: pairwise head trained with `--qat-l2` (engine: integer L2).
+pub const NET_INT_L2: u32 = 1;
+/// L1 activation scale of `--qat-l2` (u8 0..=127 in the engine).
+pub const PW_U1Q: f32 = 127.0;
 /// `--head pairwise-skip` seen on a non-train command: a pairwise-sized
 /// net file is read as `hd` 3 (the file sizes of 2 and 3 are equal).
 static HEAD_SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -409,11 +431,57 @@ pub fn ft_l1() -> f32 {
     f32::from_bits(FT_L1.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+pub fn ft_l1_group() -> f32 {
+    f32::from_bits(FT_L1_GROUP.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub fn qat_l2() -> bool {
+    #[cfg(test)]
+    if L2Q_TEST.with(|c| c.get()) {
+        return true;
+    }
+    QAT_L2.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does the forward of `sh` quantise L2 (`--qat-l2` on a pairwise head)?
+#[inline(always)]
+pub fn pw_l2q(sh: Shape) -> bool {
+    sh.pw() && qat_l2() && qat()
+}
+
+/// `--qat-l2`: L1 activation `u` (0..=1) as the engine's u8 / 127.
+#[inline(always)]
+pub fn q_u1(u: f32) -> f32 {
+    (u * PW_U1Q + 0.5).floor() * (1.0 / PW_U1Q)
+}
+
+/// `--ft-l1-group`: the extra dLoss/dp of pairwise input `pi`, `g p / ||p_c||`
+/// over its aligned chunk `c` (raw, unquantised products).
+#[inline]
+pub fn pw_group_dp(acc: &[f32], h: usize, pi: usize, g: f32) -> f32 {
+    let half = h / 2;
+    let (s, j) = (pi / half, pi % half);
+    let raw = |jj: usize| acc[s * h + jj].clamp(0.0, 1.0) * acc[s * h + jj + half].clamp(0.0, 1.0);
+    let c0 = j & !3;
+    let mut n2 = 0.0f32;
+    for u in 0..4 {
+        let v = raw(c0 + u);
+        n2 += v * v;
+    }
+    if n2 > 0.0 {
+        g * raw(j) / n2.sqrt()
+    } else {
+        0.0
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Tests: this thread's pairwise forward skips the fake quantisation
     /// (finite-difference checks of the straight-through gradients).
     static NO_QAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests: `--qat-l2` on for this thread only.
+    static L2Q_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[inline(always)]
@@ -540,6 +608,11 @@ impl Shape {
     }
     /// The shape of a net file: a plain net, or else a `--head` net.
     fn from_file_bytes(bytes: usize, buckets: usize, kb: usize) -> Option<Self> {
+        // A file with a trailer (`net_payload`): its size check uses the payload.
+        Self::from_payload_bytes(bytes, buckets, kb).or_else(|| Self::from_payload_bytes(bytes.checked_sub(NET_TRAILER)?, buckets, kb))
+    }
+
+    fn from_payload_bytes(bytes: usize, buckets: usize, kb: usize) -> Option<Self> {
         let words = bytes / 2;
         let h = words.checked_sub(buckets)? / (kb * INPUTS + 1 + 2 * buckets);
         let s = Shape { h, buckets, kb, hd: 0 };
@@ -683,7 +756,7 @@ fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32]
                 g[w1 + k * h + i] += dz[k] * x;
             }
         }
-        let l1 = ft_l1();
+        let (l1, grp) = (ft_l1(), ft_l1_group());
         for i in 0..2 * h {
             let x = acc[i];
             let a = x.clamp(0.0, 1.0);
@@ -695,6 +768,7 @@ fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32]
             for k in 0..H1 {
                 e += dz[k] * q_w1(p[w1 + k * h + pi]);
             }
+            let l1 = if grp > 0.0 { l1 + pw_group_dp(acc, h, pi, grp) } else { l1 };
             dacc[i] = pw_dacc(x, grad * ow[i] * 2.0 * a, e + l1, acc[partner].clamp(0.0, 1.0));
         }
     } else {
@@ -1136,11 +1210,18 @@ pub(crate) fn head_forward(p: &[f32], sh: Shape, b: usize, inp: impl Fn(usize) -
     }
     scr[..H1].copy_from_slice(&z);
     let ka = sh.h1_act();
+    let l2q = pw_l2q(sh);
+    let mut u = [0.0f32; H1];
+    for k in 0..ka {
+        let v = sq01(z[k]);
+        u[k] = if l2q { q_u1(v) } else { v };
+    }
     let mut out = p[b3];
     for m in 0..H2 {
         let mut zz = p[b2 + m];
         for k in 0..ka {
-            zz += sq01(z[k]) * p[w2 + m * H1 + k];
+            let w = p[w2 + m * H1 + k];
+            zz += u[k] * if l2q { q_w1(w) } else { w };
         }
         scr[H1 + m] = zz;
         out += sq01(zz) * p[w3 + m];
@@ -1171,10 +1252,12 @@ pub(crate) fn head_backward(p: &[f32], sh: Shape, b: usize, g: f32, scr: &mut [f
     for m in 0..H2 {
         d[H1 + m] = g * p[w3 + m] * dsq01(z[H1 + m]);
     }
+    let l2q = pw_l2q(sh);
     for k in 0..sh.h1_act() {
         let mut s = 0.0f32;
         for m in 0..H2 {
-            s += d[H1 + m] * p[w2 + m * H1 + k];
+            let w = p[w2 + m * H1 + k];
+            s += d[H1 + m] * if l2q { q_w1(w) } else { w };
         }
         d[k] = s * dsq01(z[k]);
     }
@@ -1196,12 +1279,14 @@ pub(crate) fn head_small_grads(sh: Shape, b: usize, g: f32, scr: &[f32; HS], gr:
             gr[b1 + k - base] += d[k];
         }
     }
+    let l2q = pw_l2q(sh);
     let mut m = part;
     while m < H2 {
         gr[w3 + m - base] += g * sq01(z[H1 + m]);
         gr[b2 + m - base] += d[H1 + m];
         for k in 0..sh.h1_act() {
-            gr[w2 + m * H1 + k - base] += d[H1 + m] * sq01(z[k]);
+            let v = sq01(z[k]);
+            gr[w2 + m * H1 + k - base] += d[H1 + m] * if l2q { q_u1(v) } else { v };
         }
         m += parts;
     }
@@ -1212,10 +1297,31 @@ fn is_pw_w1(sh: Shape, i: usize) -> bool {
     sh.pw() && i >= sh.head_off() && (i - sh.head_off()) % sh.head_len() < H1 * sh.head_in()
 }
 
+/// Is param `i` a pairwise head's W2 under `--qat-l2` (exported as `q_w1`)?
+fn is_q_w2(sh: Shape, i: usize) -> bool {
+    if !pw_l2q(sh) || i < sh.head_off() {
+        return false;
+    }
+    let r = (i - sh.head_off()) % sh.head_len();
+    let w2 = H1 * sh.head_in() + H1;
+    (w2..w2 + H2 * H1).contains(&r)
+}
+
+/// The payload length of net file `bytes` (without a trailer) and its
+/// trailer flags (0 without one).
+pub fn net_payload(bytes: &[u8]) -> (usize, u32) {
+    let n = bytes.len();
+    if n >= NET_TRAILER && n % 2 == 0 && bytes[n - NET_TRAILER..n - 4] == NET_MAGIC {
+        let f = u32::from_le_bytes(bytes[n - 4..].try_into().unwrap());
+        return (n - NET_TRAILER, f);
+    }
+    (n, 0)
+}
+
 fn quantize(p: &[f32], sh: Shape) -> Vec<u8> {
     let mut out = Vec::with_capacity(sh.file_bytes());
     for (i, &x) in p[..sh.len()].iter().enumerate() {
-        let x = if is_pw_w1(sh, i) { q_w1(x) } else { x };
+        let x = if is_pw_w1(sh, i) || is_q_w2(sh, i) { q_w1(x) } else { x };
         let scale = if i < sh.out_w() {
             QA
         } else if i < sh.out_b() {
@@ -1228,11 +1334,15 @@ fn quantize(p: &[f32], sh: Shape) -> Vec<u8> {
         let q = (x * scale).round().clamp(-32768.0, 32767.0) as i16;
         out.extend_from_slice(&q.to_le_bytes());
     }
+    if pw_l2q(sh) {
+        out.extend_from_slice(&NET_MAGIC);
+        out.extend_from_slice(&NET_INT_L2.to_le_bytes());
+    }
     out
 }
 
 fn dequantize(bytes: &[u8], sh: Shape) -> Vec<f32> {
-    bytes
+    bytes[..net_payload(bytes).0]
         .chunks_exact(2)
         .enumerate()
         .map(|(i, c)| {
@@ -1251,9 +1361,22 @@ fn dequantize(bytes: &[u8], sh: Shape) -> Vec<f32> {
         .collect()
 }
 
+/// The payload length of net file `bytes`; a `NET_INT_L2` trailer turns
+/// `--qat-l2` on (the net's function has integer L2).
+fn apply_trailer(path: &Path, bytes: &[u8]) -> usize {
+    let (len, flags) = net_payload(bytes);
+    assert!(flags & !NET_INT_L2 == 0, "{}: unknown net trailer flags {flags:#x}", path.display());
+    if flags & NET_INT_L2 != 0 && !qat_l2() {
+        QAT_L2.store(true, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{}: integer-L2 net (trailer): --qat-l2 on", path.display());
+    }
+    len
+}
+
 fn load_net(path: &Path, buckets: usize, kb: usize) -> (Vec<f32>, Shape) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let sh = Shape::from_file_bytes(bytes.len(), buckets, kb).unwrap_or_else(|| {
+    let len = apply_trailer(path, &bytes);
+    let sh = Shape::from_file_bytes(len, buckets, kb).unwrap_or_else(|| {
         panic!("{}: {} bytes is no ({kb}*768->H)x2->{buckets} net", path.display(), bytes.len())
     });
     (dequantize(&bytes, sh), sh)
@@ -2033,7 +2156,8 @@ fn cmd_rescale(args: &[String]) {
     let out = out.expect("--out");
     assert!(factor.is_some() != reference.is_some(), "pass exactly one of --factor F, --match ref.bin");
     let mut bytes = std::fs::read(&net).unwrap_or_else(|e| panic!("{}: {e}", net.display()));
-    let sh = Shape::from_file_bytes(bytes.len(), buckets, kl.kb())
+    let len = apply_trailer(&net, &bytes);
+    let sh = Shape::from_file_bytes(len, buckets, kl.kb())
         .unwrap_or_else(|| panic!("{}: {} bytes is no ({}*768->H)x2->{buckets} net", net.display(), bytes.len(), kl.kb()));
     let val = val.map(|path| {
         let mut recs = read_recs(&path);
@@ -2166,6 +2290,8 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--head-pairwise" => sh.hd = 2,
             "--head-pairwise-skip" => sh.hd = 3,
             "--ft-l1" => FT_L1.store(v().parse::<f32>().unwrap().to_bits(), std::sync::atomic::Ordering::Relaxed),
+            "--ft-l1-group" => FT_L1_GROUP.store(v().parse::<f32>().unwrap().to_bits(), std::sync::atomic::Ordering::Relaxed),
+            "--qat-l2" => QAT_L2.store(true, std::sync::atomic::Ordering::Relaxed),
             "--half" => half = true,
             "--shuffle-buffer" => shuffle_buffer = Some(v().parse().unwrap()),
             "--loader-threads" => loader_threads = v().parse().unwrap(),
@@ -3292,6 +3418,43 @@ mod tests {
         }
         assert_eq!(q_w1(1.98), 127.0 / 64.0);
         assert_eq!(q_w1(-0.0234), -1.0 / 64.0);
+    }
+
+    #[test]
+    fn qat_l2_export_trailer_and_group_penalty() {
+        let kl = KingLayout::by_name("kb4");
+        let sh = Shape { h: 32, buckets: 8, kb: kl.kb(), hd: 2 };
+        let mut rng = Rng::new(9);
+        let p = init_params(sh, &mut rng);
+        let plain = quantize(&p, sh);
+        assert_eq!(net_payload(&plain), (sh.file_bytes(), 0));
+        L2Q_TEST.with(|c| c.set(true));
+        let q = quantize(&p, sh);
+        assert_eq!(q.len(), sh.file_bytes() + NET_TRAILER);
+        assert_eq!(net_payload(&q), (sh.file_bytes(), NET_INT_L2));
+        assert_eq!(Shape::from_file_bytes(q.len(), 8, kl.kb()), Some(sh));
+        assert_eq!(q[..sh.file_bytes()], plain[..sh.file_bytes()].iter().copied().enumerate().map(|(i, b)| if is_q_w2(sh, i / 2) { q[i] } else { b }).collect::<Vec<u8>>()[..]);
+        let back = dequantize(&q, sh);
+        assert_eq!(back.len(), sh.len());
+        let w2 = head_offs(sh, 5)[2];
+        for i in w2..w2 + H2 * H1 {
+            assert_eq!(back[i], q_w1(p[i]));
+        }
+        // The export is a fixed point: re-quantising changes nothing.
+        assert_eq!(quantize(&back, sh), q);
+        L2Q_TEST.with(|c| c.set(false));
+        assert_eq!(q_u1(1.0), 1.0);
+        assert_eq!(q_u1(0.5 / 127.0 - 1e-6), 0.0);
+        assert_eq!(q_u1(3.0 / 127.0), 3.0 / 127.0);
+        // Group penalty: g p_j / ||p_c|| over the aligned chunk of input j.
+        let h = 16;
+        let mut acc = vec![0.0f32; 2 * h];
+        for (i, x) in acc.iter_mut().enumerate() {
+            *x = (i % 5) as f32 * 0.2;
+        }
+        let raw = |j: usize| acc[j].clamp(0.0, 1.0) * acc[j + h / 2].clamp(0.0, 1.0);
+        let n: f32 = (4..8).map(|j| raw(j) * raw(j)).sum::<f32>().sqrt();
+        assert!((pw_group_dp(&acc, h, 5, 2.0) - 2.0 * raw(5) / n).abs() < 1e-6);
     }
 
     #[test]

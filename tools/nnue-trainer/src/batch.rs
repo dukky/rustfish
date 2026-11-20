@@ -37,7 +37,7 @@
 //! interleaved partial sums (float reassociation only).
 
 use crate::simd::{Isa, Portable, Simd};
-use crate::{decode, ft_l1, head_backward, head_fwd_acc, head_offs, head_small_grads, head_w1t, pw_at, pw_dacc, pw_lane, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, H1, H2, HS, INPUTS};
+use crate::{decode, ft_l1, ft_l1_group, pw_group_dp, head_backward, head_fwd_acc, head_offs, head_small_grads, head_w1t, pw_at, pw_dacc, pw_lane, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, H1, H2, HS, INPUTS};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::Thread;
 
@@ -960,7 +960,7 @@ unsafe fn out_impl<V: Simd, const EXACT: bool>(a: &OutArgs) {
             let ow = std::slice::from_raw_parts(ow, 2 * h);
             let t = &a.w1t[s.bucket * h * H1..(s.bucket + 1) * h * H1];
             let dz = &scr[H1 + H2..2 * H1 + H2];
-            let l1 = ft_l1();
+            let (l1, grp) = (ft_l1(), ft_l1_group());
             let d = a.dacc.add(j * 2 * h);
             for i in 0..2 * h {
                 let x = acc[i];
@@ -970,6 +970,7 @@ unsafe fn out_impl<V: Simd, const EXACT: bool>(a: &OutArgs) {
                 for k in 0..H1 {
                     e += dz[k] * t[pi * H1 + k];
                 }
+                let l1 = if grp > 0.0 { l1 + pw_group_dp(acc, h, pi, grp) } else { l1 };
                 *d.add(i) = pw_dacc(x, g * ow[i] * 2.0 * c, e + l1, acc[partner].clamp(0.0, 1.0));
             }
         }
