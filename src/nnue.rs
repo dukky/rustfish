@@ -660,6 +660,28 @@ impl<L: Layout> NnueState<L> {
         }
     }
 
+    /// Start loading the feature rows the pending update of the current
+    /// ply will read (when it is the only pending one). A pure hint.
+    #[inline]
+    pub(crate) fn prefetch_pending(&self) {
+        if self.computed.get() + 1 != self.top {
+            return;
+        }
+        let stack = self.stack.borrow();
+        let slot = &stack[self.top];
+        let net = &*self.net;
+        let d = slot.delta;
+        for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+            if L::REFRESH && slot.refresh[pi] {
+                continue;
+            }
+            let k = if L::REFRESH { slot.ctx[pi] } else { KingCtx::ZERO };
+            for &(sq, p) in d.add[..d.n_add].iter().chain(d.sub[..d.n_sub].iter()) {
+                prefetch_row(net.row(feature(persp, p.unwrap(), sq, k)));
+            }
+        }
+    }
+
     /// Called by `undo_move`.
     #[inline]
     pub(crate) fn pop(&mut self) {
@@ -772,6 +794,28 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
         };
     }
     sum
+}
+
+/// Cache-line stride of `prefetch_row`, in i16 lanes (Apple cores have
+/// 128-byte lines).
+const PREFETCH_STRIDE: usize = if cfg!(target_arch = "aarch64") { 64 } else { 32 };
+
+/// Hint the CPU to start loading a feature row. No architectural effect.
+#[inline(always)]
+fn prefetch_row(row: &[i16; H]) {
+    let p = row.as_ptr();
+    let mut i = 0;
+    while i < H {
+        // SAFETY: prefetches are hints that never fault or write memory, and
+        // p + i stays inside the row.
+        unsafe {
+            #[cfg(target_arch = "aarch64")]
+            std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p.add(i), options(nostack, readonly, preserves_flags));
+            #[cfg(target_arch = "x86_64")]
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(p.add(i) as *const i8);
+        }
+        i += PREFETCH_STRIDE;
+    }
 }
 
 /// Output weights of bucket `b` for the side to move's half (`us`) or the other.

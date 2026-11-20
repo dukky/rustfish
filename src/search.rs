@@ -1897,6 +1897,9 @@ fn negamax(
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
         engine.eval_cache.prefetch(child_key);
+        if let Some(st) = board.nnue.as_deref() {
+            st.prefetch_pending();
+        }
         rep_stack.push(child_key);
         let gives_check = board.is_in_check(board.side_to_move);
 
@@ -2222,6 +2225,9 @@ fn quiescence(
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
         engine.eval_cache.prefetch(child_key);
+        if let Some(st) = board.nnue.as_deref() {
+            st.prefetch_pending();
+        }
         rep_stack.push(child_key);
         let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv));
         rep_stack.pop();
