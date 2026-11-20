@@ -1,6 +1,16 @@
 {
   "pending": [
     {
+      "branch": "killer-reset-per-parent",
+      "mode": "stc",
+      "front": true
+    },
+    {
+      "branch": "capture-history-r5",
+      "mode": "stc",
+      "front": true
+    },
+    {
       "branch": "lmr-index-1based",
       "mode": "stc"
     },
@@ -17,19 +27,11 @@
       "mode": "nonreg"
     },
     {
-      "branch": "killer-reset-per-parent",
-      "mode": "stc"
-    },
-    {
       "branch": "nmp-tt-store",
       "mode": "stc"
     },
     {
       "branch": "root-order-nodes",
-      "mode": "stc"
-    },
-    {
-      "branch": "capture-history-r5",
       "mode": "stc"
     }
   ],
