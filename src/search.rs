@@ -2869,6 +2869,9 @@ fn move_order_score(
 
     if is_capture_move(board, mv) {
         let see_score = see(board, mv);
+        if see_score < 0 {
+            return -1_000_000 + see_score * 12;
+        }
         return 1_000_000 + see_score * 12;
     }
 
