@@ -37,19 +37,10 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "pv-no-tt-cut",
-    "mode": "stc",
-    "test_id": "q-pv-no-tt-cut-1120-1517",
-    "sha": "82622249e8cf9448c7b1b44732c9e0734d2e8d07",
-    "base_sha": "22fcb682f78a07a61c975167a0b06e40f4a4caae",
-    "started": "2026-11-20T15:17:29Z",
-    "bench": 283276,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 273,
   "consecutive_bursts": 0,
   "identical_merges": [
