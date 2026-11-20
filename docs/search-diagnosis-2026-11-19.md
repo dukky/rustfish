@@ -483,3 +483,123 @@ cargo build --release --features stats-verify --target-dir target-sv   # error r
 ```
 Positions: `scripts/diag-mid300.txt` (this branch); OB50 FENs are in
 `scripts/peer_nps.py`.
+
+## Round 4 (2026-11-20, on main 48d4541: tt-failow + prune-exempt-killers)
+
+Stats build: branch `diag-r4` (the `diag-search-stats` counters rebased on
+main, plus root counters `it_nodes`, `asp_fl`/`asp_fh`/`asp_multi`/`asp_waste`,
+`bm_change`, `bm_idx`, `root_raise`, `score_delta`, `net_ext`,
+`pv_net_ext_by_ply`, `nmp_mate`). Bench 283739 with and without the feature.
+300 middlegames, depth 14, Hash 64: 401.8k nodes to depth 14, EBF 1.636.
+
+### Gauge
+
+200k nodes per move vs Clover 9.1, 792 games (run 44698430657, main 48d4541):
+W/D/L 31/309/452, **-205.8 (-221 .. -191)**. Before the TT fix -213, after
+it -197: prune-exempt-killers (+11 at STC) did not move the fixed-node gauge
+(it saves nodes, which a node budget does not reward).
+
+### Depth-14 misses against our own depth-20 oracle
+
+696 positions (diag-mid300 plus 396 middlegames grown by depth-7 self-play
+from the start FENs of the Clover 10+0.1 match, run 44543352392). Each:
+fresh `go depth 14` (move A) and fresh `go depth 20` (move B). Where they
+differ, B and A were each scored at depth 20 with `searchmoves` (new on
+`diag-r4`), and a miss is "significant" when B beats A by >= 25 cp there.
+Classification used `searchmoves` probes at depth 14 and the `DiagOff`
+switch bits on `diag-r4` (each turns off one of LMR, LMP, move futility,
+SEE prunes, null move, RFP, razoring, ProbCut, singular, IIR, non-root TT
+cutoffs, the cut-node LMR term, cut-node labels on root children,
+aspiration). Scripts: `misses.py`, `rootpass.py`, `deppass.py`.
+
+- d14 and d20 differ in 180 of 696 positions (26%); 64 are significant
+  (median gap 39 cp).
+- **Root class, 39 of 64 (61%)**: searched alone at depth 14 (PV window), B
+  scores higher than A (median +34 cp), yet the full search keeps A. B's
+  null-window root search fails low, in 24 of 39 at exactly alpha. B had
+  been the best move at an earlier iteration in 20 of 39.
+- **Subtree class, 25 of 64**: B scores lower than A at depth 14 even alone.
+- **No mechanism dominates.** The unchanged search reproduces A in 39 of 39,
+  but almost any switch makes the full depth-14 search pick B in 14-25 of 39
+  root-class misses, including cheap ones (cut-node LMR term off: 18/39 at
+  1.08x nodes, cut-node labels off: 14/39 at 1.08x, aspiration off: 18/39 at
+  1.32x). LMR off is the highest at 25/39, but costs 5.4x nodes. Plain depth
+  does better per node: depth 15 picks B in 11/39 (1.8x nodes), depth 16 in
+  24/39 (3.0x), depth 18 in 34/39 (6.3x). In the subtree class, single
+  switches flip 7-17 of 25 (only 3 have a single sole cause), and depth 18
+  picks B in 11/25.
+- **Agreement check:** with the oracle fixed, a perturbed search reshuffles
+  rather than improves: cut-node LMR term off agrees 72.1% (fixes 22 of the
+  64 misses, breaks 76 agreements), fail-soft qsearch (below) 73.0% at 0.9x
+  nodes, base 74.1% (biased upward: the oracle is the base engine).
+
+Reading: the depth-14 misses are knife-edge root decisions that one or two
+more plies resolve, plus deeper content that only depth 18+ sees. There is no
+single reduction, prune, extension or TT rule hiding the better move. So the
+fixed-depth deficit against Clover is not a broken mechanism we can switch
+off; it is "how much each node is worth", and the levers stay the known ones
+(eval, node efficiency at the shallow end, SPSA of the reduction terms).
+
+**One real inconsistency found on the way:** qsearch was fail-hard on a fail
+low (it returned and stored `alpha`) inside a fail-soft negamax, which is
+why so many root fails land exactly on alpha. Fail-soft qsearch (returns and
+stores the best score, stand pat included; floor 0 when the repetition check
+raised alpha): nodes -7.9%, EBF 1.636 -> 1.621, aspiration fails 457 -> 553,
+bench 275954. Queued as `qsearch-fail-soft:stc`.
+
+### Quality at depth: what our own tree shows
+
+Per iteration (300 searches each):
+
+| depth | asp. fails (low/high) | 2nd+ fails | nodes in failed searches | best move changes | best move was root move #2-4 / #5+ |
+|---:|---|---:|---:|---:|---|
+| 6 | 19 / 20 | 3 | 7.9% | 21.0% | 20 / 36 |
+| 8 | 20 / 23 | 2 | 7.9% | 15.7% | 13 / 28 |
+| 10 | 17 / 32 | 3 | 10.4% | 9.7% | 9 / 16 |
+| 12 | 18 / 31 | 2 | 12.7% | 11.3% | 9 / 18 |
+| 14 | 12 / 19 | 1 | 8.5% | 11.3% | 11 / 20 |
+
+- **Aspiration:** 10-17% of iterations fail (fail high more often than fail
+  low), and the failed searches cost 8-13% of the iteration's nodes. Only 33
+  of 457 fails were a second fail, so the linear widening (+-70 per fail) is
+  not what costs; the single re-search is. **Suspect ruled out.**
+- **PV stability:** the best move changes in 10-21% of iterations, more at
+  even depths 4-9 than at odd ones. The root re-sorts moves 2..N statically
+  every iteration (TT move, then all captures, then killers and history), and
+  the iteration's best move sat at root index 5 or later in 5-15% of
+  iterations.
+- **Extensions do not explode.** Check extensions are 3.7% of negamax nodes
+  and fall with depth. Singular tries run at 22-35% of depth 8-12 nodes and
+  extend 28-35% of them (PV: 45-52%); multi-cut 12%, negative 20%. The net
+  extension at PV nodes (depth + ply - iteration depth) averages +0.4 at
+  ply 4, +1.0 at ply 10 and +1.6 at ply 12.
+- **Nominal depth:** at qsearch entry 65% of horizon leaves are shallower
+  than the iteration depth, 13% exactly at it and 21% beyond it. The net depth
+  at CUT/ALL nodes spreads over -8..0: most of the tree is reduced.
+- **Reductions, PV vs non-PV** (avg R of reduced quiets, PV / CUT / ALL):
+  depth 6: 3.2 / 3.9 / 3.6; depth 9: 3.7 / 6.2 / 4.7; depth 12: 4.2 / 6.9 /
+  5.0. PV late quiets lose 4 plies at depth 9+ (`lmr_pv_node` is only 1 ply
+  less than ALL), and CUT ones end near the `depth - 2` clamp. Reduced
+  searches that fail high: PV 0.4-1.2%, CUT 0.3-1.3%, ALL 0.1-0.3%. Both node
+  terms are tunables in the running SPSA, so no hand change was queued.
+
+Reading: no single broken mechanism shows up. The deep tree is heavily
+reduced (PV nodes included) and still 3x Clover's nodes, which points at
+where the nodes go (shallow bushiness, Round 1) rather than at extensions or
+aspiration. Fixed-depth Elo against another engine mostly compares reduction
+schemes, so on its own it is a weak per-depth diagnostic.
+
+### Unverified suspects from the bug audit
+
+| suspect | verdict | evidence | action |
+|---|---|---|---|
+| Null move returns unproven mate scores | **real, rare** | 4 of 1.45M null-move fail highs returned a mate score; clamping to beta leaves bench and the 300-position tree identical | branch `nmp-mate-clamp` ready (bench unchanged, `:nonreg`); taken off the queue for `qsearch-fail-soft` |
+| PV nodes take TT cutoffs | **real (design)** | 1.9% of PV nodes cut on the TT. Without it: nodes +7%, PV first-move cut 60.3 -> 61.9%, bench 285432 | `pv-no-tt-cut:stc` |
+| Root orders losing captures before killers | **real** | root scoring gives every capture 1,000,000 + 12*SEE, so a -800 SEE capture still beats killers (900,000). Bad captures last: nodes +1.8%, EBF 1.636 -> 1.621, bench 284951 | branch `root-bad-captures-last` pushed, not queued (queue cap) |
+| Aspiration widens linearly | ruled out | 7% of fails are repeats (above) | none |
+| LMR table index off by one | **real** | the table is built for move numbers m >= 1 (column 0 = 0) and indexed with the 0-based searched-move count, so searched move k gets the ln(k-1) entry. With idx + 1: nodes -2.0%, EBF 1.634, bench 293434. The table shape is not an SPSA tunable | branch `lmr-index-1based` pushed, not queued (queue cap) |
+| Quiet scoring ignores negative cont. history | **proven** | plain quiets have h <= 0 and ch <= 0, so `max(h + ch/2, h)` is always h: continuation history never ordered them. Fixed: nodes -0.6%, EBF 1.636 -> 1.626, bench 307623 | `quiet-cont-neg:stc` |
+
+Candidate numbers: 300 positions, depth 14, stats build on `diag-r4` with
+each patch applied. Every queued branch passed cargo test --release,
+perfttest, selftest 100 and a UCI smoke.
