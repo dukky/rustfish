@@ -788,6 +788,21 @@ fn take_best_scored(moves: &mut Vec<(Move, i32)>) -> Option<Move> {
 
 const DARK_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
 
+/// Score of a node whose halfmove clock reached 100: a draw, unless the move
+/// that got here mated, which takes precedence over the 50-move rule. Rare
+/// enough that the move generation only runs when in check.
+#[cold]
+fn fifty_move_score(board: &mut Board, ply: usize) -> i32 {
+    if board.is_in_check(board.side_to_move) {
+        let mut moves = Vec::new();
+        board.generate_legal_moves(false, &mut moves);
+        if moves.is_empty() {
+            return -MATE_SCORE + ply as i32;
+        }
+    }
+    0
+}
+
 /// True for positions no sequence of legal moves can (sensibly) win:
 /// K vs K, KN vs K, KB vs K, KNN vs K, and kings plus any bishops that all
 /// stand on one square colour (covers KB vs KB same-coloured). Pure bitboard
@@ -1481,7 +1496,7 @@ fn negamax(
     }
 
     if board.halfmove_clock >= 100 {
-        return 0;
+        return fifty_move_score(board, ply);
     }
     if is_repetition(rep_stack, key, board.halfmove_clock) {
         return 0;
@@ -2140,7 +2155,7 @@ fn quiescence(
     }
 
     if board.halfmove_clock >= 100 {
-        return 0;
+        return fifty_move_score(board, ply);
     }
 
     if is_repetition(rep_stack, key, board.halfmove_clock) {
@@ -3015,6 +3030,19 @@ mod tests {
         let distinct = pawn_structs.values().collect::<std::collections::HashSet<_>>().len() as f64;
         let expected = CORR_SIZE as f64 * (1.0 - (-n / CORR_SIZE as f64).exp());
         assert!(n > 2000.0 && distinct > 0.97 * expected, "n {n} distinct {distinct} expected {expected}");
+    }
+
+    #[test]
+    fn mate_beats_fifty_move_rule() {
+        let mut board = Board::new();
+        // Black is mated on the move that brings the halfmove clock to 100.
+        board.set_fen("R5k1/5ppp/8/8/8/8/5PPP/6K1 b - - 100 80");
+        assert_eq!(fifty_move_score(&mut board, 1), -MATE_SCORE + 1);
+        // In check with a way out: still a 50-move draw.
+        board.set_fen("R5k1/5pp1/8/8/8/8/5PPP/6K1 b - - 100 80");
+        assert_eq!(fifty_move_score(&mut board, 1), 0);
+        board.set_fen("6k1/5ppp/8/8/8/8/5PPP/R5K1 b - - 100 80");
+        assert_eq!(fifty_move_score(&mut board, 1), 0);
     }
 
     #[test]
