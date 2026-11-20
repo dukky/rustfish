@@ -1,5 +1,10 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "ep-hash-capturable",
+      "mode": "nonreg"
+    }
+  ],
   "current": {
     "branch": "queen-promo-tactical",
     "mode": "stc",
