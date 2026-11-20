@@ -8,8 +8,12 @@ const SE_MIN_DEPTH: i32 = 8;
 const SE_MARGIN_PER_DEPTH: i32 = 2;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
-// Sudden-death clocks are budgeted as if this many moves remain.
+// Sudden-death clocks are budgeted as if this many moves remain: the horizon
+// starts at EARLY_MOVES_TO_GO and shrinks by 2 every 5 full moves down to
+// DEFAULT_MOVES_TO_GO (reached at move 50). A flat 20 drained the clock to
+// near the increment by move 40 at 120+1 (ladder PGNs, Nov 2026).
 const DEFAULT_MOVES_TO_GO: u64 = 20;
+const EARLY_MOVES_TO_GO: u64 = 40;
 // The hard limit (checked mid-iteration) is this multiple of the soft target.
 const HARD_LIMIT_FACTOR: u64 = 3;
 // Soft-target scale in percent by how many iterations the best move has held.
@@ -918,7 +922,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     } else if let Some(ms) = movetime {
         (None, Some(Instant::now() + Duration::from_millis(ms.max(1))))
     } else if let Some(t) = time_left {
-        let (soft, hard) = clock_limits(t, inc, movestogo, engine.move_overhead);
+        let (soft, hard) = clock_limits(t, inc, movestogo, board.fullmove_number, engine.move_overhead);
         (Some(soft), Some(Instant::now() + Duration::from_millis(hard)))
     } else {
         (None, None)
@@ -1119,9 +1123,12 @@ fn root_node_index(mv: Move) -> usize {
 /// Soft target and hard limit in ms for a clock search. The soft target is
 /// time/movestogo plus most of the increment; the hard limit allows a few
 /// times that but never more than 4/5 of the usable clock.
-fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, overhead: u64) -> (u64, u64) {
+fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, fullmove: u32, overhead: u64) -> (u64, u64) {
     let usable = time_left.saturating_sub(overhead).max(1);
-    let mtg = movestogo.unwrap_or(DEFAULT_MOVES_TO_GO).clamp(1, DEFAULT_MOVES_TO_GO);
+    let horizon = EARLY_MOVES_TO_GO
+        .saturating_sub(fullmove as u64 * 2 / 5)
+        .max(DEFAULT_MOVES_TO_GO);
+    let mtg = movestogo.unwrap_or(horizon).clamp(1, horizon);
     let cap = if mtg == 1 { usable * 4 / 5 } else { usable / 2 };
     let soft = (usable / mtg + inc * 3 / 4).min(cap).max(1);
     let hard = (soft * HARD_LIMIT_FACTOR).min(usable * 4 / 5).max(soft);
