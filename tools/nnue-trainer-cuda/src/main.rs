@@ -472,7 +472,7 @@ impl GpuTrainer {
             acc: DBuf::new(b * 2 * h),
             gout: DBuf::new(b),
             hsc: DBuf::new(if sh.hd > 0 { b * HS } else { 0 }),
-            dacc: DBuf::new(if sh.hd > 0 { b * 2 * h } else { 0 }),
+            dacc: DBuf::new(b * 2 * h),
             hin: DBuf::new(if sh.hd > 0 { b * sh.head_in() } else { 0 }),
             qw: DBuf::new(if sh.hd >= 2 { 2 * sh.buckets * H1 * sh.head_in() } else { 0 }),
             wf: DBuf::new(if sh.hd == 1 { 2 * sh.buckets * H1 * sh.head_in() } else { 0 }),
@@ -698,7 +698,7 @@ impl Backend for GpuTrainer {
             launch(k.quant_w1, (nq.div_ceil(256) as u32, 1), 256, st, &[P(self.pr.ptr), P(self.qw.ptr), P(self.wf.ptr), I(hi), I(bi), I(hd)]);
         }
         mark(1);
-        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), I(hd)]);
+        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), I(hd), P(self.dacc.ptr)]);
         mark(2);
         if sh.hd > 0 {
             // Head forward + head backward + dacc, a block per sample; dynamic

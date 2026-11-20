@@ -71,7 +71,8 @@ __device__ __forceinline__ float4 row4(const __half *wt, size_t at) {
 
 template <typename W>
 __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *order, const W *wt, const float *rest,
-                                             float *acc, float *gout, float *loss, int H, int buckets, int hd) {
+                                             float *acc, float *gout, float *loss, int H, int buckets, int hd,
+                                             float *dacc) {
     int sample = order[blockIdx.x];
     const GSample &s = ss[sample];
     int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
@@ -106,9 +107,10 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
     const float *w = ow + s.bucket * 2 * H + side * H + c;
     float x0 = fminf(fmaxf(a.x, 0.f), 1.f), x1 = fminf(fmaxf(a.y, 0.f), 1.f), x2 = fminf(fmaxf(a.z, 0.f), 1.f),
           x3 = fminf(fmaxf(a.w, 0.f), 1.f);
-    float part = x0 * x0 * w[0] + x1 * x1 * w[1] + x2 * x2 * w[2] + x3 * x3 * w[3];
+    const float wv[4] = {w[0], w[1], w[2], w[3]};
+    float part = x0 * x0 * wv[0] + x1 * x1 * wv[1] + x2 * x2 * wv[2] + x3 * x3 * wv[3];
     for (int o = 16; o; o >>= 1) part += __shfl_down_sync(0xffffffff, part, o);
-    __shared__ float red[32];
+    __shared__ float red[32], gsh;
     if ((t & 31) == 0) red[t >> 5] = part;
     __syncthreads();
     if (t == 0) {
@@ -123,20 +125,36 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
         float out = ob[s.bucket] + sum;
         float pred = 1.0f / (1.0f + expf(-out));
         float err = pred - s.target;
-        gout[sample] = 2.0f * err * pred * (1.0f - pred);
+        float g = 2.0f * err * pred * (1.0f - pred);
+        gout[sample] = g;
         loss[sample] = err * err;
+        gsh = g;
     }
+    if (hd) return;
+    // Plain: the FT backward's per-lane gradient dacc = g w 2 c for this
+    // thread's 4 lanes, cached here (backward_ft's staging then reads one
+    // value per pair instead of the sample, acc, w and g). Spelt out as
+    // nvcc contracted it in backward_ft (2 g w as fma(g, w, g w), times c).
+    __syncthreads();
+    float g = gsh, xs[4] = {a.x, a.y, a.z, a.w}, d[4];
+#pragma unroll
+    for (int u = 0; u < 4; u++) {
+        float x = xs[u], cl = fminf(fmaxf(x, 0.f), 1.f);
+        float gw = __fmul_rn(g, wv[u]);
+        d[u] = (x > 0.f && x < 1.f) ? __fmul_rn(cl, __fmaf_rn(g, wv[u], gw)) : 0.0f;
+    }
+    *(float4 *)(dacc + ((size_t)sample * 2 + side) * H + c) = make_float4(d[0], d[1], d[2], d[3]);
 }
 
 extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
-                                   float *acc, float *gout, float *loss, int H, int buckets, int hd) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hd);
+                                   float *acc, float *gout, float *loss, int H, int buckets, int hd, float *dacc) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hd, dacc);
 }
 
 // `--half`: the same with the fp16 copy of the merged FT rows.
 extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order, const __half *wt, const float *rest,
-                                        float *acc, float *gout, float *loss, int H, int buckets, int hd) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hd);
+                                        float *acc, float *gout, float *loss, int H, int buckets, int hd, float *dacc) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hd, dacc);
 }
 
 // ---------------------------------------------------------------- head forward (--head)
@@ -475,16 +493,8 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
         for (int r = warp; r < nr; r += 32) {
             uint32_t pr = pairs[r0 + r];
             int j = pr >> 1, side = pr & 1;
-            const GSample &s = ss[j];
-            float x = acc[((size_t)j * 2 + side) * H + col];
-            float c = fminf(fmaxf(x, 0.f), 1.f);
-            float w = ow[s.bucket * 2 * H + side * H + col];
-            if (hd) {
-                // Cached by the forward: same lane as acc[(j, side, col)].
-                sd[r][lane] = dacc[((size_t)j * 2 + side) * H + col];
-            } else {
-                sd[r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
-            }
+            // Cached by forward / head_forward: same lane as acc[(j, side, col)].
+            sd[r][lane] = dacc[((size_t)j * 2 + side) * H + col];
         }
         const uint32_t *cs = csr + (size_t)rg * CSRW;
         if (t < INPUTS) so[t] = cs[t];

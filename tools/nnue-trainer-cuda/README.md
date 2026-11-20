@@ -252,4 +252,26 @@ traffic beats the int8 decode), 3 forward blocks/SM (spills), head blocks of
 128 / 512 threads. Keeping the head fused into `forward` (2 blocks/SM)
 was as fast for pairwise but slower for the dense head, so it is split.
 
+## Plain-path speed (branch `perf-cuda-plain`)
+
+Profile, H 1024 kb8m `--factorise --half`, idle 1080 Ti at 125 W (ms/batch
+of 16384, `NNUE_CUDA_PROF`): forward 2.87, backward_ft 3.14, backward_rest
+0.73, adam_ft 0.89, plan_csr 0.10; total 7.84 (~2.0M pos/s in 600-batch
+runs; host prep 1.9 ms runs under the GPU and is not the limit).
+
+- **Plain `forward` caches dacc** (g w 2 c per lane, rounded exactly as
+  nvcc contracted it inside backward_ft), so `backward_ft`'s staging reads
+  one float per pair instead of the sample, acc, w and g (the head modes
+  already did this). Byte-identical (plain kb8m `--factorise` H 1024
+  `--half` and f32, H 512 `--mirror`, H 256 without `--factorise`; pairwise
+  and dense heads unchanged). Shared GPU, 300 batches, interleaved:
+  828k / 833k -> 879k / 879k pos/s (+6%), backward_ft 8.55 -> 5.8 ms,
+  forward +0.35 ms. `backward_rest` keeps its own sum: there nvcc fuses the
+  last multiply into the bias accumulation (fma(c, 2gw, gb)), so a cached
+  rounded dacc would change it.
+- Lost: `adam_ft` with the bucket gradients in registers (templated on
+  kb <= 8) went to 108 registers and got slower (byte-identical).
+- Not tried (changes the maths, would need its own flag and a loss A/B):
+  lazy Adam on the FT rows a batch touches; adam_ft is ~11% of the batch.
+
 
