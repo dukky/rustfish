@@ -755,3 +755,90 @@ replay; parse/analyse scripts. To rerun the EPD:
 (baseline fcbf8e7: best move leaves `am` stably at median depth 13.5,
 213k nodes; 7 never pick it). The EPD drops the move history and the
 halfmove clock, so repetition-dependent cases (H2, H3) need the game replay.
+
+## Round 7 (2026-11-20): exact-0.00 draws (H2) and game-state carry-over (H3)
+
+Method: the nodes=200000 Clover games replayed move by move (`ucinewgame`,
+Hash 16, 1 thread, `position fen <book> moves ...` + `go nodes 200000` for
+every one of our moves, the opponent's moves taken from the PGN). The run's
+build 48d4541 (bench 283739) reproduces the games exactly: 2452/2452 of our
+moves in 48 games identical, same score and depth. Variants are compared on
+96 games (every 2nd of 0-191, 4863 of our moves with phase >= 4) on main
+debf84f. "Deep judge" = where two variants choose different moves, both
+moves are scored by a fresh 2M-node search of the position after the move
+(real move history kept), clipped to +-4 pawns. Scripts were scratch
+(replay/zrate/judge/repset), not committed.
+
+**H2: the 0.00 rate is cosmetic, not a leak.** Clover prints +-0.01 for its
+draws: |score| <= 0.01 on 20.0% of its moves (phase >= 4, 200k run) vs our
+7.4% (exact 0: Clover 0.26%, us 7.2%). After a near-0 score of ours, Clover
+claims >= +1 for itself on its next move 3.7% of the time (2.9% at 60+0.6);
+after Clover's near-0, our next score is >= +1 for us 6.1% (16.1%). The
+round-6 "8/24 blunders at 0.00" is selection: blunders were chosen where
+Clover said ~0 before the move, i.e. drawish positions.
+
+Where our exact 0s come from (main, 473 zeros = 9.7% of replayed moves; a
+build that returns a distinct tiny score per draw source):
+
+| source | zeros |
+|---|---|
+| cuckoo upcoming-repetition raise (alpha -> 0) | 163 (34%) |
+| repetition (`is_repetition`) | 146 (31%) |
+| insufficient material | 39 |
+| 50-move rule | 16 |
+| stalemate | 3 |
+| eval exactly 0, or the tagged build chose differently | 106 |
+
+| candidate | exact 0 | moves changed | deep judge (candidate - main) |
+|---|---|---|---|
+| main, fresh state every move (`ucinewgame` before each `go`) | 7.4% | - | see H3 |
+| pre-root positions draw only at the 3rd occurrence (+ cuckoo targets in-tree only) | 9.8% (all moves); 42.1% vs 55.1% on the 837 of 39437 moves (2.1%) whose halfmove window holds a repeat | 272/837 | -3.8 cp, 16 vs 31 better by >= 30 (main judge); -2.2 cp, 22 vs 31 (judged by the variant) |
+| TT cutoffs ignore 0-score entries from earlier searches (GHI test) | 10.4% | - | not run: zeros went up, so carried-over TT draws are not the source |
+| negamax floors its result at 0 after the cuckoo raise | 10.5% | 400 judged | +1.6 cp, 30 vs 31 |
+
+Findings:
+
+- Counting a single pre-root occurrence as a draw is a rule choice, not a
+  bug: changing it moves a third of the decisions where it applies and the
+  deep judge mildly prefers the current rule. Branch `rep-preroot-3fold`
+  (Bench 268722 unchanged: bench positions have no history) is pushed for
+  an ordinary stc test if wanted, low priority.
+- **Bug (soundness):** after the cuckoo test raises alpha to 0, negamax kept
+  fail-soft returns below 0 (TT upper bounds, razoring/qsearch drops, the
+  final fail-low `best`), telling the parent its opponent cannot draw here,
+  which can cause a false fail-high. Quiescence already floors at 0. Branch
+  `negamax-rep-floor` (Bench 266587): the node runs with alpha 0 and clamps
+  its result; the TT keeps the unclamped, path-independent bound. Decision
+  effect neutral on the replays: **nonreg**.
+- **Bug:** a node with halfmove clock >= 100 returned 0 before checking for
+  mate, so a mate delivered by the 100th reversible half-move scored as a
+  draw (`6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 99 80`: main plays h3 at +16.6,
+  the fix plays Ra8#). Branch `fifty-move-mate` (Bench 268722 unchanged,
+  unit test added). Rare; **nonreg**.
+- Not found: draw scores leaking through the TT from earlier searches, a
+  wrong insufficient-material rule, or a contempt problem (there is no
+  contempt; draws are exactly 0).
+
+**H3: carry-over helps; the 7 "fresh never picks it" blunders are near-ties.**
+Five of the seven are in the 200k run and replay exactly. At the blunder ply,
+with the real game state, clear one thing before the `go`:
+
+| blunder | game state | -TT | -history | -correction | -TT-hist-corr | -move history | all |
+|---|---|---|---|---|---|---|---|
+| 10 Rf2 | Rf2 0 | Rf2 -37 | Rf2 -50 | Rxb7 -48 | Rxb7 -85 | Rf2 0 | Rxb7 -85 |
+| 13 Nc5 | Nc5 +107 | Nb6 +68 | Nc5 +99 | Nb6 +83 | Nf8 +74 | Nc5 +107 | Nf8 +74 |
+| 14 Ke5 | Ke5 -18 | Kc7 -116 | Ke5 -33 | Ke5 0 | Kc7 -30 | Ke5 -26 | Kc7 -45 |
+| 16 Bf1 | Bf1 -15 | Kb2 -32 | Kb2 -44 | Bf1 -18 | Bf1 -17 | Bf1 -15 | Bf1 -17 |
+| 18 Nc1 | Nc1 -44 | Nc1 -48 | Nd2 -78 | Nd2 -48 | Nb2 -58 | Nd2 -54 | Nd2 -67 |
+
+The game move reproduces with the game state in 5/5; clearing everything
+avoids it in 4/5 (Bf1 is chosen even fully fresh at 200k nodes, so the
+fcbf8e7 Hash 64 EPD verdict does not transfer exactly). No single component
+is responsible: clearing the TT flips 3/5, history 2/5, correction history
+3/5, the move history 1/5. These are near-equal choices that any change of
+state flips. Systematically, over the 96 games the game state reaches depth
+15.2 vs 13.5 fresh at the same node count, and where the two choose
+differently (500 judged moves) the game-state move is better by +5.5 cp mean,
+81 vs 36 better by >= 30 cp. The carry-over is a net gain: no TT-aging or
+history-decay fix is warranted by this data. (Blunders 02, 60+0.6, and 23,
+1M nodes, were not replayed: timed / other build.)
