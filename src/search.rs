@@ -1017,7 +1017,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
         let mut alpha = -INF;
         let mut beta = INF;
-        if d >= 4 {
+        if d >= 4 && !off(8192) {
             alpha = best_score - ASPIRATION_WINDOW;
             beta = best_score + ASPIRATION_WINDOW;
         }
