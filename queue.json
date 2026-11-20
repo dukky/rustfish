@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "killer-reset-per-parent",
-      "mode": "stc",
-      "front": true
-    },
-    {
       "branch": "capture-history-r5",
       "mode": "stc",
       "front": true
@@ -35,7 +30,17 @@
       "mode": "stc"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "killer-reset-per-parent",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-killer-reset-per-parent-1120-1731",
+    "sha": "293a7fa2922918d98b2c061a276463149d853509",
+    "base_sha": "7371b17f99ed1fb1990f26a85de1f63508255fc5",
+    "started": "2026-11-20T17:31:53Z",
+    "bench": 231779,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
