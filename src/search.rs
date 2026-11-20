@@ -882,6 +882,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     let mut movestogo: Option<u64> = None;
     let mut node_limit: Option<u64> = None;
     let mut infinite = false;
+    let mut searchmoves: Vec<String> = Vec::new();
 
     let mut i = 1;
     while i < tokens.len() {
@@ -922,6 +923,13 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 infinite = true;
                 i += 1;
             }
+            "searchmoves" => {
+                i += 1;
+                while i < tokens.len() && tokens[i].len() >= 4 && tokens[i].as_bytes()[1].is_ascii_digit() {
+                    searchmoves.push(tokens[i].to_string());
+                    i += 1;
+                }
+            }
             _ => i += 1,
         }
     }
@@ -956,6 +964,9 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
     let mut root_moves = Vec::new();
     board.generate_legal_moves(false, &mut root_moves);
+    if !searchmoves.is_empty() {
+        root_moves.retain(|m| searchmoves.contains(&move_to_uci(*m)));
+    }
     if root_moves.is_empty() {
         return None;
     }
@@ -1355,7 +1366,7 @@ fn search_root(
                 false,
             );
         } else {
-            let reduction = if idx >= ROOT_LMR_MIN_INDEX && depth >= ROOT_LMR_MIN_DEPTH {
+            let reduction = if idx >= ROOT_LMR_MIN_INDEX && depth >= ROOT_LMR_MIN_DEPTH && !off(1) {
                 ROOT_LMR_REDUCTION
             } else {
                 0
@@ -1476,6 +1487,14 @@ pub(crate) fn print_info(depth: i32, score: i32, nodes: u64, time_ms: u64, best:
     flush_stdout();
 }
 
+/// Diagnosis switches (`setoption name DiagOff value <bits>`): each bit
+/// turns one mechanism off. Diag branch only.
+pub(crate) static DIAG_OFF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[inline(always)]
+fn off(bit: u32) -> bool {
+    DIAG_OFF.load(std::sync::atomic::Ordering::Relaxed) & bit != 0
+}
+
 fn negamax(
     board: &mut Board,
     mut depth: i32,
@@ -1567,7 +1586,7 @@ fn negamax(
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
-        if excluded.is_none() && !pv_node && entry.depth as i32 >= depth {
+        if excluded.is_none() && !pv_node && !off(1024) && entry.depth as i32 >= depth {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
@@ -1605,7 +1624,7 @@ fn negamax(
     let params = engine.search_params;
 
     if let Some(se) = static_eval {
-        if beta - alpha <= 1 && depth <= 2 && st_allow!(search, ply) {
+        if beta - alpha <= 1 && depth <= 2 && !off(64) && st_allow!(search, ply) {
             let margin = if depth == 1 {
                 params.futility_margin_d1
             } else {
@@ -1633,6 +1652,7 @@ fn negamax(
             && beta - alpha <= 1
             && depth <= RFP_MAX_DEPTH
             && beta.abs() < MATE_SCORE - 1000
+            && !off(32)
             && st_allow!(search, ply)
         {
             st!{ crate::stats::inc("rfp_try", crate::stats::nd(st_nt, depth)); }
@@ -1663,12 +1683,12 @@ fn negamax(
     // after futility/RFP so those prunes are decided on the node's true depth
     // (and IIR_MIN_DEPTH > 3 keeps them from triggering on reduced depth here),
     // but before null move so its reduction and the main loop use the cheaper depth.
-    if tt_move.is_none() && depth >= IIR_MIN_DEPTH {
+    if tt_move.is_none() && depth >= IIR_MIN_DEPTH && !off(512) {
         st!{ if excluded.is_none() { crate::stats::inc("iir", crate::stats::nd(st_nt, depth)); } }
         depth -= 1;
     }
 
-    if allow_null && excluded.is_none() && depth >= 3 && !in_check && beta - alpha <= 1 {
+    if allow_null && excluded.is_none() && depth >= 3 && !in_check && beta - alpha <= 1 && !off(16) {
         let side_c = color_index(board.side_to_move);
         let side_pcs = &board.bb.pieces[side_c];
         let has_non_pawn = (side_pcs[1] | side_pcs[2] | side_pcs[3] | side_pcs[4]) != 0;
@@ -1739,6 +1759,7 @@ fn negamax(
     if !in_check
         && beta - alpha <= 1
         && depth >= PROBCUT_MIN_DEPTH
+        && !off(128)
         && beta.abs() < MATE_SCORE - MAX_PLY as i32 * 2
     {
         let probcut_beta = beta + PROBCUT_MARGIN;
@@ -1876,7 +1897,7 @@ fn negamax(
         // Singular extension: if every alternative to the TT move fails low
         // against a margin below the TT score, the TT move is singular.
         let mut extension = 0;
-        if stage == Stage::Tt && excluded.is_none() && depth >= SE_MIN_DEPTH {
+        if stage == Stage::Tt && excluded.is_none() && depth >= SE_MIN_DEPTH && !off(256) {
             if let Some(entry) = tt_entry {
                 let tt_score = score_from_tt(entry.score, ply);
                 if entry.best == Some(mv)
@@ -1963,7 +1984,7 @@ fn negamax(
             crate::stats::inc("gen_stage", crate::stats::ndk(st_nt, depth, st_cls));
         } }
 
-        if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3 {
+        if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3 && !off(2) {
             let limit = match depth {
                 1 => params.lmp_limit_d1,
                 2 => params.lmp_limit_d2,
@@ -1985,6 +2006,7 @@ fn negamax(
             && beta - alpha <= 1
             && depth <= 8
             && idx > 0
+            && !off(4)
             && static_eval.is_some_and(|se| se + params.futility_margin_d1 * depth / 2 <= alpha)
         {
             let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
@@ -2004,6 +2026,7 @@ fn negamax(
             && beta - alpha <= 1
             && idx > 0
             && depth <= SEE_QUIET_MAX_DEPTH
+            && !off(8)
             && best > -(MATE_SCORE - 1000)
             && !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth)
         {
@@ -2017,6 +2040,7 @@ fn negamax(
             && !in_check
             && beta - alpha <= 1
             && depth <= SEE_PRUNE_MAX_DEPTH
+            && !off(8)
             && idx > 0
             && best > -(MATE_SCORE - 1000)
             && !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth)
@@ -2069,6 +2093,7 @@ fn negamax(
         } else {
             let reduction = if quiet
                 && !in_check
+                && !off(1)
                 && depth >= params.lmr_min_depth
                 && idx >= params.lmr_min_move_index
             {
