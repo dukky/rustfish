@@ -2040,10 +2040,14 @@ fn negamax(
                 }
                 apply_history_delta(engine, side, threats, mv, bonus);
                 apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
+                // Quiets tried before the cutting move get a malus 1.5x the
+                // bonus: a move that failed to cut where a later one did is
+                // pushed below the many never-tried entries near zero.
+                let malus = bonus * 3 / 2;
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
-                        apply_history_delta(engine, side, threats, tried, -bonus);
-                        apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
+                        apply_history_delta(engine, side, threats, tried, -malus);
+                        apply_continuation_history_delta(engine, side, prev_move, tried, -malus);
                     }
                 }
             }
