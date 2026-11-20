@@ -634,3 +634,124 @@ first-move cutoff rate is a necessary signal, not a sufficient one. The three
 pushed branches target things the earlier rounds had not touched: stale
 killers from unrelated subtrees, a TT that forgets null-move cuts, and a root
 order that ignores the previous iteration. None is queued yet (queue full).
+
+## Round 6 (2026-11-20): where the Clover games are lost (game records only)
+
+Source: the PGNs of four existing peer-match runs (no new CI): 60+0.6
+(44545275669, 396 games), nodes=200000 (44698430657, 792), 10+0.1
+(44575415699, 792), nodes=1000000 (44547040291, 396). fastchess records
+`score/depth time` per move (no node counts). Only the games were analysed;
+Clover's code was not looked at. Both engines' scores are put into our POV;
+Clover's scale is about 1.12x ours (median ratio on same-sign middlegame
+pairs), which the gaps below allow for. Phase = non-pawn material
+(N/B 1, R 2, Q 4; 24 = full): opening/early mg >= 20, mg 9-19, eg <= 8.
+"Clover loss of our move" = Clover's score before our move minus its score
+after it (a judge that is about 200 Elo better than us, not an oracle).
+
+**1. The deficit is the UHO squeeze, on both sides.** Side by Clover's
+first score: worse side we score 2.3% (60+0.6: 0/9/189), better side 47.7%
+(11/167/20). Median scores by moves after the book, better side, Clover |
+us: m0 +118|+91, m10 +89|+103, m20 +42|+85, m30 +6|+72. Worse side:
+m0 -123|-93, m10 -166|-122, m20 -249|-204, m30 -376|-319. Clover gains 6-8
+cp per move when it is better; our edge fades 3-4 cp per move when
+we are; we keep believing in our edge (when Clover's score drops to
+<= 0.40 for good in our better-side draws, ours is still +0.91 median at
+60+0.6, +0.66 at 200k nodes). The same at all four limits.
+
+**2. Losses are decided early, slowly.** Clover's lost point (its score
+<= -2.0 for us for the rest of the game) is in the opening/early middlegame
+in 58-69% (144/209 at 60+0.6, 264/452 at 200k), middlegame 24-31%,
+endgame 7-10%; median 15-16 moves after the book, 25-26 pieces on the
+board. 95% of losses (198/209 at 60+0.6, 396/452 at 200k) have **no single
+move of ours that Clover rates as costing >= 1.5 pawns**. Of the Clover
+loss of our moves before the lost point, 30-34% comes in < 25 cp steps,
+30% in 25-50 cp, 21-23% in 50-100 cp, only 13-21% in >= 100 cp steps. We
+agree the game is lost a median 2.5-3.5 moves (mean 4.5) after Clover,
+and just before Clover's lost point our score is 82-95 cp (median) more
+optimistic.
+
+**3. What costs.** Mean Clover loss per move of ours (|score| < 3,
+200k nodes): pawn moves 6.1 cp (4.9% >= 50 cp), piece moves 4.7, king 2.9,
+captures 2.9, checks 0.4; by phase open 6.7 / mg 5.9 / eg 1.1. Our own
+score drops most after **their captures** (8.7 cp mean, 6.5% >= 50 cp)
+and pawn moves (6.6), vs 4.1 after their piece moves: we misjudge how
+exchanges and pawn breaks resolve. By our reported depth at 200k nodes:
+d9-11 13.9 cp, d12-14 6.4, d15-17 2.1 (depth tracks complexity, so this
+is partly phase).
+
+**4. Endgames and draw rules are not the leak.** Endgames where both
+scores say >= +2 for us: 11 won / 5 drawn / 0 lost (60+0.6), 29/10/1
+(200k). Endgames both near 0 that we then lose: 0 in every run. In
+better-side draws the last three moves have both scores within 0.5 in
+96-98% of games (final material RvR 54, OCB 19, of 167 at 60+0.6).
+Draws: threefold 67, 50-move 24, adjudication 75 of 176.
+
+**5. Depth at equal budget** (reported depths, not comparable across
+engines): 200k nodes us 13.2 / 14.5 / 20.7 vs Clover 16.9 / 18.6 / 29.2
+(open / mg / eg); 60+0.6 us 17.7 / 18.1 / 27.5 vs 24.7 / 26.4 / 43.5 at the
+same time per move (1.43 vs 1.36 s).
+
+**6. Critical positions** (`scripts/diag/clover-misses.epd`, 31 positions;
+`scripts/diag/epd_depth.py` measures them). Searched fresh (ucinewgame,
+1 thread, Hash 64, fcbf8e7, up to 20M nodes; plus the position after the
+game move up to 10M nodes to score the game move itself):
+
+- 24 *blunders* (Clover loss >= 1.5 pawns, Clover said ~0 before, we said
+  >= -0.5): our own search rates the game move >= 50 cp below its best,
+  stably, in 23/24, from a median depth **15** vs median game depth **13**
+  (+2 plies; 620k vs 240k nodes at depth 15/13 on these positions, ~2.6x);
+  its score of the game move reaches Clover's verdict in 22/24 at median
+  depth 15. So the blunders sit just past our horizon. Range -12..+10 plies:
+  in 7/23 a fresh search never picks the game move at all, i.e. the move
+  came from the in-game search state (TT/histories from earlier moves,
+  history of the game for repetitions), not from depth alone.
+- 8/24 blunders were played at an **exact 0.00**, and in the deep runs
+  the game move often sits at 0 for several iterations before collapsing
+  (Kc5: d16 0, d20 -12.97; Rhf8: d12-16 0, d20 -1.88; n1m g3: d20 0,
+  d24 -10.23; Nc6: d16 0, d20 -3.96). Over all games we print exact 0.00 on
+  5.5-6.4% of our moves with phase >= 4, Clover on 0.1-0.3% (it prints
+  +-0.01, so that ratio is partly cosmetic); "our 0.00, then Clover >= +1
+  for itself" occurs in 14% of our 200k losses (62/452) and 11% at 60+0.6.
+- 30 *squeeze* moves (Clover loss 0.6-1.5 pawns, not captures, not yet
+  lost): our deep search rejects the game move in only 19/30, from median
+  depth **19** (game 13; ~2.8M nodes, ~11x the budget); 11/30 are still the
+  choice at 10-20M nodes. Those are evaluation (or Clover being wrong),
+  not search.
+
+**Reading.** Roughly: 5-10% of losses are short-horizon blunders that two
+more plies fix; ~90% are a slow positional squeeze in the first 15-25 moves
+out of the book, in which half the per-move loss is visible to our own
+search 4-6 plies deeper and the rest not at all. The squeeze favours
+whoever spends nodes better on the quiet, pawn-structure decisions of an
+unbalanced middlegame; our score is a pawn too optimistic through it.
+
+**Hypotheses for our own designs** (each measurable on the EPD at fixed
+nodes before any SPRT):
+
+- **H1, threat/exchange-aware reductions.** Their captures and pawn moves
+  are what surprise us; blunders are +2 plies away. Reduce less (or
+  extend by a fraction) for moves that answer a threat created by the
+  opponent's last move (a piece newly attacked by a lower-valued piece, or
+  a recapture square), and do not LMR/prune captures at CUT nodes whose
+  SEE is only mildly negative when the last move was a capture.
+  Metric: blunder subset solved at lower depth/nodes, no node blow-up on
+  the 300-position set.
+- **H2, repetition draws masking threats.** Score repetition draws in the
+  tree without letting them enter the TT as exact (or as depth-0 bounds),
+  and check whether a position repeated only before the root should count
+  as a draw at the first repetition. Metric: frequency of exact 0.00 root
+  scores on the 200k games' positions, and the 8 zero-score blunders.
+- **H3, game-state carry-over.** 7/23 blunders are not chosen by a fresh
+  search at any depth. Replay those games (`position startpos moves ...`
+  with the real move sequence and node budget) to see whether TT entries
+  or histories from previous moves cause them; candidate fixes are
+  history decay at each new `go` and TT age preference. The squeeze side
+  (point 1, 11/30 unsolved by depth) is an eval/data question for the net
+  pipeline, not for search.
+
+Tools (scratch, not committed): python-chess in a scratch venv for PGN
+replay; parse/analyse scripts. To rerun the EPD:
+`python3 scripts/diag/epd_depth.py --engine ./target/release/rustfish --nodes 20000000`
+(baseline fcbf8e7: best move leaves `am` stably at median depth 13.5,
+213k nodes; 7 never pick it). The EPD drops the move history and the
+halfmove clock, so repetition-dependent cases (H2, H3) need the game replay.
