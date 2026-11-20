@@ -202,3 +202,58 @@ every element's summation order) is the next step, est. 1.3x more.
    --workdir /tmp/headeng` (agreement + a HEAD engine for bench/NPS),
    then `scripts/netloop.py embed --head --hidden 512 --buckets 8
    --king-buckets kb8m ...` and an `stc` gate against main.
+
+## Pairwise speed levers in the trainer (2026-11-20, branch `trainer-pw-levers`)
+
+Both default off; the default path is byte-identical to main (cmp of 2-epoch
+outputs: CPU plain / pairwise / pairwise + `--ft-l1`; CUDA the same plus `--half`).
+CPU and CUDA agree on both new flags to 6 digits of loss.
+
+- **`--ft-l1-group G`** (activation sparsity): adds `G * sum_c ||p_c||_2` per
+  sample, `c` the aligned 4-input chunks (the engine's L1 chunks) of each
+  perspective's raw pairwise products. Group lasso: whole chunks go to zero and a
+  chunk's second active input costs less than its first. The old `--ft-l1 L`
+  (plain `L * sum p`) still exists. Gradient `G p_i / ||p_c||` into dp, then the
+  usual `* partner clamp` into dacc.
+- **`--qat-l2`** (integer L2): L1 activation used as `floor(127 sq(z1) + 1/2) / 127`
+  (u8), W2 as `q_w1(W2)` (i8 at scale 64; trained W2 is already inside the +-1.98
+  clip), straight-through gradients as for W1. Exports write quantised W2 and an
+  8-byte trailer `b"RFNT"` + u32 flags (bit 0 = integer L2); loading such a file
+  turns `--qat-l2` on (eval, fen-eval, permute, rescale, warm starts). L3 stays f32:
+  32 terms, nothing to save.
+- **Engine** (branch `nnue-pw-int-l2`, off `nnue-shape-h1024kb8m-pw-fast`): nets
+  with the trailer run L2 as a 16 -> 32 i8 dot (NEON sdot / AVX2 maddubs, explicit
+  SIMD for the whole b1 -> L3 tail, bit-identical to the scalar reference); nets
+  without it are unchanged (bench 274054). `head_throughput` b1 + L2 + L3: **M3
+  53 -> 32 ns**, x86 desktop 28 -> 28 ns (loaded machine; AVX2 f32 L2 was already
+  cheap). Pilot net + trailer (integer L2 applied post hoc, no QAT): engine vs
+  trainer fen-eval mean 0.248 cp / max 0.52 on 2000 val-g10 positions (both
+  machines); val-g10 loss 0.022933 -> 0.022938, so even untrained integer L2 costs
+  ~5e-6.
+
+CPU short runs (H256 kb8m pairwise from scratch, 3 x 5M of D2004-D2007, val =
+first 100k of val-g10, quantised loss; chunks = nonzero 4-byte L1 chunks on 20k
+val-g10 positions, file order -> after the trainer's activity-sort permutation):
+
+| run | val (quantised) | active inputs | chunks |
+|---|---|---|---|
+| base | 0.038354 | 60.8% | 97.6 -> 95.4% |
+| `--qat-l2` | 0.038366 | 60.9% | 97.7 -> 95.5% |
+| `--ft-l1 3e-5` | 0.038733 | 47.9% | 92.1 -> 85.6% |
+| `--ft-l1-group 3e-5` | 0.038548 | 51.6% | 93.3 -> 88.4% |
+| `--ft-l1 1e-4` | 0.039370 | 33.3% | 76.5 -> 67.3% |
+| `--ft-l1-group 1e-4` | 0.039029 | 37.6% | 79.3 -> 73.9% |
+| `--ft-l1 3e-4` | 0.040156 | 18.1% | 50.2 -> 42.4% |
+| `--ft-l1-group 3e-4` | 0.039998 | 21.2% | 52.9 -> 47.8% |
+| `--ft-l1 1e-3` | 0.041588 | 6.3% | 20.6 -> 17.8% |
+
+- QAT-L2 is free (+1e-5, one seed: noise level).
+- Sparsity is expensive: ~3-4e-5 loss per percentage point of chunks saved (group
+  a little cheaper than plain L1). The head's whole gain over plain at H1024 was
+  ~5e-4, so only small weights (<= 3e-5) are plausible. Engine value: sparse L1 is
+  ~90 ns at 67 chunks (~1.3 ns/chunk), so 10% fewer chunks saves ~10 ns; the fused
+  FT pairwise update (the biggest cost) does not depend on sparsity.
+
+GPU A/B recipe: `tools/nnue-trainer-cuda/pw-levers.sh` (the pilot's shape recipe,
+same data / val; baseline = the pilot net; variants sp1 / sp2 = `--ft-l1-group`
+1e-5 / 3e-5, ql2 = `--qat-l2`; ~2.5-3 h each on an idle GPU).
