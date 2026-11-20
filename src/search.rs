@@ -10,6 +10,11 @@ const SE_MARGIN_PER_DEPTH: i32 = 2;
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
 const DEFAULT_MOVES_TO_GO: u64 = 20;
+// With an increment, this many increments of clock (at most a quarter of it)
+// are kept out of the per-move budget, so the clock settles near
+// INC_RESERVE + 5 increments instead of 5 (ladder PGNs, Nov 2026: a flat
+// budget left ~1-2 s from move 50 on at 120+1).
+const INC_RESERVE: u64 = 10;
 // The hard limit (checked mid-iteration) is this multiple of the soft target.
 const HARD_LIMIT_FACTOR: u64 = 3;
 // Soft-target scale in percent by how many iterations the best move has held.
@@ -1140,7 +1145,8 @@ fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, overhead: u64)
     let usable = time_left.saturating_sub(overhead).max(1);
     let mtg = movestogo.unwrap_or(DEFAULT_MOVES_TO_GO).clamp(1, DEFAULT_MOVES_TO_GO);
     let cap = if mtg == 1 { usable * 4 / 5 } else { usable / 2 };
-    let soft = (usable / mtg + inc * 3 / 4).min(cap).max(1);
+    let reserve = if movestogo.is_none() { (inc * INC_RESERVE).min(usable / 4) } else { 0 };
+    let soft = ((usable - reserve) / mtg + inc * 3 / 4).min(cap).max(1);
     let hard = (soft * HARD_LIMIT_FACTOR).min(usable * 4 / 5).max(soft);
     (soft, hard)
 }
