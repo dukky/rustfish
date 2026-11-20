@@ -69,38 +69,28 @@ in `net/experiments.jsonl`. `netloop.py auto` runs unattended but only
 ingests data now (its short fine-tunes never won). The protocol and results
 are in `docs/nnue-experiments.md`.
 
-### Current state (2026-11-17)
+### Current state (2026-11-20)
 
-- Head shape gate: `nnue-g9h1024kb8m-head-clean` (clean replay of
-  `head-v2` onto `main`, bench 366942) was rejected at stc: `-49.8 Elo`,
-  576 games, LLR `-3.825`, verdict H0 (2026-11-17 22:39Z). Do not requeue it;
-  the old `nnue-g9h1024kb8m-head` hit a queue rebase conflict and must stay
-  dead. `main` remains plain g9, and the queue advanced to
-  `feat-lmr-bad-captures`. Diagnosing the regression is deferred; Claude can
-  investigate when back.
-- Head inference speedup: `perf-head-fuse-screlu` (commit `2841118`) fuses the
-  head's first activation into the last incremental pass; bench 366942 and
-  `evalhash 248c85c4a1cc6558` byte-identical, ~2% faster on M3 depth 12.
-  Pushed but parked because the head shape gate failed; do not queue it
-  against plain g9. The us/them head slot must follow `persp == stm`; fixed
-  white/black order changes evalhash.
-- CPU head trainer: `perf-trainer-head-w1-batch` (commit `66efbba`) batches W1
-  gradient adds per output bucket; 31 tests pass, nets byte-identical,
-  +24% H256 and ~1.8x H512 pos/s on M3. Trainer-only owner merge decision.
-- Datagen3 runs the frozen g9/10-thread binary on D2020-D2023 (1M games
-  each, 5000 nodes) in tmux `datagen3` on the desktop. Do not start another
-  datagen run on those seeds.
-- CUDA trainer perf stack (trainer-only, no engine gate):
-  `perf-head-cuda-dacc` (766k pos/s head), `perf-head-rowwarp` (878k),
-  `perf-head-bucket-backward` (960k), `perf-head-speed-cuda` (**1.05M head,
-  2.48M plain**, byte-identical nets). `perf-head-fuse-dacc` and
-  `perf-head-warp` were slower and are parked; `speed-cuda` alone is the
-  plain-FT part of the same change.
-- CPU/GPU split: bulk plain FT stays on the desktop CPU; head training is
-  dense and stays on the 1080 Ti. CPU sparse/int8 head kernels and head-only
-  freezing are optional future work, not blockers. Do not benchmark on the
-  desktop while datagen3 runs; M3 is fine (no AVX, so AVX paths stay
-  unmeasured until the desktop is idle).
+- **Search parity is the main lever now** (`plan.md`, short term). Clover 9.1
+  (3725, same net class) is the black-box gauge: we are +91 at depth 1 but
+  -197 at 200k fixed nodes and -51 at depth 14, so search quality, not eval,
+  is the gap (`docs/search-diagnosis-2026-11-19.md`,
+  `docs/peer-analysis-2026-11-19.md`). Tooling: `diag-search-stats` (feature
+  `stats`, `stats-verify`), `scripts/search_stats.py`, `scripts/diag-mid300.txt`;
+  Clover matches via `peer-match.yml`. Merged since 19 Nov: `tt-failow-nomove`
+  **+16.7** and `prune-exempt-killers` **+11.1**. New candidates go through the
+  merge queue (`queue.py add <b>:stc`), not manual `ci.py sprt`.
+- **Owner rule: other engines are benchmarks only, never code sources.**
+- **Long SPSA** (sum combine) runs until ~Sun 22 Nov 03:00; the queue runs at
+  12 shards meanwhile.
+- **Nets:** gen 10 (`g10h1024kb8m`, pool10 6.08B) merged **+12.2**, ladder
+  **3588**. `gen10w` (gen 10 recipe, newest data weighted 2x) is running;
+  gate it if it beats g10. Window test: more data beats newer data, newest 2x
+  best. Pairwise head is parked (never trained from the g9 warm start).
+  Results in `docs/nnue-experiments.md`.
+- **Data policy:** own self-play only (no T80), a true from-scratch engine;
+  revisit at a real data wall.
+- **Desktop GPU power cap 125 W** (set by hand, not persistent across reboots).
 
 ### Net naming
 
