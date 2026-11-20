@@ -422,10 +422,12 @@ For refactors:
 ---
 
 ## Current strategic priorities
-See `plan.md` for the live version. In short (2026-11-11):
-1. Reach CCRL Blitz top 100 (3506; ~3508 now, at the line), then top 10 (3751).
-2. NNUE generations on ever larger self-play pools (data is the main lever),
-   trained on the 9600X desktop; bigger nets (1024 wide) tested on the laptop GPU.
+See `plan.md` for the live version. In short (2026-11-20, ~3588 CCRL Blitz before the 19-20 Nov search merges):
+1. Next targets ~3700, then CCRL Blitz top 10 (3751). Top 100 (3506) is cleared.
+2. **Search parity is the biggest lever:** against Clover 9.1 (same net class) our eval is fine but we lose ~200 Elo per node.
+   Diagnose with our own instrumentation (`diag-search-stats`, docs/search-diagnosis-2026-11-19.md), fix, SPRT via the merge queue;
+   long SPSA of the search tunables. Other engines are benchmarks only: never port their code, formulas or constants.
+3. NNUE generations on ever larger self-play pools (more data beats newer data; weight the newest seeds 2x), 1024-wide kb8m,
+   trained with the CUDA trainer on the desktop's 1080 Ti. A cheap (pairwise, i8) head is the next architecture step.
    GitHub Actions is for testing only (no bulk datagen or training).
-3. Search features and simplifications through the queue's SPRTs; SPSA of the tunables.
 4. Preserve no-dependency constraint.
