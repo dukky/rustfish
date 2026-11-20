@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "ep-hash-capturable",
+      "mode": "nonreg",
+      "front": true
+    },
+    {
       "branch": "quiet-cont-neg",
       "mode": "stc"
     },
@@ -29,16 +34,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "ep-hash-capturable",
-    "mode": "nonreg",
-    "test_id": "q-ep-hash-capturable-1120-0806",
-    "sha": "1ff1aa7e1c51eae00a576b86cd0dcbd9c60e3c43",
-    "base_sha": "48d45412b04b8a42c540dec175cae3c37366a209",
-    "started": "2026-11-20T08:06:55Z",
-    "bench": 278638,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
