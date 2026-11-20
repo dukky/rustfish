@@ -2,6 +2,11 @@
 
 Status: implemented on `head-v2`; engine+net gate `nnue-g9h1024kb8m-head-clean` queued at stc (2026-11-17). Fused inference (`perf-head-fuse-screlu`) and batched CPU-trainer W1 gradients (`perf-trainer-head-w1-batch`) are pushed as pending perf follow-ups, both byte-identical. The original proposal text below is kept for history.
 
+Earlier status (2026-11-13): step 1 (CPU trainer `--head`) and the
+engine inference (step 3) are implemented; see **Implementation** at the end.
+Step 1 loss results (CPU, from scratch, pool8 3 x 200M, val.bin): H512
+0.027971 vs H512+head 0.027596; H1024 0.027683 vs H1024+head 0.027352.
+
 ## Why
 
 Today's net is `(KB*768 -> H) x 2 -> B`: a wide feature transformer (FT)
@@ -124,3 +129,76 @@ no FMA contraction, so integers throughout are the safer choice.
 - How much of a head's gain shows at our data size: the H 1024 nets'
   train/val gap (0.0234 vs 0.0266) says we are data-limited; a head adds
   capacity too, so expect smaller gains until pool9+.
+
+## Implementation (head-v2)
+
+What the trainer actually trains (differs from the sketch above): no CReLU
+copy and no skip neuron; the head is added to the existing linear output,
+which plays the skip role.
+
+```
+z1 = b1 + W1 . sq(a)     (16, a = both accumulators, stm first, sq = clamp(.,0,1)^2)
+z2 = b2 + W2 . sq(z1)    (32)
+out = linear output + b3 + W3 . sq(z2)
+```
+
+**Net file:** the plain net, then per output bucket W1 [16][2H], b1, W2
+[32][16], b2, W3 [32], b3 as i16 at 8192 (the trainer's export; the engine
+re-quantises at load). `nnue-trainer` tools recognise the size
+(`eval`, `fen-eval`, `--init`).
+
+**Engine** (`src/nnue_head.rs`, `HEAD` in `src/nnue.rs`, default false =
+main unchanged, bench identical): L1 input `(clamp(acc,0,255)^2 + 256) >> 9`
+in u8 0..127; W1 i8 with a per-net power-of-two scale chosen at load (trained
+W1 are small: mean ~0.02, max ~0.07, so a fixed scale of 64 would leave 1-2
+levels); sparse L1 over nonzero 4-byte chunks (NEON `sdot` via asm, AVX2
+`maddubs`/`madd`, scalar twin; the nonzero list is built in the activation
+pass); L2/L3 i32 at 2^12 activations. Integer throughout: SIMD == scalar
+bit for bit (tests).
+
+- Agreement with the trainer's float forward (`scripts/head_check.py`,
+  2000 val.bin positions): a from-scratch 2M-position H512 kb8m head net:
+  mean |engine - trainer| 0.64 cp, p95 1.6, max 3.6; g7kb8m warm-started
+  head: mean 0.51, p95 0.96, max 1.02 (the engine truncates to whole cp).
+  Rounding the L1 input (not truncating) was worth 4x here.
+- NPS (M3, bench 13, interleaved x3, busy laptop): main (H1024 plain)
+  1.80M, H512 kb8m plain 2.39M, H512 kb8m + head 1.63M: the head costs
+  ~32% against plain H512 and the head net runs ~9% slower than main.
+  Per eval: activation ~35%, L1 ~45%, L2/L3 ~20% of the head.
+- Sparsity: main's net has 10% nonzero L1 inputs but 34% nonzero 4-byte
+  chunks. `nnue-trainer permute` reorders the FT neurons, most active
+  first (exact: the integer eval is unchanged, bench nodes identical):
+  g7kb8m+head 52% -> 42% nonzero chunks, +2% NPS. A greedy co-activation
+  grouping did worse (51%).
+
+**Gating a head net:** `scripts/netloop.py embed --head ...` sets `HEAD =
+true` (no `--match-scale`: it rescales only the linear output).
+`scripts/head_check.py --net N --records val.bin --workdir D` builds a head
+engine in `D` and checks it against `nnue-trainer fen-eval`.
+
+**Trainer speed (CPU, M3, 2 threads, H512 kb8m, interleaved):** plain
+~150k pos/s; `--head` 52-60k (head-v1) -> 70-76k after moving the 16-term
+loop outermost in the FT-tile backward (bit-identical). The rest of the
+head cost is the per-sample W1 gradient read-modify-write and the `e` sum
+(~7 vector ops per W1 element per sample); keeping a tile's W1 gradient in
+registers over runs of same-bucket samples (stable bucket order keeps
+every element's summation order) is the next step, est. 1.3x more.
+
+**CUDA:** ported, untested (tools/nnue-trainer-cuda/README.md, "Head").
+
+## Step 2 on the desktop (H512 kb8m + head vs main)
+
+1. Validate the CUDA head (tools/nnue-trainer-cuda/README.md checklist).
+2. Train with the gen-8/9 chain recipe at H 512 with `--head` on every
+   stage (copy `~/rustfish-data/gen9.sh`, set `--hidden 512`, add
+   `--head`): plain H512 -> m1 -> kb8m factoriser. `--init` carries the
+   head through the chain (head nets load as head nets); `--init <plain
+   net> --head` instead adds a zero-output head (W3 = 0, exact start) if
+   only the last stage should have one. Data: `--data pool9.list
+   --shuffle-buffer 67108864 --stream-stride 4 --epoch-size N`.
+3. `nnue-trainer permute --net net.bin --buckets 8 --king-buckets kb8m
+   --data val.bin --out net-p.bin` (exact; fewer nonzero L1 chunks).
+4. `python3 scripts/head_check.py --net net-p.bin --records val.bin
+   --workdir /tmp/headeng` (agreement + a HEAD engine for bench/NPS),
+   then `scripts/netloop.py embed --head --hidden 512 --buckets 8
+   --king-buckets kb8m ...` and an `stc` gate against main.

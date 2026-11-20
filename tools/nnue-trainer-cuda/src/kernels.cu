@@ -10,6 +10,24 @@
 
 #define INPUTS 768
 #define CLIP 1.98f
+// --head (docs/nnue-deeper-head.md): per output bucket W1 [H1][2H], b1,
+// W2 [H2][H1], b2, W3 [H2], b3 after the output biases in `rest`; per
+// sample scratch hs[HS] = z1 (H1) | z2 (H2) | dz1 (H1) | dz2 (H2), the CPU
+// trainer's layout (nnue_trainer::HS). UNTESTED ON CUDA (written without a
+// GPU; see README "Head: validating on the GPU").
+#define H1 16
+#define H2 32
+#define HS 96
+#define HSMALL (H1 + H2 * H1 + H2 + H2 + 1)
+__device__ __forceinline__ int head_len(int H) { return H1 * 2 * H + HSMALL; }
+__device__ __forceinline__ const float *head_of(const float *rest, int H, int buckets, int b) {
+    return rest + H + buckets * 2 * H + buckets + (size_t)b * head_len(H);
+}
+__device__ __forceinline__ float sq01(float z) {
+    float c = fminf(fmaxf(z, 0.f), 1.f);
+    return c * c;
+}
+__device__ __forceinline__ float dsq01(float z) { return (z > 0.f && z < 1.f) ? 2.0f * z : 0.0f; }
 
 struct GSample {
     uint16_t f[2][32];
@@ -39,7 +57,8 @@ __device__ __forceinline__ float4 row4(const __half *wt, size_t at) {
 
 template <typename W>
 __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *order, const W *wt, const float *rest,
-                                             float *acc, float *gout, float *loss, int H, int buckets) {
+                                             float *acc, float *gout, float *loss, int H, int buckets, float *hs,
+                                             int hd) {
     int sample = order[blockIdx.x];
     const GSample &s = ss[sample];
     int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
@@ -78,6 +97,63 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
     for (int o = 16; o; o >>= 1) part += __shfl_down_sync(0xffffffff, part, o);
     __shared__ float red[32];
     if ((t & 31) == 0) red[t >> 5] = part;
+    if (hd) {
+        __syncthreads();
+        __shared__ float z1s[H1], dz2s[H2];
+        int lane = t & 31, warp = t >> 5, nwarps = blockDim.x >> 5;
+        const float *hp = head_of(rest, H, buckets, s.bucket);
+        const float *w1 = hp;
+        const float *b1 = hp + H1 * 2 * H;
+        const float *as = acc + (size_t)sample * 2 * H;
+        for (int q = warp; q < H1; q += nwarps) {
+            float z = 0.f;
+            const float *r = w1 + (size_t)q * 2 * H;
+            for (int l = lane; l < 2 * H; l += 32) z += sq01(as[l]) * r[l];
+            for (int o = 16; o; o >>= 1) z += __shfl_down_sync(0xffffffff, z, o);
+            if (lane == 0) z1s[q] = b1[q] + z;
+        }
+        __syncthreads();
+        if (t < 32) {
+            int nw = nwarps;
+            const float *w2 = b1 + H1, *b2 = w2 + H2 * H1, *w3 = b2 + H2, *b3 = w3 + H2;
+            float z1 = (t < H1) ? z1s[t] : 0.f;
+            __syncwarp();
+            // Lane m: z2[m] and its L3 term.
+            float z2 = b2[t];
+#pragma unroll
+            for (int k = 0; k < H1; k++) z2 += sq01(z1s[k]) * w2[t * H1 + k];
+            float o3 = sq01(z2) * w3[t];
+            for (int o = 16; o; o >>= 1) o3 += __shfl_down_sync(0xffffffff, o3, o);
+            float g = 0.0f;
+            if (t == 0) {
+                float sum = 0;
+                for (int i = 0; i < nw; i++) sum += red[i];
+                float out = ob[s.bucket] + sum;
+                out += b3[0] + o3;
+                float pred = 1.0f / (1.0f + expf(-out));
+                float err = pred - s.target;
+                g = 2.0f * err * pred * (1.0f - pred);
+                gout[sample] = g;
+                loss[sample] = err * err;
+            }
+            g = __shfl_sync(0xffffffff, g, 0);
+            // Head backward (as head_backward): dz2 = g W3 dsq(z2),
+            // dz1 = dsq(z1) sum_m dz2[m] W2[m][k].
+            float dz2 = g * w3[t] * dsq01(z2);
+            dz2s[t] = dz2;
+            __syncwarp();
+            float *hsp = hs + (size_t)sample * HS;
+            hsp[H1 + t] = z2;
+            hsp[2 * H1 + H2 + t] = dz2;
+            if (t < H1) {
+                float sm = 0.0f;
+                for (int m = 0; m < H2; m++) sm += dz2s[m] * w2[m * H1 + t];
+                hsp[t] = z1;
+                hsp[H1 + H2 + t] = sm * dsq01(z1);
+            }
+        }
+        return;
+    }
     __syncthreads();
     if (t == 0) {
         float sum = 0;
@@ -91,66 +167,138 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
 }
 
 extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
-                                   float *acc, float *gout, float *loss, int H, int buckets) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets);
+                                   float *acc, float *gout, float *loss, int H, int buckets, float *hs, int hd) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
 }
 
 // `--half`: the same with the fp16 copy of the merged FT rows.
 extern "C" __global__ void forward_half(const GSample *ss, const uint32_t *order, const __half *wt, const float *rest,
-                                        float *acc, float *gout, float *loss, int H, int buckets) {
-    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets);
+                                        float *acc, float *gout, float *loss, int H, int buckets, float *hs, int hd) {
+    forward_impl(ss, order, wt, rest, acc, gout, loss, H, buckets, hs, hd);
+}
+
+// --------------------------------------------------------- cached dacc (--head)
+
+// Both backward branches need the same dacc[(j, cc)] for every sample j and
+// flattened lane cc = side * H + col: cache it here instead of redoing the
+// dense 16-term e sum twice. Same expression and operation order as the old
+// head branches; sample-major/lane-minor order, no atomics.
+extern "C" __global__ void __launch_bounds__(256) compute_dacc(const GSample *ss, const float *acc,
+                                                               const float *gout, const float *rest,
+                                                               const float *hs, float *dacc, int H,
+                                                               int buckets, int n) {
+    int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y;
+    if (cc >= 2 * H || j >= n) return;
+    size_t at = (size_t)j * 2 * H + cc;
+    int b = ss[j].bucket;
+    float x = acc[at];
+    float c = fminf(fmaxf(x, 0.f), 1.f);
+    const float *ow = rest + H;
+    float w = ow[b * 2 * H + cc];
+    const float *w1 = head_of(rest, H, buckets, b) + cc;
+    const float *dz = hs + (size_t)j * HS + H1 + H2;
+    float e = 0.0f;
+#pragma unroll
+    for (int q = 0; q < H1; q++) e += dz[q] * w1[(size_t)q * 2 * H];
+    dacc[at] = (x > 0.f && x < 1.f) ? (gout[j] * w + e) * 2.0f * c : 0.0f;
 }
 
 // ---------------------------------------------------------------- FT backward
 
-// Block = (32-column tile, work item = up to WI pairs of one king bucket),
-// 1024 threads, lane = column; warp w owns the bucket's features w, w+32,
-// ..., w+736 in registers. Per range of R pairs: stage dacc[R][32] in
-// shared memory, set per-feature bitmasks of the pairs that contain it,
-// then each warp adds its features' staged rows in pair order. Writes the
-// item's gradient slice `part[item][768][H]` (zeros included).
-#define R 128
-#define FPW (INPUTS / 32)
+// Ranges of R pairs (they never cross a work item: items start at
+// multiples of R within their bucket's run). `plan_csr`, once per batch for
+// every column tile: per range, its incidences (pair, feature) sorted by
+// feature, pairs ascending within a feature: `csr[range]` = per feature a
+// packed (start | end << 16) into the range's list, then the list of pair
+// offsets in the range (bytes, < R).
+#define R 256
+#define RW (R / 32)
+#define LIST_WORDS (R * 32 / 4)
+#define CSRW (INPUTS + LIST_WORDS)
 
-// Per range of R pairs (ranges never cross a work item: items start at
-// multiples of R within their bucket's run): the bitmask of the range's
-// pairs that contain each of the bucket's features, `masks[range][768][R/32]`,
-// built once per batch for every column tile.
-extern "C" __global__ void plan_masks(const GSample *ss, const uint32_t *pairs, const int *range_start,
-                                      const int *range_bucket, uint32_t *masks, int nranges) {
-    __shared__ uint32_t mask[INPUTS][R / 32];
-    int rg = blockIdx.x;
-    for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) (&mask[0][0])[i] = 0u;
+extern "C" __global__ void __launch_bounds__(256) plan_csr(const GSample *ss, const uint32_t *pairs, const int *range_start,
+                                                           const int *range_bucket, uint32_t *csr) {
+    __shared__ uint32_t mask[INPUTS][RW];
+    __shared__ int wsum[8];
+    int rg = blockIdx.x, t = threadIdx.x;
+    for (int i = t; i < INPUTS * RW; i += 256) (&mask[0][0])[i] = 0u;
     __syncthreads();
     int r0 = range_start[rg], nr = range_start[rg + 1] - r0, b = range_bucket[rg];
-    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
-    for (int r = warp; r < nr; r += nw) {
+    int lane = t & 31, warp = t >> 5;
+    for (int r = warp; r < nr; r += 8) {
         uint32_t pr = pairs[r0 + r];
         const GSample &s = ss[pr >> 1];
         if (lane < s.n) atomicOr(&mask[s.f[pr & 1][lane] - b * INPUTS][r >> 5], 1u << (r & 31));
     }
     __syncthreads();
-    uint32_t *out = masks + (size_t)rg * INPUTS * (R / 32);
-    for (int i = threadIdx.x; i < INPUTS * (R / 32); i += blockDim.x) out[i] = (&mask[0][0])[i];
+    // Thread t: features 3t .. 3t + 2; exclusive scan of their counts.
+    int c[3], tot = 0;
+#pragma unroll
+    for (int j = 0; j < 3; j++) {
+        int n = 0;
+#pragma unroll
+        for (int q = 0; q < RW; q++) n += __popc(mask[3 * t + j][q]);
+        c[j] = n;
+        tot += n;
+    }
+    int x = tot;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        int y = __shfl_up_sync(0xffffffff, x, o);
+        if (lane >= o) x += y;
+    }
+    if (lane == 31) wsum[warp] = x;
+    __syncthreads();
+    int base = x - tot;
+    for (int w = 0; w < warp; w++) base += wsum[w];
+    uint32_t *out = csr + (size_t)rg * CSRW;
+    uint8_t *lst = (uint8_t *)(out + INPUTS);
+#pragma unroll
+    for (int j = 0; j < 3; j++) {
+        int f = 3 * t + j, k = base;
+        out[f] = (uint32_t)base | (uint32_t)(base + c[j]) << 16;
+#pragma unroll
+        for (int q = 0; q < RW; q++) {
+            uint32_t m = mask[f][q];
+            while (m) {
+                int bit = __ffs(m) - 1;
+                m &= m - 1;
+                lst[k++] = (uint8_t)(q * 32 + bit);
+            }
+        }
+        base += c[j];
+    }
 }
 
+// Block = (32-column tile, work item = up to WI pairs of one king bucket),
+// 1024 threads, lane = column; warp w owns the bucket's features w, w+32,
+// ..., w+736 in registers. Per range of R pairs: stage dacc[R][32] and the
+// range's CSR in shared memory, then each warp adds its features' staged
+// rows in pair order (the same order as a scan of per-feature pair
+// bitmasks). Writes the item's gradient slice `part[item][768][H]` (zeros
+// included).
+#define FPW (INPUTS / 32)
 extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss, const uint32_t *pairs,
-                                                              const Item *items, const uint32_t *masks,
-                                                              const float *acc, const float *gout,
-                                                              const float *rest, float *part, int H) {
-    __shared__ float sd[2][R][32];
-    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+                                                               const Item *items, const uint32_t *csr,
+                                                               const float *acc, const float *gout,
+                                                               const float *rest, float *part, int H,
+                                                               const float *hs, const float *dacc, int hd, int buckets) {
+    __shared__ float sd[R][32];
+    __shared__ uint32_t so[INPUTS];
+    __shared__ uint32_t sl[LIST_WORDS];
+    int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     int col = blockIdx.x * 32 + lane;
     const float *ow = rest + H;
     Item it = items[blockIdx.y];
     float g[FPW];
 #pragma unroll
     for (int i = 0; i < FPW; i++) g[i] = 0.0f;
-    // Item.start/end are pair offsets; ranges of R pairs from it.start, the
-    // global range index from it.range.
-    int buf = 0;
-    for (int r0 = it.start, rg = it.range; r0 < it.end; r0 += R, rg++, buf ^= 1) {
+    for (int r0 = it.start, rg = it.range; r0 < it.end; r0 += R, rg++) {
         int nr = min(R, it.end - r0);
+        // Single-buffered (R = 256 fills the 48 KB): the previous range's
+        // sums are done before its staging is overwritten.
+        __syncthreads();
         for (int r = warp; r < nr; r += 32) {
             uint32_t pr = pairs[r0 + r];
             int j = pr >> 1, side = pr & 1;
@@ -158,24 +306,23 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
             float x = acc[((size_t)j * 2 + side) * H + col];
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[s.bucket * 2 * H + side * H + col];
-            sd[buf][r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
+            if (hd) {
+                // Cached by compute_dacc: same lane as acc[(j, side, col)].
+                sd[r][lane] = dacc[((size_t)j * 2 + side) * H + col];
+            } else {
+                sd[r][lane] = (x > 0.f && x < 1.f) ? gout[j] * w * 2.0f * c : 0.0f;
+            }
         }
-        // Double-buffered staging: one barrier per range.
+        const uint32_t *cs = csr + (size_t)rg * CSRW;
+        if (t < INPUTS) so[t] = cs[t];
+        int nw = ((cs[INPUTS - 1] >> 16) + 3) >> 2;
+        for (int w = t; w < nw; w += 1024) sl[w] = cs[INPUTS + w];
         __syncthreads();
-        const uint32_t *mk = masks + (size_t)rg * INPUTS * (R / 32);
+        const uint8_t *lb = (const uint8_t *)sl;
 #pragma unroll
         for (int i = 0; i < FPW; i++) {
-            const uint4 m4 = __ldg((const uint4 *)(mk + (warp + 32 * i) * (R / 32)));
-            uint32_t ms[4] = {m4.x, m4.y, m4.z, m4.w};
-#pragma unroll
-            for (int q = 0; q < R / 32; q++) {
-                uint32_t m = ms[q];
-                while (m) {
-                    int b = __ffs(m) - 1;
-                    m &= m - 1;
-                    g[i] += sd[buf][q * 32 + b][lane];
-                }
-            }
+            uint32_t oe = so[warp + 32 * i];
+            for (int k = oe & 0xffff, e = oe >> 16; k < e; k++) g[i] += sd[lb[k]][lane];
         }
     }
     float *out = part + (size_t)blockIdx.y * INPUTS * H;
@@ -190,7 +337,8 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
 // sample order. pr layout per chunk: ow (B * 2H) | bias (2H) | ob (B).
 #define CH 256
 extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, const float *gout, const float *rest,
-                                         float *pr, int H, int buckets, int n) {
+                                         float *pr, int H, int buckets, int n, const float *hs, const float *dacc,
+                                         int hd) {
     int cc = blockIdx.x * blockDim.x + threadIdx.x;  // side * H + col
     int chunk = blockIdx.y;
     int j0 = chunk * CH, j1 = min(j0 + CH, n);
@@ -208,7 +356,11 @@ extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, co
 #pragma unroll
             for (int k = 0; k < 8; k++)
                 if (k == b) gw[k] += gg * c * c;
-            gb += (x > 0.f && x < 1.f) ? gg * w * 2.0f * c : 0.0f;
+            if (hd) {
+                gb += dacc[(size_t)j * 2 * H + cc];
+            } else {
+                gb += (x > 0.f && x < 1.f) ? gg * w * 2.0f * c : 0.0f;
+            }
         }
         for (int k = 0; k < buckets; k++) out[(size_t)k * 2 * H + cc] = gw[k];
         out[(size_t)buckets * 2 * H + cc] = gb;
@@ -241,6 +393,77 @@ extern "C" __global__ void reduce_rest(const float *pr, float *grest, int H, int
         for (int k = 0; k < chunks; k++) s += pr[k * stride + (size_t)buckets * 2 * H + 2 * H + b];
     }
     grest[i] = s;
+}
+
+// ---------------------------------------------------------------- head backward (--head)
+
+// Partials of chunk `chunk` (up to CH samples) in the head's own layout:
+// ph[chunk][bucket][head_len]. W1: thread = lane cc of 2H, grid.y = chunk *
+// buckets + bucket; bidx[bucket, chunk] lists that chunk's samples of the
+// bucket in sample order, so the sum matches the old bucket-filtered scan.
+extern "C" __global__ void backward_head_w1(const float *acc, const float *hs, float *ph, const uint32_t *bidx,
+                                             const uint32_t *bcnt, int H, int buckets, int chunks) {
+    int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.y % buckets, chunk = blockIdx.y / buckets;
+    if (cc >= 2 * H) return;
+    int bi = b * chunks + chunk;
+    const uint32_t *js = bidx + (size_t)bi * CH;
+    int nj = bcnt[bi];
+    float g[H1];
+#pragma unroll
+    for (int q = 0; q < H1; q++) g[q] = 0.0f;
+    for (int z = 0; z < nj; z++) {
+        int j = js[z];
+        float c = fminf(fmaxf(acc[(size_t)j * 2 * H + cc], 0.f), 1.f);
+        float a2 = c * c;
+        const float *dz = hs + (size_t)j * HS + H1 + H2;
+#pragma unroll
+        for (int q = 0; q < H1; q++) g[q] += dz[q] * a2;
+    }
+    float *out = ph + ((size_t)chunk * buckets + b) * head_len(H);
+#pragma unroll
+    for (int q = 0; q < H1; q++) out[(size_t)q * 2 * H + cc] = g[q];
+}
+
+// b1, W2, b2, W3, b3 (HSMALL params per bucket, thread = param), grid
+// (buckets, chunks); the same per-bucket sample list as backward_head_w1.
+extern "C" __global__ void backward_head_small(const float *gout, const float *hs, float *ph, const uint32_t *bidx,
+                                                const uint32_t *bcnt, int H, int buckets, int chunks) {
+    int b = blockIdx.x, chunk = blockIdx.y, t = threadIdx.x;
+    if (t >= HSMALL) return;
+    int bi = b * chunks + chunk;
+    const uint32_t *js = bidx + (size_t)bi * CH;
+    int nj = bcnt[bi];
+    float sm = 0.0f;
+    for (int u = 0; u < nj; u++) {
+        int j = js[u];
+        const float *z = hs + (size_t)j * HS;
+        const float *z1 = z, *z2 = z + H1, *dz1 = z + H1 + H2, *dz2 = z + 2 * H1 + H2;
+        float g = gout[j];
+        if (t < H1) {
+            sm += dz1[t];
+        } else if (t < H1 + H2 * H1) {
+            int m = (t - H1) / H1, k = (t - H1) % H1;
+            sm += dz2[m] * sq01(z1[k]);
+        } else if (t < H1 + H2 * H1 + H2) {
+            sm += dz2[t - H1 - H2 * H1];
+        } else if (t < H1 + H2 * H1 + 2 * H2) {
+            sm += g * sq01(z2[t - H1 - H2 * H1 - H2]);
+        } else {
+            sm += g;
+        }
+    }
+    ph[((size_t)chunk * buckets + b) * head_len(H) + H1 * 2 * H + t] = sm;
+}
+
+// Head gradient = the chunk partials summed in chunk order.
+extern "C" __global__ void reduce_head(const float *ph, float *grest, int H, int buckets, int chunks) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t nh = (size_t)buckets * head_len(H);
+    if (i >= nh) return;
+    float sm = 0.0f;
+    for (int k = 0; k < chunks; k++) sm += ph[(size_t)k * nh + i];
+    grest[H + buckets * 2 * H + buckets + i] = sm;
 }
 
 // ---------------------------------------------------------------- AdamW

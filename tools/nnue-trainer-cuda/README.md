@@ -61,18 +61,87 @@ kb8m H 512 `--factorise --mirror`, 3 x 2M positions, val (last 200k of
 s45): CPU 0.049903 / 0.039111 / 0.037563, GPU 0.049905 / 0.039107 /
 0.037562 (train loss equal to 6 digits).
 
+## Head (`--head`): UNTESTED ON CUDA
+
+Written on the laptop without a GPU or nvcc (2026-11-13, branch
+`head-v2`): the host code type-checks (`NNUE_CUDA_NO_NVCC=1 cargo check`)
+and `src/kernels.cu` passes a clang `-x cuda -fsyntax-only` device pass
+with stub headers, but **no kernel has run**. It mirrors the CPU trainer's
+math (`head_forward`, `head_backward`, `head_small_grads`, the `e` term of
+`train_sample`; docs/nnue-deeper-head.md):
+
+- `forward`: with `hd`, each thread also forms its 4 columns' share of
+  the 16 z1 sums (warp shuffle tree, then warps in order through shared
+  memory); warp 0 adds b1, does L2 (lane = z2 row), L3 (shuffle tree),
+  the loss and gradient, the head backward (dz2, dz1), and writes the
+  sample's scratch `hs[sample][96]` = z1 | z2 | dz1 | dz2 (the CPU `HS`
+  layout).
+- `backward_ft` staging and `backward_rest` (FT bias): dacc = `(g w + e)
+  2 a`, `e = sum_q dz1[q] W1[q][i]` (q ascending), as `train_sample`.
+- New: `backward_head_w1` (thread = lane of 2H, grid.y = chunk x bucket;
+  walks its chunk's samples of that bucket in order, gW1[q] += dz1[q] a^2),
+  `backward_head_small` (thread = one of the 593 b1/W2/b2/W3/b3 params per
+  bucket), `reduce_head` (chunk partials in chunk order -> `gr`). AdamW of
+  the head is `adam_flat` (the head is part of `rest`). Extra memory at
+  batch 16384: hs 6 MB, partials 64 chunks x 8 x head_len floats (34 MB at
+  H 512, 67 MB at H 1024).
+- Without `--head` the kernels take the old code paths (`hd = 0`): check
+  that plain runs are byte-identical to the previous build (step 1 below).
+
+### Validating on the GPU (desktop checklist)
+
+```bash
+cd ~/dev/rustfish && git fetch && git checkout head-v2
+RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path tools/nnue-trainer/Cargo.toml
+RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path tools/nnue-trainer-cuda/Cargo.toml
+C=tools/nnue-trainer/target/release/nnue-trainer
+G=tools/nnue-trainer-cuda/target/release/nnue-trainer-cuda
+D=~/rustfish-data; mkdir -p $D/headcheck
+head -c $((32 * 6000000)) $D/pool8.bin > $D/headcheck/slice.bin     # any shuffled 32-byte pool
+V="--val $D/val.bin"
+S="--data $D/headcheck/slice.bin --hidden 512 --buckets 8 --king-buckets kb8m --factorise --mirror --epochs 3 --epoch-size 2000000 --seed 1"
+# 1. no-head regression: same net bytes as main's nnue-trainer-cuda
+git worktree add /tmp/rf-main origin/main
+RUSTFLAGS="-C target-cpu=native" cargo build --release --manifest-path /tmp/rf-main/tools/nnue-trainer-cuda/Cargo.toml
+G_MAIN=/tmp/rf-main/tools/nnue-trainer-cuda/target/release/nnue-trainer-cuda
+$G train $S $V --out $D/headcheck/plain-new.bin --threads 2 && $G_MAIN train $S $V --out $D/headcheck/plain-old.bin --threads 2
+cmp $D/headcheck/plain-new.bin $D/headcheck/plain-old.bin
+# 2. CPU vs GPU with the head: epoch train / val losses within ~1e-5 (plain nets agree to ~1e-6)
+$C train $S $V --head --out $D/headcheck/cpu.bin --threads 12 | tee $D/headcheck/cpu.log
+$G train $S $V --head --out $D/headcheck/gpu.bin --threads 2 | tee $D/headcheck/gpu.log
+grep epoch $D/headcheck/cpu.log $D/headcheck/gpu.log
+# 3. deterministic: a rerun writes the same bytes
+$G train $S $V --head --out $D/headcheck/gpu2.bin --threads 2 && cmp $D/headcheck/gpu.bin $D/headcheck/gpu2.bin
+# 4. warm start from a plain net is exact (start val loss = the plain net's, both trainers)
+$G train $S $V --head --init $D/headcheck/plain-new.bin --epochs 1 --max-batches 1 --out $D/headcheck/warm.bin --threads 2 | grep "start val"
+$C eval --net $D/headcheck/plain-new.bin --buckets 8 --king-buckets kb8m --val $D/val.bin
+# 5. checkpoints cross over: CPU checkpoint resumed on the GPU continues the CPU loss curve
+$C train $S $V --head --epochs 1 --out $D/headcheck/x.bin --threads 12
+$G train $S $V --head --resume $D/headcheck/x.ckpt --out $D/headcheck/y.bin --threads 2
+# 6. engine agreement on the GPU net (builds a HEAD engine in the workdir)
+python3 scripts/head_check.py --net $D/headcheck/gpu.bin --hidden 512 --king-buckets kb8m \
+    --records $D/val.bin --trainer $C --workdir $D/headcheck/engine
+```
+
+If 2 disagrees: compare one batch (`--epochs 1 --epoch-size 16384`,
+`--lr 1e-3`) with `eval` on both nets; a wrong head gradient shows as a
+diverging train loss within the first epoch, a wrong forward as a
+different start val loss (the start loss is computed by the shared CPU
+code, so it must agree exactly; the first epoch's train loss comes from
+the GPU forward).
+
 ## Kernels (per batch)
 
 1. `forward`: a block per sample (bucket-pair order), H/2 threads, float4
    columns; accumulators, output gradient, loss.
-2. `plan_masks` (once per batch, for every column tile): per range of 128
-   pairs, per feature of its bucket, the bitmask of the pairs containing it.
-   `backward_ft`: the Metal trainer's `grad_fused`. Block = (32-column tile,
-   work item = up to 2048 pairs of one king bucket), 1024 threads (lane =
-   column, warp w owns features w + 32i of the bucket in registers). Per
-   128 pairs: dacc staged in shared memory (double-buffered, one barrier
-   per range), each warp sums its features' rows in pair order.
-   Writes per-item partial gradients.
+2. `plan_csr` (once per batch, for every column tile): per range of 256
+   pairs, its (pair, feature) incidences sorted by feature (pairs ascending
+   within a feature): per-feature start/end and a byte list of pair offsets.
+   `backward_ft`: block = (32-column tile, work item = up to 2048 pairs of
+   one king bucket), 1024 threads (lane = column, warp w owns features
+   w + 32i of the bucket in registers). Per 256 pairs: dacc and the range's
+   lists staged in shared memory, each warp walks its features' lists and
+   sums the staged rows in pair order. Writes per-item partial gradients.
 3. `backward_rest` + `reduce_rest`: output-weight, FT-bias and output-bias
    gradients over 256-sample chunks, summed in chunk order.
 4. `adam_ft`: per FT element, the bucket's item partials in item order;
@@ -105,10 +174,37 @@ Kernels alone (`bench.cu`, kb8m H 512): forward 1.6 ms, FT backward 2.2
 ms, AdamW 0.4 ms per batch (3.9M pos/s). Checked: CPU checkpoint resumed on
 the GPU and back, `--init` warm start, `--keep-best`, `--wd`.
 
+`NNUE_CUDA_PROF=1` records timing events between the kernels and prints
+per-stage ms/batch (and the host's prep / wait time) at every epoch end.
+
+Per batch at kb8m H 1024 `--half` (2026-11-13, 180 W cap): forward 2.1 ms,
+`backward_ft` 2.2 ms (3.8 ms with the per-range bitmasks it replaced),
+output-layer gradients 0.6 ms, AdamW 0.8 ms; host prep (decode, sort) 1.1
+ms runs under the GPU's batch, so the feed is not the limit.
+
+`backward_ft` variants measured (kb8m H 1024 `--half`, ms/batch; all
+byte-identical): bitmasks R 128 3.82; incidence lists R 64 with 64-column
+tiles and feature halves 3.0 (unrolled 3.4, register prefetch of the next
+range 3.0, quarters at 512 threads 3.9-4.1); R 128 32 columns 2.67; R 128
+64 columns, halves 2.26; **R 256 32 columns 2.22** (single-buffered: R 256
+fills the 48 KB); same with 768 / 512 threads 3.1 / 2.9. Fewer, larger
+ranges win: the per-feature loop and the barrier per range cost more than
+the adds.
+
+Head training on the same net/shape (H 1024 kb8m `--half`, batch 16384,
+2 CPU threads, 300 batches, byte-identical nets at every step): cached
+`dacc` 766k pos/s, one warp per z1 row 878k, per-bucket sample lists 960k,
+plus the `speed-cuda` incidence-list FT backward **1.05M pos/s**. Plain
+training on the final branch is **2.48M pos/s** (from 2.09M with the older
+bitmask path). Head profile at batch 16384: `forward_half` 6.38 ms,
+`compute_dacc` 3.34 ms, `backward_ft` 1.67 ms (3.35 ms before incidence
+lists), `backward_head_w1` 1.32 ms, `adam_ft` 0.87 ms. The CPU head trainer
+is 84-104k pos/s even at H 512, so bulk head runs stay on the GPU.
+
 Approaches that lost (1080 Ti, kb8m):
 - Smaller output-gradient chunks (`CH` 64 / 32 instead of 256): no gain.
 - A per-pair record (accumulator row, output-weight offset, gradient)
-  written by `plan_masks` so `backward_ft`'s staging skips the sample load:
+  written by `plan_csr` so `backward_ft`'s staging skips the sample load:
   -8% at H 1024 `--half` (byte-identical, just slower).
 - Larger work items (`WI` 1024 / 4096): no change.
 - Bigger redesigns of `backward_ft` (64-column tiles, register prefetch of

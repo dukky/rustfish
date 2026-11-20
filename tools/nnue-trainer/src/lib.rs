@@ -212,6 +212,14 @@ fn read_recs(path: &Path) -> Vec<Rec> {
     bytes.chunks_exact(REC).map(|c| c.try_into().unwrap()).collect()
 }
 
+/// The first `n` records of a record file.
+fn read_recs_n(path: &Path, n: usize) -> Vec<Rec> {
+    let mut bytes = Vec::new();
+    let f = File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    f.take((n * REC) as u64).read_to_end(&mut bytes).unwrap();
+    bytes.chunks_exact(REC).map(|c| c.try_into().unwrap()).collect()
+}
+
 fn threads_default() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
@@ -353,7 +361,18 @@ pub struct Shape {
     pub buckets: usize,
     /// King (input) buckets: the FT has `kb * 768` rows.
     pub kb: usize,
+    /// `--head`: 1 = a dense head (2H -> 16 -> 32 -> 1 per output bucket,
+    /// SCReLU) added to the linear output (docs/nnue-deeper-head.md).
+    pub hd: usize,
 }
+
+/// Head layer sizes.
+pub const H1: usize = 16;
+pub const H2: usize = 32;
+/// Export scale of head params (fine, not engine-shaped: for loss checks).
+const HEAD_Q: f32 = 8192.0;
+/// Head scratch per sample: [z1 (H1), z2 (H2), dz1 (H1), dz2 (H2)].
+pub const HS: usize = 2 * (H1 + H2);
 
 impl Shape {
     pub fn ft_b(&self) -> usize {
@@ -365,17 +384,33 @@ impl Shape {
     pub fn out_b(&self) -> usize {
         self.out_w() + self.buckets * 2 * self.h
     }
-    pub fn len(&self) -> usize {
+    /// First head param (= the net's length without a head).
+    pub fn head_off(&self) -> usize {
         self.out_b() + self.buckets
+    }
+    /// Head params per output bucket: W1 (H1 x 2H), b1, W2 (H2 x H1), b2, W3 (H2), b3.
+    pub fn head_len(&self) -> usize {
+        H1 * 2 * self.h + H1 + H2 * H1 + H2 + H2 + 1
+    }
+    pub fn len(&self) -> usize {
+        self.head_off() + self.hd * self.buckets * self.head_len()
     }
     /// Size of the exported i16 file.
     fn file_bytes(&self) -> usize {
         self.len() * 2
     }
+    /// The shape of a net file: a plain net, or else a `--head` net.
     fn from_file_bytes(bytes: usize, buckets: usize, kb: usize) -> Option<Self> {
         let words = bytes / 2;
         let h = words.checked_sub(buckets)? / (kb * INPUTS + 1 + 2 * buckets);
-        let s = Shape { h, buckets, kb };
+        let s = Shape { h, buckets, kb, hd: 0 };
+        if s.file_bytes() == bytes {
+            return Some(s);
+        }
+        // Head: per bucket 16*2H + (16 + 16*32 + 32 + 32 + 1) more words.
+        let fixed = buckets * (1 + H1 + H2 * H1 + 2 * H2 + 1);
+        let h = words.checked_sub(fixed)? / (kb * INPUTS + 1 + 2 * buckets + buckets * 2 * H1);
+        let s = Shape { h, buckets, kb, hd: 1 };
         (s.file_bytes() == bytes).then_some(s)
     }
 }
@@ -454,6 +489,10 @@ fn forward(p: &[f32], sh: Shape, s: &Sample, acc: &mut [f32]) -> f32 {
         sum += a * a * *w;
     }
     out += sum;
+    if sh.hd > 0 {
+        let mut scr = [0.0f32; HS];
+        out += head_forward(p, sh, s.bucket, acc, None, &mut scr);
+    }
     out
 }
 
@@ -471,14 +510,31 @@ fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32]
 
     let ow0 = sh.out_w() + s.bucket * 2 * h;
     g[sh.out_b() + s.bucket] += grad;
+    let mut scr = [0.0f32; HS];
+    if sh.hd > 0 {
+        head_forward(p, sh, s.bucket, acc, None, &mut scr);
+        head_backward(p, sh, s.bucket, grad, &mut scr);
+        head_small_grads(sh, s.bucket, grad, &scr, g, 0, 0, 1);
+    }
+    let w1 = head_offs(sh, s.bucket)[0];
     {
         let ow = &p[ow0..ow0 + 2 * h];
-        let gow = &mut g[ow0..ow0 + 2 * h];
         for i in 0..2 * h {
             let x = acc[i];
             let a = x.clamp(0.0, 1.0);
-            gow[i] += grad * a * a;
-            dacc[i] = if x > 0.0 && x < 1.0 { grad * ow[i] * 2.0 * a } else { 0.0 };
+            g[ow0 + i] += grad * a * a;
+            dacc[i] = if sh.hd == 0 {
+                if x > 0.0 && x < 1.0 { grad * ow[i] * 2.0 * a } else { 0.0 }
+            } else {
+                // Head: gW1[k][i] += dz1[k] * a^2; dacc adds sum_k dz1[k] W1[k][i].
+                let mut e = 0.0f32;
+                for k in 0..H1 {
+                    let dz = scr[H1 + H2 + k];
+                    g[w1 + k * 2 * h + i] += dz * (a * a);
+                    e += dz * p[w1 + k * 2 * h + i];
+                }
+                if x > 0.0 && x < 1.0 { (grad * ow[i] + e) * 2.0 * a } else { 0.0 }
+            };
         }
     }
     let (gw, rest) = g.split_at_mut(sh.ft_b());
@@ -508,7 +564,266 @@ fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
     for x in &mut p[sh.out_w()..sh.out_b()] {
         *x = rng.uniform(a);
     }
+    // Head (after the base draws, so head-less nets keep their RNG sequence).
+    for b in 0..sh.hd * sh.buckets {
+        let [w1, _, w2, _, w3, _] = head_offs(sh, b);
+        for (o, len, fan) in [(w1, H1 * 2 * sh.h, 2 * sh.h), (w2, H2 * H1, H1), (w3, H2, H2)] {
+            let a = 1.0 / (fan as f32).sqrt();
+            for x in &mut p[o..o + len] {
+                *x = rng.uniform(a);
+            }
+        }
+    }
     p
+}
+
+/// `--init <plain net> --head`: the plain net's params, then a fresh head
+/// (`init_params`' draws) with W3 = 0, so the net starts exactly at the
+/// plain net's evals and W3's gradient opens the head up.
+fn add_head(p: &[f32], plain: Shape, rng: &mut Rng) -> Vec<f32> {
+    assert_eq!(p.len(), plain.len());
+    let sh = Shape { hd: 1, ..plain };
+    let fresh = init_params(sh, rng);
+    let mut out = p.to_vec();
+    out.extend_from_slice(&fresh[sh.head_off()..]);
+    for b in 0..sh.buckets {
+        let [_, _, _, _, w3, _] = head_offs(sh, b);
+        out[w3..w3 + H2].fill(0.0);
+    }
+    out
+}
+
+/// `fen-eval --net N [--buckets B] [--king-buckets L] --fens FILE`: the
+/// float forward (the net file dequantised, as `eval`) of each FEN line, in
+/// centipawns from the side to move (= 400 * out). For checking engine
+/// inference (`src/nnue_head.rs`) against the trainer.
+fn cmd_fen_eval(args: &[String]) {
+    let (mut net, mut fens, mut buckets, mut kl) = (None, None, 1usize, NO_BUCKETS);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--fens" => fens = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let text = std::fs::read_to_string(fens.expect("--fens")).unwrap();
+    let mut acc = vec![0.0f32; 2 * sh.h];
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let r = encode(&format!("{line} | 0 | 0.5")).unwrap_or_else(|| panic!("bad FEN {line}"));
+        let s = decode(&r, 0.5, sh.buckets, false, kl);
+        println!("{line} | {:.4}", forward(&p, sh, &s, &mut acc) * SCALE);
+    }
+}
+
+/// `permute --net N [--buckets B] [--king-buckets L] --data F [--n 20000] --out O`:
+/// reorder the FT neurons by how often they are active (engine L1 input
+/// nonzero) on `--n` positions of `--data`, most active first. The net
+/// computes the same function (FT columns, FT bias, output weights and, with
+/// a head, W1 columns are permuted together; the engine's integer eval is
+/// bit-identical), but active neurons share 4-byte chunks, so the engine's
+/// sparse head L1 (`src/nnue_head.rs`) skips more chunks.
+fn cmd_permute(args: &[String]) {
+    let (mut net, mut data, mut out, mut buckets, mut kl, mut n) = (None, None, None, 1usize, NO_BUCKETS, 20000usize);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--data" => data = Some(PathBuf::from(it.next().unwrap())),
+            "--out" => out = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
+            "--n" => n = it.next().unwrap().parse().unwrap(),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    let mut recs = read_recs_n(&data.expect("--data"), n);
+    recs.truncate(n);
+    let h = sh.h;
+    // Engine L1 input of neuron j is nonzero iff its i16 accumulator >= 16.
+    let active = |acc: &[f32], j: usize| (acc[j] * QA).round() >= 16.0;
+    let mut freq = vec![0u64; h];
+    let mut acts = Vec::with_capacity(recs.len());
+    let mut acc = vec![0.0f32; 2 * h];
+    for r in &recs {
+        let s = decode(r, 0.5, sh.buckets, false, kl);
+        forward(&p, sh, &s, &mut acc);
+        let mut a = vec![false; 2 * h];
+        for side in 0..2 {
+            for j in 0..h {
+                a[side * h + j] = active(&acc[side * h..], j);
+                freq[j] += a[side * h + j] as u64;
+            }
+        }
+        acts.push(a);
+    }
+    // Most active first. (Greedy co-activation grouping of 4-chunks was
+    // tried and lost to this on g7kb8m + head: 50.8% vs 42.2% of chunks.)
+    let mut perm: Vec<usize> = (0..h).collect();
+    perm.sort_by_key(|&j| (std::cmp::Reverse(freq[j]), j));
+    let chunks = |perm: &[usize]| -> f64 {
+        let mut c = 0u64;
+        for a in &acts {
+            for side in 0..2 {
+                for q in perm.chunks(4) {
+                    c += q.iter().any(|&j| a[side * h + j]) as u64;
+                }
+            }
+        }
+        c as f64 / (acts.len() * 2 * h / 4) as f64
+    };
+    let ident: Vec<usize> = (0..h).collect();
+    let el = freq.iter().sum::<u64>() as f64 / (acts.len() * 2 * h) as f64;
+    println!("active inputs {:.1}%; nonzero 4-byte chunks {:.1}% -> {:.1}% after the permutation", 100.0 * el, 100.0 * chunks(&ident), 100.0 * chunks(&perm));
+    let q = permute_neurons(&p, sh, &perm);
+    let out = out.expect("--out");
+    File::create(&out).unwrap().write_all(&quantize(&q, sh)).unwrap();
+    println!("wrote {}", out.display());
+}
+
+/// New neuron `k` = old neuron `perm[k]`, everywhere a neuron index appears.
+fn permute_neurons(p: &[f32], sh: Shape, perm: &[usize]) -> Vec<f32> {
+    let h = sh.h;
+    let mut q = p.to_vec();
+    for r in 0..sh.kb * INPUTS + 1 {
+        // FT rows, then the FT bias (the row right after them).
+        for k in 0..h {
+            q[r * h + k] = p[r * h + perm[k]];
+        }
+    }
+    for b in 0..sh.buckets {
+        let o = sh.out_w() + b * 2 * h;
+        for side in 0..2 {
+            for k in 0..h {
+                q[o + side * h + k] = p[o + side * h + perm[k]];
+            }
+        }
+        if sh.hd > 0 {
+            let w1 = head_offs(sh, b)[0];
+            for m in 0..H1 {
+                for side in 0..2 {
+                    let o = w1 + m * 2 * h + side * h;
+                    for k in 0..h {
+                        q[o + k] = p[o + perm[k]];
+                    }
+                }
+            }
+        }
+    }
+    q
+}
+
+#[inline(always)]
+fn sq01(z: f32) -> f32 {
+    let c = z.clamp(0.0, 1.0);
+    c * c
+}
+
+/// d sq01(z) / dz.
+#[inline(always)]
+fn dsq01(z: f32) -> f32 {
+    if z > 0.0 && z < 1.0 {
+        2.0 * z
+    } else {
+        0.0
+    }
+}
+
+/// Offsets of output bucket `b`'s head params: (W1, b1, W2, b2, W3, b3).
+#[inline(always)]
+pub(crate) fn head_offs(sh: Shape, b: usize) -> [usize; 6] {
+    let w1 = sh.head_off() + b * sh.head_len();
+    let b1 = w1 + H1 * 2 * sh.h;
+    let w2 = b1 + H1;
+    let b2 = w2 + H2 * H1;
+    let w3 = b2 + H2;
+    [w1, b1, w2, b2, w3, w3 + H2]
+}
+
+/// The head of output bucket `b` on accumulators `acc` (2H): returns its
+/// output and stores z1, z2 in `scr`. `w1t` (optional) is W1 transposed to
+/// input-major `[2H][H1]` (the batch kernels keep one; it only changes the
+/// memory layout, not the arithmetic): each z1[k] is summed over i in
+/// ascending order either way, so reference and batch agree bit for bit.
+pub(crate) fn head_forward(p: &[f32], sh: Shape, b: usize, acc: &[f32], w1t: Option<&[f32]>, scr: &mut [f32; HS]) -> f32 {
+    let n = 2 * sh.h;
+    let [w1, b1, w2, b2, w3, b3] = head_offs(sh, b);
+    let mut z = [0.0f32; H1];
+    z.copy_from_slice(&p[b1..b1 + H1]);
+    match w1t {
+        Some(t) => {
+            for i in 0..n {
+                let a = sq01(acc[i]);
+                let row: &[f32; H1] = t[i * H1..(i + 1) * H1].try_into().unwrap();
+                for k in 0..H1 {
+                    z[k] += a * row[k];
+                }
+            }
+        }
+        None => {
+            let w = &p[w1..w1 + H1 * n];
+            for i in 0..n {
+                let a = sq01(acc[i]);
+                for k in 0..H1 {
+                    z[k] += a * w[k * n + i];
+                }
+            }
+        }
+    }
+    scr[..H1].copy_from_slice(&z);
+    let mut out = p[b3];
+    for m in 0..H2 {
+        let mut zz = p[b2 + m];
+        for k in 0..H1 {
+            zz += sq01(z[k]) * p[w2 + m * H1 + k];
+        }
+        scr[H1 + m] = zz;
+        out += sq01(zz) * p[w3 + m];
+    }
+    out
+}
+
+/// Given dLoss/dOut `g`, the head's z gradients into `scr` (dz1, dz2).
+pub(crate) fn head_backward(p: &[f32], sh: Shape, b: usize, g: f32, scr: &mut [f32; HS]) {
+    let [_, _, w2, _, w3, _] = head_offs(sh, b);
+    let (z, d) = scr.split_at_mut(H1 + H2);
+    for m in 0..H2 {
+        d[H1 + m] = g * p[w3 + m] * dsq01(z[H1 + m]);
+    }
+    for k in 0..H1 {
+        let mut s = 0.0f32;
+        for m in 0..H2 {
+            s += d[H1 + m] * p[w2 + m * H1 + k];
+        }
+        d[k] = s * dsq01(z[k]);
+    }
+}
+
+/// Head small-layer gradients of one sample for W2 rows `m` with
+/// `m % parts == part` (W2, b2, W3); `part == 0` also adds b1 and b3.
+/// `gr` holds params from `base` on. Every element gets one add per sample.
+pub(crate) fn head_small_grads(sh: Shape, b: usize, g: f32, scr: &[f32; HS], gr: &mut [f32], base: usize, part: usize, parts: usize) {
+    let [_, b1, w2, b2, w3, b3] = head_offs(sh, b);
+    let (z, d) = scr.split_at(H1 + H2);
+    if part == 0 {
+        gr[b3 - base] += g;
+        for k in 0..H1 {
+            gr[b1 + k - base] += d[k];
+        }
+    }
+    let mut m = part;
+    while m < H2 {
+        gr[w3 + m - base] += g * sq01(z[H1 + m]);
+        gr[b2 + m - base] += d[H1 + m];
+        for k in 0..H1 {
+            gr[w2 + m * H1 + k - base] += d[H1 + m] * sq01(z[k]);
+        }
+        m += parts;
+    }
 }
 
 fn quantize(p: &[f32], sh: Shape) -> Vec<u8> {
@@ -518,8 +833,10 @@ fn quantize(p: &[f32], sh: Shape) -> Vec<u8> {
             QA
         } else if i < sh.out_b() {
             QB
-        } else {
+        } else if i < sh.head_off() {
             QA * QB
+        } else {
+            HEAD_Q
         };
         let q = (x * scale).round().clamp(-32768.0, 32767.0) as i16;
         out.extend_from_slice(&q.to_le_bytes());
@@ -537,8 +854,10 @@ fn dequantize(bytes: &[u8], sh: Shape) -> Vec<f32> {
                 QA
             } else if i < sh.out_b() {
                 QB
-            } else {
+            } else if i < sh.head_off() {
                 QA * QB
+            } else {
+                HEAD_Q
             };
             q / scale
         })
@@ -590,19 +909,31 @@ fn init_factor(sh: Shape, rng: &mut Rng) -> Vec<f32> {
 /// `--factorise --init`: a one-bucket net goes into `F` (`W = 0`, so every
 /// bucket starts as that net's rows); a net of the full bucketed shape goes
 /// into `W` with `F = 0`.
-fn load_init_factor(path: &Path, sh: Shape) -> Vec<f32> {
+fn load_init_factor(path: &Path, sh: Shape, rng: &mut Rng) -> Vec<f32> {
     let bytes = std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).len() as usize;
+    // `--head` from a plain net: add a head whose output starts at 0 (add_head).
+    let mut headed = |p: Vec<f32>, s: Shape| -> Vec<f32> {
+        if sh.hd > 0 && s.hd == 0 {
+            println!("init: {} has no head; added one whose output starts at 0 (W3 = 0)", path.display());
+            add_head(&p, Shape { kb: sh.kb, ..s }, rng)
+        } else {
+            p
+        }
+    };
     if Shape::from_file_bytes(bytes, sh.buckets, sh.kb).is_some() {
         let (p, s) = load_net(path, sh.buckets, sh.kb);
-        assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+        assert_eq!(Shape { hd: sh.hd, ..s }, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+        assert!(s.hd <= sh.hd, "init net has a head; add --head");
         println!("init: {} has all {} king buckets; factoriser starts at 0", path.display(), sh.kb);
-        return factor_vector(p, sh, None);
+        return factor_vector(headed(p, s), sh, None);
     }
     let (p1, s1) = load_net(path, sh.buckets, 1);
-    assert_eq!(Shape { kb: sh.kb, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    assert_eq!(Shape { kb: sh.kb, hd: sh.hd, ..s1 }, sh, "init net shape differs from --hidden/--buckets");
+    assert!(s1.hd <= sh.hd, "init net has a head; add --head");
     println!("init: {} is a one-bucket net; its FT rows become the factoriser, buckets start at 0", path.display());
     let mut p = vec![0.0f32; sh.ft_b()];
     p.extend_from_slice(&p1[s1.ft_b()..]);
+    let p = headed(p, s1);
     factor_vector(p, sh, Some(&p1[..s1.ft_b()]))
 }
 
@@ -763,7 +1094,8 @@ fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32
 /// (0 for `none`, so one-bucket checkpoints are unchanged). With the
 /// factoriser, `p`, `m` and `v` are the training vector (net params + F).
 fn ckpt_word1(sh: Shape, kl: &KingLayout, fac: Fac) -> u64 {
-    sh.buckets as u64 | (kl.id() as u64) << 32 | (fac.on() as u64) << 40
+    // Bit 48 is the threat id on threat-inputs-v2; the head takes bit 56.
+    sh.buckets as u64 | (kl.id() as u64) << 32 | (fac.on() as u64) << 40 | (sh.hd as u64) << 56
 }
 
 fn save_ckpt(path: &Path, sh: Shape, kl: &KingLayout, fac: Fac, p: &[f32], opt: &Adam, seen: u64) {
@@ -1401,7 +1733,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let mut data = Vec::new();
     let mut val_path = None;
     let mut out = PathBuf::from("net.bin");
-    let mut sh = Shape { h: 256, buckets: 1, kb: 1 };
+    let mut sh = Shape { h: 256, buckets: 1, kb: 1, hd: 0 };
     let mut kl = NO_BUCKETS;
     let (mut epochs, mut epoch_size) = (10u64, 0u64);
     let (mut batch, mut lr, mut lr_end, mut wd, mut lambda) = (16384usize, 1e-3f32, 1e-5f32, 0.0f32, 0.5f32);
@@ -1443,6 +1775,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--wd-active-only" => wd_active = Some(true),
             "--no-wd-active-only" => wd_active = Some(false),
             "--keep-best" => keep_best = true,
+            "--head" => sh.hd = 1,
             "--half" => half = true,
             "--shuffle-buffer" => shuffle_buffer = Some(v().parse().unwrap()),
             "--loader-threads" => loader_threads = v().parse().unwrap(),
@@ -1475,10 +1808,15 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
         (Some(r), _) => load_ckpt(r, sh, kl, fac),
         (None, Some(i)) => {
             let p = if fac.on() {
-                load_init_factor(i, sh)
+                load_init_factor(i, sh, &mut rng)
             } else {
-                let (p, s) = load_init(i, sh.buckets, sh.kb);
-                assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets");
+                let (mut p, s) = load_init(i, sh.buckets, sh.kb);
+                if sh.hd > 0 && s.hd == 0 {
+                    p = add_head(&p, Shape { hd: 0, ..sh }, &mut rng);
+                    println!("init: {} has no head; added one whose output starts at 0 (W3 = 0)", i.display());
+                } else {
+                    assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets/--head");
+                }
                 p
             };
             let n = p.len();
@@ -1673,13 +2011,15 @@ impl Backend for batch::BatchTrainer {
 /// The command line; `train` uses `gpu` instead of the CPU kernels if given.
 pub fn cli(gpu: Option<&MakeBackend>) {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|scalecheck|rescale|pack|unpack|stream|shuffle-check> ... (see the module docs)";
+    let usage = "usage: nnue-trainer <convert|shuffle|train|eval|fen-eval|permute|scalecheck|rescale|pack|unpack|stream|shuffle-check> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
         "convert" => cmd_convert(rest),
         "shuffle" => cmd_shuffle(rest),
         "train" => cmd_train(rest, gpu),
         "eval" => cmd_eval(rest),
+        "fen-eval" => cmd_fen_eval(rest),
+        "permute" => cmd_permute(rest),
         "scalecheck" => cmd_scalecheck(rest),
         "rescale" => cmd_rescale(rest),
         "pack" => packed::cmd_pack(rest),
@@ -1791,7 +2131,7 @@ mod tests {
 
     #[test]
     fn warm_start_copies_rows_into_every_bucket() {
-        let s1 = Shape { h: 8, buckets: 2, kb: 1 };
+        let s1 = Shape { h: 8, buckets: 2, kb: 1, hd: 0 };
         let mut rng = Rng::new(5);
         let p1 = init_params(s1, &mut rng);
         let p = expand_buckets(&p1, s1, 8);
@@ -1820,7 +2160,7 @@ mod tests {
     #[test]
     fn factoriser_merge_gradient_and_init() {
         let kl = KingLayout::by_name("kb4");
-        let sh = Shape { h: 8, buckets: 2, kb: kl.kb() };
+        let sh = Shape { h: 8, buckets: 2, kb: kl.kb(), hd: 0 };
         let fac = Fac::new(sh, true);
         assert_eq!(fac.fl, 768 * 8);
         let mut rng = Rng::new(11);
@@ -1907,7 +2247,7 @@ mod tests {
         let init = dir.join("plain.bin");
         File::create(&init).unwrap().write_all(&quantize(&p1, s1)).unwrap();
         let q1 = dequantize(&quantize(&p1, s1), s1);
-        let pi = load_init_factor(&init, sh);
+        let pi = load_init_factor(&init, sh, &mut Rng::new(1));
         merge_factor(&pi, sh, fac, &mut m);
         assert_eq!(m, expand_buckets(&q1, s1, sh.kb));
         assert_eq!(&pi[sh.len()..], &q1[..s1.ft_b()]);
@@ -1949,7 +2289,7 @@ mod tests {
 
     #[test]
     fn quantize_roundtrip_and_shape() {
-        let sh = Shape { h: 32, buckets: 8, kb: 1 };
+        let sh = Shape { h: 32, buckets: 8, kb: 1, hd: 0 };
         let mut rng = Rng::new(3);
         let p = init_params(sh, &mut rng);
         let q = quantize(&p, sh);
@@ -1959,12 +2299,12 @@ mod tests {
             let tol = if i < sh.out_w() { 0.5 / QA } else { 0.5 / QB };
             assert!((p[i] - d[i]).abs() <= tol + 1e-6);
         }
-        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1, 1), Some(Shape { h: 512, buckets: 1, kb: 1 }));
+        assert_eq!(Shape::from_file_bytes(394_753 * 2, 1, 1), Some(Shape { h: 512, buckets: 1, kb: 1, hd: 0 }));
     }
 
     #[test]
     fn scalecheck_slope_detects_halved_scores() {
-        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let sh = Shape { h: 32, buckets: 1, kb: 1, hd: 0 };
         let mut rng = Rng::new(11);
         let mut p = init_params(sh, &mut rng);
         for x in &mut p[sh.out_w()..] {
@@ -2030,7 +2370,7 @@ mod tests {
 
     #[test]
     fn rescale_scales_evals_and_leaves_ft_alone() {
-        let sh = Shape { h: 32, buckets: 2, kb: 1 };
+        let sh = Shape { h: 32, buckets: 2, kb: 1, hd: 0 };
         let net = rescale_test_net(sh, 1.0);
         let mut out = net.clone();
         let (cw, cb) = rescale_output(&mut out, sh, 0.9);
@@ -2046,7 +2386,7 @@ mod tests {
 
     #[test]
     fn rescale_match_recovers_the_scale() {
-        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let sh = Shape { h: 32, buckets: 1, kb: 1, hd: 0 };
         let reference = rescale_test_net(sh, 1.0);
         let wide = rescale_test_net(sh, 1.25);
         let pairs: Vec<(f64, f64)> = evals(&reference, sh).into_iter().zip(evals(&wide, sh)).collect();
@@ -2099,7 +2439,7 @@ mod tests {
             assert!((*a as f64 * 0.92 - *b as f64).abs() < 1.0);
         }
         // Exact on a real net's evals: achieved factor == slope of new evals on old ones.
-        let sh = Shape { h: 32, buckets: 2, kb: 1 };
+        let sh = Shape { h: 32, buckets: 2, kb: 1, hd: 0 };
         let net = rescale_test_net(sh, 1.0);
         let p = dequantize(&net, sh);
         let recs: Vec<Rec> = RESCALE_FENS.iter().map(|f| encode(&format!("{f} | 0 | 0.5")).unwrap()).collect();
@@ -2118,7 +2458,7 @@ mod tests {
 
     #[test]
     fn rescale_clips_output_weights_to_the_fast_path() {
-        let sh = Shape { h: 32, buckets: 1, kb: 1 };
+        let sh = Shape { h: 32, buckets: 1, kb: 1, hd: 0 };
         let mut net = rescale_test_net(sh, 1.0);
         net[2 * sh.out_w()..2 * sh.out_w() + 2].copy_from_slice(&120i16.to_le_bytes());
         net[2 * sh.out_w() + 2..2 * sh.out_w() + 4].copy_from_slice(&(-100i16).to_le_bytes());
@@ -2132,7 +2472,7 @@ mod tests {
 
     #[test]
     fn gradient_matches_finite_difference() {
-        let sh = Shape { h: 16, buckets: 2, kb: 1 };
+        let sh = Shape { h: 16, buckets: 2, kb: 1, hd: 0 };
         let mut rng = Rng::new(7);
         let mut p = init_params(sh, &mut rng);
         for x in &mut p[sh.ft_b()..sh.out_w()] {
@@ -2246,7 +2586,7 @@ mod tests {
             (32, 1, KingLayout::by_name("kb4"), true, false),
         ];
         for (h, buckets, kl, factorise, wd_active) in cases {
-            let sh = Shape { h, buckets, kb: kl.kb() };
+            let sh = Shape { h, buckets, kb: kl.kb(), hd: 0 };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(5);
             let mut p = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
@@ -2313,7 +2653,7 @@ mod tests {
             (32, 1, KingLayout::by_name("kb4"), true, false),
         ];
         for (h, buckets, kl, factorise, wd_active) in cases {
-            let sh = Shape { h, buckets, kb: kl.kb() };
+            let sh = Shape { h, buckets, kb: kl.kb(), hd: 0 };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(7);
             let p0 = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
@@ -2422,7 +2762,7 @@ mod tests {
     #[test]
     fn half_forward_is_deterministic_and_close() {
         let (h, buckets, kl) = (64, 8, KingLayout::by_name("kb8m"));
-        let sh = Shape { h, buckets, kb: kl.kb() };
+        let sh = Shape { h, buckets, kb: kl.kb(), hd: 0 };
         let fac = Fac::new(sh, true);
         let mut rng = Rng::new(11);
         let p0 = init_factor(sh, &mut rng);
@@ -2458,8 +2798,114 @@ mod tests {
     }
 
     #[test]
+    fn head_file_shape_warm_start_and_permute() {
+        let kl = KingLayout::by_name("kb4");
+        let plain = Shape { h: 32, buckets: 8, kb: kl.kb(), hd: 0 };
+        let sh = Shape { hd: 1, ..plain };
+        assert_eq!(Shape::from_file_bytes(plain.file_bytes(), 8, kl.kb()), Some(plain));
+        assert_eq!(Shape::from_file_bytes(sh.file_bytes(), 8, kl.kb()), Some(sh));
+        let mut rng = Rng::new(21);
+        let p0 = init_params(plain, &mut rng);
+        let p = add_head(&p0, plain, &mut rng);
+        assert_eq!(p.len(), sh.len());
+        let (recs, _) = test_recs(40);
+        let (mut a0, mut a1) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        for r in &recs {
+            let s = decode(r, 0.5, 8, false, kl);
+            // W3 = 0: the warm-started head adds b3 = 0, so evals are the plain net's.
+            assert_eq!(forward(&p0, plain, &s, &mut a0), forward(&p, sh, &s, &mut a1));
+        }
+        // A random head, then a permutation: same evals up to float reassociation.
+        let p = init_params(sh, &mut rng);
+        let perm: Vec<usize> = (0..sh.h).map(|k| (k * 7 + 3) % sh.h).collect();
+        let q = permute_neurons(&p, sh, &perm);
+        for r in &recs {
+            let s = decode(r, 0.5, 8, false, kl);
+            let (x, y) = (forward(&p, sh, &s, &mut a0), forward(&q, sh, &s, &mut a1));
+            assert!((x - y).abs() < 1e-4, "{x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn head_gradient_matches_finite_difference() {
+        let sh = Shape { h: 16, buckets: 2, kb: 1, hd: 1 };
+        let mut rng = Rng::new(11);
+        let mut p = init_params(sh, &mut rng);
+        for x in &mut p[sh.ft_b()..sh.out_w()] {
+            *x = 0.3;
+        }
+        let r = encode("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3 | 35 | 1.0").unwrap();
+        let s = decode(&r, 0.5, sh.buckets, false, NO_BUCKETS);
+        // Pull the head's pre-activations into (0, 1) so every path carries gradient.
+        let [w1, b1, w2, b2, w3, b3] = head_offs(sh, s.bucket);
+        for k in 0..H1 {
+            p[b1 + k] = 0.5;
+        }
+        for m in 0..H2 {
+            p[b2 + m] = 0.5;
+        }
+        let mut g = vec![0.0f32; sh.len()];
+        let (mut acc, mut dacc) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
+        train_sample(&p, sh, &s, &mut g, &mut acc, &mut dacc);
+        let loss = |p: &[f32]| {
+            let mut acc = vec![0.0; 2 * sh.h];
+            let d = sigmoid(forward(p, sh, &s, &mut acc)) - s.target;
+            (d * d) as f64
+        };
+        let f0 = s.f[0][0] as usize * sh.h;
+        let checks = [f0, f0 + 3, sh.ft_b() + 1, sh.out_w() + s.bucket * 2 * sh.h + 5, sh.out_b() + s.bucket,
+            w1 + 3 * 2 * sh.h + 5, w1 + 7, b1 + 2, w2 + 5 * H1 + 3, b2 + 4, w3 + 6, b3];
+        for &i in &checks {
+            let eps = 1e-3;
+            let mut a = p.clone();
+            a[i] += eps;
+            let mut b = p.clone();
+            b[i] -= eps;
+            let num = (loss(&a) - loss(&b)) / (2.0 * eps as f64);
+            assert!((num - g[i] as f64).abs() < 1e-4 + 1e-2 * num.abs(), "param {i}: numeric {num} vs analytic {}", g[i]);
+        }
+    }
+
+    #[test]
+    fn head_batch_matches_reference() {
+        for (h, buckets, kl, factorise) in [(32, 8, NO_BUCKETS, false), (64, 2, KingLayout::by_name("kb4"), true), (512, 8, NO_BUCKETS, false)] {
+            let sh = Shape { h, buckets, kb: kl.kb(), hd: 1 };
+            let fac = Fac::new(sh, factorise);
+            let mut rng = Rng::new(13);
+            let mut p = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
+            for x in &mut p[sh.ft_b()..sh.out_w()] {
+                *x = 0.2;
+            }
+            let (recs, mirror) = test_recs(301);
+            let n = p.len();
+            let mut ropt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
+            let (gref, lref, pref) = reference_step(&p, sh, kl, fac, false, &recs, &mirror, &mut ropt);
+            assert!(gref[sh.head_off()..].iter().any(|&x| x != 0.0), "head got no gradient");
+            for isa in isas() {
+                for threads in [1, 3] {
+                    let what = format!("H={h} {} fac={factorise} {isa:?} threads={threads}", kl.name);
+                    let mut bt = batch::BatchTrainer::new(sh, 64, true, fac.fl, false);
+                    bt.isa = isa;
+                    let mut p2 = p.clone();
+                    let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
+                    batch::Pool::with(threads, |pool| {
+                        let loss = bt.batch(pool, &p2, &recs, &mirror, 0.5, kl);
+                        assert_eq!(loss, lref, "{what}: loss");
+                        let g = bt.gradient();
+                        for (i, (a, b)) in g.iter().zip(&gref).enumerate() {
+                            assert!(a.to_bits() == b.to_bits(), "{what}: grad {i} (head from {}): {a} vs {b}", sh.head_off());
+                        }
+                        bt.adam(pool, &mut p2, &mut opt, 1e-3, 0.01, 1.0 / recs.len() as f32);
+                    });
+                    assert!(p2.iter().zip(&pref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: Adam step");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn batch_trainer_is_deterministic() {
-        let sh = Shape { h: 96, buckets: 8, kb: 1 };
+        let sh = Shape { h: 96, buckets: 8, kb: 1, hd: 0 };
         let mut rng = Rng::new(9);
         let p = init_params(sh, &mut rng);
         let (recs, mirror) = test_recs(500);
