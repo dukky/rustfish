@@ -710,7 +710,7 @@ impl Backend for GpuTrainer {
                 HT,
                 shmem,
                 st,
-                &[P(sl.ss.ptr), P(self.acc.ptr), P(self.pr.ptr), P(self.qw.ptr), P(self.wf.ptr), P(self.gout.ptr), P(sl.loss.ptr), P(self.hsc.ptr), P(self.hin.ptr), P(self.dacc.ptr), I(hi), I(bi), I(hd), F(nnue_trainer::ft_l1())],
+                &[P(sl.ss.ptr), P(self.acc.ptr), P(self.pr.ptr), P(self.qw.ptr), P(self.wf.ptr), P(self.gout.ptr), P(sl.loss.ptr), P(self.hsc.ptr), P(self.hin.ptr), P(self.dacc.ptr), I(hi), I(bi), I(hd), F(nnue_trainer::ft_l1()), F(nnue_trainer::ft_l1_group()), I(nnue_trainer::pw_l2q(sh) as i32)],
             );
         }
         mark(3);
@@ -735,7 +735,7 @@ impl Backend for GpuTrainer {
             launch(k.backward_head_w1, (sh.head_in().div_ceil(256) as u32, ch * bu), 256, st, &[P(self.hin.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
             mark(8);
             let small = sh.head_len() - H1 * sh.head_in();
-            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
+            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd), I(nnue_trainer::pw_l2q(sh) as i32)]);
             mark(9);
             let nh = sh.buckets * sh.head_len();
             launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32), I(hd)]);

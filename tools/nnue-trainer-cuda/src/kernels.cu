@@ -42,6 +42,8 @@ __device__ __forceinline__ float sq01(float z) {
     return c * c;
 }
 __device__ __forceinline__ float dsq01(float z) { return (z > 0.f && z < 1.f) ? 2.0f * z : 0.0f; }
+// --qat-l2 (nnue_trainer::q_u1): the L1 activation as the engine's u8 / 127.
+__device__ __forceinline__ float q_u1(float u) { return floorf(__fadd_rn(__fmul_rn(u, 127.0f), 0.5f)) * (1.0f / 127.0f); }
 
 struct GSample {
     uint16_t f[2][32];
@@ -174,7 +176,7 @@ extern "C" __global__ void __launch_bounds__(HT) head_forward(const GSample *ss,
                                                               const int8_t *qw, const float *wf, float *gout,
                                                               float *loss, float *hs,
                                                               float *hin, float *dacc, int H, int buckets, int hd,
-                                                              float l1) {
+                                                              float l1, float grp, int ql2) {
     int j = blockIdx.x, t = threadIdx.x, lane = t & 31, warp = t >> 5;
     const int nwarps = HT / 32;
     extern __shared__ float dsm[];
@@ -195,7 +197,8 @@ extern "C" __global__ void __launch_bounds__(HT) head_forward(const GSample *ss,
             float v = src[k];
             hsm[k] = v;
             int r = k - H1;
-            if (r >= 0 && r < H2 * H1) w2p[r / H1][r % H1] = v;
+            // --qat-l2: L2 (forward and dz1) uses W2 as q_w1(W2).
+            if (r >= 0 && r < H2 * H1) w2p[r / H1][r % H1] = ql2 ? q_w1(v) : v;
         }
         if (t == 0) {
             obs = ob[bk];
@@ -269,8 +272,13 @@ extern "C" __global__ void __launch_bounds__(HT) head_forward(const GSample *ss,
         float z2 = b2[t];
         const int ka = hd == 3 ? H1 - 1 : H1;
 #pragma unroll
-        for (int k = 0; k < H1; k++)
-            if (k < ka) z2 += sq01(z1s[k]) * w2p[t][k];
+        if (ql2) {
+            for (int k = 0; k < H1; k++)
+                if (k < ka) z2 = __fadd_rn(z2, __fmul_rn(q_u1(sq01(z1s[k])), w2p[t][k]));
+        } else {
+            for (int k = 0; k < H1; k++)
+                if (k < ka) z2 += sq01(z1s[k]) * w2p[t][k];
+        }
         float o3 = sq01(z2) * w3[t];
         for (int o = 16; o; o >>= 1) o3 += __shfl_down_sync(0xffffffff, o3, o);
         float g = 0.0f;
@@ -314,6 +322,23 @@ extern "C" __global__ void __launch_bounds__(HT) head_forward(const GSample *ss,
         for (int g4 = t; g4 < H / 4; g4 += HT) {
             int pi = 4 * g4, side = pi >= half, c0 = pi - side * half;
             float e[4] = {0.f, 0.f, 0.f, 0.f};
+            // --ft-l1-group (nnue_trainer::pw_group_dp): pi..pi+3 is one
+            // aligned chunk; its extra dLoss/dp is grp p_u / ||p||.
+            float gl[4] = {l1, l1, l1, l1};
+            if (grp > 0.f) {
+                float pr[4], n2 = 0.f;
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    int a = side * H + c0 + u;
+                    pr[u] = __fmul_rn(fminf(fmaxf(as_s[a], 0.f), 1.f), fminf(fmaxf(as_s[a + half], 0.f), 1.f));
+                    n2 = __fadd_rn(n2, __fmul_rn(pr[u], pr[u]));
+                }
+                if (n2 > 0.f) {
+                    float r = 1.0f / sqrtf(n2);
+#pragma unroll
+                    for (int u = 0; u < 4; u++) gl[u] = __fadd_rn(l1, __fmul_rn(grp, pr[u]) * r);
+                }
+            }
 #pragma unroll
             for (int q = 0; q < H1; q++) {
                 int k4 = *(const int *)(qb + (size_t)q * H + pi);
@@ -335,7 +360,7 @@ extern "C" __global__ void __launch_bounds__(HT) head_forward(const GSample *ss,
                     // the different context cannot change the rounding.
                     float gw = __fmul_rn(wo[u], gj);
                     float m = __fmul_rn(cl, __fmaf_rn(wo[u], gj, gw));
-                    d[u] = (x[u] > 0.f && x[u] < 1.f) ? __fmaf_rn(__fadd_rn(e[u], l1), cp, m) : 0.0f;
+                    d[u] = (x[u] > 0.f && x[u] < 1.f) ? __fmaf_rn(__fadd_rn(e[u], gl[u]), cp, m) : 0.0f;
                 }
                 *(float4 *)(dacc + (size_t)j * 2 * H + cc) = make_float4(d[0], d[1], d[2], d[3]);
             }
@@ -623,7 +648,7 @@ extern "C" __global__ void __launch_bounds__(256) backward_head_w1(const float *
 // (buckets, chunks); the same per-bucket sample list as backward_head_w1.
 #define HST 32
 extern "C" __global__ void backward_head_small(const float *gout, const float *hs, float *ph, const uint32_t *bidx,
-                                                const uint32_t *bcnt, int H, int buckets, int chunks, int hd) {
+                                                const uint32_t *bcnt, int H, int buckets, int chunks, int hd, int ql2) {
     int b = blockIdx.x, chunk = blockIdx.y, t = threadIdx.x;
     int bi = b * chunks + chunk;
     const uint32_t *js = bidx + (size_t)bi * CH;
@@ -648,7 +673,7 @@ extern "C" __global__ void backward_head_small(const float *gout, const float *h
             } else if (t < H1 + H2 * H1) {
                 int m = (t - H1) / H1, k = (t - H1) % H1;
                 // Pairwise-skip: the skip neuron does not feed L2.
-                if (!(hd == 3 && k == H1 - 1)) sm += dz2[m] * sq01(z1[k]);
+                if (!(hd == 3 && k == H1 - 1)) sm += dz2[m] * (ql2 ? q_u1(sq01(z1[k])) : sq01(z1[k]));
             } else if (t < H1 + H2 * H1 + H2) {
                 sm += dz2[t - H1 - H2 * H1];
             } else if (t < H1 + H2 * H1 + 2 * H2) {
