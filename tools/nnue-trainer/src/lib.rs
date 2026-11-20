@@ -1428,6 +1428,8 @@ struct StepCtx<'a> {
     sh: Shape,
     fac: Fac,
     active: Option<&'a [u8]>,
+    /// `--lazy-adam` (needs `active`): rows not in the batch are skipped.
+    lazy: bool,
 }
 
 /// Sum the per-thread gradients, then one AdamW step with clipping, in parallel.
@@ -1462,6 +1464,17 @@ fn adam_step(p: &mut [f32], opt: &mut Adam, grads: &[Vec<f32>], lr: f32, wd: f32
                         }
                     }
                     g *= inv_batch;
+                    if cx.lazy {
+                        let a = active.unwrap();
+                        let skip = if gi < ft_b {
+                            a[gi / h] == 0
+                        } else {
+                            gi >= n && (0..kb).all(|b| a[b * INPUTS + (gi - n) / h] == 0)
+                        };
+                        if skip {
+                            continue;
+                        }
+                    }
                     mc[i] = b1 * mc[i] + (1.0 - b1) * g;
                     vc[i] = b2 * vc[i] + (1.0 - b2) * g * g;
                     let upd = (mc[i] / c1) / ((vc[i] / c2).sqrt() + eps);
@@ -2128,6 +2141,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     let (mut init, mut resume, mut ckpt) = (None::<PathBuf>, None::<PathBuf>, None::<PathBuf>);
     let (mut exact, mut sub_batch, mut max_batches) = (false, 0usize, u64::MAX);
     let (mut factorise, mut wd_active, mut keep_best) = (false, None::<bool>, false);
+    let mut lazy = false;
     let mut half = false;
     // Streaming loader (`stream.rs`): packed files, directories, manifests,
     // or any data with `--shuffle-buffer`.
@@ -2161,6 +2175,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--factorise" | "--factorize" => factorise = true,
             "--wd-active-only" => wd_active = Some(true),
             "--no-wd-active-only" => wd_active = Some(false),
+            "--lazy-adam" => lazy = true,
             "--keep-best" => keep_best = true,
             "--head" => sh.hd = 1,
             "--head-pairwise" => sh.hd = 2,
@@ -2233,6 +2248,9 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     if wd_active {
         kb_note += " wd-active-only";
     }
+    if lazy {
+        kb_note += " lazy-adam";
+    }
     println!(
         "train H={} buckets={}{kb_note} params={} epochs={epochs} x {epoch_size} batch={batch} lr {lr}->{lr_end} wd={wd} lambda={lambda} mirror={mirror} threads={threads} val={}",
         sh.h,
@@ -2249,10 +2267,14 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
     // far; the start net (epoch 0: the --init / --resume net) competes too.
     let mut best = keep_best.then(|| (ql0, seen / epoch_size, q0));
 
-    let cfg = BackendCfg { sh, fl: fac.fl, wd_active, exact, sub_batch, batch, half };
+    let cfg = BackendCfg { sh, fl: fac.fl, wd_active, lazy, exact, sub_batch, batch, half };
     let mut bt: Box<dyn Backend> = match gpu {
         Some(mk) => mk(&cfg),
-        None => Box::new(batch::BatchTrainer::with_half(sh, sub_batch, exact, fac.fl, wd_active, half)),
+        None => {
+            let mut b = batch::BatchTrainer::with_half(sh, sub_batch, exact, fac.fl, wd_active, half);
+            b.set_lazy(lazy);
+            Box::new(b)
+        }
     };
     println!("{}", bt.describe());
     // Loader thread: feed + shuffle + the per-batch mirror flags (the same
@@ -2371,6 +2393,8 @@ pub struct BackendCfg {
     pub sh: Shape,
     pub fl: usize,
     pub wd_active: bool,
+    /// `--lazy-adam`: AdamW skips FT rows (and F rows) not in the batch.
+    pub lazy: bool,
     pub exact: bool,
     pub sub_batch: usize,
     /// `--half`: the forward reads an fp16 copy of the FT rows.
@@ -2641,13 +2665,13 @@ mod tests {
         let n = p.len();
         let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
         let mut q = p.clone();
-        let cx = StepCtx { sh, fac, active: Some(&active) };
+        let cx = StepCtx { sh, fac, active: Some(&active), lazy: false };
         adam_step(&mut q, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &cx);
         assert_eq!(&q[idle * sh.h..(idle + 1) * sh.h], &p[idle * sh.h..(idle + 1) * sh.h]);
         assert!(q[sh.len() + fk] != p[sh.len() + fk]);
         let mut q2 = p.clone();
         let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
-        adam_step(&mut q2, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &StepCtx { sh, fac, active: None });
+        adam_step(&mut q2, &mut opt, std::slice::from_ref(&g), 1e-3, 0.1, 0.5, 2, &StepCtx { sh, fac, active: None, lazy: false });
         assert_eq!(q2[idle * sh.h], p[idle * sh.h] * (1.0 - 1e-3 * 0.1));
 
         // From scratch: merged net == the KB=1 init with the same seed, in every bucket.
@@ -2968,7 +2992,7 @@ mod tests {
         sh: Shape,
         kl: &KingLayout,
         fac: Fac,
-        wd_active: bool,
+        (wd_active, lazy): (bool, bool),
         recs: &[Rec],
         mirror: &[bool],
         opt: &mut Adam,
@@ -2991,7 +3015,7 @@ mod tests {
             }
         }
         let mut p = p.to_vec();
-        let cx = StepCtx { sh, fac, active: wd_active.then_some(&active[..]) };
+        let cx = StepCtx { sh, fac, active: (wd_active || lazy).then_some(&active[..]), lazy };
         adam_step(&mut p, opt, std::slice::from_ref(&g), 1e-3, 0.01, 1.0 / recs.len() as f32, 3, &cx);
         (g, loss, p)
     }
@@ -3010,7 +3034,7 @@ mod tests {
             (64, 8, KingLayout::by_name("kb8m"), true, true),
             (32, 1, KingLayout::by_name("kb4"), true, false),
         ];
-        for (h, buckets, kl, factorise, wd_active) in cases {
+        for ((h, buckets, kl, factorise, wd_active), lazy) in cases.iter().flat_map(|&c| [(c, false), (c, true)]) {
             let sh = Shape { h, buckets, kb: kl.kb(), hd: 0 };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(5);
@@ -3026,17 +3050,18 @@ mod tests {
             let (recs, mirror) = test_recs(301);
             let n = p.len();
             let mut ropt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
-            let (gref, lref, pref) = reference_step(&p, sh, kl, fac, wd_active, &recs, &mirror, &mut ropt);
+            let (gref, lref, pref) = reference_step(&p, sh, kl, fac, (wd_active, lazy), &recs, &mirror, &mut ropt);
             for isa in isas() {
                 for (threads, exact) in [(1, true), (3, true), (4, false), (2, false)] {
                     let mut bt = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
+                    bt.set_lazy(lazy);
                     bt.isa = isa;
                     let mut p2 = p.clone();
                     let mut opt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
                     batch::Pool::with(threads, |pool| {
                         let loss = bt.batch(pool, &p2, &recs, &mirror, 0.5, kl);
                         let g = bt.gradient();
-                        let what = format!("H={h} {} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
+                        let what = format!("H={h} {} fac={factorise} wda={wd_active} lazy={lazy} {isa:?} threads={threads} exact={exact}", kl.name);
                         if exact {
                             assert_eq!(loss, lref, "{what}");
                             assert!(g.iter().zip(&gref).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: gradient differs");
@@ -3056,7 +3081,7 @@ mod tests {
                             // Second step: the trainer's (merged) FT copy and the
                             // active-row flags must follow the update.
                             let mut ropt2 = Adam { m: ropt.m.clone(), v: ropt.v.clone(), step: ropt.step };
-                            let (g2, l2, p3) = reference_step(&pref, sh, kl, fac, wd_active, &recs[..200], &mirror[..200], &mut ropt2);
+                            let (g2, l2, p3) = reference_step(&pref, sh, kl, fac, (wd_active, lazy), &recs[..200], &mirror[..200], &mut ropt2);
                             assert_eq!(bt.batch(pool, &p2, &recs[..200], &mirror[..200], 0.5, kl), l2, "{what}: second step loss");
                             assert!(bt.gradient().iter().zip(&g2).all(|(a, b)| a.to_bits() == b.to_bits()), "{what}: second step gradient");
                             bt.adam(pool, &mut p2, &mut opt, 1e-3, 0.01, 1.0 / 200.0);
@@ -3077,7 +3102,7 @@ mod tests {
             (64, 8, KingLayout::by_name("kb8m"), true, true),
             (32, 1, KingLayout::by_name("kb4"), true, false),
         ];
-        for (h, buckets, kl, factorise, wd_active) in cases {
+        for ((h, buckets, kl, factorise, wd_active), lazy) in cases.iter().flat_map(|&c| [(c, false), (c, true)]) {
             let sh = Shape { h, buckets, kb: kl.kb(), hd: 0 };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(7);
@@ -3088,11 +3113,13 @@ mod tests {
             let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
             for isa in isas() {
                 for (threads, exact) in [(1, true), (3, false), (4, true)] {
-                    let what = format!("H={h} {} fac={factorise} wda={wd_active} {isa:?} threads={threads} exact={exact}", kl.name);
+                    let what = format!("H={h} {} fac={factorise} wda={wd_active} lazy={lazy} {isa:?} threads={threads} exact={exact}", kl.name);
                     let mut want = (AVec::from(p0.clone()), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 });
                     let mut got = (AVec::from(p0.clone()), Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 });
                     let mut ra = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
                     let mut rb = batch::BatchTrainer::new(sh, 64, exact, fac.fl, wd_active);
+                    ra.set_lazy(lazy);
+                    rb.set_lazy(lazy);
                     ra.isa = isa;
                     rb.isa = isa;
                     batch::Pool::with(threads, |pool| {
@@ -3360,7 +3387,7 @@ mod tests {
             let (recs, mirror) = test_recs(301);
             let n = p.len();
             let mut ropt = Adam { m: AVec::zeros(n), v: AVec::zeros(n), step: 0 };
-            let (gref, lref, pref) = reference_step(&p, sh, kl, fac, false, &recs, &mirror, &mut ropt);
+            let (gref, lref, pref) = reference_step(&p, sh, kl, fac, (false, false), &recs, &mirror, &mut ropt);
             assert!(gref[sh.head_off()..].iter().any(|&x| x != 0.0), "head got no gradient");
             for isa in isas() {
                 for threads in [1, 3] {

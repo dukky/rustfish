@@ -339,6 +339,8 @@ struct GpuTrainer {
     sh: Shape,
     fl: usize,
     wd_active: bool,
+    /// `--lazy-adam` (the row flags are then kept even without `wd_active`).
+    lazy: bool,
     device: String,
     k: Kernels,
     live: bool,
@@ -451,6 +453,7 @@ impl GpuTrainer {
             sh,
             fl: cfg.fl,
             wd_active: cfg.wd_active,
+            lazy: cfg.lazy,
             device,
             k,
             live: false,
@@ -548,7 +551,8 @@ impl Backend for GpuTrainer {
         let si = self.slot;
         self.slot ^= 1;
         let t_host = std::time::Instant::now();
-        let wd_active = self.wd_active;
+        // Per-row "occurred in the batch" flags: `--wd-active-only`, `--lazy-adam`.
+        let wd_active = self.wd_active || self.lazy;
         // Prepare this batch on the CPU while the GPU runs the previous one
         // (this slot's last batch, two steps ago, finished: `step` waited
         // for the batch after it).
@@ -751,7 +755,7 @@ impl Backend for GpuTrainer {
             ((INPUTS * h).div_ceil(256) as u32, 1),
             256,
             st,
-            &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(if self.half { self.wth.ptr } else { 0 }), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32)],
+            &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(if self.half { self.wth.ptr } else { 0 }), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32), I(self.lazy as i32)],
         );
         mark(11);
         launch(k.adam_flat, (nrest.div_ceil(256) as u32, 1), 256, st, &[C(c), P(self.pr.ptr), P(self.mr.ptr), P(self.vr.ptr), P(self.gr.ptr), I(nrest as i32)]);
@@ -856,10 +860,11 @@ impl PairBackend {
         let share = ((g * k as f64).round() as usize).clamp(1, k - 1);
         let (jobs, job_rx) = sync_channel::<Job>(8);
         let (reply_tx, replies) = sync_channel::<Reply>(64);
-        let (sh, fl, wd_active, half) = (cfg.sh, cfg.fl, cfg.wd_active, cfg.half);
+        let (sh, fl, wd_active, half, lazy) = (cfg.sh, cfg.fl, cfg.wd_active, cfg.half, cfg.lazy);
         std::thread::spawn(move || {
             Pool::with(cpu_threads, |pool| {
                 let mut bt = BatchTrainer::with_half(sh, 0, false, fl, wd_active, half);
+                bt.set_lazy(lazy);
                 let mut st: Option<(Vec<f32>, Adam)> = None;
                 for job in job_rx {
                     match job {

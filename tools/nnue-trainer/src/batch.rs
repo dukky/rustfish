@@ -307,6 +307,9 @@ pub struct BatchTrainer {
     /// in (empty if off).
     active: Vec<AtomicU32>,
     gen: u32,
+    /// `--lazy-adam`: AdamW leaves FT rows (W, and F rows of features no
+    /// bucket saw) that did not occur in the batch untouched (needs `active`).
+    lazy: bool,
     /// `step`: the FT's training state, tile-major (`[tile][row][TB]`, the
     /// `rows` FT rows then, with the factoriser, F's 768 rows), so that the
     /// AdamW of a column tile is one sequential stream. It is the master
@@ -357,11 +360,25 @@ impl BatchTrainer {
             fl,
             active: if wd_active { (0..rows).map(|_| AtomicU32::new(0)).collect() } else { Vec::new() },
             gen: 0,
+            lazy: false,
             ftp: ABuf::new(0),
             ftm: ABuf::new(0),
             ftv: ABuf::new(0),
             ft_live: false,
         }
+    }
+
+    /// `--lazy-adam`: from the next step on, AdamW skips the FT rows that did
+    /// not occur in the batch: their params, moments and decay stay as they
+    /// are (no moment decay, no momentum step; the bias correction uses the
+    /// global step). Rows that occurred get the dense update. Needs the
+    /// per-row flags of `--wd-active-only` (allocated here if off; then the
+    /// rows that occurred still decay, the skipped ones do not).
+    pub fn set_lazy(&mut self, on: bool) {
+        if on && self.active.is_empty() {
+            self.active = (0..self.rows).map(|_| AtomicU32::new(0)).collect();
+        }
+        self.lazy = on;
     }
 
     pub fn sub_batch(&self) -> usize {
@@ -413,6 +430,7 @@ impl BatchTrainer {
                 active: std::ptr::null(),
                 gen: 0,
                 half: false,
+                lazy: false,
             };
             adam_dispatch(self.isa, &c, &a);
         }
@@ -521,7 +539,7 @@ impl BatchTrainer {
         let sb_len = |k: usize| sb.min(n - k * sb);
         let ftr = self.ft_rows();
         let ft = [self.ftp.ptr(), self.ftm.ptr(), self.ftv.ptr()];
-        let (fl, kb) = (self.fl > 0, sh.kb);
+        let (fl, kb, lazy) = (self.fl > 0, sh.kb, self.lazy);
         let act = APtr(if active.is_empty() { std::ptr::null() } else { active.as_ptr() });
         let decode_one = |r: usize, s: &mut Sample| {
             *s = decode(&recs[r], lambda, sh.buckets, mirror[r], kl);
@@ -628,6 +646,7 @@ impl BatchTrainer {
                         active: act.get(),
                         gen,
                         half,
+                        lazy,
                     };
                     tile_adam_dispatch(isa, fused.unwrap(), &a);
                     return;
@@ -722,7 +741,7 @@ impl BatchTrainer {
     pub fn adam(&mut self, pool: &Pool, p: &mut [f32], opt: &mut Adam, lr: f32, wd: f32, inv_batch: f32) {
         assert!(!self.ft_live, "batch/adam after step: export first");
         let c = adam_consts(opt, lr, wd, inv_batch);
-        let (gen, half) = (self.gen, self.half);
+        let (gen, half, lazy) = (self.gen, self.half, self.lazy);
         let (h, rows, tiles, ftb) = (self.sh.h, self.rows, self.tiles, self.sh.ft_b());
         let (pp, mp, vp) = (Ptr(p.as_mut_ptr()), Ptr(opt.m.as_mut_ptr()), Ptr(opt.v.as_mut_ptr()));
         if !self.wt_ok {
@@ -746,11 +765,11 @@ impl BatchTrainer {
             let a = if u < ft_units {
                 let (f0, f1) = (u * AB, ((u + 1) * AB).min(units_rows));
                 let (p, m, v, g, wt, active) = (pp.get(), mp.get(), vp.get(), gft.get(), wt.get(), active.get());
-                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active, gen, half }
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0, f1, flat: 0, n, fl, kb, active, gen, half, lazy }
             } else {
                 let (p, m, v) = (pp.get().add(ftb), mp.get().add(ftb), vp.get().add(ftb));
                 let (g, wt, active) = (grest.get(), wt.get(), std::ptr::null());
-                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active, gen: 0, half }
+                AdamArgs { p, m, v, g, wt, tf, h, rows, tiles, f0: 0, f1: 0, flat: rest, n, fl, kb, active, gen: 0, half, lazy: false }
             };
             adam_dispatch(isa, &c, &a);
         });
@@ -1244,6 +1263,8 @@ struct AdamArgs {
     /// The batch whose rows count as active.
     gen: u32,
     half: bool,
+    /// `--lazy-adam`: skip rows without the flag.
+    lazy: bool,
 }
 
 /// The AdamW constants of the next step (advances `opt.step`).
@@ -1278,6 +1299,7 @@ struct TileAdamArgs {
     active: *const AtomicU32,
     gen: u32,
     half: bool,
+    lazy: bool,
 }
 
 /// `adam_rows` for one column tile, row by row in the same per-element
@@ -1289,13 +1311,21 @@ unsafe fn tile_adam<V: Simd>(c: &AdamC, a: &TileAdamArgs) {
     let wt_at = |r: usize| (col / a.tf * a.rows + r) * a.tf + col % a.tf;
     let decay = |r: usize| if !a.active.is_null() && (*a.active.add(r)).load(Ordering::Relaxed) != a.gen { 1.0 } else { c.decay };
     let line = |r: usize, d: f32, g: *mut f32| adam_line::<V>(c, d, a.p.add(r * TB), a.m.add(r * TB), a.v.add(r * TB), g);
+    // `--lazy-adam`: row `r` did not occur (its gradient is 0) and stays as it is.
+    let skip = |r: usize| a.lazy && (*a.active.add(r)).load(Ordering::Relaxed) != a.gen;
     if !a.fl {
         for r in a.r0..a.r1 {
+            if skip(r) {
+                continue;
+            }
             let w = line(r, decay(r), a.g.add(r * TB));
             put_wt::<V>(a.wt, a.half, wt_at(r), &w);
         }
     } else {
         for f in a.r0..a.r1 {
+            if (0..a.kb).all(|b| skip(b * INPUTS + f)) {
+                continue;
+            }
             let mut gf = [0.0f32; TB];
             for b in 0..a.kb {
                 let g = a.g.add((b * INPUTS + f) * TB);
@@ -1306,7 +1336,7 @@ unsafe fn tile_adam<V: Simd>(c: &AdamC, a: &TileAdamArgs) {
             let fp = line(a.rows + f, c.decay, gf.as_mut_ptr());
             for b in 0..a.kb {
                 let r = b * INPUTS + f;
-                let wp = line(r, decay(r), a.g.add(r * TB));
+                let wp = if skip(r) { *(a.p.add(r * TB) as *const [f32; TB]) } else { line(r, decay(r), a.g.add(r * TB)) };
                 let mut w = [0.0f32; TB];
                 for k in 0..TB {
                     w[k] = (wp[k] + fp[k]).clamp(-CLIP, CLIP);
@@ -1392,8 +1422,12 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
         }
     };
     let wt_at = |r: usize, j: usize| (j / a.tf * a.rows + r) * a.tf + j % a.tf;
+    let skip = |r: usize| a.lazy && (*a.active.add(r)).load(Ordering::Relaxed) != a.gen;
     if a.fl == 0 {
         for f in a.f0..a.f1 {
+            if skip(f) {
+                continue;
+            }
             let decay = row_decay(f);
             for t in 0..a.tiles {
                 let i = f * a.h + t * TB;
@@ -1404,6 +1438,9 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
         return;
     }
     for f in a.f0..a.f1 {
+        if (0..a.kb).all(|b| skip(b * INPUTS + f)) {
+            continue;
+        }
         let mut decay = [0.0f32; 8];
         for (b, d) in decay[..a.kb].iter_mut().enumerate() {
             *d = row_decay(b * INPUTS + f);
@@ -1423,7 +1460,11 @@ unsafe fn adam_rows<V: Simd>(c: &AdamC, a: &AdamArgs) {
             for (b, &d) in decay[..a.kb].iter().enumerate() {
                 let r = b * INPUTS + f;
                 let i = r * a.h + t * TB;
-                let wp = adam_line::<V>(c, d, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB));
+                let wp = if skip(r) {
+                    *(a.p.add(i) as *const [f32; TB])
+                } else {
+                    adam_line::<V>(c, d, a.p.add(i), a.m.add(i), a.v.add(i), a.g.add((t * a.rows + r) * TB))
+                };
                 let mut w = [0.0f32; TB];
                 for k in 0..TB {
                     w[k] = (wp[k] + fp[k]).clamp(-CLIP, CLIP);

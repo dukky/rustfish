@@ -698,15 +698,28 @@ extern "C" __global__ void adam_flat(AdamC c, float *p, float *m, float *v, cons
 // (fac): F first from every bucket's gradient (bucket order), then each
 // bucket's W, then the merged rows into wt. Without: each bucket's row.
 // `active` (null = plain decay): rows without the batch's flag skip decay.
+// `lazy` (`--lazy-adam`, needs `active`): rows without the flag are left
+// untouched (no moment decay, no step; W read for the merged row), and F
+// rows of features no bucket saw too (the CPU's `tile_adam`).
 extern "C" __global__ void adam_ft(AdamC c, float *pw, float *mw, float *vw, float *pf, float *mf, float *vf,
                                    float *wt, __half *wth, const float *part, const int *ilo,
-                                   const uint8_t *active, int H, int kb, int fac) {
+                                   const uint8_t *active, int H, int kb, int fac, int lazy) {
     size_t e = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     size_t nf = (size_t)INPUTS * H;
     if (e >= nf) return;
     int f = e / H;
+    if (lazy) {
+        // Uniform per block (H is a multiple of the block size in practice).
+        bool any = false;
+        for (int b = 0; b < kb; b++) any |= active[b * INPUTS + f] != 0;
+        if (!any) return;
+    }
     float gb[64];
     for (int b = 0; b < kb; b++) {
+        if (lazy && !active[b * INPUTS + f]) {
+            gb[b] = 0.0f;
+            continue;
+        }
         float s = 0.0f;
         for (int k = ilo[b]; k < ilo[b + 1]; k++) s += part[(size_t)k * nf + e];
         gb[b] = s;
@@ -724,12 +737,17 @@ extern "C" __global__ void adam_ft(AdamC c, float *pw, float *mw, float *vw, flo
     }
     for (int b = 0; b < kb; b++) {
         size_t i = b * nf + e;
-        float decay = (active && !active[b * INPUTS + f]) ? 1.0f : c.decay;
-        float pp = pw[i], mm = mw[i], vv = vw[i];
-        adam1(c, decay, pp, mm, vv, gb[b]);
-        pw[i] = pp;
-        mw[i] = mm;
-        vw[i] = vv;
+        float pp = pw[i];
+        if (lazy && !active[b * INPUTS + f]) {
+            if (!fac) continue;  // nothing changed: the merged row is the same
+        } else {
+            float decay = (active && !active[b * INPUTS + f]) ? 1.0f : c.decay;
+            float mm = mw[i], vv = vw[i];
+            adam1(c, decay, pp, mm, vv, gb[b]);
+            pw[i] = pp;
+            mw[i] = mm;
+            vw[i] = vv;
+        }
         float w = fac ? fminf(fmaxf(pp + fp, -CLIP), CLIP) : pp;
         if (wth)
             wth[i] = __float2half_rn(w);
