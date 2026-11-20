@@ -1455,9 +1455,9 @@ pub(crate) fn print_info(depth: i32, score: i32, nodes: u64, time_ms: u64, best:
 
 fn negamax(
     board: &mut Board,
-    mut depth: i32,
-    mut alpha: i32,
-    mut beta: i32,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
     ply: usize,
     search: &mut Search,
     engine: &mut EngineState,
@@ -1490,12 +1490,42 @@ fn negamax(
         return 0;
     }
     if alpha < 0 && upcoming_repetition(board, rep_stack, key, search) {
-        alpha = 0;
-        if alpha >= beta {
-            return alpha;
+        if beta <= 0 {
+            return 0;
         }
+        // The side to move can repeat, so the node is worth at least the
+        // draw score: search with alpha raised to it and never report less.
+        // A fail-low value below 0 would tell the parent its opponent cannot
+        // draw here and could cut it off wrongly. The TT keeps the unclamped
+        // bound (the draw is path-dependent, the subtree's bound is not).
+        let score = negamax_body(
+            board, depth, 0, beta, ply, search, engine, rep_stack, key, prev_move, allow_null,
+            known_in_check, cut_node,
+        );
+        return score.max(0);
     }
+    negamax_body(
+        board, depth, alpha, beta, ply, search, engine, rep_stack, key, prev_move, allow_null,
+        known_in_check, cut_node,
+    )
+}
 
+/// negamax after the draw and repetition checks.
+fn negamax_body(
+    board: &mut Board,
+    mut depth: i32,
+    mut alpha: i32,
+    mut beta: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    prev_move: Option<Move>,
+    allow_null: bool,
+    known_in_check: Option<bool>,
+    cut_node: bool,
+) -> i32 {
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
     if in_check {
         depth += 1;
