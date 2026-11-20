@@ -1384,7 +1384,7 @@ fn search_root(
                 Some(mv),
                 true,
                 None,
-                true,
+                !off(4096),
             );
             if reduction > 0 && score > alpha {
                 // The reduced search says this move might beat alpha; verify it
@@ -2113,7 +2113,7 @@ fn negamax(
                     r -= 1;
                 }
                 // Node type: expected cut nodes reduce more, PV nodes less.
-                if cut_node {
+                if cut_node && !off(2048) {
                     r += params.lmr_cut_node;
                 }
                 if pv_node {
