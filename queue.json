@@ -23,6 +23,18 @@
     {
       "branch": "queen-promo-tactical",
       "mode": "nonreg"
+    },
+    {
+      "branch": "killer-reset-per-parent",
+      "mode": "stc"
+    },
+    {
+      "branch": "nmp-tt-store",
+      "mode": "stc"
+    },
+    {
+      "branch": "root-order-nodes",
+      "mode": "stc"
     }
   ],
   "current": {
