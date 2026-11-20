@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "spsa-r14-interim",
+      "mode": "stc",
+      "front": true
+    },
+    {
       "branch": "lmr-history-sign",
       "mode": "stc",
       "front": true
