@@ -1638,7 +1638,10 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
-                return score;
+                // A mate found after passing is not proven for the real
+                // position (and its distance counts the null ply): fail high
+                // with beta instead.
+                return if score >= MATE_SCORE - MAX_PLY as i32 { beta } else { score };
             }
         }
     }
