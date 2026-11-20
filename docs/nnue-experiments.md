@@ -68,7 +68,8 @@ separately and games decide.
 | `val.bin` | 2026-11-04 | seed 9 tail | net4 era | 1,000,000 | | reference only |
 | `val17x2.bin` | 2026-11-06 | seed 17 tail, x2 | | 1,000,000 | | reference only |
 | `valL1008.bin` | 2026-11-13 | laptop L1008 (seed 1008) tail | 04e6e43 (g8h1024kb8m) | 1,000,000 | 983ec3d43ceecfee | stopgap, one seed; screens gen 9; L1008 stays out of pools |
-| `val-g10.bin` | 2026-11-18 | D2021 + D2022 tails (whole games) | 1d94b84 (rustfish, gen 9) | 1,000,000 | ece7b77d8bdf37e4 | **current** (`val-current.bin`); D2021/D2022 tails out of pool10 |
+| `val-g10.bin` | 2026-11-18 | D2021 + D2022 tails (whole games) | 1d94b84 (rustfish, gen 9) | 1,000,000 | ece7b77d8bdf37e4 | gen-10 val (kept for cross-generation comparison); D2021/D2022 tails out of pool10 |
+| `val-g11.bin` | 2026-11-20 | D2027 + L1012 tails, 500k each (whole games) | f7d7a51 (TT fix) / 2d945ec (gen 10) | 1,000,000 | df6e70abea4d0fb5 | **current from gen 11**; D2027.train / L1012.train in pool11, tails held out |
 
 ## Audit of the v1 chain (2026-11-06)
 
