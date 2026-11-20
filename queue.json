@@ -1,11 +1,15 @@
 {
-  "pending": [
-    {
-      "branch": "queen-promo-tactical",
-      "mode": "stc"
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "queen-promo-tactical",
+    "mode": "stc",
+    "test_id": "q-queen-promo-tactical-1120-0419",
+    "sha": "ee4555cd7aaa5d0781a240d1991b08482e4fd931",
+    "base_sha": "0c46b02f0cfc6efc0e78157fc1af2e7471ab0ef5",
+    "started": "2026-11-20T04:19:04Z",
+    "bench": 284592,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
