@@ -1851,8 +1851,15 @@ fn negamax(
                 || quiet_continuation > 0);
         // Only killers and the counter-move are exempt from the move-count,
         // futility and SEE prunes; a merely positive history is not.
+        // Pawn pushes to the 6th rank or beyond (passed-pawn races, breaks next
+        // to the king) are forcing like checks: exempt from the quiet prunes
+        // and reduced one ply less.
+        let advanced_pawn = quiet && is_advanced_pawn_push(board, mv);
         let prune_exempt = quiet
-            && (Some(mv) == killers[0] || Some(mv) == killers[1] || Some(mv) == counter_move);
+            && (Some(mv) == killers[0]
+                || Some(mv) == killers[1]
+                || Some(mv) == counter_move
+                || advanced_pawn);
 
         if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3 {
             let limit = match depth {
@@ -1956,6 +1963,9 @@ fn negamax(
                 }
                 // Killers, counter-moves and positive-history quiets reduce one ply less.
                 if priority_quiet {
+                    r -= 1;
+                }
+                if advanced_pawn {
                     r -= 1;
                 }
                 // Node type: expected cut nodes reduce more, PV nodes less.
@@ -2308,6 +2318,16 @@ fn order_moves(
             &maps,
         ))
     });
+}
+
+/// A pawn push to the mover's 6th, 7th or 8th rank.
+#[inline(always)]
+fn is_advanced_pawn_push(board: &Board, mv: Move) -> bool {
+    matches!(board.squares[mv.from as usize], Some(p) if p.kind == PieceType::Pawn)
+        && match board.side_to_move {
+            Color::White => mv.to / 8 >= 5,
+            Color::Black => mv.to / 8 <= 2,
+        }
 }
 
 fn is_capture_move(board: &Board, mv: Move) -> bool {
