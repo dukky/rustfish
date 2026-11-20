@@ -9,8 +9,8 @@
       "mode": "stc"
     },
     {
-      "branch": "nmp-mate-clamp",
-      "mode": "nonreg"
+      "branch": "qsearch-fail-soft",
+      "mode": "stc"
     }
   ],
   "current": {
