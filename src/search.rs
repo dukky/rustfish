@@ -1944,7 +1944,7 @@ fn negamax(
                 && idx >= params.lmr_min_move_index
             {
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
-                let m = idx.min(LMR_MAX_MOVES - 1);
+                let m = (idx + 1).min(LMR_MAX_MOVES - 1);
                 let mut r = engine.lmr_table[d][m];
                 if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
                     r += 1;
