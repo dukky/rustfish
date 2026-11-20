@@ -68,7 +68,7 @@ separately and games decide.
 | `val.bin` | 2026-11-04 | seed 9 tail | net4 era | 1,000,000 | | reference only |
 | `val17x2.bin` | 2026-11-06 | seed 17 tail, x2 | | 1,000,000 | | reference only |
 | `valL1008.bin` | 2026-11-13 | laptop L1008 (seed 1008) tail | 04e6e43 (g8h1024kb8m) | 1,000,000 | 983ec3d43ceecfee | stopgap, one seed; screens gen 9; L1008 stays out of pools |
-| `val-g10.bin` | after D2006 | D2006 + L1009 tails (whole games) | e3390ac / 04e6e43 (g8) | ~1,000,000 | | planned; D2006/L1009 tails out of pool10 |
+| `val-g10.bin` | 2026-11-18 | D2021 + D2022 tails (whole games) | 1d94b84 (rustfish, gen 9) | 1,000,000 | ece7b77d8bdf37e4 | **current** (`val-current.bin`); D2021/D2022 tails out of pool10 |
 
 ## Audit of the v1 chain (2026-11-06)
 
@@ -154,6 +154,40 @@ Rows in `net/experiments.jsonl`; gate results in the queue log.
   **g4kb8m merged +11.0 [4.9, 17.1]**.
 - Validation loss differences of a few 1e-4 have not predicted gate Elo on
   their own: games remain the gate.
+
+## Results 2026-11-18..20 (gen 10)
+
+Losses are val-g10 best-scale unless noted.
+
+- **Net shape** (plain 4 -> m1 1 -> kb8m 2 -> head 2 epochs on the 1.27B newest positions):
+
+  | width | no head | head |
+  |---|---|---|
+  | 256 | 0.024609 | 0.023984 |
+  | 512 | 0.023924 | 0.023363 |
+  | 1024 | 0.023470 | 0.022993 |
+
+  Metal vs CUDA at 256 agree to 6e-5. Games: H512 vs H1024 -17.3 stc / -36.9
+  fixed nodes; head at 512 -69.1 stc / +24.8 FN; head at 1024 -79.2 stc / +25.4 FN.
+  **1024 stays the width**; the head's eval gain is real but its speed cost
+  dominates. Loss overstates the head in games, so **fixed-nodes games are part
+  of the gate**.
+- **Head-fix** (exact W1): engine vs trainer 0.47 cp; -46.7 stc, **+41.8 at 200k
+  fixed nodes**: right but too slow. `ci.py sprt --nodes N` is a DIAG mode, never
+  used by the queue.
+- **Pairwise head: parked.** The head never trained (W1 stayed at its random init
+  after 3 epochs): from the g9 warm start only ~1% of pairwise inputs are nonzero,
+  so it gets no gradient. Likely needs an FT trained for pairwise (full chain);
+  revisit at gen 11/12 (`trainer-head-pairwise`).
+- **Window test: more beats newer** (val-g10 / valL1008): newest 1.27B 0.023470 /
+  0.022888; whole 6.08B pool 0.023336 / 0.022723; whole pool, newest 2x
+  **0.023299 / 0.022690**. Keep old seeds, weight the newest 2x.
+- **Gen 10 merged +12.2** [2.9, 21.6] (net-gate, `2d945ec`, g10h1024kb8m): pool10
+  6.08B, gen-9 chain all `--half`, CUDA on the 1080 Ti at 125 W. val-g10 / valL1008
+  / val.bin 0.022948 / 0.022408 / 0.025551 (g9 0.023016 / 0.022553 / 0.025538).
+  **Ladder 3588** [3570, 3605].
+- **gen10w** (running): gen 10 recipe with the newest data weighted 2x; gated if it
+  beats g10.
 
 ## Running a generation with scripts/netloop.py
 
