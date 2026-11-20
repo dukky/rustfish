@@ -721,7 +721,8 @@ impl MovePicker {
             if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
                 picker.bufs.priority_quiets.push((mv, score + esc));
             } else {
-                picker.bufs.quiets.push((mv, score.max(h) + esc));
+                // h <= 0 and ch <= 0 here, so `score.max(h)` dropped ch entirely.
+                picker.bufs.quiets.push((mv, score + esc));
             }
         }
 
