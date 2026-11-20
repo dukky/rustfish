@@ -42,6 +42,14 @@
     {
       "branch": "history-bonus-linear-r2",
       "mode": "stc"
+    },
+    {
+      "branch": "negamax-rep-floor",
+      "mode": "nonreg"
+    },
+    {
+      "branch": "fifty-move-mate",
+      "mode": "nonreg"
     }
   ],
   "current": {
