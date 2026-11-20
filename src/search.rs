@@ -545,6 +545,10 @@ fn apply_capture_history_delta(engine: &mut EngineState, side: Color, board: &Bo
 /// Capture history counts this much less than one SEE unit in capture ordering
 /// (SEE is weighted 16 per centipawn, so the bound 16384 is worth ~128 cp of SEE).
 const CAPTURE_HISTORY_DIV: i32 = 8;
+/// Capture SEE pruning shifts its threshold by capture history / this: a
+/// losing capture that has often cut is kept to a deeper SEE loss, one that
+/// keeps failing is pruned sooner (the bound 16384 is worth 256 cp).
+const CAPTURE_HISTORY_SEE_DIV: i32 = 64;
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
@@ -1916,7 +1920,11 @@ fn negamax(
             && depth <= SEE_PRUNE_MAX_DEPTH
             && idx > 0
             && best > -(MATE_SCORE - 1000)
-            && !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth)
+            && !see_ge(
+                board,
+                mv,
+                -SEE_PRUNE_CAPTURE_MARGIN * depth - capture_history_score(engine, side, board, mv) / CAPTURE_HISTORY_SEE_DIV,
+            )
         {
             continue;
         }
