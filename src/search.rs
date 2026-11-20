@@ -2130,8 +2130,12 @@ fn quiescence(
     if ply > 0 && is_insufficient_material(board) {
         return 0;
     }
+    // Fail-soft floor: a forced draw is available when the repetition check
+    // raised alpha to 0, so the node never scores below it.
+    let mut floor = -INF;
     if ply > 0 && alpha < 0 && upcoming_repetition(board, rep_stack, key, search) {
         alpha = 0;
+        floor = 0;
         if alpha >= beta {
             return alpha;
         }
@@ -2168,10 +2172,14 @@ fn quiescence(
     let static_eval = raw_static_eval
         .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
+    // Fail-soft: `best` is the highest score seen (stand pat included) and is
+    // what a fail-low node returns, as in negamax.
+    let mut best = floor;
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
             return stand_pat;
         }
+        best = best.max(stand_pat);
         if stand_pat > alpha {
             alpha = stand_pat;
         }
@@ -2192,7 +2200,7 @@ fn quiescence(
         if in_check {
             return -MATE_SCORE + ply as i32;
         }
-        return alpha;
+        return best;
     }
 
     while let Some((mv, stage)) = picker.next() {
@@ -2236,17 +2244,21 @@ fn quiescence(
                 );
             return score;
         }
+        best = best.max(score);
         if score > alpha {
             alpha = score;
             best_move = Some(mv);
         }
     }
 
-    let bound = if alpha <= alpha_orig { Bound::Upper } else { Bound::Exact };
+    // In check with every evasion pruned cannot happen (evasions are not
+    // pruned), so best > -INF here unless the position had no moves.
+    let best = if best == -INF { alpha } else { best };
+    let bound = if best <= alpha_orig { Bound::Upper } else { Bound::Exact };
     engine
         .tt
-        .store(key, 0, score_to_tt(alpha, ply), raw_static_eval, bound, best_move.or(tt_move));
-    alpha
+        .store(key, 0, score_to_tt(best, ply), raw_static_eval, bound, best_move.or(tt_move));
+    best
 }
 
 fn order_moves(
