@@ -1,5 +1,18 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "quiet-cont-neg",
+      "mode": "stc"
+    },
+    {
+      "branch": "pv-no-tt-cut",
+      "mode": "stc"
+    },
+    {
+      "branch": "nmp-mate-clamp",
+      "mode": "nonreg"
+    }
+  ],
   "current": {
     "branch": "ep-hash-capturable",
     "mode": "nonreg",
