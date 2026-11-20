@@ -212,7 +212,7 @@ Approaches that lost (1080 Ti, kb8m):
   the next range) run out of registers: the bucket's 768 x 32 gradient
   slice already takes 24 of the 64 registers per thread at 1024 threads.
 
-## Head speed (`--head pairwise`, branch `perf-cuda-pairwise`): WIP
+## Head speed (`--head pairwise`, branch `perf-cuda-pairwise`)
 
 Byte-identical to `trainer-head-pairwise` (8c9ff85): every net (`.e1`,
 `.e2`, final) and the checkpoint `cmp`-equal, 2 x 1.5M positions from
@@ -231,19 +231,25 @@ dense, natural + lane-major layouts; small head params, ob, target in
 shared; `backward_head_w1` / `backward_head_small` stage their sample rows
 in shared memory.
 
-Speed, H 1024 kb8m `--factorise --half`, 600 batches, interleaved, GPU
-SHARED with the running pairwise fine-tune (absolute numbers about half;
-full-speed numbers to follow):
+Speed, H 1024 kb8m `--factorise --half`, batch 16384, `--threads 2`, 600
+batches from `pwcheck/slice.bin`, `--init g9h1024kb8m`, 125 W cap; base and
+candidate interleaved, two rounds:
 
-| run | base 8c9ff85 | candidate |
-|---|---|---|
-| `--head pairwise` | 331k / 331k | 731k / 733k (2.21x) |
-| plain | 872k / 879k | 877k / 872k (same) |
+| run | base 8c9ff85 | candidate | |
+|---|---|---|---|
+| `--head pairwise`, idle GPU (2026-11-20) | 717k / 709k | 1.49M / 1.46M | 2.07x |
+| plain, idle GPU | 1.995M / 1.977M | 1.976M / 1.947M | -1.2% (noise level) |
+| `--head pairwise`, GPU shared with a training run | 331k / 331k | 731k / 733k | 2.21x |
+| plain, shared | 872k / 879k | 877k / 872k | same |
 
-Profile (`NNUE_CUDA_PROF`, ms/batch, shared GPU), pairwise base: forward
-(incl. head) 26.6 + compute_dacc 12.0 of 52.6 total; head_w1 2.7.
-Candidate: forward 5.6, head_forward 4.7, backward_ft 5.1, adam_ft 2.1,
-backward_rest 2.2, head_w1 0.49, head_small 0.18 of 22.0 (plain total
-18.3). Lost: fp16 W1 copies (slower than int8: L2 traffic), 3 forward
-blocks/SM, head blocks of 128 / 512 threads.
+Profile at idle (ms/batch), pairwise base: forward (incl. the head) 16.6,
+reduce_rest + head kernels 1.5, backward_ft 2.3, adam_ft 0.93; total 22.4.
+Candidate: forward 3.1, head_forward 2.1, backward_ft 2.6, backward_rest
+0.92, head_w1 0.35, head_small 0.12, reduce_head 0.13, adam_ft 1.0; total
+10.6 (plain 7.9). Shared-GPU base profile: forward 26.6 + compute_dacc 12.0
+of 52.6 ms. Lost (all byte-identical, just slower): fp16 W1 copies (L2
+traffic beats the int8 decode), 3 forward blocks/SM (spills), head blocks of
+128 / 512 threads. Keeping the head fused into `forward` (2 blocks/SM)
+was as fast for pairwise but slower for the dense head, so it is split.
+
 
