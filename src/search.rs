@@ -1402,7 +1402,7 @@ fn search_root(
                     Some(mv),
                     true,
                     None,
-                    true,
+                    !off(4096),
                 );
             }
             if score > alpha && score < beta {
