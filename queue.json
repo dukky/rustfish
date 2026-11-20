@@ -35,6 +35,10 @@
     {
       "branch": "root-order-nodes",
       "mode": "stc"
+    },
+    {
+      "branch": "capture-history-r5",
+      "mode": "stc"
     }
   ],
   "current": {
