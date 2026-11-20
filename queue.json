@@ -38,6 +38,10 @@
     {
       "branch": "root-order-nodes",
       "mode": "stc"
+    },
+    {
+      "branch": "history-bonus-linear-r2",
+      "mode": "stc"
     }
   ],
   "current": {
