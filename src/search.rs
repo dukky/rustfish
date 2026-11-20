@@ -1510,7 +1510,7 @@ fn negamax(
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
-        if excluded.is_none() && entry.depth as i32 >= depth {
+        if excluded.is_none() && !pv_node && entry.depth as i32 >= depth {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => return tt_score,
