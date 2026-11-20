@@ -34,6 +34,13 @@
 //!   computes the same z1 bit for bit.
 //! - L2 / L3 in f32 (like the trainer), fixed operation order (no fma
 //!   contraction in Rust): the same on every target.
+//! - Integer L2 (nets from `nnue-trainer --qat-l2`, marked by the 8-byte
+//!   file trailer `NET_MAGIC` + flags `NET_INT_L2`, see `nnue::Network`):
+//!   the L1 activation is `q = floor(127 sq(z1) + 1/2)` (u8 0..=127, f32
+//!   arithmetic as the trainer's `q_u1`), W2 is i8 at scale 64 (`W2q * 128`
+//!   in the file), `z2 = (Σ q W2q) / (127 * 64) + b2` with the dot in i32
+//!   (NEON `sdot`, AVX2 `maddubs` + `madd`: 16 inputs, 4 chunks, exact),
+//!   then L3 in f32 as above. Nets without the trailer keep f32 L2.
 //! - Final: `round(400 * (linear + head))` to the nearest centipawn.
 
 use super::{BUCKETS, H, QA, QB, SCALE};
@@ -66,6 +73,15 @@ const KA: usize = if SKIP { H1 - 1 } else { H1 };
 #[derive(Clone)]
 struct W1Bucket([i8; CHUNKS * H1 * 4]);
 
+/// Integer-L2 W2 of one bucket, chunk-major: `.0[c*128 + m*4 + j]` =
+/// W2q[m][4c + j] (0 for the skip neuron).
+#[repr(C, align(64))]
+#[derive(Clone)]
+pub(crate) struct W2Bucket(pub(crate) [i8; H1 * H2]);
+
+/// z2 = Σ q w / Z2_DIV (q at 127, w at 64).
+const Z2_DIV: f32 = 127.0 * 64.0;
+
 #[repr(C, align(64))]
 pub(crate) struct Input(pub(crate) [u8; N_IN]);
 
@@ -95,13 +111,21 @@ pub(crate) struct HeadNet {
     b2: [[f32; H2]; BUCKETS],
     w3: [[f32; H2]; BUCKETS],
     b3: [f32; BUCKETS],
+    /// Integer L2 (`--qat-l2` nets): W2 as `w2i`, else the f32 `w2`.
+    int_l2: bool,
+    w2i: Vec<W2Bucket>,
     /// The file words, for `to_bytes`.
     raw: Vec<i16>,
 }
 
 impl HeadNet {
-    /// From the trainer's `HEAD_WORDS` i16 words (at `HEAD_Q`).
+    /// From the trainer's `HEAD_WORDS` i16 words (at `HEAD_Q`), f32 L2.
     pub(crate) fn from_words(raw: Vec<i16>) -> Self {
+        Self::from_words_l2(raw, false)
+    }
+
+    /// As `from_words`; `int_l2` = the net file's `NET_INT_L2` flag.
+    pub(crate) fn from_words_l2(raw: Vec<i16>, int_l2: bool) -> Self {
         assert_eq!(raw.len(), HEAD_WORDS);
         let mut h = Self {
             w1: vec![W1Bucket([0; CHUNKS * H1 * 4]); BUCKETS],
@@ -110,6 +134,8 @@ impl HeadNet {
             b2: [[0.0; H2]; BUCKETS],
             w3: [[0.0; H2]; BUCKETS],
             b3: [0.0; BUCKETS],
+            int_l2,
+            w2i: vec![W2Bucket([0; H1 * H2]); BUCKETS],
             raw: Vec::new(),
         };
         let f = |v: i16| v as f32 / HEAD_Q;
@@ -129,7 +155,12 @@ impl HeadNet {
             }
             for m in 0..H2 {
                 for k in 0..H1 {
-                    h.w2[b][k][m] = f(it.next().unwrap());
+                    let v = it.next().unwrap();
+                    h.w2[b][k][m] = f(v);
+                    // W2q * 128 in a --qat-l2 file (rounded like W1).
+                    let v = v as i32;
+                    let w = ((v + if v >= 0 { 64 } else { -64 }) / 128).clamp(-127, 127);
+                    h.w2i[b].0[(k / 4) * H2 * 4 + m * 4 + k % 4] = if k < KA { w as i8 } else { 0 };
                 }
             }
             for m in 0..H2 {
@@ -150,6 +181,12 @@ impl HeadNet {
         &self.raw
     }
 
+    /// Integer L2 (the net file's `NET_INT_L2` trailer flag).
+    #[allow(dead_code)] // to_bytes (tests)
+    pub(crate) fn int_l2(&self) -> bool {
+        self.int_l2
+    }
+
     /// The head's output for bucket `b`, in trainer units (1.0 = 400 cp).
     #[inline]
     pub(crate) fn forward(&self, b: usize, us: &[i16; H], them: &[i16; H]) -> f32 {
@@ -160,8 +197,52 @@ impl HeadNet {
             let n = kernels::activate(us, &mut s.x.0[..HALF], 0, &mut s.nnz, 0);
             let n = kernels::activate(them, &mut s.x.0[HALF..], HALF / 4, &mut s.nnz, n);
             let z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..n]);
-            self.rest_fast(b, &z1)
+            self.rest_any(b, &z1)
         })
+    }
+
+    /// `rest_int` or `rest_fast`, per the net's L2 format.
+    #[inline(always)]
+    fn rest_any(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        if self.int_l2 {
+            self.rest_int(b, z1, kernels::l2(&self.w2i[b], &self.l1_act_q(b, z1)))
+        } else {
+            self.rest_fast(b, z1)
+        }
+    }
+
+    /// Integer L2: the u8 L1 activation `floor(127 sq(z1) + 1/2)`.
+    #[inline(always)]
+    fn l1_act_q(&self, b: usize, z1: &[i32; H1]) -> [u8; H1] {
+        let mut q = [0u8; H1];
+        for k in 0..KA {
+            let c = (z1[k] as f32 * (1.0 / Z1_DIV) + self.b1[b][k]).clamp(0.0, 1.0);
+            q[k] = (c * c * 127.0 + 0.5) as u8;
+        }
+        q
+    }
+
+    /// Integer L2: z2 from the i32 dot `z2i`, then L3 in f32 (the same
+    /// fixed tree as `rest`).
+    #[inline(always)]
+    fn rest_int(&self, b: usize, z1: &[i32; H1], z2i: [i32; H2]) -> f32 {
+        let mut t = [0.0f32; H2];
+        for m in 0..H2 {
+            let c = (z2i[m] as f32 * (1.0 / Z2_DIV) + self.b2[b][m]).clamp(0.0, 1.0);
+            t[m] = self.w3[b][m] * (c * c);
+        }
+        let mut w = H2 / 2;
+        while w > 0 {
+            for m in 0..w {
+                t[m] += t[m + w];
+            }
+            w /= 2;
+        }
+        let mut out = self.b3[b] + t[0];
+        if SKIP {
+            out += z1[H1 - 1] as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
+        }
+        out
     }
 
     /// `forward` on an input already in `s` (the fused update's output).
@@ -169,7 +250,7 @@ impl HeadNet {
     #[allow(dead_code)]
     pub(crate) fn forward_scratch(&self, b: usize, s: &Scratch) -> f32 {
         let z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..s.n]);
-        self.rest_fast(b, &z1)
+        self.rest_any(b, &z1)
     }
 
     /// Scalar twin of `forward` (tests).
@@ -180,6 +261,9 @@ impl HeadNet {
         let n = scalar::activate(us, &mut x.0[..HALF], 0, &mut nnz, 0);
         let n = scalar::activate(them, &mut x.0[HALF..], HALF / 4, &mut nnz, n);
         let z1 = scalar::l1(self, b, &x.0, &nnz[..n]);
+        if self.int_l2 {
+            return self.rest_int(b, &z1, scalar::l2(&self.w2i[b], &self.l1_act_q(b, &z1)));
+        }
         self.rest(b, &z1)
     }
 
@@ -468,6 +552,22 @@ pub(crate) mod scalar {
         }
         z
     }
+
+    /// Integer L2: `Σ_k q[k] W2q[m][k]` (`W2Bucket` layout).
+    #[inline(always)]
+    pub(crate) fn l2(w: &W2Bucket, q: &[u8; H1]) -> [i32; H2] {
+        let mut z = [0i32; H2];
+        for c in 0..H1 / 4 {
+            for m in 0..H2 {
+                let mut s = 0i32;
+                for j in 0..4 {
+                    s += q[4 * c + j] as i32 * w.0[c * H2 * 4 + m * 4 + j] as i32;
+                }
+                z[m] += s;
+            }
+        }
+        z
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -633,6 +733,38 @@ pub(crate) mod kernels {
             std::arch::asm!("sdot {0:v}.4s, {1:v}.16b, {2:v}.16b", inout(vreg) acc, in(vreg) x, in(vreg) w, options(pure, nomem, nostack));
         }
         acc
+    }
+
+    #[inline(always)]
+    pub(crate) fn l2(w: &W2Bucket, q: &[u8; H1]) -> [i32; H2] {
+        if dotprod() {
+            // SAFETY: FEAT_DotProd is available.
+            unsafe { l2_sdot(w, q) }
+        } else {
+            scalar::l2(w, q)
+        }
+    }
+
+    /// Integer L2: 4 chunks x 8 output vectors = 32 `sdot`s.
+    #[target_feature(enable = "dotprod")]
+    unsafe fn l2_sdot(w: &W2Bucket, q: &[u8; H1]) -> [i32; H2] {
+        // SAFETY: fixed-size arrays, all loads in bounds.
+        unsafe {
+            let mut acc = [vdupq_n_s32(0); H2 / 4];
+            let xp = q.as_ptr() as *const u32;
+            let wp = w.0.as_ptr();
+            for c in 0..H1 / 4 {
+                let xv = vreinterpretq_s8_u32(vdupq_n_u32(xp.add(c).read_unaligned()));
+                for (r, a) in acc.iter_mut().enumerate() {
+                    *a = sdot(*a, xv, vld1q_s8(wp.add(c * H2 * 4 + 16 * r)));
+                }
+            }
+            let mut out = [0i32; H2];
+            for (r, a) in acc.iter().enumerate() {
+                vst1q_s32(out.as_mut_ptr().add(4 * r), *a);
+            }
+            out
+        }
     }
 
     #[target_feature(enable = "dotprod")]
@@ -936,6 +1068,38 @@ pub(crate) mod kernels {
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn l2(w: &W2Bucket, q: &[u8; H1]) -> [i32; H2] {
+        if avx2() {
+            // SAFETY: AVX2 is available.
+            unsafe { l2_avx2(w, q) }
+        } else {
+            scalar::l2(w, q)
+        }
+    }
+
+    /// Integer L2: 4 chunks x 4 output vectors (maddubs + madd, exact).
+    #[target_feature(enable = "avx2")]
+    unsafe fn l2_avx2(w: &W2Bucket, q: &[u8; H1]) -> [i32; H2] {
+        // SAFETY: fixed-size arrays, the weights 64-byte aligned.
+        unsafe {
+            let mut a = [_mm256_setzero_si256(); H2 / 8];
+            let xp = q.as_ptr() as *const i32;
+            let wp = w.0.as_ptr() as *const __m256i;
+            for c in 0..H1 / 4 {
+                let x = _mm256_set1_epi32(xp.add(c).read_unaligned());
+                for (r, v) in a.iter_mut().enumerate() {
+                    *v = dp0(*v, x, _mm256_load_si256(wp.add(c * 4 + r)));
+                }
+            }
+            let mut out = [0i32; H2];
+            for (r, v) in a.iter().enumerate() {
+                _mm256_storeu_si256(out.as_mut_ptr().add(8 * r) as *mut __m256i, *v);
+            }
+            out
+        }
+    }
+
     /// The L1 kernel flavours on this machine (tests).
     #[cfg(test)]
     pub(crate) fn l1_all(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> Vec<[i32; H1]> {
@@ -959,7 +1123,7 @@ pub(crate) mod kernels {
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) mod kernels {
-    pub(crate) use super::scalar::{activate, l1, update_pw};
+    pub(crate) use super::scalar::{activate, l1, l2, update_pw};
 }
 
 /// This thread's head scratch (the fused update writes the L1 input there).
@@ -1017,6 +1181,12 @@ mod tests {
     /// The trainer's float head (quantisation-aware forward) on the
     /// (already quantised) accumulators.
     fn float_head(raw: &[i16], b: usize, us: &[i16; H], them: &[i16; H]) -> f64 {
+        float_head_l2(raw, b, us, them, false)
+    }
+
+    /// `float_head`; `l2q`: the `--qat-l2` forward (L1 activation on the
+    /// 1/127 grid; W2 already on the 1/64 grid in `raw`).
+    fn float_head_l2(raw: &[i16], b: usize, us: &[i16; H], them: &[i16; H], l2q: bool) -> f64 {
         let p: Vec<f64> = raw[b * BUCKET_WORDS..(b + 1) * BUCKET_WORDS].iter().map(|&x| x as f64 / HEAD_Q as f64).collect();
         let qx = 65025.0 / 512.0;
         let pw = |a: &[i16; H], i: usize| {
@@ -1032,7 +1202,8 @@ mod tests {
         let z1: Vec<f64> = (0..H1).map(|k| b1[k] + (0..N_IN).map(|i| w1[k * N_IN + i] * x[i]).sum::<f64>()).collect();
         let mut out = b3[0];
         for m in 0..H2 {
-            let z2 = b2[m] + (0..KA).map(|k| w2[m * H1 + k] * sq(z1[k])).sum::<f64>();
+            let u = |k: usize| if l2q { (sq(z1[k]) * 127.0 + 0.5).floor() / 127.0 } else { sq(z1[k]) };
+            let z2 = b2[m] + (0..KA).map(|k| w2[m * H1 + k] * u(k)).sum::<f64>();
             out += w3[m] * sq(z2);
         }
         if SKIP {
@@ -1066,6 +1237,37 @@ mod tests {
         }
         // Float rounding only (the integer L1 is exact): far below a centipawn.
         assert!(worst < 0.01, "worst head error {worst:.4} cp");
+    }
+
+    #[test]
+    fn int_l2_matches_scalar_and_float() {
+        // random_words with W2 on the i8 grid, as a --qat-l2 export.
+        let mut raw = random_words(4);
+        for b in 0..BUCKETS {
+            let o = b * BUCKET_WORDS + H1 * N_IN + H1;
+            for w in &mut raw[o..o + H2 * H1] {
+                *w = ((*w as f64 / 128.0).round().clamp(-127.0, 127.0) * 128.0) as i16;
+            }
+        }
+        let head = HeadNet::from_words_l2(raw.clone(), true);
+        for (k, w) in head.w2i.iter().enumerate() {
+            let q = [7u8, 0, 127, 3, 1, 9, 0, 0, 100, 2, 0, 5, 127, 0, 64, 1];
+            assert_eq!(kernels::l2(w, &q), scalar::l2(w, &q), "bucket {k}");
+        }
+        let mut r = rng(23);
+        let (mut worst, mut sum) = (0.0f64, 0.0f64);
+        for t in 0..400 {
+            let us = random_acc(&mut r, [0, 50, 90, 100][t % 4]);
+            let them = random_acc(&mut r, [0, 50, 90, 100][(t / 4) % 4]);
+            let b = t % BUCKETS;
+            let q = head.forward(b, &us, &them);
+            assert_eq!(q.to_bits(), head.forward_scalar(b, &us, &them).to_bits(), "case {t}");
+            let d = (q as f64 - float_head_l2(&raw, b, &us, &them, true)).abs() * SCALE as f64;
+            worst = worst.max(d);
+            sum += d;
+        }
+        // f32 vs f64 only, except a rare L1 activation rounding tie: one 1/127 step.
+        assert!(sum / 400.0 < 0.05 && worst < 3.0, "int L2 error mean {:.4} worst {worst:.4} cp", sum / 400.0);
     }
 
     #[test]
@@ -1211,7 +1413,18 @@ mod tests {
                 s += head.rest(i % BUCKETS, std::hint::black_box(&z)) as f64;
             }
             let ns_rest = t.elapsed().as_secs_f64() * 1e9 / n as f64;
-            println!("head: {zero}% zero acc, {:.0}/{CHUNKS} nonzero chunks: forward {ns:.1} ns (activate + nnz {ns_act:.1}, b1 + L2 + L3 {ns_rest:.1})", nz as f64 / accs.len() as f64);
+            // b1 + L2 + L3 as the engine runs them: f32 (SIMD) and integer L2.
+            let ih = HeadNet::from_words_l2(random_words(5), true);
+            let mut rest_ns = [0.0f64; 2];
+            for (j, hn) in [&head, &ih].into_iter().enumerate() {
+                let t = Instant::now();
+                for i in 0..n {
+                    z[i % H1] = (i as i32 * 977) & 0x3fff;
+                    s += hn.rest_any(i % BUCKETS, std::hint::black_box(&z)) as f64;
+                }
+                rest_ns[j] = t.elapsed().as_secs_f64() * 1e9 / n as f64;
+            }
+            println!("head: {zero}% zero acc, {:.0}/{CHUNKS} nonzero chunks: forward {ns:.1} ns (activate + nnz {ns_act:.1}, b1 + L2 + L3 {ns_rest:.1} scalar, {:.1} SIMD f32, {:.1} integer L2)", nz as f64 / accs.len() as f64, rest_ns[0], rest_ns[1]);
             std::hint::black_box(s);
         }
     }

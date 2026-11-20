@@ -115,7 +115,8 @@ def main():
     want = head_net_bytes(args.hidden, args.buckets, kb)
     if args.plain:
         want = 2 * (kb * 768 * args.hidden + args.hidden + args.buckets * (2 * args.hidden + 1))
-    if net.stat().st_size != want:
+    # An 8-byte trailer (b"RFNT" + flags, e.g. a --qat-l2 net) may follow the words.
+    if net.stat().st_size not in (want, want + 8):
         sys.exit(f"{net} is {net.stat().st_size} bytes; a H={args.hidden} {args.king_buckets} "
                  f"{args.buckets}-bucket {'plain' if args.plain else 'head'} net is {want}")
     wd = Path(args.workdir).expanduser().resolve()

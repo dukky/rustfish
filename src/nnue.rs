@@ -10,7 +10,8 @@
 //!   the original `(c == p ? 0 : 384) + t*64 + o(s)`.
 //! - net file: little-endian i16, feature weights [KB][768][H], feature
 //!   biases [H], output weights [B][2H] (stm half first), output biases [B];
-//!   no header.
+//!   no header. An optional 8-byte trailer `NET_MAGIC` + u32 LE flags may
+//!   follow (`NET_INT_L2`: a `--qat-l2` pairwise head, integer L2).
 //! - `eval = ((Σ screlu(us)·w[i] + Σ screlu(them)·w[H+i]) / QA + b) · SCALE / (QA·QB)`
 //!   with `screlu(x) = clamp(x, 0, QA)²`, integer division truncating to zero.
 //!
@@ -176,6 +177,12 @@ pub(crate) const fn net_bytes(kb: usize) -> usize {
     (kb * INPUTS * H + H + BUCKETS * (2 * H + 1) + if HEAD { head::HEAD_WORDS } else { 0 }) * 2
 }
 
+/// Optional net file trailer (after the words): magic, then u32 LE flags.
+pub(crate) const NET_MAGIC: [u8; 4] = *b"RFNT";
+pub(crate) const NET_TRAILER: usize = 8;
+/// Trailer flag: the pairwise head runs L2 in integers (`head::HeadNet`).
+pub(crate) const NET_INT_L2: u32 = 1;
+
 /// Bytes in a net file for the active layout.
 #[allow(dead_code)]
 pub(crate) const NET_BYTES: usize = net_bytes(KB);
@@ -278,6 +285,16 @@ impl Network {
     }
 
     pub(crate) fn from_bytes_kb(bytes: &[u8], kb: usize) -> Result<Self, String> {
+        let mut flags = 0u32;
+        let bytes = if bytes.len() == net_bytes(kb) + NET_TRAILER && bytes[net_bytes(kb)..net_bytes(kb) + 4] == NET_MAGIC {
+            flags = u32::from_le_bytes(bytes[net_bytes(kb) + 4..].try_into().unwrap());
+            &bytes[..net_bytes(kb)]
+        } else {
+            bytes
+        };
+        if flags & !NET_INT_L2 != 0 || (flags & NET_INT_L2 != 0 && !HEAD) {
+            return Err(format!("net trailer flags {flags:#x} not supported by this build"));
+        }
         if bytes.len() != net_bytes(kb) {
             return Err(format!(
                 "net is {} bytes, expected {} (H={H}, {kb} king bucket(s), {BUCKETS} output bucket(s))",
@@ -298,7 +315,7 @@ impl Network {
         }
         let mut net = Self::from_parts(ft_w, ft_b, out_w, out_b);
         if HEAD {
-            net.head = Some(Box::new(head::HeadNet::from_words(words.collect())));
+            net.head = Some(Box::new(head::HeadNet::from_words_l2(words.collect(), flags & NET_INT_L2 != 0)));
         }
         Ok(net)
     }
@@ -325,6 +342,10 @@ impl Network {
         let head = self.head.as_ref().map(|h| h.words()).unwrap_or(&[]);
         for w in all.chain(self.out_b.iter()).chain(head.iter()) {
             out.extend_from_slice(&w.to_le_bytes());
+        }
+        if self.head.as_ref().is_some_and(|h| h.int_l2()) {
+            out.extend_from_slice(&NET_MAGIC);
+            out.extend_from_slice(&NET_INT_L2.to_le_bytes());
         }
         out
     }
@@ -2123,6 +2144,20 @@ mod tests {
     fn rejects_wrong_size() {
         assert!(Network::from_bytes(&[0u8; 10]).is_err());
         assert!(Network::from_bytes(&vec![0u8; NET_BYTES]).is_ok());
+        // The optional trailer: integer L2 (HEAD builds only), unknown flags rejected.
+        let mut t = vec![0u8; NET_BYTES];
+        t.extend_from_slice(&NET_MAGIC);
+        t.extend_from_slice(&NET_INT_L2.to_le_bytes());
+        let net = Network::from_bytes(&t);
+        assert_eq!(net.is_ok(), HEAD);
+        if let Ok(net) = net {
+            assert!(net.head.as_ref().unwrap().int_l2());
+            assert_eq!(net.to_bytes(), t);
+        }
+        let n = t.len();
+        t[n - 4] = 2;
+        assert!(Network::from_bytes(&t).is_err());
+        assert_eq!(Network::from_bytes(include_bytes!("../net/nnue.bin")).unwrap().to_bytes(), include_bytes!("../net/nnue.bin"));
     }
 
     /// Throughput report: `cargo test --release nnue_throughput -- --ignored --nocapture`.
