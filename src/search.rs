@@ -1011,6 +1011,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             beta = best_score + ASPIRATION_WINDOW;
         }
 
+        #[cfg(feature = "stats")]
+        let mut st_fails = 0u32;
         let (score, mv, completed, depth_nodes) = loop {
             if use_threads {
                 if worker_engines.is_none() {
@@ -1053,14 +1055,20 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     &mut rep_stack,
                 );
                 let nodes_after = search.nodes;
+                st!{ if result.2 {
+                    crate::stats::add("it_nodes", crate::stats::db(d), nodes_after - nodes_before);
+                    crate::stats::inc("it_search", crate::stats::db(d));
+                } }
                 if !result.2 || d < 4 {
                     break (result.0, result.1, result.2, nodes_after - nodes_before);
                 }
                 if result.0 <= alpha {
+                    st!{ st_fails += 1; if st_fails >= 2 { crate::stats::inc("asp_multi", crate::stats::db(d)); } crate::stats::inc("asp_fl", crate::stats::db(d)); crate::stats::add("asp_waste", crate::stats::db(d), nodes_after - nodes_before); }
                     alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
                     continue;
                 }
                 if result.0 >= beta {
+                    st!{ st_fails += 1; if st_fails >= 2 { crate::stats::inc("asp_multi", crate::stats::db(d)); } crate::stats::inc("asp_fh", crate::stats::db(d)); crate::stats::add("asp_waste", crate::stats::db(d), nodes_after - nodes_before); }
                     beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
                     continue;
                 }
@@ -1077,6 +1085,14 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         }
         let prev_score = best_score;
         best_score = score;
+        st!{
+            crate::stats::inc("it_done", crate::stats::db(d));
+            if mv.is_some() && mv != best_move { crate::stats::inc("bm_change", crate::stats::db(d)); }
+            if d >= 2 { crate::stats::add("score_delta", crate::stats::db(d), (score - prev_score).unsigned_abs() as u64); }
+            if let Some(m) = mv { if let Some(pos) = root_moves.iter().position(|x| *x == m) {
+                crate::stats::inc("bm_idx", crate::stats::ndk(0, d, pos));
+            } }
+        }
         if mv.is_some() && mv != best_move {
             stable_iterations = 0;
         } else {
@@ -1410,6 +1426,7 @@ fn search_root(
             best_move = Some(mv);
         }
         if score > alpha {
+            st!{ if idx > 0 { crate::stats::inc("root_raise", crate::stats::db(depth)); } }
             alpha = score;
         }
         if alpha >= beta {
@@ -1529,6 +1546,11 @@ fn negamax(
     let pv_node = beta - alpha > 1;
     #[cfg(feature = "stats")]
     let st_nt: usize = if pv_node { 0 } else if cut_node { 1 } else { 2 };
+    st!{ if search.excluded[ply].is_none() {
+        let net = depth + ply as i32 - crate::stats::ROOT_DEPTH.with(|r| r.get());
+        crate::stats::inc("net_ext", crate::stats::ndk(st_nt, 0, (net + 8).clamp(0, 15) as usize));
+        if pv_node { crate::stats::inc("pv_net_ext_by_ply", (ply.min(31)) * 16 + (net + 8).clamp(0, 15) as usize); }
+    } }
     // Singular verification search: same node, minus this move. The TT entry
     // describes the full node, so it must not cut off or be overwritten here.
     let excluded = search.excluded[ply];
@@ -1698,7 +1720,7 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
-                st!{ crate::stats::inc("nmp_fire", crate::stats::nd(st_nt, depth)); }
+                st!{ crate::stats::inc("nmp_fire", crate::stats::nd(st_nt, depth)); if score >= MATE_SCORE - MAX_PLY as i32 { crate::stats::inc("nmp_mate", crate::stats::nd(st_nt, depth)); } }
                 #[cfg(feature = "stats-verify")]
                 {
                     if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
