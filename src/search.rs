@@ -1971,6 +1971,14 @@ fn negamax(
             captures_tried.push(mv);
         }
 
+        // Late captures with negative capture history (the slot has failed to
+        // cut more often than it cut) get a one-ply reduction at non-PV nodes.
+        let capture_lmr = matches!(stage, Stage::GoodCapture | Stage::BadCapture)
+            && !pv_node
+            && !in_check
+            && depth >= params.lmr_min_depth
+            && idx >= params.lmr_min_move_index
+            && capture_history_score(engine, side, board, mv) < 0;
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
@@ -2035,6 +2043,8 @@ fn negamax(
                     r += params.lmr_not_improving;
                 }
                 r.clamp(0, depth - 2)
+            } else if capture_lmr && !gives_check {
+                1
             } else {
                 0
             };
