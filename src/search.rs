@@ -1655,6 +1655,11 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
+                // Remember the null-move cut as a lower bound (no move: an
+                // older best move for this key is kept), so a revisit at the
+                // same or lower depth cuts on the TT probe.
+                let stored = if score >= MATE_SCORE - MAX_PLY as i32 { beta } else { score };
+                engine.tt.store(key, depth, score_to_tt(stored, ply), raw_static_eval, Bound::Lower, None);
                 return score;
             }
         }
