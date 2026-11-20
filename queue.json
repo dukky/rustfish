@@ -29,20 +29,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "ep-hash-capturable",
-    "mode": "nonreg",
-    "front": true,
-    "test_id": "q-ep-hash-capturable-1120-1136",
-    "sha": "7c3c350db535c2a4aa3d0a2337f72dfb62ae2716",
-    "base_sha": "a808d8a2ed50a25545ea15c2380f9257d8c0be84",
-    "started": "2026-11-20T11:36:08Z",
-    "bench": 278638,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1,
+  "merges_since_check": 2,
+  "merges_since_ladder": 2,
   "next_seed": 273,
   "consecutive_bursts": 0,
   "identical_merges": [
