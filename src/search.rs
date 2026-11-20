@@ -1287,6 +1287,16 @@ fn search_root(
     if search.root_nodes.is_empty() {
         search.root_nodes = vec![0; 64 * 64];
     }
+    // After the first iteration, keep the first (TT) move and order the rest
+    // by the nodes spent under them so far in this search: a move whose
+    // subtree was hard to refute is a likelier best-move candidate than the
+    // static order says. Stable, so unsearched moves keep the static order.
+    if root_moves.len() > 2 {
+        let rn = &search.root_nodes;
+        if root_moves[1..].iter().any(|m| rn[root_node_index(*m)] > 0) {
+            root_moves[1..].sort_by_key(|m| Reverse(rn[root_node_index(*m)]));
+        }
+    }
 
     for (idx, mv) in root_moves.iter().copied().enumerate() {
         if search.should_stop() {
