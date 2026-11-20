@@ -60,13 +60,26 @@ struct AdamC {
 
 // ---------------------------------------------------------------- forward
 
-// One block per sample (visited in `order`), H/2 threads: thread t owns
-// side t / (H/4) and four columns. Accumulators, output gradient, loss.
-__device__ __forceinline__ float4 row4(const float *wt, size_t at) { return __ldg((const float4 *)(wt + at)); }
-__device__ __forceinline__ float4 row4(const __half *wt, size_t at) {
-    uint2 u = __ldg((const uint2 *)(wt + at));
+// One block per sample (visited in `order`), H/4 threads: thread t owns
+// side t / (H/8) and eight columns (16-byte fp16 row loads). Accumulators,
+// output gradient, loss. The output sum is reduced exactly as the former
+// layout (H/2 threads x four columns) did: its lane 2t + h is this thread's
+// column half h, its warp 16 threads here, so its shuffle offsets 16..2 run
+// on both halves with width 16, offset 1 is half 0 + half 1, then the old
+// warps' sums in order. Byte-identical to the old layout, ~2x fewer loads.
+__device__ __forceinline__ void row8(const float *wt, size_t at, float4 &lo, float4 &hi) {
+    lo = __ldg((const float4 *)(wt + at));
+    hi = __ldg((const float4 *)(wt + at + 4));
+}
+__device__ __forceinline__ void row8(const __half *wt, size_t at, float4 &lo, float4 &hi) {
+    uint4 u = __ldg((const uint4 *)(wt + at));
     float2 a = __half22float2(*(const __half2 *)&u.x), b = __half22float2(*(const __half2 *)&u.y);
-    return make_float4(a.x, a.y, b.x, b.y);
+    float2 c = __half22float2(*(const __half2 *)&u.z), d = __half22float2(*(const __half2 *)&u.w);
+    lo = make_float4(a.x, a.y, b.x, b.y);
+    hi = make_float4(c.x, c.y, d.x, d.y);
+}
+__device__ __forceinline__ void add4(float4 &a, const float4 &w) {
+    a.x += w.x; a.y += w.y; a.z += w.z; a.w += w.w;
 }
 
 template <typename W>
@@ -75,47 +88,61 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
                                              float *dacc) {
     int sample = order[blockIdx.x];
     const GSample &s = ss[sample];
-    int q = H / 4, t = threadIdx.x, side = t / q, c = (t % q) * 4;
+    int q = H / 8, t = threadIdx.x, side = t / q, c = (t % q) * 8;
     const float *ftb = rest, *ow = rest + H, *ob = rest + H + buckets * 2 * H;
     // The sample's feature indices once into shared memory (a global index
     // load before every row load made the loop latency-bound).
     __shared__ uint32_t fs[32];
     __shared__ int ns;
-    if (t < 32) fs[t] = ((const uint32_t *)s.f)[t];
+    for (int k = t; k < 32; k += blockDim.x) fs[k] = ((const uint32_t *)s.f)[k];
     if (t == 0) ns = s.n;
     __syncthreads();
     const uint16_t *feats = (const uint16_t *)fs + side * 32;
     int n = ns;
-    float4 a = *(const float4 *)(ftb + c);
-    // Four row loads in flight, added in feature order.
+    float4 a0 = *(const float4 *)(ftb + c), a1 = *(const float4 *)(ftb + c + 4);
+    // Four rows in flight, added in feature order.
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float4 w0 = row4(wt, (size_t)feats[i] * H + c);
-        float4 w1 = row4(wt, (size_t)feats[i + 1] * H + c);
-        float4 w2 = row4(wt, (size_t)feats[i + 2] * H + c);
-        float4 w3 = row4(wt, (size_t)feats[i + 3] * H + c);
-        a.x += w0.x; a.y += w0.y; a.z += w0.z; a.w += w0.w;
-        a.x += w1.x; a.y += w1.y; a.z += w1.z; a.w += w1.w;
-        a.x += w2.x; a.y += w2.y; a.z += w2.z; a.w += w2.w;
-        a.x += w3.x; a.y += w3.y; a.z += w3.z; a.w += w3.w;
+        float4 l0, h0, l1, h1, l2, h2, l3, h3;
+        row8(wt, (size_t)feats[i] * H + c, l0, h0);
+        row8(wt, (size_t)feats[i + 1] * H + c, l1, h1);
+        row8(wt, (size_t)feats[i + 2] * H + c, l2, h2);
+        row8(wt, (size_t)feats[i + 3] * H + c, l3, h3);
+        add4(a0, l0); add4(a1, h0);
+        add4(a0, l1); add4(a1, h1);
+        add4(a0, l2); add4(a1, h2);
+        add4(a0, l3); add4(a1, h3);
     }
     for (; i < n; i++) {
-        float4 w = row4(wt, (size_t)feats[i] * H + c);
-        a.x += w.x; a.y += w.y; a.z += w.z; a.w += w.w;
+        float4 l, h;
+        row8(wt, (size_t)feats[i] * H + c, l, h);
+        add4(a0, l); add4(a1, h);
     }
-    *(float4 *)(acc + ((size_t)sample * 2 + side) * H + c) = a;
+    float *ar = acc + ((size_t)sample * 2 + side) * H + c;
+    *(float4 *)ar = a0;
+    *(float4 *)(ar + 4) = a1;
     const float *w = ow + s.bucket * 2 * H + side * H + c;
-    float x0 = fminf(fmaxf(a.x, 0.f), 1.f), x1 = fminf(fmaxf(a.y, 0.f), 1.f), x2 = fminf(fmaxf(a.z, 0.f), 1.f),
-          x3 = fminf(fmaxf(a.w, 0.f), 1.f);
-    const float wv[4] = {w[0], w[1], w[2], w[3]};
-    float part = x0 * x0 * wv[0] + x1 * x1 * wv[1] + x2 * x2 * wv[2] + x3 * x3 * wv[3];
-    for (int o = 16; o; o >>= 1) part += __shfl_down_sync(0xffffffff, part, o);
+    const float wv[8] = {w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]};
+    float pt[2];
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+        float4 a = h ? a1 : a0;
+        const float *wh = wv + 4 * h;
+        float x0 = fminf(fmaxf(a.x, 0.f), 1.f), x1 = fminf(fmaxf(a.y, 0.f), 1.f), x2 = fminf(fmaxf(a.z, 0.f), 1.f),
+              x3 = fminf(fmaxf(a.w, 0.f), 1.f);
+        pt[h] = x0 * x0 * wh[0] + x1 * x1 * wh[1] + x2 * x2 * wh[2] + x3 * x3 * wh[3];
+    }
+    const unsigned mk = blockDim.x >= 32 ? 0xffffffffu : 0xffffu;
+#pragma unroll
+    for (int h = 0; h < 2; h++)
+        for (int o = 8; o; o >>= 1) pt[h] += __shfl_down_sync(mk, pt[h], o, 16);
+    float part = pt[0] + pt[1];
     __shared__ float red[32], gsh;
-    if ((t & 31) == 0) red[t >> 5] = part;
+    if ((t & 15) == 0) red[t >> 4] = part;
     __syncthreads();
     if (t == 0) {
         float sum = 0;
-        for (int i = 0; i < (int)(blockDim.x >> 5); i++) sum += red[i];
+        for (int i = 0; i < (int)(blockDim.x >> 4); i++) sum += red[i];
         if (hd) {
             // --head: the linear output's sum, for head_forward (which
             // overwrites gout with the gradient).
@@ -132,18 +159,20 @@ __device__ __forceinline__ void forward_impl(const GSample *ss, const uint32_t *
     }
     if (hd) return;
     // Plain: the FT backward's per-lane gradient dacc = g w 2 c for this
-    // thread's 4 lanes, cached here (backward_ft's staging then reads one
+    // thread's 8 lanes, cached here (backward_ft's staging then reads one
     // value per pair instead of the sample, acc, w and g). Spelt out as
     // nvcc contracted it in backward_ft (2 g w as fma(g, w, g w), times c).
     __syncthreads();
-    float g = gsh, xs[4] = {a.x, a.y, a.z, a.w}, d[4];
+    float g = gsh, xs[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w}, d[8];
 #pragma unroll
-    for (int u = 0; u < 4; u++) {
+    for (int u = 0; u < 8; u++) {
         float x = xs[u], cl = fminf(fmaxf(x, 0.f), 1.f);
         float gw = __fmul_rn(g, wv[u]);
         d[u] = (x > 0.f && x < 1.f) ? __fmul_rn(cl, __fmaf_rn(g, wv[u], gw)) : 0.0f;
     }
-    *(float4 *)(dacc + ((size_t)sample * 2 + side) * H + c) = make_float4(d[0], d[1], d[2], d[3]);
+    float *dr = dacc + ((size_t)sample * 2 + side) * H + c;
+    *(float4 *)dr = make_float4(d[0], d[1], d[2], d[3]);
+    *(float4 *)(dr + 4) = make_float4(d[4], d[5], d[6], d[7]);
 }
 
 extern "C" __global__ void forward(const GSample *ss, const uint32_t *order, const float *wt, const float *rest,
@@ -502,10 +531,26 @@ extern "C" __global__ void __launch_bounds__(1024) backward_ft(const GSample *ss
         for (int w = t; w < nw; w += 1024) sl[w] = cs[INPUTS + w];
         __syncthreads();
         const uint8_t *lb = (const uint8_t *)sl;
+        // Whole words of the list (4 entries) with one shared load and the
+        // four row loads independent; the unaligned head and the tail byte
+        // by byte. Same adds in the same order.
 #pragma unroll
         for (int i = 0; i < FPW; i++) {
             uint32_t oe = so[warp + 32 * i];
-            for (int k = oe & 0xffff, e = oe >> 16; k < e; k++) g[i] += sd[lb[k]][lane];
+            int k = oe & 0xffff, e = oe >> 16;
+            float a = g[i];
+            for (; k < e && (k & 3); k++) a += sd[lb[k]][lane];
+            for (; k + 4 <= e; k += 4) {
+                uint32_t wd = sl[k >> 2];
+                float v0 = sd[wd & 0xff][lane], v1 = sd[(wd >> 8) & 0xff][lane], v2 = sd[(wd >> 16) & 0xff][lane],
+                      v3 = sd[wd >> 24][lane];
+                a += v0;
+                a += v1;
+                a += v2;
+                a += v3;
+            }
+            for (; k < e; k++) a += sd[lb[k]][lane];
+            g[i] = a;
         }
     }
     float *out = part + (size_t)blockIdx.y * INPUTS * H;
@@ -527,12 +572,20 @@ extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, co
     int j0 = chunk * CH, j1 = min(j0 + CH, n);
     size_t stride = (size_t)buckets * 2 * H + 2 * H + buckets;
     float *out = pr + chunk * stride;
+    // The chunk's buckets and output gradients once into shared memory.
+    __shared__ int bks[CH];
+    __shared__ float ggs[CH];
+    for (int k = threadIdx.x; k < j1 - j0; k += blockDim.x) {
+        bks[k] = ss[j0 + k].bucket;
+        ggs[k] = gout[j0 + k];
+    }
+    __syncthreads();
     if (cc < 2 * H) {
         const float *ow = rest + H;
         float gw[8] = {0, 0, 0, 0, 0, 0, 0, 0}, gb = 0.0f;
         for (int j = j0; j < j1; j++) {
-            int b = ss[j].bucket;
-            float gg = gout[j];
+            int b = bks[j - j0];
+            float gg = ggs[j - j0];
             float x = acc[(size_t)j * 2 * H + cc];
             float c = fminf(fmaxf(x, 0.f), 1.f);
             float w = ow[b * 2 * H + cc];
@@ -551,7 +604,7 @@ extern "C" __global__ void backward_rest(const GSample *ss, const float *acc, co
     if (blockIdx.x == 0 && threadIdx.x < buckets) {
         float s = 0.0f;
         for (int j = j0; j < j1; j++)
-            if (ss[j].bucket == threadIdx.x) s += gout[j];
+            if (bks[j - j0] == (int)threadIdx.x) s += ggs[j - j0];
         out[(size_t)buckets * 2 * H + 2 * H + threadIdx.x] = s;
     }
 }

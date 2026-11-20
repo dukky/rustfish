@@ -698,7 +698,7 @@ impl Backend for GpuTrainer {
             launch(k.quant_w1, (nq.div_ceil(256) as u32, 1), 256, st, &[P(self.pr.ptr), P(self.qw.ptr), P(self.wf.ptr), I(hi), I(bi), I(hd)]);
         }
         mark(1);
-        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), I(hd), P(self.dacc.ptr)]);
+        launch(fwd, (n as u32, 1), (h / 4) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), I(hd), P(self.dacc.ptr)]);
         mark(2);
         if sh.hd > 0 {
             // Head forward + head backward + dacc, a block per sample; dynamic

@@ -275,3 +275,26 @@ runs; host prep 1.9 ms runs under the GPU and is not the limit).
   lazy Adam on the FT rows a batch touches; adam_ft is ~11% of the batch.
 
 
+## Hot-kernel pass (branch `perf-cuda-hot`)
+
+Idle-GPU profile before (main e406d5f, H 1024 kb8m `--factorise --half`,
+ms/batch of 16384): plain forward 2.97, backward_ft 2.57, adam_ft 0.95,
+backward_rest 0.80, plan_csr 0.11 (total 7.5); pairwise forward 3.09,
+head_forward 2.09, backward_ft 2.58, adam_ft 1.0, backward_rest 0.92,
+head_w1 0.35 (total 10.6). Three byte-identical changes:
+
+- `forward`: H/4 threads x 8 columns (one 16-byte fp16 load per row
+  instead of two 8-byte ones); the output sum's reduction replays the old
+  4-column tree (width-16 shuffles per column half, then half 0 + half 1).
+- `backward_ft`: whole words of the pair-offset list with one shared load
+  and four independent row loads (5 shared loads per 4 pairs instead of 8).
+- `backward_rest`: the chunk's buckets and output gradients staged in
+  shared memory (no per-sample global loads in the 256-sample loop).
+
+`cmp`-identical nets (`.e1`, `.e2`, final) and checkpoints vs main, 2 x
+500k positions of `pwcheck/slice.bin`: plain H 1024 `--half` and f32,
+pairwise / dense H 1024 `--half`, pairwise-skip H 512, plain H 512
+`--mirror`, H 256, H 64 `--mirror` (32-thread forward blocks), pairwise H 128.
+Speed: measured only on the GPU shared with gen 11 (unreliable); the idle
+table (`~/trainerperf-build/idle-table.sh`: base / all / each change alone,
+600 batches, two interleaved rounds) decides which parts to keep.
