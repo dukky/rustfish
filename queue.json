@@ -11,6 +11,14 @@
     {
       "branch": "qsearch-fail-soft",
       "mode": "stc"
+    },
+    {
+      "branch": "lmr-index-1based",
+      "mode": "stc"
+    },
+    {
+      "branch": "root-bad-captures-last",
+      "mode": "stc"
     }
   ],
   "current": {
