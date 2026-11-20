@@ -468,6 +468,10 @@ for packed-data.
 - **Bot merges skip `ci.yml`**; the queue runs the same checks itself.
 - **Time management** is tested at 60+0.6 and 10+0.1; CCRL also plays 40/15.
 - **Lazy SMP is untested for strength** (bot and 4-CPU lists).
+  **Parked (owner, 20 Nov): no lever for the 1-CPU CCRL Blitz target, and SMP games cost ~4x CI per game.**
+  - *When to pick it up:* single-thread rating within ~50 of the target (~3700 / 3751), or the owner rates the CCRL 4-CPU list or the Lichess bot, or the merge queue sits idle (< 2 waiting) with free shards.
+  - *First step:* one scaling diagnostic on CI's 4-vCPU runners: Threads=4 vs Threads=1 at stc (then 2 vs 1). Sensible scaling: park again. Weak scaling (4T under ~+50): bug hunt. Check shared-TT races and torn entries, helper depth staggering and divergence, stop/ponder handling and node counting across threads, and time management with threads.
+  - *Then:* SMP-specific SPRTs only for changes that touch threading; single-thread search work carries over automatically.
 
 ## Process
 
