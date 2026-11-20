@@ -523,6 +523,10 @@ merging (the queue does that).
 | CUDA pairwise-head trainer speed (`perf-cuda-pairwise`): full-speed table on a free GPU, README, squash | next free GPU window (after gen10w); paused subagent |
 | Pairwise head revival: init / pair-order experiments, else an FT trained for pairwise in a full chain | paused (budget); decide at gen 11/12 |
 | Merge the verified faster CUDA trainer (perf-head-speed-cuda) into main | next free agent slot (independent of the pairwise decision) |
+| GPU order 20 Nov: gen10w evals -> CUDA speed table -> **pairwise-from-scratch pilot** (shape recipe, ~2-3 h; if the head trains and beats plain, gen 11 = full pairwise chain) -> gen 11 | chained/agents; pairwise agent owns the pilot |
+| Pool11 prep on CPU while the pilot runs: cut val-g11 (D2027 + L1012 tails), convert/pack D2023-D2027 and L1009/L1011/L1012 (laptop .txt -> .bin -> .rfp, then copy), newest seeds 2x | main session, 20 Nov |
+| Recipe-length test: does a shorter chain (e.g. plain 6-8 epochs) match the 10+1+4 recipe? Cuts every generation's ~11 h | next free GPU window after gen 11 starts? (needs its own GPU slot) |
+| CUDA plain/kb8m training speed (profile; lazy Adam as a flagged option) + merge perf-head-speed-cuda and perf-cuda-pairwise to main | CUDA agent, 20 Nov |
 | Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10+ engine: D2027 + L1012 tails), then build pool11 (~6.7B, newest seeds 2x) | D2027 done (~Sat 21 Nov early) |
 | Bug audit fixes in the merge queue (`rep-null-guard`, `ep-hash-capturable`, `queen-promo-tactical`, all `:stc`); unverified suspects listed in docs/search-diagnosis (Bug audit) | queue results (auto-merge on pass) |
 | Search: next experiments from round 3 (X3 PV stability; reduction/extension balance at depth); gauge = 200k-node Clover match after each batch | after prune-exempt-killers' verdict |
