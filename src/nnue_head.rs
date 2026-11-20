@@ -205,9 +205,132 @@ impl HeadNet {
     #[inline(always)]
     fn rest_any(&self, b: usize, z1: &[i32; H1]) -> f32 {
         if self.int_l2 {
-            self.rest_int(b, z1, kernels::l2(&self.w2i[b], &self.l1_act_q(b, z1)))
+            self.rest_int_fast(b, z1)
         } else {
             self.rest_fast(b, z1)
+        }
+    }
+
+    /// `rest_int`, explicitly vectorised where available (bit-identical:
+    /// the same f32 operations in the same order, an exact integer dot).
+    #[inline(always)]
+    fn rest_int_fast(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        #[cfg(target_arch = "aarch64")]
+        if kernels::dotprod() {
+            // SAFETY: FEAT_DotProd is available.
+            return unsafe { self.rest_int_neon(b, z1) };
+        }
+        #[cfg(target_arch = "x86_64")]
+        if kernels::avx2() {
+            // SAFETY: AVX2 detected.
+            return unsafe { self.rest_int_avx2(b, z1) };
+        }
+        self.rest_int(b, z1, kernels::l2(&self.w2i[b], &self.l1_act_q(b, z1)))
+    }
+
+    /// `rest_int` with NEON + sdot. The skip neuron's q (SKIP) is formed
+    /// but meets zero weights in `w2i`, as the scalar path's q = 0 does.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "dotprod")]
+    unsafe fn rest_int_neon(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        use std::arch::aarch64::*;
+        // SAFETY: fixed-size arrays, all accesses in bounds.
+        unsafe {
+            let (zero, one) = (vdupq_n_f32(0.0), vdupq_n_f32(1.0));
+            let (inv, q127, half) = (vdupq_n_f32(1.0 / Z1_DIV), vdupq_n_f32(127.0), vdupq_n_f32(0.5));
+            let mut qi = [vdupq_n_u32(0); H1 / 4];
+            for (r, v) in qi.iter_mut().enumerate() {
+                let z = vaddq_f32(vmulq_f32(vcvtq_f32_s32(vld1q_s32(z1.as_ptr().add(4 * r))), inv), vld1q_f32(self.b1[b].as_ptr().add(4 * r)));
+                let c = vminq_f32(vmaxq_f32(z, zero), one);
+                *v = vcvtq_u32_f32(vaddq_f32(vmulq_f32(vmulq_f32(c, c), q127), half));
+            }
+            let lo = vmovn_u16(vcombine_u16(vmovn_u32(qi[0]), vmovn_u32(qi[1])));
+            let hi = vmovn_u16(vcombine_u16(vmovn_u32(qi[2]), vmovn_u32(qi[3])));
+            let qv = vreinterpretq_u32_u8(vcombine_u8(lo, hi));
+            let wp = self.w2i[b].0.as_ptr();
+            let mut acc = [vdupq_n_s32(0); H2 / 4];
+            let xs = [vdupq_laneq_u32::<0>(qv), vdupq_laneq_u32::<1>(qv), vdupq_laneq_u32::<2>(qv), vdupq_laneq_u32::<3>(qv)];
+            for (c, x) in xs.iter().enumerate() {
+                let xv = vreinterpretq_s8_u32(*x);
+                for (r, a) in acc.iter_mut().enumerate() {
+                    *a = kernels::sdot(*a, xv, vld1q_s8(wp.add(c * H2 * 4 + 16 * r)));
+                }
+            }
+            let inv2 = vdupq_n_f32(1.0 / Z2_DIV);
+            let mut t = [vdupq_n_f32(0.0); H2 / 4];
+            for r in 0..H2 / 4 {
+                let z = vaddq_f32(vmulq_f32(vcvtq_f32_s32(acc[r]), inv2), vld1q_f32(self.b2[b].as_ptr().add(4 * r)));
+                let c = vminq_f32(vmaxq_f32(z, zero), one);
+                t[r] = vmulq_f32(vld1q_f32(self.w3[b].as_ptr().add(4 * r)), vmulq_f32(c, c));
+            }
+            // The scalar tree (as rest_neon).
+            for r in 0..4 {
+                t[r] = vaddq_f32(t[r], t[r + 4]);
+            }
+            for r in 0..2 {
+                t[r] = vaddq_f32(t[r], t[r + 2]);
+            }
+            let v = vaddq_f32(t[0], t[1]);
+            let v2 = vadd_f32(vget_low_f32(v), vget_high_f32(v));
+            let s = vget_lane_f32::<0>(v2) + vget_lane_f32::<1>(v2);
+            let mut out = self.b3[b] + s;
+            if SKIP {
+                out += z1[H1 - 1] as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
+            }
+            out
+        }
+    }
+
+    /// `rest_int` with AVX2 (maddubs + madd: exact). As `rest_int_neon`
+    /// for the skip neuron.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn rest_int_avx2(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        use std::arch::x86_64::*;
+        // SAFETY: fixed-size arrays, all accesses in bounds (the weights
+        // 64-byte aligned, the rest unaligned loads).
+        unsafe {
+            let (zero, one) = (_mm256_setzero_ps(), _mm256_set1_ps(1.0));
+            let (inv, q127, half) = (_mm256_set1_ps(1.0 / Z1_DIV), _mm256_set1_ps(127.0), _mm256_set1_ps(0.5));
+            let mut qi = [_mm256_setzero_si256(); 2];
+            for (r, v) in qi.iter_mut().enumerate() {
+                let zi = _mm256_loadu_si256(z1.as_ptr().add(8 * r) as *const __m256i);
+                let z = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(zi), inv), _mm256_loadu_ps(self.b1[b].as_ptr().add(8 * r)));
+                let c = _mm256_min_ps(_mm256_max_ps(z, zero), one);
+                *v = _mm256_cvttps_epi32(_mm256_add_ps(_mm256_mul_ps(_mm256_mul_ps(c, c), q127), half));
+            }
+            // i32 0..=127 -> 16 bytes in order (packs work per 128-bit lane).
+            let w16 = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packs_epi32(qi[0], qi[1]));
+            let b8 = _mm_packus_epi16(_mm256_castsi256_si128(w16), _mm256_extracti128_si256::<1>(w16));
+            let mut q = [0i32; H1 / 4];
+            _mm_storeu_si128(q.as_mut_ptr() as *mut __m128i, b8);
+            let wp = self.w2i[b].0.as_ptr() as *const __m256i;
+            let mut a = [_mm256_setzero_si256(); H2 / 8];
+            let ones = _mm256_set1_epi16(1);
+            for (c, &qc) in q.iter().enumerate() {
+                let x = _mm256_set1_epi32(qc);
+                for (r, v) in a.iter_mut().enumerate() {
+                    let w = _mm256_load_si256(wp.add(c * 4 + r));
+                    *v = _mm256_add_epi32(*v, _mm256_madd_epi16(_mm256_maddubs_epi16(x, w), ones));
+                }
+            }
+            let inv2 = _mm256_set1_ps(1.0 / Z2_DIV);
+            let mut t = [zero; H2 / 8];
+            for r in 0..H2 / 8 {
+                let z = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(a[r]), inv2), _mm256_loadu_ps(self.b2[b].as_ptr().add(8 * r)));
+                let c = _mm256_min_ps(_mm256_max_ps(z, zero), one);
+                t[r] = _mm256_mul_ps(_mm256_loadu_ps(self.w3[b].as_ptr().add(8 * r)), _mm256_mul_ps(c, c));
+            }
+            // The scalar tree (as rest_avx2).
+            let v = _mm256_add_ps(_mm256_add_ps(t[0], t[2]), _mm256_add_ps(t[1], t[3]));
+            let qd = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps::<1>(v));
+            let h = _mm_add_ps(qd, _mm_movehl_ps(qd, qd));
+            let s = _mm_cvtss_f32(h) + _mm_cvtss_f32(_mm_shuffle_ps::<1>(h, h));
+            let mut out = self.b3[b] + s;
+            if SKIP {
+                out += z1[H1 - 1] as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
+            }
+            out
         }
     }
 
@@ -707,7 +830,7 @@ pub(crate) mod kernels {
     }
 
     #[inline(always)]
-    fn dotprod() -> bool {
+    pub(crate) fn dotprod() -> bool {
         if cfg!(target_feature = "dotprod") {
             return true;
         }
@@ -727,7 +850,7 @@ pub(crate) mod kernels {
 
     /// `acc += Σ_j x[4l+j] * w[4l+j]` per i32 lane (x <= 127, so signed).
     #[inline(always)]
-    unsafe fn sdot(mut acc: int32x4_t, x: int8x16_t, w: int8x16_t) -> int32x4_t {
+    pub(crate) unsafe fn sdot(mut acc: int32x4_t, x: int8x16_t, w: int8x16_t) -> int32x4_t {
         // SAFETY: register-only instruction; callers enable dotprod.
         unsafe {
             std::arch::asm!("sdot {0:v}.4s, {1:v}.16b, {2:v}.16b", inout(vreg) acc, in(vreg) x, in(vreg) w, options(pure, nomem, nostack));
