@@ -9,16 +9,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "rep-null-guard",
-    "mode": "stc",
-    "test_id": "q-rep-null-guard-1119-2355",
-    "sha": "eafbbf00e0cf052b8306912fd73115adc776f9ed",
-    "base_sha": "0c46b02f0cfc6efc0e78157fc1af2e7471ab0ef5",
-    "started": "2026-11-19T23:55:08Z",
-    "bench": 283739,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
