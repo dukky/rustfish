@@ -551,11 +551,33 @@ struct PickerBufs {
 }
 
 impl PickerBufs {
+    /// Empty all lists and make room for any position's moves (no legal
+    /// position has more than 218), so `push_either` never reallocates.
     fn clear(&mut self) {
-        self.good_captures.clear();
-        self.priority_quiets.clear();
-        self.quiets.clear();
-        self.bad_captures.clear();
+        for v in [&mut self.good_captures, &mut self.priority_quiets, &mut self.quiets, &mut self.bad_captures] {
+            v.clear();
+            v.reserve(PICK_CAP);
+        }
+    }
+}
+
+/// Capacity every picker list is reserved to.
+const PICK_CAP: usize = 256;
+
+/// Append `e0` to `v0` if `to0`, else `e1` to `v1`, without a branch on
+/// `to0`: both values are written into spare capacity and only one length
+/// moves. Same contents as the branchy push.
+#[inline(always)]
+fn push_either(v0: &mut Vec<(Move, i32)>, v1: &mut Vec<(Move, i32)>, to0: bool, e0: (Move, i32), e1: (Move, i32)) {
+    let (n0, n1) = (v0.len(), v1.len());
+    assert!(n0 < v0.capacity() && n1 < v1.capacity());
+    // SAFETY: both slots are inside the capacity (checked above), and the
+    // lengths grow by exactly the one element written at the old end.
+    unsafe {
+        v0.as_mut_ptr().add(n0).write(e0);
+        v1.as_mut_ptr().add(n1).write(e1);
+        v0.set_len(n0 + to0 as usize);
+        v1.set_len(n1 + !to0 as usize);
     }
 }
 
@@ -686,12 +708,9 @@ impl MovePicker {
 
             if is_capture_move(board, mv) {
                 let see_score = see(board, mv);
-                let score = capture_stage_score_from_see(board, mv, see_score);
-                if see_score >= 0 {
-                    picker.bufs.good_captures.push((mv, score));
-                } else {
-                    picker.bufs.bad_captures.push((mv, score));
-                }
+                let e = (mv, capture_stage_score_from_see(board, mv, see_score));
+                let b = &mut picker.bufs;
+                push_either(&mut b.good_captures, &mut b.bad_captures, see_score >= 0, e, e);
                 continue;
             }
 
@@ -718,11 +737,9 @@ impl MovePicker {
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
             let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
-            if is_k0 || is_k1 || is_counter || h > 0 || ch > 0 {
-                picker.bufs.priority_quiets.push((mv, score + esc));
-            } else {
-                picker.bufs.quiets.push((mv, score.max(h) + esc));
-            }
+            let priority = is_k0 | is_k1 | is_counter | (h > 0) | (ch > 0);
+            let b = &mut picker.bufs;
+            push_either(&mut b.priority_quiets, &mut b.quiets, priority, (mv, score + esc), (mv, score.max(h) + esc));
         }
 
         picker
