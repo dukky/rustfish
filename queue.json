@@ -23,6 +23,10 @@
     {
       "branch": "nmp-mate-clamp",
       "mode": "nonreg"
+    },
+    {
+      "branch": "queen-promo-tactical",
+      "mode": "nonreg"
     }
   ],
   "current": {
