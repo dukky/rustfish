@@ -72,6 +72,12 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
     }
 
     let n = name.to_ascii_lowercase();
+    if n == "diagoff" {
+        if let Ok(v) = value.trim().parse::<u32>() {
+            crate::search::DIAG_OFF.store(v, std::sync::atomic::Ordering::Relaxed);
+        }
+        return;
+    }
     if n == "clear hash" {
         engine.tt.clear();
         return;
