@@ -5,16 +5,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "ep-hash-capturable",
-    "mode": "stc",
-    "test_id": "q-ep-hash-capturable-1120-0031",
-    "sha": "e8fbb18e82b413f662bcf9a5222a2a41396a79c7",
-    "base_sha": "0c46b02f0cfc6efc0e78157fc1af2e7471ab0ef5",
-    "started": "2026-11-20T00:31:26Z",
-    "bench": 278638,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
