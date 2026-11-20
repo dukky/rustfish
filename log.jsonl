@@ -611,3 +611,4 @@
 {"branch": "capture-history-r5", "logged_at": "2026-11-20T16:01:27Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "qsearch-fail-soft", "elo": 14.87, "elo_ci95": [8.08, 21.68], "games": 2688, "llr": 5.159, "logged_at": "2026-11-20T17:31:08Z", "mode": "stc", "outcome": "merged", "sha": "b567d55d79fb4375cb24fd0714bfc0c296c7d487", "test_id": "q-qsearch-fail-soft-1120-1555", "verdict": "H1"}
 {"base_sha": "7371b17f99ed1fb1990f26a85de1f63508255fc5", "branch": "killer-reset-per-parent", "logged_at": "2026-11-20T17:31:53Z", "mode": "stc", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "293a7fa2922918d98b2c061a276463149d853509", "test_id": "q-killer-reset-per-parent-1120-1731"}
+{"branch": "speed-nnue-row-prefetch", "logged_at": "2026-11-20T19:56:21Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "f8155e4fe12fb68c86a2053cef1996b93b8d8ac6"}

@@ -42,6 +42,14 @@
     {
       "branch": "history-bonus-linear-r2",
       "mode": "stc"
+    },
+    {
+      "branch": "speed-picker-branchless",
+      "mode": "speedup"
+    },
+    {
+      "branch": "speed-movegen-sink",
+      "mode": "speedup"
     }
   ],
   "current": {
@@ -72,6 +80,7 @@
     "8e150ec6429f815ca3787a3f042afe5eb89bfad1",
     "c7818639afaefc95453fa2405ca0b1e34dec100c",
     "d40aa894aff68184008d8d9d2d18cbe96986cc4e",
-    "407e4e8ef6904f282555e2d5445ed90273baad89"
+    "407e4e8ef6904f282555e2d5445ed90273baad89",
+    "f8155e4fe12fb68c86a2053cef1996b93b8d8ac6"
   ]
 }
