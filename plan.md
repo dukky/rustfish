@@ -54,6 +54,7 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   with newest 2x **0.023299 / 0.022690**. Keep growing, don't drop old seeds, weight the
   newest 2x. **Running:** `gen10w.sh` = gen 10 recipe with newest 2x (GPU, 22:44 -> ~09:30
   20 Nov); gate it if it beats g10.
+- **gen10w (newest 2x) does not beat g10 at full scale:** val-g10 0.022958 vs 0.022948, valL1008 0.022415 vs 0.022408, val.bin 0.025641 vs 0.025551. The window test's short-recipe weighting gain (~4e-5) vanishes with full training: no gate; **gen 11 = plain, unweighted pool11**. CUDA speed table (idle GPU): pairwise 2.07x (717k -> 1.49M), plain -0.9/-1.5% (being checked before merge).
 - **Pairwise head: the head never trained** (W1 = its random init after 3 epochs). From the
   g9 warm start only ~1% of pairwise inputs are nonzero, so the head gets no gradient. QAT
   and CUDA are not the cause. Likely needs an FT trained for pairwise (full chain), so it
@@ -524,7 +525,7 @@ merging (the queue does that).
 | Pairwise head revival: init / pair-order experiments, else an FT trained for pairwise in a full chain | paused (budget); decide at gen 11/12 |
 | Merge the verified faster CUDA trainer (perf-head-speed-cuda) into main | next free agent slot (independent of the pairwise decision) |
 | GPU order 20 Nov: gen10w evals -> CUDA speed table -> **pairwise-from-scratch pilot** (shape recipe, ~2-3 h; if the head trains and beats plain, gen 11 = full pairwise chain) -> gen 11 | chained/agents; pairwise agent owns the pilot |
-| Pool11 prep on CPU while the pilot runs: cut val-g11 (D2027 + L1012 tails), convert/pack D2023-D2027 and L1009/L1011/L1012 (laptop .txt -> .bin -> .rfp, then copy), newest seeds 2x | main session, 20 Nov |
+| Pool11 prep on CPU while the pilot runs: cut val-g11 (D2027 + L1012 tails), convert/pack D2023-D2027 and L1009/L1011/L1012 (laptop .txt -> .bin -> .rfp, then copy); no 2x weighting (gen10w) | main session, 20 Nov |
 | Recipe-length test: does a shorter chain (e.g. plain 6-8 epochs) match the 10+1+4 recipe? Cuts every generation's ~11 h | next free GPU window after gen 11 starts? (needs its own GPU slot) |
 | CUDA plain/kb8m training speed (profile; lazy Adam as a flagged option) + merge perf-head-speed-cuda and perf-cuda-pairwise to main | CUDA agent, 20 Nov |
 | Cut val-g11 (~1M, whole games, >= 2 seeds, gen-10+ engine: D2027 + L1012 tails), then build pool11 (~6.7B, newest seeds 2x) | D2027 done (~Sat 21 Nov early) |
