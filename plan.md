@@ -41,6 +41,7 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
     Pruning error rates are 0-1.2% and reduced searches fail high only 0.3-1.5%: margins are
     conservative, single-knob tweaks don't pay, so a **long SPSA** (sum combine; the old
     400-iteration run used mean, which applied one chain's steps per round) is running.
+  - **Overnight 19-20 Nov:** `prune-exempt-killers` **merged +11.1** [4.2, 18.1] (`0c46b02`). Bug fixes: `rep-null-guard` H0 -4.8 [-11.5, 1.9] (dropped); `ep-hash-capturable` H0 +0.7 [-2.0, 3.4] over 18.8k games, neutral but a real correctness fix, so queued `:nonreg`; `queen-promo-tactical` running. Since 19 Nov: TT fix +16.7, prune-exempt +11.1.
   - **Bug audit (19-20 Nov):** three proven long-standing bugs, each queued `:stc`: repetition check looked past null moves (61/368 bench draws false); ep square hashed after every double push even when no capture possible (one position, several keys); quiet queen promotions pruned/reduced as quiets (624/2843 pruned). Node counts within noise, so SPRT decides. NPS 'drop' is only the first second (flat 1.41-1.45M from depth 15-27): not a bug.
   - In the queue: `prune-exempt-killers` (only killers/counter exempt from move-loop
     pruning; nodes -9.6%). Next: PV stability at depth (X3), reduction/extension balance at depth.
