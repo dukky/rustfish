@@ -147,7 +147,16 @@ the GPU forward).
    gradients over 256-sample chunks, summed in chunk order.
 4. `adam_ft`: per FT element, the bucket's item partials in item order;
    factoriser F (bucket order), W, merged rows; `--wd-active-only` flags
-   from the CPU decode. `adam_flat` for the rest.
+   from the CPU decode. `adam_flat` for the rest. `--lazy-adam` (CPU
+   README, "Lazy Adam"): threads of rows without the flag return before
+   reading partials or moments (F rows only if no bucket row occurred).
+   Smoke (2026-11-20, GPU shared with a training run, so ~2.7x slow):
+   kb8m H 1024 `--half` `--factorise`, 98 batches x 2 runs, `adam_ft`
+   dense 2.28 / 2.23 ms, lazy 2.08 / 2.22 ms of ~17.9 ms: within noise,
+   under 1% of the batch (84% of W rows and 92% of F rows occur in a
+   16384 batch, and a skipped W row still reads p for its merged row).
+   Default-off runs write the same bytes as main; lazy runs are
+   deterministic and match the CPU trainer's lazy runs to 6 digits.
 
 ## Pipeline
 

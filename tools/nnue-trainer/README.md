@@ -213,6 +213,34 @@ before; `--no-wd-active-only` restores plain decay. It only matters with
 `--wd > 0` (the default is 0). KB=1 nets keep plain decay and train
 bit-for-bit as before.
 
+### Lazy Adam (`--lazy-adam`, off by default; also in the CUDA trainer)
+
+AdamW skips the FT rows whose feature did not occur in the batch: their
+params, `m` and `v` stay exactly as they are (no moment decay, no momentum
+step, no weight decay), while the rows that occurred get the normal dense
+update. With `--factorise`, a feature's `F` row is skipped only when none
+of its bucket rows occurred; a skipped `W` row next to an updated `F` row
+still gets its merged row rebuilt. Bias correction uses the global step
+(no per-row step counter, nothing new in checkpoints, which stay
+interchangeable with dense runs).
+
+Why no catch-up for the skipped steps: exact catch-up of the missed
+momentum steps has no closed form (the bias correction and `sqrt(v)`
+change every step), and decaying the moments by `b1^k`, `b2^k` on the next
+visit needs per-row step state in the checkpoint. Plain skipping is the
+cheapest variant and the one that makes the speed case; the cost is that a
+returning row's stale `m` gives one full-size momentum step. Rare rows are
+the only ones affected: at batch 16384 kb8m ~84% of `W` rows and ~92% of
+features occur in every batch (pool7), so it is a small change in
+semantics and a small speed gain (CPU: none measurable, its AdamW already
+skips unchanged lines' stores; CUDA: `adam_ft` 2.08-2.22 vs 2.23-2.28
+ms/batch at kb8m H 1024 `--half`, under 1% of the batch, see its README).
+
+Not byte-identical to a dense run (checked against the reference step in
+the unit tests). H 256 kb8m `--factorise --mirror`, 3 x 1M (pool7 slice,
+val-current 200k): dense val 0.071027 / 0.059283 / 0.056822 (quantized
+0.056885), lazy 0.071026 / 0.059276 / 0.056813 (0.056871).
+
 ## Score-scale check
 
 ```bash

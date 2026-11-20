@@ -30,6 +30,10 @@
 //! whose feature occurs in the batch, so rarely hit buckets are not shrunk
 //! toward zero. `F`, the biases and output weights decay as before.
 //!
+//! `--lazy-adam` (off by default): AdamW leaves FT rows (and `F` rows of
+//! features no bucket saw) that did not occur in the batch untouched: no
+//! moment decay, no step, no catch-up later (README, "Lazy Adam").
+//!
 //! Pipeline:
 //!
 //! ```text
