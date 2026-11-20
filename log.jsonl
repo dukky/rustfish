@@ -609,3 +609,4 @@
 {"branch": "-h", "logged_at": "2026-11-20T16:01:27Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "killer-reset-per-parent", "logged_at": "2026-11-20T16:01:27Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "capture-history-r5", "logged_at": "2026-11-20T16:01:27Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
+{"branch": "qsearch-fail-soft", "elo": 14.87, "elo_ci95": [8.08, 21.68], "games": 2688, "llr": 5.159, "logged_at": "2026-11-20T17:31:08Z", "mode": "stc", "outcome": "merged", "sha": "b567d55d79fb4375cb24fd0714bfc0c296c7d487", "test_id": "q-qsearch-fail-soft-1120-1555", "verdict": "H1"}
