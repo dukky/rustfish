@@ -1882,7 +1882,9 @@ fn negamax(
         }
 
         // Quiet SEE pruning: skip late, unremarkable quiets that hang material
-        // by more than a depth-scaled margin.
+        // by more than a depth-scaled margin. Checks are kept (as in the
+        // futility prune above): a checking sacrifice is the usual way such a
+        // quiet works, and the loss is then not what SEE says.
         if quiet
             && !prune_exempt
             && !in_check
@@ -1891,6 +1893,7 @@ fn negamax(
             && depth <= SEE_QUIET_MAX_DEPTH
             && best > -(MATE_SCORE - 1000)
             && !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth)
+            && !check_info.get_or_insert_with(|| CheckInfo::new(board)).gives_check(board, mv)
         {
             continue;
         }
