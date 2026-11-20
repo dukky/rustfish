@@ -19,6 +19,10 @@
     {
       "branch": "root-bad-captures-last",
       "mode": "stc"
+    },
+    {
+      "branch": "nmp-mate-clamp",
+      "mode": "nonreg"
     }
   ],
   "current": {
