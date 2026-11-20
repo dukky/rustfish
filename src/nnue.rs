@@ -40,10 +40,12 @@ pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
 /// Output buckets, selected by piece count: `(pieces - 2) * BUCKETS / 32`.
 pub(crate) const BUCKETS: usize = 8;
-/// Deeper head (`src/nnue_head.rs`, docs/nnue-deeper-head.md): `true`
-/// expects nets from `nnue-trainer --head` (2H -> 16 -> 32 -> 1 per output
-/// bucket, added to the linear output). Default off: format and eval as before.
-pub(crate) const HEAD: bool = false;
+/// Pairwise head (`src/nnue_head.rs`, docs/nnue-deeper-head.md): `true`
+/// expects nets from `nnue-trainer --head pairwise` (H pairwise products
+/// -> 16 -> 32 -> 1 per output bucket, added to the linear output; with
+/// `head::SKIP`, `--head pairwise-skip` nets without a linear output).
+/// Default off: format and eval as before.
+pub(crate) const HEAD: bool = true;
 
 #[path = "nnue_head.rs"]
 pub(crate) mod head;
@@ -706,11 +708,23 @@ impl<L: Layout> NnueState<L> {
             let b = bucket(pieces);
             let mut stack = self.stack.borrow_mut();
             let (lo, hi) = stack.split_at_mut(self.top);
-            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b);
-            self.computed.set(self.top);
             if HEAD {
-                return finish_head(net, b, sum, &hi[0].acc, stm);
+                // The update also writes the head's L1 input (and, unless
+                // SKIP, the linear output sum) in the same pass.
+                return head::with_scratch(|sc| {
+                    sc.n = 0;
+                    let sum = if head::SKIP {
+                        apply_delta_with::<L, false>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b, Some(&mut *sc))
+                    } else {
+                        apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b, Some(&mut *sc))
+                    };
+                    self.computed.set(self.top);
+                    let h = net.head.as_ref().expect("HEAD net without head").forward_scratch(b, sc);
+                    head::finish(net.out_b[b], sum, h, EVAL_LIMIT)
+                });
             }
+            let sum = apply_delta_with::<L, true>(net, &lo[k].acc, &mut hi[0], &self.cache, stm, b, None);
+            self.computed.set(self.top);
             return finish(net, b, sum);
         }
         self.materialise();
@@ -723,12 +737,14 @@ impl<L: Layout> NnueState<L> {
 /// pass; a perspective marked for refresh is rebuilt from the finny table.
 #[inline(always)]
 fn apply_delta<L: Layout>(net: &Network, src: &Accumulator, dst: &mut Slot, cache: &RefCell<Vec<CacheEntry>>) {
-    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0);
+    apply_delta_with::<L, false>(net, src, dst, cache, Color::White, 0, None);
 }
 
 /// `apply_delta`, and with `EVAL` also the output sum of the result for
 /// side to move `stm` and output bucket `b` (requires `net.small_out`),
-/// fused into the update pass. Without `EVAL` it returns 0.
+/// fused into the update pass. Without `EVAL` it returns 0. With `act`
+/// (`HEAD`), also the head's pairwise L1 input of the result (stm half
+/// first; `act.n` counts the nonzero chunks, start it at 0).
 #[inline(always)]
 fn apply_delta_with<L: Layout, const EVAL: bool>(
     net: &Network,
@@ -737,12 +753,14 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
     cache: &RefCell<Vec<CacheEntry>>,
     stm: Color,
     b: usize,
+    mut act: Option<&mut head::Scratch>,
 ) -> i64 {
     let d = dst.delta;
     let mut sum = 0i64;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
         let w = if EVAL { out_half(net, b, persp == stm) } else { &net.ft_b };
         let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
+        let half = if persp == stm { 0 } else { 1 };
         if L::REFRESH && dst.refresh[pi] {
             let mut c = cache.borrow_mut();
             let bb = dst.bb;
@@ -750,13 +768,24 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
             if EVAL {
                 sum += simd::screlu_dot(&dst.acc.v[pi], w);
             }
+            if let Some(a) = act.as_deref_mut() {
+                let hx = head::CHUNKS * 2;
+                a.n = head::kernels::activate(&dst.acc.v[pi], &mut a.x.0[half * hx..(half + 1) * hx], half * hx / 4, &mut a.nnz, a.n);
+            }
             continue;
         }
         let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
         let a0 = f(d.add[0]);
         let s0 = f(d.sub[0]);
         let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
-        let run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
+        let mut run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
+            if let Some(a) = act.as_deref_mut() {
+                let hx = head::CHUNKS * 2;
+                let (x, nnz) = (&mut a.x.0[half * hx..(half + 1) * hx], &mut a.nnz);
+                let (sum, n) = head::kernels::update_pw::<EVAL>(o, s, adds, subs, w, x, half * hx / 4, nnz, a.n);
+                a.n = n;
+                return sum;
+            }
             if EVAL {
                 simd::update_dot(o, s, adds, subs, w)
             } else {
@@ -804,7 +833,8 @@ pub(crate) fn evaluate_acc(net: &Network, acc: &Accumulator, stm: Color, pieces:
     };
     let b = bucket(pieces);
     if HEAD {
-        return finish_head(net, b, output_sum(net, b, us, them), acc, stm);
+        let sum = if head::SKIP { 0 } else { output_sum(net, b, us, them) };
+        return finish_head(net, b, sum, acc, stm);
     }
     finish(net, b, output_sum(net, b, us, them))
 }
@@ -1693,6 +1723,9 @@ mod tests {
     /// Hand-computed: one nonzero bias, one nonzero weight, empty-ish board.
     #[test]
     fn tiny_net_matches_formula() {
+        if HEAD && head::SKIP {
+            return; // no linear output to check
+        }
         let mut ft_w = vec![0i16; INPUTS * H];
         let mut ft_b = [0i16; H];
         let mut out_w = vec![0i16; BUCKETS * 2 * H];
