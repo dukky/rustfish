@@ -1369,6 +1369,7 @@ fn search_root(
                 None,
                 !off(4096),
             );
+            let s_nw = score;
             if reduction > 0 && score > alpha {
                 // The reduced search says this move might beat alpha; verify it
                 // at full depth before accepting the score.
@@ -1388,7 +1389,9 @@ fn search_root(
                     !off(4096),
                 );
             }
+            let s_ver = score;
             if score > alpha && score < beta {
+                if off(16384) { println!("info string pvresearch {} nw {} ver {} red {}", move_to_uci(mv), s_nw, s_ver, reduction); }
                 score = -negamax(
                     board,
                     depth - 1,
