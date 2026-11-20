@@ -37,7 +37,7 @@
 //! interleaved partial sums (float reassociation only).
 
 use crate::simd::{Isa, Portable, Simd};
-use crate::{decode, head_backward, head_forward, head_offs, head_small_grads, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, H1, H2, HS, INPUTS};
+use crate::{decode, ft_l1, head_backward, head_fwd_acc, head_offs, head_small_grads, head_w1t, pw_at, pw_dacc, pw_lane, sigmoid, Adam, KingLayout, Rec, Sample, Shape, CLIP, H1, H2, HS, INPUTS};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::thread::Thread;
 
@@ -287,6 +287,8 @@ pub struct BatchTrainer {
     acc: [ABuf; NACC],
     /// `--head`: per accumulator slot, each sample's head scratch (`HS`).
     hsc: [ABuf; NACC],
+    /// Pairwise heads: per accumulator slot, each sample's dLoss/dacc (2H).
+    dac: [ABuf; NACC],
     /// `--head`: W1 of every output bucket transposed to `[2H][H1]` (rebuilt
     /// from `p` each batch; layout only, see `head_forward`).
     w1t: Vec<f32>,
@@ -328,12 +330,13 @@ impl BatchTrainer {
         let sb = if sb == 0 { ((2 << 20) / (8 * sh.h)).clamp(128, 2048) } else { sb };
         let sb = sb.div_ceil(FB) * FB;
         let rows = sh.kb * INPUTS;
+        let tiles = sh.h / TB;
         let blank = Sample { f: [[0; 32]; 2], n: 0, bucket: 0, target: 0.0 };
         assert!(sh.kb <= MAX_KB);
         BatchTrainer {
             sh,
             rows,
-            tiles: sh.h / TB,
+            tiles,
             sb,
             isa: Isa::detect(),
             exact,
@@ -345,7 +348,8 @@ impl BatchTrainer {
             grest: ABuf::new(sh.len() - sh.ft_b()),
             acc: std::array::from_fn(|_| ABuf::new(sb * 2 * sh.h)),
             hsc: std::array::from_fn(|_| ABuf::new(if sh.hd > 0 { sb * HS } else { 0 })),
-            w1t: vec![0.0; sh.hd * sh.buckets * 2 * sh.h * H1],
+            dac: std::array::from_fn(|_| ABuf::new(if sh.pw() { sb * 2 * sh.h } else { 0 })),
+            w1t: vec![0.0; sh.buckets * if sh.hd > 0 { sh.head_in() * H1 } else { 0 }],
             samples: vec![blank; sb],
             pairs: Vec::new(),
             grad: Vec::new(),
@@ -501,16 +505,11 @@ impl BatchTrainer {
         let grest = self.grest.ptr();
         let accs: [Ptr; NACC] = std::array::from_fn(|i| self.acc[i].ptr());
         let hscs: [Ptr; NACC] = std::array::from_fn(|i| self.hsc[i].ptr());
+        let dacs: [Ptr; NACC] = std::array::from_fn(|i| self.dac[i].ptr());
         if self.sh.hd > 0 {
-            let n2 = 2 * self.sh.h;
+            let n2 = self.sh.head_in();
             for b in 0..self.sh.buckets {
-                let w1 = head_offs(self.sh, b)[0];
-                let t = &mut self.w1t[b * n2 * H1..(b + 1) * n2 * H1];
-                for k in 0..H1 {
-                    for i in 0..n2 {
-                        t[i * H1 + k] = p[w1 + k * n2 + i];
-                    }
-                }
+                head_w1t(p, self.sh, b, &mut self.w1t[b * n2 * H1..(b + 1) * n2 * H1]);
             }
         }
         let w1t = &self.w1t[..];
@@ -639,7 +638,7 @@ impl BatchTrainer {
                     let len = sb_len(k);
                     let ss = std::slice::from_raw_parts(samples.get().add(k * sb), len);
                     let gr = std::slice::from_raw_parts(grad.get().add(k * sb), len);
-                    let a = BwdArgs { sh, rows, p, ss, acc: accs[k % NACC].get(), hs: hscs[k % NACC].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
+                    let a = BwdArgs { sh, rows, p, ss, acc: accs[k % NACC].get(), hs: hscs[k % NACC].get(), dacc: dacs[k % NACC].get(), grad: gr, gft: gft.get(), grest: grest.get(), c: u };
                     bwd_dispatch(isa, &a);
                     tile_k[u].store(k + 1, Ordering::Release);
                     bwd_done[k].fetch_add(1, Ordering::AcqRel);
@@ -683,6 +682,7 @@ impl BatchTrainer {
                         grad: grad.get().add(base + s0),
                         loss: loss.get().add(base + s0),
                         hs: hscs[k % NACC].get().add(s0 * HS),
+                        dacc: if sh.pw() { dacs[k % NACC].get().add(s0 * 2 * sh.h) } else { std::ptr::null_mut() },
                         w1t,
                     };
                     out_dispatch(isa, exact, &a);
@@ -801,6 +801,8 @@ struct OutArgs<'a> {
     /// `--head`: the block's head scratch out (`ss.len() * HS`), and the
     /// transposed W1 of every bucket.
     hs: *mut f32,
+    /// Pairwise heads: the block's dLoss/dacc out (`ss.len() * 2H`).
+    dacc: *mut f32,
     w1t: &'a [f32],
 }
 
@@ -812,6 +814,8 @@ struct BwdArgs<'a> {
     acc: *const f32,
     /// `--head`: the sub-batch's head scratch.
     hs: *const f32,
+    /// Pairwise heads: the sub-batch's dLoss/dacc.
+    dacc: *const f32,
     grad: &'a [f32],
     gft: *mut f32,
     grest: *mut f32,
@@ -936,8 +940,9 @@ unsafe fn out_impl<V: Simd, const EXACT: bool>(a: &OutArgs) {
         out += sum;
         let mut scr = [0.0f32; HS];
         if sh.hd > 0 {
-            let t = &a.w1t[s.bucket * 2 * h * H1..(s.bucket + 1) * 2 * h * H1];
-            out += head_forward(a.p, sh, s.bucket, std::slice::from_raw_parts(acc, 2 * h), Some(t), &mut scr);
+            let n_in = sh.head_in();
+            let t = &a.w1t[s.bucket * n_in * H1..(s.bucket + 1) * n_in * H1];
+            out += head_fwd_acc(a.p, sh, s.bucket, std::slice::from_raw_parts(acc, 2 * h), Some(t), &mut scr);
         }
         let pred = sigmoid(out);
         let err = pred - s.target;
@@ -947,6 +952,26 @@ unsafe fn out_impl<V: Simd, const EXACT: bool>(a: &OutArgs) {
         if sh.hd > 0 {
             head_backward(a.p, sh, s.bucket, g, &mut scr);
             std::ptr::copy_nonoverlapping(scr.as_ptr(), a.hs.add(j * HS), HS);
+        }
+        if sh.pw() {
+            // dLoss/dacc of every lane, as `train_sample` (same expressions
+            // and order; W1 from the quantised transposed copy).
+            let acc = std::slice::from_raw_parts(acc, 2 * h);
+            let ow = std::slice::from_raw_parts(ow, 2 * h);
+            let t = &a.w1t[s.bucket * h * H1..(s.bucket + 1) * h * H1];
+            let dz = &scr[H1 + H2..2 * H1 + H2];
+            let l1 = ft_l1();
+            let d = a.dacc.add(j * 2 * h);
+            for i in 0..2 * h {
+                let x = acc[i];
+                let c = x.clamp(0.0, 1.0);
+                let (pi, partner) = pw_lane(h, i);
+                let mut e = 0.0f32;
+                for k in 0..H1 {
+                    e += dz[k] * t[pi * H1 + k];
+                }
+                *d.add(i) = pw_dacc(x, g * ow[i] * 2.0 * c, e + l1, acc[partner].clamp(0.0, 1.0));
+            }
         }
     }
 }
@@ -965,22 +990,20 @@ unsafe fn bwd_impl<V: Simd>(a: &BwdArgs) {
     let ow0 = a.p.as_ptr().add(sh.out_w());
     let two = V::splat(2.0);
     let head = sh.hd > 0;
-    let rest_len = sh.len() - sh.ft_b();
+    if sh.pw() {
+        bwd_pw::<V>(a);
+        return;
+    }
+    if head {
+        bwd_head_batch::<V>(a);
+        return;
+    }
     for (j, s) in a.ss.iter().enumerate() {
         let g = a.grad[j];
-        let scr: &[f32; HS] = if head { &*(a.hs.add(j * HS) as *const [f32; HS]) } else { &[0.0; HS] };
         if a.c == 0 {
             *gob.add(s.bucket) += g;
         }
-        if head {
-            // W2 rows spread over the column units (unit c: rows m = c mod tiles).
-            head_small_grads(sh, s.bucket, g, scr, std::slice::from_raw_parts_mut(a.grest, rest_len), sh.ft_b(), a.c, sh.h / TB);
-        }
         let gs = V::splat(g);
-        if head {
-            bwd_head_sample::<V>(a, j, s, g, scr);
-            continue;
-        }
         for side in 0..2 {
             let off = s.bucket * 2 * h + side * h + col;
             let x0 = a.acc.add(j * 2 * h + side * h + col);
@@ -1006,70 +1029,185 @@ unsafe fn bwd_impl<V: Simd>(a: &BwdArgs) {
     }
 }
 
-/// `bwd_impl` for one sample of a `--head` net: the same per-element
-/// float operations in the same order as `train_sample` (so batch ==
-/// reference bit for bit), but with the head's 16-term loop outermost:
-/// both sides' column vectors give 2 * TB / W independent chains for the
-/// W1 gradient and for `e = sum_q dz1[q] W1[q][i]` (with q innermost they
-/// were 16-long dependent chains, the CPU trainer's main `--head` cost).
+/// Pairwise heads: column tile `c` of the sub-batch's gradient from the
+/// cached dLoss/dacc, in sample order. Tiles of the first half of the
+/// columns (`col < H/2`) also do the W1 gradient of the pairwise inputs
+/// they start (both perspectives).
 #[inline(always)]
-unsafe fn bwd_head_sample<V: Simd>(a: &BwdArgs, j: usize, s: &Sample, g: f32, scr: &[f32; HS]) {
+unsafe fn bwd_pw<V: Simd>(a: &BwdArgs) {
     let sh = a.sh;
     let h = sh.h;
     let n = TB / V::W;
     let col = a.c * TB;
     let gtile = a.gft.add(a.c * a.rows * TB);
     let gb = a.grest.add(col);
+    let gob = a.grest.add(sh.out_b() - sh.ft_b());
+    let gow0 = a.grest.add(sh.out_w() - sh.ft_b());
+    let half = h / 2;
+    let w1_tile = col < half;
+    for (j, s) in a.ss.iter().enumerate() {
+        let g = a.grad[j];
+        let gs = V::splat(g);
+        if a.c == 0 {
+            *gob.add(s.bucket) += g;
+        }
+        let scr = &*(a.hs.add(j * HS) as *const [f32; HS]);
+        head_small_grads(sh, s.bucket, g, scr, std::slice::from_raw_parts_mut(a.grest, sh.len() - sh.ft_b()), sh.ft_b(), a.c, sh.h / TB);
+        let acc = std::slice::from_raw_parts(a.acc.add(j * 2 * h), 2 * h);
+        if w1_tile {
+            let w1 = head_offs(sh, s.bucket)[0];
+            for side in 0..2 {
+                for q in 0..TB {
+                    let i = side * half + col + q;
+                    let x = pw_at(acc, h, i);
+                    for k in 0..H1 {
+                        let gq = a.grest.add(w1 + k * h + i - sh.ft_b());
+                        *gq += scr[H1 + H2 + k] * x;
+                    }
+                }
+            }
+        }
+        for side in 0..2 {
+            let off = s.bucket * 2 * h + side * h + col;
+            let x0 = a.acc.add(j * 2 * h + side * h + col);
+            let d0 = a.dacc.add(j * 2 * h + side * h + col);
+            let mut d = [V::zero(); 16];
+            for k in 0..n {
+                if !sh.skip() {
+                    let c = V::load(x0.add(k * V::W)).clamp01();
+                    let go = gow0.add(off + k * V::W);
+                    V::load(go).add(gs.mul(c).mul(c)).store(go);
+                }
+                d[k] = V::load(d0.add(k * V::W));
+                let b = gb.add(k * V::W);
+                V::load(b).add(d[k]).store(b);
+            }
+            for &f in &s.f[side][..s.n] {
+                let row = gtile.add(f as usize * TB);
+                for k in 0..n {
+                    let q = row.add(k * V::W);
+                    V::load(q).add(d[k]).store(q);
+                }
+            }
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn bwd_head_batch<V: Simd>(a: &BwdArgs) {
+    let sh = a.sh;
+    let h = sh.h;
+    let n = TB / V::W;
+    let col = a.c * TB;
+    let gtile = a.gft.add(a.c * a.rows * TB);
+    let gb = a.grest.add(col);
+    let gob = a.grest.add(sh.out_b() - sh.ft_b());
     let gow0 = a.grest.add(sh.out_w() - sh.ft_b());
     let ow0 = a.p.as_ptr().add(sh.out_w());
     let two = V::splat(2.0);
-    let gs = V::splat(g);
-    let w1 = head_offs(sh, s.bucket)[0];
-    let mut x = [[V::zero(); 16]; 2];
-    let mut c = [[V::zero(); 16]; 2];
-    let mut a2 = [[V::zero(); 16]; 2];
-    let mut e = [[V::zero(); 16]; 2];
-    for side in 0..2 {
-        let off = s.bucket * 2 * h + side * h + col;
-        let x0 = a.acc.add(j * 2 * h + side * h + col);
-        for k in 0..n {
-            x[side][k] = V::load(x0.add(k * V::W));
-            c[side][k] = x[side][k].clamp01();
-            let go = gow0.add(off + k * V::W);
-            V::load(go).add(gs.mul(c[side][k]).mul(c[side][k])).store(go);
-            a2[side][k] = c[side][k].mul(c[side][k]);
+
+    const CH: usize = 16;
+    let mut x = [[[V::zero(); 16]; 2]; CH];
+    let mut a2 = [[[V::zero(); 16]; 2]; CH];
+    let mut groups: Vec<Vec<u16>> = vec![Vec::with_capacity(CH); sh.buckets];
+    let len = a.ss.len();
+    let mut s0 = 0;
+    while s0 < len {
+        let m = CH.min(len - s0);
+        for g in &mut groups {
+            g.clear();
         }
-    }
-    // As train_sample: gW1[q][i] += dz1[q] * a^2, e = sum_q dz1[q] W1[q][i] (q ascending).
-    for q in 0..H1 {
-        let dz = V::splat(scr[H1 + H2 + q]);
-        for side in 0..2 {
-            let at0 = w1 + q * 2 * h + side * h + col;
-            let gq0 = a.grest.add(at0 - sh.ft_b());
-            let w0 = a.p.as_ptr().add(at0);
-            for k in 0..n {
-                let gq = gq0.add(k * V::W);
-                V::load(gq).add(dz.mul(a2[side][k])).store(gq);
-                e[side][k] = e[side][k].add(dz.mul(V::load(w0.add(k * V::W))));
+        for j in 0..m {
+            let idx = s0 + j;
+            let s = &a.ss[idx];
+            let g = a.grad[idx];
+            let gs = V::splat(g);
+            groups[s.bucket].push(j as u16);
+            if a.c == 0 {
+                *gob.add(s.bucket) += g;
+            }
+            head_small_grads(sh, s.bucket, g, &*(a.hs.add(idx * HS) as *const [f32; HS]), std::slice::from_raw_parts_mut(a.grest, sh.len() - sh.ft_b()), sh.ft_b(), a.c, sh.h / TB);
+            for side in 0..2 {
+                let off = s.bucket * 2 * h + side * h + col;
+                let x0 = a.acc.add(idx * 2 * h + side * h + col);
+                for k in 0..n {
+                    let xv = V::load(x0.add(k * V::W));
+                    let c = xv.clamp01();
+                    let av = c.mul(c);
+                    x[j][side][k] = xv;
+                    a2[j][side][k] = av;
+                    let go = gow0.add(off + k * V::W);
+                    V::load(go).add(gs.mul(c).mul(c)).store(go);
+                }
             }
         }
-    }
-    for side in 0..2 {
-        let off = s.bucket * 2 * h + side * h + col;
-        let mut d = [V::zero(); 16];
-        for k in 0..n {
-            let w = V::load(ow0.add(off + k * V::W));
-            d[k] = V::select_in01(x[side][k], gs.mul(w).add(e[side][k]).mul(two).mul(c[side][k]));
-            let b = gb.add(k * V::W);
-            V::load(b).add(d[k]).store(b);
-        }
-        for &f in &s.f[side][..s.n] {
-            let row = gtile.add(f as usize * TB);
-            for k in 0..n {
-                let q = row.add(k * V::W);
-                V::load(q).add(d[k]).store(q);
+        for b in 0..sh.buckets {
+            let group = &groups[b];
+            if group.is_empty() {
+                continue;
+            }
+            let w1 = head_offs(sh, b)[0];
+            for q in 0..H1 {
+                let mut dzs = [0.0f32; CH];
+                for &j in group {
+                    dzs[j as usize] = *a.hs.add((s0 + j as usize) * HS + H1 + H2 + q);
+                }
+                for side in 0..2 {
+                    let gq0 = a.grest.add(w1 + q * 2 * h + side * h + col - sh.ft_b());
+                    let mut gacc = [V::zero(); 16];
+                    for k in 0..n {
+                        gacc[k] = V::load(gq0.add(k * V::W));
+                    }
+                    for &j in group {
+                        let j = j as usize;
+                        let dz = V::splat(dzs[j]);
+                        for k in 0..n {
+                            gacc[k] = gacc[k].add(dz.mul(a2[j][side][k]));
+                        }
+                    }
+                    for k in 0..n {
+                        gacc[k].store(gq0.add(k * V::W));
+                    }
+                }
             }
         }
+        for j in 0..m {
+            let idx = s0 + j;
+            let s = &a.ss[idx];
+            let g = a.grad[idx];
+            let gs = V::splat(g);
+            let scr = &*(a.hs.add(idx * HS) as *const [f32; HS]);
+            let w1 = head_offs(sh, s.bucket)[0];
+            let mut e = [[V::zero(); 16]; 2];
+            for q in 0..H1 {
+                let dz = V::splat(scr[H1 + H2 + q]);
+                for side in 0..2 {
+                    let w0 = a.p.as_ptr().add(w1 + q * 2 * h + side * h + col);
+                    for k in 0..n {
+                        e[side][k] = e[side][k].add(dz.mul(V::load(w0.add(k * V::W))));
+                    }
+                }
+            }
+            for side in 0..2 {
+                let off = s.bucket * 2 * h + side * h + col;
+                let mut d = [V::zero(); 16];
+                for k in 0..n {
+                    let w = V::load(ow0.add(off + k * V::W));
+                    let c = x[j][side][k].clamp01();
+                    d[k] = V::select_in01(x[j][side][k], gs.mul(w).add(e[side][k]).mul(two).mul(c));
+                    let b = gb.add(k * V::W);
+                    V::load(b).add(d[k]).store(b);
+                }
+                for &f in &s.f[side][..s.n] {
+                    let row = gtile.add(f as usize * TB);
+                    for k in 0..n {
+                        let p = row.add(k * V::W);
+                        V::load(p).add(d[k]).store(p);
+                    }
+                }
+            }
+        }
+        s0 += m;
     }
 }
 

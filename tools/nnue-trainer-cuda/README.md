@@ -70,12 +70,13 @@ with stub headers, but **no kernel has run**. It mirrors the CPU trainer's
 math (`head_forward`, `head_backward`, `head_small_grads`, the `e` term of
 `train_sample`; docs/nnue-deeper-head.md):
 
-- `forward`: with `hd`, each thread also forms its 4 columns' share of
-  the 16 z1 sums (warp shuffle tree, then warps in order through shared
-  memory); warp 0 adds b1, does L2 (lane = z2 row), L3 (shuffle tree),
-  the loss and gradient, the head backward (dz2, dz1), and writes the
-  sample's scratch `hs[sample][96]` = z1 | z2 | dz1 | dz2 (the CPU `HS`
-  layout).
+- `forward` + `head_forward` (since `perf-cuda-pairwise`, see "Head
+  speed" below; before, all of this ran at the end of `forward` and in a
+  `compute_dacc` kernel): the 16 z1 sums (a warp per row: lane partials,
+  then the shuffle tree); warp 0 adds b1, does L2 (lane = z2 row), L3
+  (shuffle tree), the loss and gradient, the head backward (dz2, dz1), and
+  writes the sample's scratch `hs[sample][96]` = z1 | z2 | dz1 | dz2 (the
+  CPU `HS` layout); then dacc for every lane.
 - `backward_ft` staging and `backward_rest` (FT bias): dacc = `(g w + e)
   2 a`, `e = sum_q dz1[q] W1[q][i]` (q ascending), as `train_sample`.
 - New: `backward_head_w1` (thread = lane of 2H, grid.y = chunk x bucket;
@@ -210,4 +211,45 @@ Approaches that lost (1080 Ti, kb8m):
 - Bigger redesigns of `backward_ft` (64-column tiles, register prefetch of
   the next range) run out of registers: the bucket's 768 x 32 gradient
   slice already takes 24 of the 64 registers per thread at 1024 threads.
+
+## Head speed (`--head pairwise`, branch `perf-cuda-pairwise`)
+
+Byte-identical to `trainer-head-pairwise` (8c9ff85): every net (`.e1`,
+`.e2`, final) and the checkpoint `cmp`-equal, 2 x 1.5M positions from
+`pwcheck/slice.bin`, for H 1024 kb8m `--factorise --init g9h1024kb8m`
+pairwise (`--half` and f32), pairwise-skip, dense `--head`, plain, and
+pairwise H 512 / H 256, dense H 256.
+
+Changes: the head moved out of `forward` into `head_forward` (block of 256
+per sample, 4 blocks/SM instead of 2 of 512); `compute_dacc` folded into it
+(e summed once per pairwise input, shared by both partner lanes; the dacc
+rounding pinned with `__fmul_rn` / `__fmaf_rn` to nvcc's old contraction);
+head inputs (pw_in / sq01) formed once into shared memory and `hin` (read by
+`backward_head_w1` instead of recomputing pw_in from acc); W1 copied once
+per batch (`quant_w1`): int8 q_w1 * 64 for pairwise (exact), f32 aligned for
+dense, natural + lane-major layouts; small head params, ob, target in
+shared; `backward_head_w1` / `backward_head_small` stage their sample rows
+in shared memory.
+
+Speed, H 1024 kb8m `--factorise --half`, batch 16384, `--threads 2`, 600
+batches from `pwcheck/slice.bin`, `--init g9h1024kb8m`, 125 W cap; base and
+candidate interleaved, two rounds:
+
+| run | base 8c9ff85 | candidate | |
+|---|---|---|---|
+| `--head pairwise`, idle GPU (2026-11-20) | 717k / 709k | 1.49M / 1.46M | 2.07x |
+| plain, idle GPU | 1.995M / 1.977M | 1.976M / 1.947M | -1.2% (noise level) |
+| `--head pairwise`, GPU shared with a training run | 331k / 331k | 731k / 733k | 2.21x |
+| plain, shared | 872k / 879k | 877k / 872k | same |
+
+Profile at idle (ms/batch), pairwise base: forward (incl. the head) 16.6,
+reduce_rest + head kernels 1.5, backward_ft 2.3, adam_ft 0.93; total 22.4.
+Candidate: forward 3.1, head_forward 2.1, backward_ft 2.6, backward_rest
+0.92, head_w1 0.35, head_small 0.12, reduce_head 0.13, adam_ft 1.0; total
+10.6 (plain 7.9). Shared-GPU base profile: forward 26.6 + compute_dacc 12.0
+of 52.6 ms. Lost (all byte-identical, just slower): fp16 W1 copies (L2
+traffic beats the int8 decode), 3 forward blocks/SM (spills), head blocks of
+128 / 512 threads. Keeping the head fused into `forward` (2 blocks/SM)
+was as fast for pairwise but slower for the dense head, so it is split.
+
 

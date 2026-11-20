@@ -72,7 +72,9 @@ struct Prof {
 }
 
 impl Prof {
-    const STAGES: [&'static str; 8] = ["forward", "plan_csr", "backward_ft", "backward_rest", "reduce_rest", "adam_ft", "adam_flat", "loss copy"];
+    const STAGES: [&'static str; 13] = [
+        "quant_w1", "forward", "head_forward", "plan_csr", "backward_ft", "backward_rest", "reduce_rest", "head_w1", "head_small", "reduce_head", "adam_ft", "adam_flat", "loss copy",
+    ];
     fn new() -> Self {
         let mk = || {
             (0..=Self::STAGES.len())
@@ -250,19 +252,26 @@ impl Slot {
 enum Arg {
     P(CuPtr),
     I(i32),
+    F(f32),
     C(AdamC),
 }
 
 fn launch(f: Handle, grid: (u32, u32), block: u32, stream: Handle, args: &[Arg]) {
+    launch_sh(f, grid, block, 0, stream, args)
+}
+
+/// `launch` with `shmem` bytes of dynamic shared memory.
+fn launch_sh(f: Handle, grid: (u32, u32), block: u32, shmem: u32, stream: Handle, args: &[Arg]) {
     let mut vals: Vec<*mut c_void> = args
         .iter()
         .map(|a| match a {
             Arg::P(p) => p as *const CuPtr as *mut c_void,
             Arg::I(i) => i as *const i32 as *mut c_void,
+            Arg::F(x) => x as *const f32 as *mut c_void,
             Arg::C(c) => c as *const AdamC as *mut c_void,
         })
         .collect();
-    let r = unsafe { cuLaunchKernel(f, grid.0, grid.1, 1, block, 1, 1, 0, stream, vals.as_mut_ptr(), std::ptr::null_mut()) };
+    let r = unsafe { cuLaunchKernel(f, grid.0, grid.1, 1, block, 1, 1, shmem, stream, vals.as_mut_ptr(), std::ptr::null_mut()) };
     ck(r, "launch");
 }
 
@@ -298,6 +307,8 @@ struct AdamC {
     inv_batch: f32,
 }
 
+/// head_forward block size (kernels.cu `HT`).
+const HT: u32 = 256;
 /// Pairs per FT-backward work item (one king bucket each).
 const WI: usize = 2048;
 /// Pairs per incidence-list range (kernels.cu `R`).
@@ -311,7 +322,8 @@ struct Kernels {
     forward: Handle,
     forward_half: Handle,
     to_half: Handle,
-    compute_dacc: Handle,
+    quant_w1: Handle,
+    head_forward: Handle,
     backward_ft: Handle,
     plan_csr: Handle,
     backward_rest: Handle,
@@ -355,6 +367,14 @@ struct GpuTrainer {
     /// `--head`: dacc[j * 2H + cc] cached once per batch, so both backward
     /// kernels can read the head term instead of recomputing it per lane.
     dacc: DBuf<f32>,
+    /// `--head`: the head inputs (pw_in / sq01) per sample, written by
+    /// head_forward for backward_head_w1.
+    hin: DBuf<f32>,
+    /// Pairwise heads: W1 as int8 (q_w1 * 64), natural and lane-major
+    /// (quant_w1, every batch).
+    qw: DBuf<u8>,
+    /// Dense head: the same two copies of W1 in f32.
+    wf: DBuf<f32>,
     phead: DBuf<f32>,
     slots: [Slot; 2],
     /// Per range of R pairs: its (pair, feature) incidences by feature (plan_csr).
@@ -379,7 +399,7 @@ impl GpuTrainer {
         let sh = cfg.sh;
         assert!(sh.h % 64 == 0 && sh.h <= 2048, "nnue-trainer-cuda: --hidden must be a multiple of 64, at most 2048");
         assert!(sh.buckets <= 8 && sh.kb <= 64, "nnue-trainer-cuda: at most 8 output buckets, 64 king buckets");
-        assert!(sh.hd <= 1, "nnue-trainer-cuda: unknown head");
+        assert!(sh.hd <= 3, "nnue-trainer-cuda: unknown head");
         if sh.hd > 0 {
             eprintln!("nnue-trainer-cuda: --head is UNTESTED ON CUDA; validate against the CPU trainer first (README)");
         }
@@ -406,7 +426,8 @@ impl GpuTrainer {
             forward: get("forward"),
             forward_half: get("forward_half"),
             to_half: get("to_half"),
-            compute_dacc: get("compute_dacc"),
+            quant_w1: get("quant_w1"),
+            head_forward: get("head_forward"),
             backward_ft: get("backward_ft"),
             plan_csr: get("plan_csr"),
             backward_rest: get("backward_rest"),
@@ -452,6 +473,9 @@ impl GpuTrainer {
             gout: DBuf::new(b),
             hsc: DBuf::new(if sh.hd > 0 { b * HS } else { 0 }),
             dacc: DBuf::new(if sh.hd > 0 { b * 2 * h } else { 0 }),
+            hin: DBuf::new(if sh.hd > 0 { b * sh.head_in() } else { 0 }),
+            qw: DBuf::new(if sh.hd >= 2 { 2 * sh.buckets * H1 * sh.head_in() } else { 0 }),
+            wf: DBuf::new(if sh.hd == 1 { 2 * sh.buckets * H1 * sh.head_in() } else { 0 }),
             phead: DBuf::new(if sh.hd > 0 { chunks * sh.buckets * sh.head_len() } else { 0 }),
             slots: [Slot::new(b, max_items, max_ranges, sh.kb, sh.buckets, rows), Slot::new(b, max_items, max_ranges, sh.kb, sh.buckets, rows)],
             csr: DBuf::new(max_ranges * CSRW),
@@ -667,17 +691,31 @@ impl Backend for GpuTrainer {
                 p.mark(si, i, st)
             }
         };
-        mark(0);
         let hd = sh.hd as i32;
-        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), P(self.hsc.ptr), I(hd)]);
+        mark(0);
         if sh.hd > 0 {
-            // One sample-parallel pass over all lanes; both backward kernels
-            // then read dacc instead of recomputing the head's dense e sum.
-            launch(k.compute_dacc, ((2 * h).div_ceil(256) as u32, n as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.hsc.ptr), P(self.dacc.ptr), I(hi), I(bi), I(nn)]);
+            let nq = sh.buckets * H1 * sh.head_in();
+            launch(k.quant_w1, (nq.div_ceil(256) as u32, 1), 256, st, &[P(self.pr.ptr), P(self.qw.ptr), P(self.wf.ptr), I(hi), I(bi), I(hd)]);
         }
         mark(1);
-        launch(k.plan_csr, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.csr.ptr)]);
+        launch(fwd, (n as u32, 1), (h / 2) as u32, st, &[P(sl.ss.ptr), P(sl.order.ptr), P(wt), P(self.pr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(sl.loss.ptr), I(hi), I(bi), I(hd)]);
         mark(2);
+        if sh.hd > 0 {
+            // Head forward + head backward + dacc, a block per sample; dynamic
+            // shared = the sample's accumulators (2H) and head inputs.
+            let shmem = (4 * (2 * h + sh.head_in())) as u32;
+            launch_sh(
+                k.head_forward,
+                (n as u32, 1),
+                HT,
+                shmem,
+                st,
+                &[P(sl.ss.ptr), P(self.acc.ptr), P(self.pr.ptr), P(self.qw.ptr), P(self.wf.ptr), P(self.gout.ptr), P(sl.loss.ptr), P(self.hsc.ptr), P(self.hin.ptr), P(self.dacc.ptr), I(hi), I(bi), I(hd), F(nnue_trainer::ft_l1())],
+            );
+        }
+        mark(3);
+        launch(k.plan_csr, (nr as u32, 1), 256, st, &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.rs.ptr), P(sl.rb.ptr), P(self.csr.ptr)]);
+        mark(4);
         launch(
             k.backward_ft,
             ((h / 32) as u32, ni as u32),
@@ -685,22 +723,29 @@ impl Backend for GpuTrainer {
             st,
             &[P(sl.ss.ptr), P(sl.pairs.ptr), P(sl.items.ptr), P(self.csr.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.part.ptr), I(hi), P(self.hsc.ptr), P(self.dacc.ptr), I(hd), I(bi)],
         );
-        mark(3);
+        mark(5);
         launch(k.backward_rest, ((2 * h).div_ceil(256) as u32, chunks as u32), 256, st, &[P(sl.ss.ptr), P(self.acc.ptr), P(self.gout.ptr), P(self.pr.ptr), P(self.prest.ptr), I(hi), I(bi), I(nn), P(self.hsc.ptr), P(self.dacc.ptr), I(hd)]);
-        mark(4);
-        launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+        mark(6);
+        launch(k.reduce_rest, (nrest.div_ceil(256) as u32, 1), 256, st, &[P(self.prest.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32), I(hd)]);
+        mark(7);
         if sh.hd > 0 {
             // Head gradients: W1 per (lane, bucket, chunk), the small layers
             // per (bucket, chunk), then summed in chunk order into gr.
             let (bu, ch) = (sh.buckets as u32, chunks as u32);
-            launch(k.backward_head_w1, ((2 * h).div_ceil(256) as u32, ch * bu), 256, st, &[P(self.acc.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32)]);
-            let small = sh.head_len() - H1 * 2 * h;
-            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32)]);
+            launch(k.backward_head_w1, (sh.head_in().div_ceil(256) as u32, ch * bu), 256, st, &[P(self.hin.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
+            mark(8);
+            let small = sh.head_len() - H1 * sh.head_in();
+            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
+            mark(9);
             let nh = sh.buckets * sh.head_len();
-            launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32)]);
+            launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32), I(hd)]);
+        }
+        if sh.hd == 0 {
+            mark(8);
+            mark(9);
         }
         let act = if wd_active { sl.active.ptr } else { 0 };
-        mark(5);
+        mark(10);
         launch(
             k.adam_ft,
             ((INPUTS * h).div_ceil(256) as u32, 1),
@@ -708,11 +753,11 @@ impl Backend for GpuTrainer {
             st,
             &[C(c), P(self.pw.ptr), P(self.mw.ptr), P(self.vw.ptr), P(self.pf.ptr), P(self.mf.ptr), P(self.vf.ptr), P(self.wt.ptr), P(if self.half { self.wth.ptr } else { 0 }), P(self.part.ptr), P(sl.ilo.ptr), P(act), I(hi), I(kb as i32), I((self.fl > 0) as i32)],
         );
-        mark(6);
+        mark(11);
         launch(k.adam_flat, (nrest.div_ceil(256) as u32, 1), 256, st, &[C(c), P(self.pr.ptr), P(self.mr.ptr), P(self.vr.ptr), P(self.gr.ptr), I(nrest as i32)]);
-        mark(7);
+        mark(12);
         ck(unsafe { cuMemcpyDtoHAsync_v2(sl.hloss.ptr as *mut c_void, sl.loss.ptr, n * 4, st) }, "loss download");
-        mark(8);
+        mark(13);
         ck(unsafe { cuEventRecord(sl.done, st) }, "event record");
         // Return the previous batch's loss (it runs ahead of this one).
         let prev = self.pending.replace((si, n));

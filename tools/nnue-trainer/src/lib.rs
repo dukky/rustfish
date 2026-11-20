@@ -362,8 +362,123 @@ pub struct Shape {
     /// King (input) buckets: the FT has `kb * 768` rows.
     pub kb: usize,
     /// `--head`: 1 = a dense head (2H -> 16 -> 32 -> 1 per output bucket,
-    /// SCReLU) added to the linear output (docs/nnue-deeper-head.md).
+    /// SCReLU) added to the linear output (docs/nnue-deeper-head.md);
+    /// 2 = `--head pairwise` (the H pairwise products -> 16 -> 32 -> 1,
+    /// added to the SCReLU linear output); 3 = `--head pairwise-skip`
+    /// (pairwise, no linear output: L1 neuron 15 is added to the output
+    /// as is, neurons 0..15 feed L2). See `pw_in`.
     pub hd: usize,
+}
+
+/// Pairwise heads (`hd` 2 and 3), the engine's integer scheme modelled
+/// exactly in the float forward (quantisation-aware: training, `eval`
+/// and `fen-eval` all run the quantised function):
+///
+/// - Per perspective (side to move first), input `i < H/2` is
+///   `p = clamp(a[i], 0, 1) * clamp(a[i + H/2], 0, 1)`, then
+///   `x = round(p * PW_QX)` in 0..=127 and the head sees `x / PW_QX`. The
+///   engine computes `x = (c[i] * c[i + H/2] + 256) >> 9` from the u8
+///   clamped i16 accumulators (`c = 255 a`), and `65025 / 512 = PW_QX`.
+///   Gradients pass the rounding straight through (`dx/dp = 1`).
+/// - W1 is used as `round(64 w) / 64`, clamped to +-127/64 (`q_w1`): an i8
+///   at scale 64, so the engine's `u8 x i8` dot products are exact. The
+///   latent float W1 gets the gradient (straight through); exports write
+///   the quantised values (multiples of 1/64, exact at HEAD_Q).
+/// - Optional `--ft-l1 L`: adds `L * sum(p)` per sample to the loss (FT
+///   activation sparsity for the sparse engine L1), default 0.
+pub const PW_QX: f32 = 65025.0 / 512.0;
+/// The rounding offset of `pw_in`: a half plus 1/1024, so that inputs
+/// from integer accumulators (`eval` / `fen-eval` of a quantised net) round
+/// their exact ties (`c1 c2 = 512 k + 256`) up, as the engine does, despite
+/// float error (~1e-5 here; the nearest non-tie is 1/512 away).
+pub const PW_HALF: f32 = 0.5 + 1.0 / 1024.0;
+/// Initial b1 / b2 of pairwise heads (`init_params`); `NNUE_PW_B1` /
+/// `NNUE_PW_B2` override them (experiments).
+pub const PW_B1_INIT: f32 = 0.5;
+pub const PW_B2_INIT: f32 = 0.25;
+/// W1 scale of pairwise heads (i8 in the engine).
+pub const PW_W1Q: f32 = 64.0;
+
+/// `--ft-l1` as f32 bits (set once by `cmd_train`, read by the kernels).
+pub static FT_L1: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// `--head pairwise-skip` seen on a non-train command: a pairwise-sized
+/// net file is read as `hd` 3 (the file sizes of 2 and 3 are equal).
+static HEAD_SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn ft_l1() -> f32 {
+    f32::from_bits(FT_L1.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: this thread's pairwise forward skips the fake quantisation
+    /// (finite-difference checks of the straight-through gradients).
+    static NO_QAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[inline(always)]
+fn qat() -> bool {
+    #[cfg(test)]
+    if NO_QAT.with(|c| c.get()) {
+        return false;
+    }
+    *QAT_ON
+}
+
+/// `NNUE_PW_NO_QAT=1`: pairwise forward without fake quantisation
+/// (diagnostics only: such nets do not match the engine).
+static QAT_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NNUE_PW_NO_QAT").is_err());
+
+fn env_f32(name: &str, default: f32) -> f32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Pairwise W1 as the forward uses it.
+#[inline(always)]
+pub fn q_w1(w: f32) -> f32 {
+    if !qat() {
+        return w;
+    }
+    (w * PW_W1Q).round().clamp(-127.0, 127.0) * (1.0 / PW_W1Q)
+}
+
+/// Quantised pairwise input of accumulator values `a` and `b`.
+#[inline(always)]
+pub fn pw_in(a: f32, b: f32) -> f32 {
+    let p = a.clamp(0.0, 1.0) * b.clamp(0.0, 1.0);
+    if !qat() {
+        return p;
+    }
+    (p * PW_QX + PW_HALF).floor() / PW_QX
+}
+
+/// Pairwise input `i` (0..H) of the 2H accumulators `acc`.
+#[inline(always)]
+pub fn pw_at(acc: &[f32], h: usize, i: usize) -> f32 {
+    let half = h / 2;
+    let (s, j) = (i / half, i % half);
+    pw_in(acc[s * h + j], acc[s * h + j + half])
+}
+
+/// Accumulator lane `l` (0..2H) of a pairwise head: its pairwise input
+/// index and its partner lane.
+#[inline(always)]
+pub fn pw_lane(h: usize, l: usize) -> (usize, usize) {
+    let half = h / 2;
+    let (s, j) = (l / h, l % h);
+    let partner = if j < half { l + half } else { l - half };
+    (s * half + j % half, partner)
+}
+
+/// dLoss/dacc of lane `x` (pairwise heads): the linear output's term
+/// `lin`, plus `dp` (dLoss/d input) times the partner's clamped value.
+#[inline(always)]
+pub fn pw_dacc(x: f32, lin: f32, dp: f32, cp: f32) -> f32 {
+    if x > 0.0 && x < 1.0 {
+        lin + dp * cp
+    } else {
+        0.0
+    }
 }
 
 /// Head layer sizes.
@@ -388,12 +503,36 @@ impl Shape {
     pub fn head_off(&self) -> usize {
         self.out_b() + self.buckets
     }
-    /// Head params per output bucket: W1 (H1 x 2H), b1, W2 (H2 x H1), b2, W3 (H2), b3.
+    /// Pairwise head (`hd` 2 or 3).
+    pub fn pw(&self) -> bool {
+        self.hd >= 2
+    }
+    /// Pairwise head without a linear output (`hd` 3).
+    pub fn skip(&self) -> bool {
+        self.hd == 3
+    }
+    /// Head inputs: 2H (SCReLU of both accumulators) or H (pairwise).
+    pub fn head_in(&self) -> usize {
+        if self.pw() {
+            self.h
+        } else {
+            2 * self.h
+        }
+    }
+    /// L1 neurons that feed L2 (pairwise-skip: neuron 15 is the skip).
+    pub fn h1_act(&self) -> usize {
+        if self.skip() {
+            H1 - 1
+        } else {
+            H1
+        }
+    }
+    /// Head params per output bucket: W1 (H1 x head_in), b1, W2 (H2 x H1), b2, W3 (H2), b3.
     pub fn head_len(&self) -> usize {
-        H1 * 2 * self.h + H1 + H2 * H1 + H2 + H2 + 1
+        H1 * self.head_in() + H1 + H2 * H1 + H2 + H2 + 1
     }
     pub fn len(&self) -> usize {
-        self.head_off() + self.hd * self.buckets * self.head_len()
+        self.head_off() + (self.hd > 0) as usize * self.buckets * self.head_len()
     }
     /// Size of the exported i16 file.
     fn file_bytes(&self) -> usize {
@@ -411,7 +550,14 @@ impl Shape {
         let fixed = buckets * (1 + H1 + H2 * H1 + 2 * H2 + 1);
         let h = words.checked_sub(fixed)? / (kb * INPUTS + 1 + 2 * buckets + buckets * 2 * H1);
         let s = Shape { h, buckets, kb, hd: 1 };
-        (s.file_bytes() == bytes).then_some(s)
+        if s.file_bytes() == bytes {
+            return Some(s);
+        }
+        // Pairwise: W1 is 16 x H per bucket.
+        let h = words.checked_sub(fixed)? / (kb * INPUTS + 1 + 2 * buckets + buckets * H1);
+        let hd = if HEAD_SKIP.load(std::sync::atomic::Ordering::Relaxed) { 3 } else { 2 };
+        let s = Shape { h, buckets, kb, hd };
+        (h % 8 == 0 && s.file_bytes() == bytes).then_some(s)
     }
 }
 
@@ -491,9 +637,20 @@ fn forward(p: &[f32], sh: Shape, s: &Sample, acc: &mut [f32]) -> f32 {
     out += sum;
     if sh.hd > 0 {
         let mut scr = [0.0f32; HS];
-        out += head_forward(p, sh, s.bucket, acc, None, &mut scr);
+        out += head_fwd_acc(p, sh, s.bucket, acc, None, &mut scr);
     }
     out
+}
+
+/// `head_forward` on accumulators `acc` (2H): SCReLU or pairwise inputs.
+#[inline(always)]
+pub(crate) fn head_fwd_acc(p: &[f32], sh: Shape, b: usize, acc: &[f32], w1t: Option<&[f32]>, scr: &mut [f32; HS]) -> f32 {
+    if sh.pw() {
+        let h = sh.h;
+        head_forward(p, sh, b, |i| pw_at(acc, h, i), w1t, scr)
+    } else {
+        head_forward(p, sh, b, |i| sq01(acc[i]), w1t, scr)
+    }
 }
 
 /// Forward + backward for one sample into gradient buffer `g`; returns loss.
@@ -512,12 +669,35 @@ fn train_sample(p: &[f32], sh: Shape, s: &Sample, g: &mut [f32], acc: &mut [f32]
     g[sh.out_b() + s.bucket] += grad;
     let mut scr = [0.0f32; HS];
     if sh.hd > 0 {
-        head_forward(p, sh, s.bucket, acc, None, &mut scr);
+        head_fwd_acc(p, sh, s.bucket, acc, None, &mut scr);
         head_backward(p, sh, s.bucket, grad, &mut scr);
         head_small_grads(sh, s.bucket, grad, &scr, g, 0, 0, 1);
     }
     let w1 = head_offs(sh, s.bucket)[0];
-    {
+    if sh.pw() {
+        let ow = &p[ow0..ow0 + 2 * h];
+        let dz: &[f32] = &scr[H1 + H2..2 * H1 + H2];
+        for i in 0..h {
+            let x = pw_at(acc, h, i);
+            for k in 0..H1 {
+                g[w1 + k * h + i] += dz[k] * x;
+            }
+        }
+        let l1 = ft_l1();
+        for i in 0..2 * h {
+            let x = acc[i];
+            let a = x.clamp(0.0, 1.0);
+            if !sh.skip() {
+                g[ow0 + i] += grad * a * a;
+            }
+            let (pi, partner) = pw_lane(h, i);
+            let mut e = 0.0f32;
+            for k in 0..H1 {
+                e += dz[k] * q_w1(p[w1 + k * h + pi]);
+            }
+            dacc[i] = pw_dacc(x, grad * ow[i] * 2.0 * a, e + l1, acc[partner].clamp(0.0, 1.0));
+        }
+    } else {
         let ow = &p[ow0..ow0 + 2 * h];
         for i in 0..2 * h {
             let x = acc[i];
@@ -565,14 +745,33 @@ fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
         *x = rng.uniform(a);
     }
     // Head (after the base draws, so head-less nets keep their RNG sequence).
-    for b in 0..sh.hd * sh.buckets {
+    for b in 0..(sh.hd > 0) as usize * sh.buckets {
         let [w1, _, w2, _, w3, _] = head_offs(sh, b);
-        for (o, len, fan) in [(w1, H1 * 2 * sh.h, 2 * sh.h), (w2, H2 * H1, H1), (w3, H2, H2)] {
-            let a = 1.0 / (fan as f32).sqrt();
+        for (o, len, fan) in [(w1, H1 * sh.head_in(), sh.head_in()), (w2, H2 * H1, H1), (w3, H2, H2)] {
+            let mut a = 1.0 / (fan as f32).sqrt();
+            if sh.pw() && o == w1 {
+                // `NNUE_PW_W1A`: W1 init amplitude (sparse inputs: the
+                // 1/sqrt(fan) default leaves z1 nearly constant).
+                a = env_f32("NNUE_PW_W1A", a);
+            }
             for x in &mut p[o..o + len] {
                 *x = rng.uniform(a);
             }
         }
+        if sh.pw() {
+            // Pairwise inputs are sparse (~3% of chunks nonzero from a warm
+            // start), so with zero biases z1 ~ 0, sq(z1) ~ 0, z2 ~ 0 and
+            // every head gradient is ~0 (below Adam's eps): the head never
+            // starts learning (seen: 3 x 4.9B positions, W1 still at its
+            // init). Biases in the active range keep L1 and L2 alive.
+            let [_, b1, _, b2, _, _] = head_offs(sh, b);
+            p[b1..b1 + H1].fill(env_f32("NNUE_PW_B1", PW_B1_INIT));
+            p[b2..b2 + H2].fill(env_f32("NNUE_PW_B2", PW_B2_INIT));
+        }
+    }
+    if sh.skip() {
+        // No linear output (see `add_head`).
+        p[sh.out_w()..sh.out_b()].fill(0.0);
     }
     p
 }
@@ -580,15 +779,33 @@ fn init_params(sh: Shape, rng: &mut Rng) -> Vec<f32> {
 /// `--init <plain net> --head`: the plain net's params, then a fresh head
 /// (`init_params`' draws) with W3 = 0, so the net starts exactly at the
 /// plain net's evals and W3's gradient opens the head up.
-fn add_head(p: &[f32], plain: Shape, rng: &mut Rng) -> Vec<f32> {
+///
+/// Pairwise-skip (`hd` 3) has no linear output: the out weights are
+/// zeroed (and stay 0: they get no gradient), and so are the skip neuron's
+/// W1 row and bias, so the start is the plain net's output biases alone.
+fn add_head(p: &[f32], plain: Shape, hd: usize, rng: &mut Rng) -> Vec<f32> {
     assert_eq!(p.len(), plain.len());
-    let sh = Shape { hd: 1, ..plain };
+    assert!(hd > 0);
+    let sh = Shape { hd, ..plain };
     let fresh = init_params(sh, rng);
     let mut out = p.to_vec();
     out.extend_from_slice(&fresh[sh.head_off()..]);
     for b in 0..sh.buckets {
-        let [_, _, _, _, w3, _] = head_offs(sh, b);
-        out[w3..w3 + H2].fill(0.0);
+        let [w1, b1, _, _, w3, _] = head_offs(sh, b);
+        // Pairwise heads may start W3 slightly off zero (`NNUE_PW_W3A`), so
+        // W1 gets a gradient at once (W3 = 0 blocks it until W3 grows).
+        let w3a = if sh.pw() { env_f32("NNUE_PW_W3A", 0.0) } else { 0.0 };
+        for x in &mut out[w3..w3 + H2] {
+            *x = if w3a > 0.0 { rng.uniform(w3a) } else { 0.0 };
+        }
+        if sh.skip() {
+            let n = sh.head_in();
+            out[w1 + (H1 - 1) * n..w1 + H1 * n].fill(0.0);
+            out[b1 + H1 - 1] = 0.0;
+        }
+    }
+    if sh.skip() {
+        out[sh.out_w()..sh.out_b()].fill(0.0);
     }
     out
 }
@@ -626,6 +843,88 @@ fn cmd_fen_eval(args: &[String]) {
 /// a head, W1 columns are permuted together; the engine's integer eval is
 /// bit-identical), but active neurons share 4-byte chunks, so the engine's
 /// sparse head L1 (`src/nnue_head.rs`) skips more chunks.
+/// `pair-order --net N [--buckets B] [--king-buckets L] --data F [--n 20000] --out O`:
+/// for a plain (head-less) net used as a pairwise warm start, reorder the
+/// FT neurons so that the pairs `(j, j + H/2)` are often active (> 0)
+/// together: greedy, most active lane first, partner = the remaining lane
+/// with the most co-active positions. Same function (FT columns, FT bias
+/// and output weights move together); a warm start from an SCReLU net in
+/// file order has only ~3% of pairwise inputs nonzero.
+fn cmd_pair_order(args: &[String]) {
+    let (mut net, mut data, mut out, mut buckets, mut kl, mut n) = (None, None, None, 1usize, NO_BUCKETS, 20000usize);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--net" => net = Some(PathBuf::from(it.next().unwrap())),
+            "--data" => data = Some(PathBuf::from(it.next().unwrap())),
+            "--out" => out = Some(PathBuf::from(it.next().unwrap())),
+            "--buckets" => buckets = it.next().unwrap().parse().unwrap(),
+            "--king-buckets" => kl = KingLayout::by_name(it.next().unwrap()),
+            "--n" => n = it.next().unwrap().parse().unwrap(),
+            other => panic!("unknown option {other}"),
+        }
+    }
+    let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
+    assert_eq!(sh.hd, 0, "pair-order takes a plain net (the warm start)");
+    let mut recs = read_recs_n(&data.expect("--data"), n);
+    recs.truncate(n);
+    let (h, half) = (sh.h, sh.h / 2);
+    let words = (2 * recs.len()).div_ceil(64);
+    let mut bits = vec![0u64; h * words];
+    let mut acc = vec![0.0f32; 2 * h];
+    for (r, rec) in recs.iter().enumerate() {
+        let s = decode(rec, 0.5, sh.buckets, false, kl);
+        forward(&p, sh, &s, &mut acc);
+        for side in 0..2 {
+            let k = 2 * r + side;
+            for j in 0..h {
+                // Engine-active: the u8 clamp c >= 1.
+                if (acc[side * h + j] * QA).round() >= 1.0 {
+                    bits[j * words + k / 64] |= 1 << (k % 64);
+                }
+            }
+        }
+    }
+    let row = |j: usize| &bits[j * words..(j + 1) * words];
+    let pairs_on = |perm: &[usize]| -> f64 {
+        let mut c = 0u64;
+        for k in 0..half {
+            c += row(perm[k]).iter().zip(row(perm[k + half])).map(|(a, b)| (a & b).count_ones() as u64).sum::<u64>();
+        }
+        c as f64 / (half * 2 * recs.len()) as f64
+    };
+    let ident: Vec<usize> = (0..h).collect();
+    let mut order: Vec<usize> = (0..h).collect();
+    order.sort_by_key(|&j| (std::cmp::Reverse(row(j).iter().map(|x| x.count_ones()).sum::<u32>()), j));
+    let mut used = vec![false; h];
+    let (mut firsts, mut seconds) = (Vec::with_capacity(half), Vec::with_capacity(half));
+    for &j in &order {
+        if used[j] {
+            continue;
+        }
+        used[j] = true;
+        let (mut best, mut bc) = (usize::MAX, 0u64);
+        for &k in &order {
+            if used[k] {
+                continue;
+            }
+            let c: u64 = row(j).iter().zip(row(k)).map(|(a, b)| (a & b).count_ones() as u64).sum();
+            if best == usize::MAX || c > bc {
+                (best, bc) = (k, c);
+            }
+        }
+        used[best] = true;
+        firsts.push(j);
+        seconds.push(best);
+    }
+    let perm: Vec<usize> = firsts.into_iter().chain(seconds).collect();
+    println!("nonzero pairwise inputs: {:.2}% in file order -> {:.2}% after pairing", 100.0 * pairs_on(&ident), 100.0 * pairs_on(&perm));
+    let q = permute_neurons(&p, sh, &perm);
+    let out = out.expect("--out");
+    File::create(&out).unwrap().write_all(&quantize(&q, sh)).unwrap();
+    println!("wrote {}", out.display());
+}
+
 fn cmd_permute(args: &[String]) {
     let (mut net, mut data, mut out, mut buckets, mut kl, mut n) = (None, None, None, 1usize, NO_BUCKETS, 20000usize);
     let mut it = args.iter();
@@ -643,6 +942,9 @@ fn cmd_permute(args: &[String]) {
     let (p, sh) = load_net(&net.expect("--net"), buckets, kl.kb());
     let mut recs = read_recs_n(&data.expect("--data"), n);
     recs.truncate(n);
+    if sh.pw() {
+        return permute_pairwise(&p, sh, kl, &recs, &out.expect("--out"));
+    }
     let h = sh.h;
     // Engine L1 input of neuron j is nonzero iff its i16 accumulator >= 16.
     let active = |acc: &[f32], j: usize| (acc[j] * QA).round() >= 16.0;
@@ -685,7 +987,47 @@ fn cmd_permute(args: &[String]) {
     println!("wrote {}", out.display());
 }
 
-/// New neuron `k` = old neuron `perm[k]`, everywhere a neuron index appears.
+/// `permute` for pairwise heads: pairs `(j, j + H/2)` move together,
+/// ordered by how often their engine input (`x > 0`) is nonzero, most
+/// active first, so active inputs share the engine's 4-byte chunks.
+fn permute_pairwise(p: &[f32], sh: Shape, kl: &KingLayout, recs: &[Rec], out: &Path) {
+    let (h, half) = (sh.h, sh.h / 2);
+    let mut freq = vec![0u64; half];
+    let mut acts = Vec::with_capacity(recs.len());
+    let mut acc = vec![0.0f32; 2 * h];
+    for r in recs {
+        let s = decode(r, 0.5, sh.buckets, false, kl);
+        forward(p, sh, &s, &mut acc);
+        let a: Vec<bool> = (0..h).map(|i| pw_at(&acc, h, i) > 0.0).collect();
+        for i in 0..h {
+            freq[i % half] += a[i] as u64;
+        }
+        acts.push(a);
+    }
+    let mut pp: Vec<usize> = (0..half).collect();
+    pp.sort_by_key(|&j| (std::cmp::Reverse(freq[j]), j));
+    let chunks = |pp: &[usize]| -> f64 {
+        let mut c = 0u64;
+        for a in &acts {
+            for side in 0..2 {
+                for q in pp.chunks(4) {
+                    c += q.iter().any(|&j| a[side * half + j]) as u64;
+                }
+            }
+        }
+        c as f64 / (acts.len() * h / 4) as f64
+    };
+    let ident: Vec<usize> = (0..half).collect();
+    let el = freq.iter().sum::<u64>() as f64 / (acts.len() * h) as f64;
+    println!("active pairwise inputs {:.1}%; nonzero 4-byte chunks {:.1}% -> {:.1}% after the permutation", 100.0 * el, 100.0 * chunks(&ident), 100.0 * chunks(&pp));
+    let perm: Vec<usize> = (0..h).map(|k| if k < half { pp[k] } else { pp[k - half] + half }).collect();
+    let q = permute_neurons(p, sh, &perm);
+    File::create(out).unwrap().write_all(&quantize(&q, sh)).unwrap();
+    println!("wrote {}", out.display());
+}
+
+/// New neuron `k` = old neuron `perm[k]`, everywhere a neuron index appears
+/// (pairwise heads: `perm` must move the pairs `(j, j + H/2)` together).
 fn permute_neurons(p: &[f32], sh: Shape, perm: &[usize]) -> Vec<f32> {
     let h = sh.h;
     let mut q = p.to_vec();
@@ -702,7 +1044,19 @@ fn permute_neurons(p: &[f32], sh: Shape, perm: &[usize]) -> Vec<f32> {
                 q[o + side * h + k] = p[o + side * h + perm[k]];
             }
         }
-        if sh.hd > 0 {
+        if sh.pw() {
+            let half = h / 2;
+            assert!((0..half).all(|k| perm[k] < half && perm[k + half] == perm[k] + half), "pairwise permutation must move pairs together");
+            let w1 = head_offs(sh, b)[0];
+            for m in 0..H1 {
+                for side in 0..2 {
+                    let o = w1 + m * h + side * half;
+                    for k in 0..half {
+                        q[o + k] = p[o + perm[k]];
+                    }
+                }
+            }
+        } else if sh.hd > 0 {
             let w1 = head_offs(sh, b)[0];
             for m in 0..H1 {
                 for side in 0..2 {
@@ -737,7 +1091,7 @@ fn dsq01(z: f32) -> f32 {
 #[inline(always)]
 pub(crate) fn head_offs(sh: Shape, b: usize) -> [usize; 6] {
     let w1 = sh.head_off() + b * sh.head_len();
-    let b1 = w1 + H1 * 2 * sh.h;
+    let b1 = w1 + H1 * sh.head_in();
     let w2 = b1 + H1;
     let b2 = w2 + H2 * H1;
     let w3 = b2 + H2;
@@ -749,15 +1103,19 @@ pub(crate) fn head_offs(sh: Shape, b: usize) -> [usize; 6] {
 /// input-major `[2H][H1]` (the batch kernels keep one; it only changes the
 /// memory layout, not the arithmetic): each z1[k] is summed over i in
 /// ascending order either way, so reference and batch agree bit for bit.
-pub(crate) fn head_forward(p: &[f32], sh: Shape, b: usize, acc: &[f32], w1t: Option<&[f32]>, scr: &mut [f32; HS]) -> f32 {
-    let n = 2 * sh.h;
+///
+/// `inp(i)` is head input `i` (`head_fwd_acc`). Pairwise heads use W1 as
+/// `q_w1(W1)` (a `w1t` holds it already quantised) and, for
+/// pairwise-skip, add z1[15] to the output instead of feeding it to L2.
+pub(crate) fn head_forward(p: &[f32], sh: Shape, b: usize, inp: impl Fn(usize) -> f32, w1t: Option<&[f32]>, scr: &mut [f32; HS]) -> f32 {
+    let n = sh.head_in();
     let [w1, b1, w2, b2, w3, b3] = head_offs(sh, b);
     let mut z = [0.0f32; H1];
     z.copy_from_slice(&p[b1..b1 + H1]);
     match w1t {
         Some(t) => {
             for i in 0..n {
-                let a = sq01(acc[i]);
+                let a = inp(i);
                 let row: &[f32; H1] = t[i * H1..(i + 1) * H1].try_into().unwrap();
                 for k in 0..H1 {
                     z[k] += a * row[k];
@@ -766,25 +1124,44 @@ pub(crate) fn head_forward(p: &[f32], sh: Shape, b: usize, acc: &[f32], w1t: Opt
         }
         None => {
             let w = &p[w1..w1 + H1 * n];
+            let pw = sh.pw();
             for i in 0..n {
-                let a = sq01(acc[i]);
+                let a = inp(i);
                 for k in 0..H1 {
-                    z[k] += a * w[k * n + i];
+                    let wv = w[k * n + i];
+                    z[k] += a * if pw { q_w1(wv) } else { wv };
                 }
             }
         }
     }
     scr[..H1].copy_from_slice(&z);
+    let ka = sh.h1_act();
     let mut out = p[b3];
     for m in 0..H2 {
         let mut zz = p[b2 + m];
-        for k in 0..H1 {
+        for k in 0..ka {
             zz += sq01(z[k]) * p[w2 + m * H1 + k];
         }
         scr[H1 + m] = zz;
         out += sq01(zz) * p[w3 + m];
     }
+    if sh.skip() {
+        out += z[H1 - 1];
+    }
     out
+}
+
+/// W1 of bucket `b` transposed to `[head_in][H1]`, quantised for pairwise
+/// heads (what `head_forward` multiplies by).
+pub(crate) fn head_w1t(p: &[f32], sh: Shape, b: usize, t: &mut [f32]) {
+    let n = sh.head_in();
+    let w1 = head_offs(sh, b)[0];
+    for k in 0..H1 {
+        for i in 0..n {
+            let w = p[w1 + k * n + i];
+            t[i * H1 + k] = if sh.pw() { q_w1(w) } else { w };
+        }
+    }
 }
 
 /// Given dLoss/dOut `g`, the head's z gradients into `scr` (dz1, dz2).
@@ -794,12 +1171,16 @@ pub(crate) fn head_backward(p: &[f32], sh: Shape, b: usize, g: f32, scr: &mut [f
     for m in 0..H2 {
         d[H1 + m] = g * p[w3 + m] * dsq01(z[H1 + m]);
     }
-    for k in 0..H1 {
+    for k in 0..sh.h1_act() {
         let mut s = 0.0f32;
         for m in 0..H2 {
             s += d[H1 + m] * p[w2 + m * H1 + k];
         }
         d[k] = s * dsq01(z[k]);
+    }
+    if sh.skip() {
+        // The skip neuron is linear: dLoss/dz1[15] = g.
+        d[H1 - 1] = g;
     }
 }
 
@@ -819,16 +1200,22 @@ pub(crate) fn head_small_grads(sh: Shape, b: usize, g: f32, scr: &[f32; HS], gr:
     while m < H2 {
         gr[w3 + m - base] += g * sq01(z[H1 + m]);
         gr[b2 + m - base] += d[H1 + m];
-        for k in 0..H1 {
+        for k in 0..sh.h1_act() {
             gr[w2 + m * H1 + k - base] += d[H1 + m] * sq01(z[k]);
         }
         m += parts;
     }
 }
 
+/// Is param `i` part of a pairwise head's W1 (exported as `q_w1`)?
+fn is_pw_w1(sh: Shape, i: usize) -> bool {
+    sh.pw() && i >= sh.head_off() && (i - sh.head_off()) % sh.head_len() < H1 * sh.head_in()
+}
+
 fn quantize(p: &[f32], sh: Shape) -> Vec<u8> {
     let mut out = Vec::with_capacity(sh.file_bytes());
-    for (i, &x) in p.iter().enumerate() {
+    for (i, &x) in p[..sh.len()].iter().enumerate() {
+        let x = if is_pw_w1(sh, i) { q_w1(x) } else { x };
         let scale = if i < sh.out_w() {
             QA
         } else if i < sh.out_b() {
@@ -915,7 +1302,7 @@ fn load_init_factor(path: &Path, sh: Shape, rng: &mut Rng) -> Vec<f32> {
     let mut headed = |p: Vec<f32>, s: Shape| -> Vec<f32> {
         if sh.hd > 0 && s.hd == 0 {
             println!("init: {} has no head; added one whose output starts at 0 (W3 = 0)", path.display());
-            add_head(&p, Shape { kb: sh.kb, ..s }, rng)
+            add_head(&p, Shape { kb: sh.kb, ..s }, sh.hd, rng)
         } else {
             p
         }
@@ -1776,6 +2163,9 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             "--no-wd-active-only" => wd_active = Some(false),
             "--keep-best" => keep_best = true,
             "--head" => sh.hd = 1,
+            "--head-pairwise" => sh.hd = 2,
+            "--head-pairwise-skip" => sh.hd = 3,
+            "--ft-l1" => FT_L1.store(v().parse::<f32>().unwrap().to_bits(), std::sync::atomic::Ordering::Relaxed),
             "--half" => half = true,
             "--shuffle-buffer" => shuffle_buffer = Some(v().parse().unwrap()),
             "--loader-threads" => loader_threads = v().parse().unwrap(),
@@ -1812,7 +2202,7 @@ fn cmd_train(args: &[String], gpu: Option<&MakeBackend>) {
             } else {
                 let (mut p, s) = load_init(i, sh.buckets, sh.kb);
                 if sh.hd > 0 && s.hd == 0 {
-                    p = add_head(&p, Shape { hd: 0, ..sh }, &mut rng);
+                    p = add_head(&p, Shape { hd: 0, ..sh }, sh.hd, &mut rng);
                     println!("init: {} has no head; added one whose output starts at 0 (W3 = 0)", i.display());
                 } else {
                     assert_eq!(s, sh, "init net shape differs from --hidden/--buckets/--king-buckets/--head");
@@ -2009,8 +2399,42 @@ impl Backend for batch::BatchTrainer {
 }
 
 /// The command line; `train` uses `gpu` instead of the CPU kernels if given.
+/// `--head [dense|pairwise|pairwise-skip]` (the value is optional; bare
+/// `--head` is the dense head): `train` gets `--head`, `--head-pairwise` or
+/// `--head-pairwise-skip`; other commands read the shape from the file
+/// size and only need to know about pairwise-skip (`HEAD_SKIP`).
+fn head_args(args: Vec<String>) -> Vec<String> {
+    let train = args.first().map(|a| a == "train").unwrap_or(false);
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.into_iter().peekable();
+    while let Some(a) = it.next() {
+        if a != "--head" {
+            out.push(a);
+            continue;
+        }
+        let v = match it.peek().map(|s| s.as_str()) {
+            Some(v @ ("dense" | "pairwise" | "pairwise-skip")) => v.to_string(),
+            _ => "dense".to_string(),
+        };
+        if v != "dense" || it.peek().map(|s| s == "dense").unwrap_or(false) {
+            it.next();
+        }
+        if v == "pairwise-skip" {
+            HEAD_SKIP.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if train {
+            out.push(match v.as_str() {
+                "pairwise" => "--head-pairwise",
+                "pairwise-skip" => "--head-pairwise-skip",
+                _ => "--head",
+            }.to_string());
+        }
+    }
+    out
+}
+
 pub fn cli(gpu: Option<&MakeBackend>) {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = head_args(std::env::args().skip(1).collect());
     let usage = "usage: nnue-trainer <convert|shuffle|train|eval|fen-eval|permute|scalecheck|rescale|pack|unpack|stream|shuffle-check> ... (see the module docs)";
     let (cmd, rest) = args.split_first().unwrap_or_else(|| panic!("{usage}"));
     match cmd.as_str() {
@@ -2020,6 +2444,7 @@ pub fn cli(gpu: Option<&MakeBackend>) {
         "eval" => cmd_eval(rest),
         "fen-eval" => cmd_fen_eval(rest),
         "permute" => cmd_permute(rest),
+        "pair-order" => cmd_pair_order(rest),
         "scalecheck" => cmd_scalecheck(rest),
         "rescale" => cmd_rescale(rest),
         "pack" => packed::cmd_pack(rest),
@@ -2799,14 +3224,15 @@ mod tests {
 
     #[test]
     fn head_file_shape_warm_start_and_permute() {
+      for hd in [1, 2] {
         let kl = KingLayout::by_name("kb4");
         let plain = Shape { h: 32, buckets: 8, kb: kl.kb(), hd: 0 };
-        let sh = Shape { hd: 1, ..plain };
+        let sh = Shape { hd, ..plain };
         assert_eq!(Shape::from_file_bytes(plain.file_bytes(), 8, kl.kb()), Some(plain));
         assert_eq!(Shape::from_file_bytes(sh.file_bytes(), 8, kl.kb()), Some(sh));
         let mut rng = Rng::new(21);
         let p0 = init_params(plain, &mut rng);
-        let p = add_head(&p0, plain, &mut rng);
+        let p = add_head(&p0, plain, hd, &mut rng);
         assert_eq!(p.len(), sh.len());
         let (recs, _) = test_recs(40);
         let (mut a0, mut a1) = (vec![0.0; 2 * sh.h], vec![0.0; 2 * sh.h]);
@@ -2817,18 +3243,64 @@ mod tests {
         }
         // A random head, then a permutation: same evals up to float reassociation.
         let p = init_params(sh, &mut rng);
-        let perm: Vec<usize> = (0..sh.h).map(|k| (k * 7 + 3) % sh.h).collect();
+        let perm: Vec<usize> = if hd == 1 {
+            (0..sh.h).map(|k| (k * 7 + 3) % sh.h).collect()
+        } else {
+            let half = sh.h / 2;
+            (0..sh.h).map(|k| (k % half * 7 + 3) % half + k / half * half).collect()
+        };
         let q = permute_neurons(&p, sh, &perm);
         for r in &recs {
             let s = decode(r, 0.5, 8, false, kl);
             let (x, y) = (forward(&p, sh, &s, &mut a0), forward(&q, sh, &s, &mut a1));
             assert!((x - y).abs() < 1e-4, "{x} vs {y}");
         }
+        // Export: a pairwise W1 is written as its quantised values.
+        let back = dequantize(&quantize(&p, sh), sh);
+        if hd == 2 {
+            let w1 = head_offs(sh, 3)[0];
+            for i in w1..w1 + H1 * sh.head_in() {
+                assert_eq!(back[i], q_w1(p[i]));
+            }
+        }
+      }
+    }
+
+    #[test]
+    fn pairwise_skip_warm_start_and_quantisation() {
+        let kl = KingLayout::by_name("kb4");
+        let plain = Shape { h: 32, buckets: 8, kb: kl.kb(), hd: 0 };
+        let sh = Shape { hd: 3, ..plain };
+        let mut rng = Rng::new(5);
+        let p0 = init_params(plain, &mut rng);
+        let p = add_head(&p0, plain, 3, &mut rng);
+        assert!(p[sh.out_w()..sh.out_b()].iter().all(|&x| x == 0.0));
+        let (recs, _) = test_recs(20);
+        let mut a = vec![0.0; 2 * sh.h];
+        for r in &recs {
+            let s = decode(r, 0.5, 8, false, kl);
+            // No linear output and a zero skip neuron: the start is out_b.
+            assert_eq!(forward(&p, sh, &s, &mut a), p[sh.out_b() + s.bucket]);
+        }
+        // Inputs: x / PW_QX with x = the engine's (c1 c2 + 256) >> 9,
+        // exact ties (c1 c2 = 512 k + 256) included.
+        for c1 in 0..=255 {
+          for c2 in 0..=255 {
+            let want = ((c1 * c2 + 256) >> 9) as f32 / PW_QX;
+            assert_eq!(pw_in(c1 as f32 / 255.0, c2 as f32 / 255.0), want, "{c1} {c2}");
+          }
+        }
+        assert_eq!(q_w1(1.98), 127.0 / 64.0);
+        assert_eq!(q_w1(-0.0234), -1.0 / 64.0);
     }
 
     #[test]
     fn head_gradient_matches_finite_difference() {
-        let sh = Shape { h: 16, buckets: 2, kb: 1, hd: 1 };
+      // Pairwise heads with the fake quantisation off (its gradients are
+      // straight through by design; `head_batch_matches_reference` covers it).
+      NO_QAT.with(|c| c.set(true));
+      for hd in [1, 2, 3] {
+        let sh = Shape { h: 16, buckets: 2, kb: 1, hd };
         let mut rng = Rng::new(11);
         let mut p = init_params(sh, &mut rng);
         for x in &mut p[sh.ft_b()..sh.out_w()] {
@@ -2853,23 +3325,32 @@ mod tests {
             (d * d) as f64
         };
         let f0 = s.f[0][0] as usize * sh.h;
-        let checks = [f0, f0 + 3, sh.ft_b() + 1, sh.out_w() + s.bucket * 2 * sh.h + 5, sh.out_b() + s.bucket,
-            w1 + 3 * 2 * sh.h + 5, w1 + 7, b1 + 2, w2 + 5 * H1 + 3, b2 + 4, w3 + 6, b3];
+        let n_in = sh.head_in();
+        let checks = [f0, f0 + 3, f0 + 11, sh.ft_b() + 1, sh.ft_b() + 9, sh.out_w() + s.bucket * 2 * sh.h + 5, sh.out_b() + s.bucket,
+            w1 + 3 * n_in + 5, w1 + 7, w1 + 15 * n_in + 2, b1 + 2, b1 + 15, w2 + 5 * H1 + 3, b2 + 4, w3 + 6, b3];
         for &i in &checks {
+            if sh.skip() && i >= sh.out_w() && i < sh.out_b() {
+                assert_eq!(g[i], 0.0, "pairwise-skip: no linear output");
+                continue;
+            }
             let eps = 1e-3;
             let mut a = p.clone();
             a[i] += eps;
             let mut b = p.clone();
             b[i] -= eps;
             let num = (loss(&a) - loss(&b)) / (2.0 * eps as f64);
-            assert!((num - g[i] as f64).abs() < 1e-4 + 1e-2 * num.abs(), "param {i}: numeric {num} vs analytic {}", g[i]);
+            assert!((num - g[i] as f64).abs() < 1e-4 + 1e-2 * num.abs(), "hd {hd} param {i}: numeric {num} vs analytic {}", g[i]);
         }
+      }
+      NO_QAT.with(|c| c.set(false));
     }
 
     #[test]
     fn head_batch_matches_reference() {
-        for (h, buckets, kl, factorise) in [(32, 8, NO_BUCKETS, false), (64, 2, KingLayout::by_name("kb4"), true), (512, 8, NO_BUCKETS, false)] {
-            let sh = Shape { h, buckets, kb: kl.kb(), hd: 1 };
+        let cases = [(32, 8, NO_BUCKETS, false, 1), (64, 2, KingLayout::by_name("kb4"), true, 1), (512, 8, NO_BUCKETS, false, 1),
+            (32, 8, NO_BUCKETS, false, 2), (64, 2, KingLayout::by_name("kb4"), true, 2), (512, 8, NO_BUCKETS, false, 2), (64, 8, NO_BUCKETS, false, 3)];
+        for (h, buckets, kl, factorise, hd) in cases {
+            let sh = Shape { h, buckets, kb: kl.kb(), hd };
             let fac = Fac::new(sh, factorise);
             let mut rng = Rng::new(13);
             let mut p = if factorise { init_factor(sh, &mut rng) } else { init_params(sh, &mut rng) };
@@ -2883,7 +3364,7 @@ mod tests {
             assert!(gref[sh.head_off()..].iter().any(|&x| x != 0.0), "head got no gradient");
             for isa in isas() {
                 for threads in [1, 3] {
-                    let what = format!("H={h} {} fac={factorise} {isa:?} threads={threads}", kl.name);
+                    let what = format!("H={h} hd={hd} {} fac={factorise} {isa:?} threads={threads}", kl.name);
                     let mut bt = batch::BatchTrainer::new(sh, 64, true, fac.fl, false);
                     bt.isa = isa;
                     let mut p2 = p.clone();
