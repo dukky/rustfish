@@ -1462,6 +1462,9 @@ fn negamax(
     if ply >= MAX_PLY - 1 {
         return eval_for_side(board);
     }
+    // Killers are per parent: this node's children start without the killers
+    // left by the children of earlier nodes at this ply.
+    search.killers[ply + 1] = [None, None];
 
     if board.halfmove_clock >= 100 {
         return 0;
