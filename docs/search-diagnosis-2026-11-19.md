@@ -603,3 +603,34 @@ schemes, so on its own it is a weak per-depth diagnostic.
 Candidate numbers: 300 positions, depth 14, stats build on `diag-r4` with
 each patch applied. Every queued branch passed cargo test --release,
 perfttest, selftest 100 and a UCI smoke.
+
+## Round 5 (2026-11-20, on main c8e3ff7, before the queued round-4 fixes)
+
+Stats build: branch `diag-r5` (`diag-r4` rebased on c8e3ff7). Same 300
+middlegames, depth 14, Hash 64. Baseline: 95.0M nodes, EBF(10-14) 1.639,
+first-move cutoff 83.6% (PV 60.1 / CUT 86.0 / ALL 76.8).
+
+**Noise first.** A one-unit change to the history bonus (`16d^2 + 1`, no
+real effect) moves total nodes **+5.0%** and EBF 1.639 -> 1.647, while the
+first-move cutoff rates move <= 0.2 pt. So on this set, node totals within
++-5% are noise (several earlier "-1..-2% nodes" readings were too); cutoff
+rates, per-class cut rates, TT hit rates and root counters are the stable
+signals. Hash 48 vs 64 changes nodes by only 0.1%: the noise is the
+chaos of the tree under any ordering change, not TT capacity.
+
+| candidate | ordering / TT / root signal | nodes | status |
+|---|---|---|---|
+| capture history (`[side][mover][to][victim]`, ordering only, negamax; /8) | first-move cut 83.6 -> 84.5% (CUT 86.8, ALL 77.8), idx-1 cuts 9.4 -> 8.7%: the biggest ordering gain measured so far | +3.5% | **not pushed**: the same idea was H0 twice in the queue (+0.2 over 6.7k, -2.4 over 9.1k games). Better ordering by this metric did not buy Elo |
+| continuation history keyed by piece-to on both sides | +0.1 pt | +1.8% | dropped (matches the rejected `feat-conthist-rekey`) |
+| 2-ply follow-up history in quiet ordering | +0.1 pt | +6.8% | dropped (matches the rejected cont2-ply tests) |
+| **killers per parent** (clear `killers[ply+1]` at node entry) | killer 1 cut rate when searched 42.2 -> 64.7% (5.61M -> 3.11M searched), counter 22.9 -> 27.0%, first-move cut +0.3 pt (ALL +0.5) | +4.5% | pushed `killer-reset-per-parent`, Bench 293830 |
+| **null-move cutoffs stored in the TT** (lower bound, no move) | CUT TT hit 23.2 -> 24.5%, hit with depth >= d 12.4 -> 13.4%, TT cutoff 8.1 -> 8.5% | +3.4% | pushed `nmp-tt-store`, Bench 278392 |
+| **root moves 2..N ordered by subtree nodes so far** | best move from root index >= 2 in iterations 6-14: 286/305 -> 182/172 of 2700 (two runs each); aspiration fails 382/403 -> 360/364; best-move changes 353/377 -> 429/407 | +2.8% | pushed `root-order-nodes`, Bench 351039 |
+
+Reading: the three ordering-structure ideas that the queue already rejected
+(capture history, piece-to re-key, follow-up history) are also the ones this
+round measures as either neutral or "better ordering, no node saving". The
+first-move cutoff rate is a necessary signal, not a sufficient one. The three
+pushed branches target things the earlier rounds had not touched: stale
+killers from unrelated subtrees, a TT that forgets null-move cuts, and a root
+order that ignores the previous iteration. None is queued yet (queue full).
