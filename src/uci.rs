@@ -673,6 +673,15 @@ mod tests {
                     &engine.position_history,
                     key,
                     board.halfmove_clock,
+                    0,
+                ));
+                // Seen from a root at the current position, a single earlier
+                // occurrence is only a 2-fold.
+                assert!(!crate::search::is_repetition(
+                    &engine.position_history,
+                    key,
+                    board.halfmove_clock,
+                    engine.position_history.len() - 1,
                 ));
             })
             .unwrap()

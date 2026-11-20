@@ -356,6 +356,9 @@ pub(crate) struct Search {
     /// the current path (0 when there is none); repetition lookahead must
     /// not reach behind it.
     null_idx: usize,
+    /// rep_stack index of the root position. Positions before it are game
+    /// history: repeating one of those once is not a draw (see is_repetition).
+    root_idx: usize,
 }
 
 impl Search {
@@ -371,6 +374,7 @@ impl Search {
             move_buf: Vec::with_capacity(256),
             root_nodes: Vec::new(),
             null_idx: 0,
+            root_idx: 0,
         }
     }
 
@@ -823,16 +827,29 @@ pub(crate) fn is_insufficient_material(board: &Board) -> bool {
     }
 }
 
-pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) -> bool {
+/// Draw by repetition for scoring purposes. A repeat of a position on the
+/// search path (index >= `root_idx`, the root included) is a draw at its first
+/// recurrence: the side that allowed it could repeat again. A position seen
+/// only in the game before the root is a draw once it occurs a third time,
+/// i.e. it matches two earlier entries; one earlier occurrence makes only a
+/// 2-fold, which the opponent is free to leave.
+pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32, root_idx: usize) -> bool {
     if rep_stack.len() < 3 || halfmove_clock < 4 {
         return false;
     }
 
     let mut idx = rep_stack.len() - 3;
     let mut remaining = halfmove_clock as usize;
+    let mut pre_root_hits = 0;
     loop {
         if rep_stack[idx] == key {
-            return true;
+            if idx >= root_idx {
+                return true;
+            }
+            pre_root_hits += 1;
+            if pre_root_hits >= 2 {
+                return true;
+            }
         }
         if idx < 2 || remaining < 2 {
             break;
@@ -844,15 +861,17 @@ pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) ->
 }
 
 /// Cuckoo upcoming-repetition test: the side to move can (ignoring legality)
-/// play a reversible move back into a position on the path or in the game
-/// history, which `is_repetition` would score as a draw. Searches use it to
-/// raise alpha to the draw score before doing any work.
+/// play a reversible move back into a position on the search path, which
+/// `is_repetition` would score as a draw. Searches use it to raise alpha to
+/// the draw score before doing any work. Game-history positions before the
+/// root are not targets: re-entering one once is only a 2-fold.
 #[inline]
 fn upcoming_repetition(board: &Board, rep_stack: &[u64], key: u64, search: &Search) -> bool {
     if board.halfmove_clock < 3 {
         return false;
     }
-    let max_back = rep_stack.len() - 1 - search.null_idx;
+    // null_idx, when set, is always above root_idx.
+    let max_back = rep_stack.len() - 1 - search.null_idx.max(search.root_idx);
     crate::tt::Cuckoo::get()
         .upcoming_repetition(board, rep_stack, key, max_back)
         .is_some()
@@ -1287,6 +1306,7 @@ fn search_root(
     rep_stack: &mut Vec<u64>,
 ) -> (i32, Option<Move>, bool) {
     let alpha_orig = alpha;
+    search.root_idx = rep_stack.len() - 1;
     let tt_move = engine.tt.probe(key).and_then(|e| e.best);
     order_moves(
         board,
@@ -1483,7 +1503,7 @@ fn negamax(
     if board.halfmove_clock >= 100 {
         return 0;
     }
-    if is_repetition(rep_stack, key, board.halfmove_clock) {
+    if is_repetition(rep_stack, key, board.halfmove_clock, search.root_idx) {
         return 0;
     }
     if is_insufficient_material(board) {
@@ -2143,7 +2163,7 @@ fn quiescence(
         return 0;
     }
 
-    if is_repetition(rep_stack, key, board.halfmove_clock) {
+    if is_repetition(rep_stack, key, board.halfmove_clock, search.root_idx) {
         return 0;
     }
     // ply > 0 keeps qsearch_gap (tuner, called at ply 0) unaffected.
