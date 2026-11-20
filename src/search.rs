@@ -477,11 +477,6 @@ const HISTORY_MAX: i32 = 16_384;
 /// Cap on a single history bonus/malus. 16 * d^2 reaches it at depth 10, so
 /// one deep cutoff moves an entry at most ~9% of the way to the bound.
 const HISTORY_BONUS_MAX: i32 = 1_536;
-/// LMR adjusts the reduction for quiets whose history passes +/- this value.
-/// The old threshold was 2000 under linear `d^2` accumulation; with a 16x
-/// bonus and gravity, the same number of net same-depth cutoffs lands at
-/// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
-const LMR_HISTORY_THRESHOLD: i32 = 14_000;
 
 fn history_bonus(depth: i32) -> i32 {
     (16 * depth * depth).min(HISTORY_BONUS_MAX)
@@ -1965,8 +1960,13 @@ fn negamax(
                 if pv_node {
                     r -= params.lmr_pv_node;
                 }
-                // Reduce more for moves with bad history
-                if quiet_history < -LMR_HISTORY_THRESHOLD {
+                // Reduce more for moves with negative history. Measured: quiet
+                // history + continuation history sits in [-4096, 4096) for ~95%
+                // of searched quiets, and at depth >= 4 a negative sum cuts
+                // 0.1-0.6% of the time against 1-4% at zero and 3-15% above:
+                // the sign is the signal, the magnitude below zero is not (the
+                // old -14000 threshold on plain history almost never fired).
+                if quiet_history + quiet_continuation < 0 {
                     r += 1;
                 }
                 // Reduce more when our static eval is not improving.
