@@ -160,7 +160,7 @@ impl HeadNet {
             let n = kernels::activate(us, &mut s.x.0[..HALF], 0, &mut s.nnz, 0);
             let n = kernels::activate(them, &mut s.x.0[HALF..], HALF / 4, &mut s.nnz, n);
             let z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..n]);
-            self.rest(b, &z1)
+            self.rest_fast(b, &z1)
         })
     }
 
@@ -169,7 +169,7 @@ impl HeadNet {
     #[allow(dead_code)]
     pub(crate) fn forward_scratch(&self, b: usize, s: &Scratch) -> f32 {
         let z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..s.n]);
-        self.rest(b, &z1)
+        self.rest_fast(b, &z1)
     }
 
     /// Scalar twin of `forward` (tests).
@@ -183,8 +183,122 @@ impl HeadNet {
         self.rest(b, &z1)
     }
 
+    /// `rest`, explicitly vectorised where available (bit-identical; the
+    /// fixture test checks `forward` against `forward_scalar`).
+    #[inline(always)]
+    fn rest_fast(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        #[cfg(target_arch = "aarch64")]
+        return self.rest_neon(b, z1);
+        #[cfg(target_arch = "x86_64")]
+        if kernels::avx2() {
+            // SAFETY: AVX2 detected.
+            return unsafe { self.rest_avx2(b, z1) };
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        return self.rest(b, z1);
+    }
+
+    /// `rest` with explicit AVX2: the same f32 operations in the same
+    /// order (separate mul and add, never fused), so bit-identical.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn rest_avx2(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        use std::arch::x86_64::*;
+        // SAFETY: fixed-size arrays, all accesses in bounds (unaligned loads).
+        unsafe {
+            let (zero, one) = (_mm256_setzero_ps(), _mm256_set1_ps(1.0));
+            let inv = _mm256_set1_ps(1.0 / Z1_DIV);
+            let mut u = [0.0f32; H1];
+            for q in 0..H1 / 8 {
+                let zi = _mm256_loadu_si256(z1.as_ptr().add(8 * q) as *const __m256i);
+                let z = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(zi), inv), _mm256_loadu_ps(self.b1[b].as_ptr().add(8 * q)));
+                let c = _mm256_min_ps(_mm256_max_ps(z, zero), one);
+                _mm256_storeu_ps(u.as_mut_ptr().add(8 * q), _mm256_mul_ps(c, c));
+            }
+            let w2 = &self.w2[b];
+            let mut z2 = [zero; H2 / 8];
+            for (r, z) in z2.iter_mut().enumerate() {
+                *z = _mm256_loadu_ps(self.b2[b].as_ptr().add(8 * r));
+            }
+            for k in 0..KA {
+                let uk = _mm256_set1_ps(u[k]);
+                for (r, z) in z2.iter_mut().enumerate() {
+                    *z = _mm256_add_ps(*z, _mm256_mul_ps(_mm256_loadu_ps(w2[k].as_ptr().add(8 * r)), uk));
+                }
+            }
+            let mut t = [zero; H2 / 8];
+            for r in 0..H2 / 8 {
+                let c = _mm256_min_ps(_mm256_max_ps(z2[r], zero), one);
+                t[r] = _mm256_mul_ps(_mm256_loadu_ps(self.w3[b].as_ptr().add(8 * r)), _mm256_mul_ps(c, c));
+            }
+            // The scalar tree: t[m] += t[m + w] for w = 16, 8 (whole
+            // vectors), then 4, 2, 1 inside the first vector.
+            let v = _mm256_add_ps(_mm256_add_ps(t[0], t[2]), _mm256_add_ps(t[1], t[3]));
+            let q = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps::<1>(v));
+            let h = _mm_add_ps(q, _mm_movehl_ps(q, q));
+            let s = _mm_cvtss_f32(h) + _mm_cvtss_f32(_mm_shuffle_ps::<1>(h, h));
+            let mut out = self.b3[b] + s;
+            if SKIP {
+                out += z1[H1 - 1] as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
+            }
+            out
+        }
+    }
+
+    /// `rest` with explicit NEON: the same f32 operations in the same
+    /// order (no fma), so bit-identical.
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn rest_neon(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        use std::arch::aarch64::*;
+        // SAFETY: fixed-size arrays, all accesses in bounds.
+        unsafe {
+            let (zero, one) = (vdupq_n_f32(0.0), vdupq_n_f32(1.0));
+            let mut u = [0.0f32; H1];
+            let inv = vdupq_n_f32(1.0 / Z1_DIV);
+            for q in 0..H1 / 4 {
+                let z = vaddq_f32(vmulq_f32(vcvtq_f32_s32(vld1q_s32(z1.as_ptr().add(4 * q))), inv), vld1q_f32(self.b1[b].as_ptr().add(4 * q)));
+                let c = vminq_f32(vmaxq_f32(z, zero), one);
+                vst1q_f32(u.as_mut_ptr().add(4 * q), vmulq_f32(c, c));
+            }
+            let w2 = &self.w2[b];
+            let mut z2 = [vdupq_n_f32(0.0); H2 / 4];
+            for (r, z) in z2.iter_mut().enumerate() {
+                *z = vld1q_f32(self.b2[b].as_ptr().add(4 * r));
+            }
+            for k in 0..KA {
+                let uk = vdupq_n_f32(u[k]);
+                for (r, z) in z2.iter_mut().enumerate() {
+                    *z = vaddq_f32(*z, vmulq_f32(vld1q_f32(w2[k].as_ptr().add(4 * r)), uk));
+                }
+            }
+            let mut t = [vdupq_n_f32(0.0); H2 / 4];
+            for r in 0..H2 / 4 {
+                let c = vminq_f32(vmaxq_f32(z2[r], zero), one);
+                t[r] = vmulq_f32(vld1q_f32(self.w3[b].as_ptr().add(4 * r)), vmulq_f32(c, c));
+            }
+            // The scalar tree: t[m] += t[m + w] for w = 16, 8, 4 (whole
+            // vectors), then 2 and 1 inside the first vector.
+            for r in 0..4 {
+                t[r] = vaddq_f32(t[r], t[r + 4]);
+            }
+            for r in 0..2 {
+                t[r] = vaddq_f32(t[r], t[r + 2]);
+            }
+            let v = vaddq_f32(t[0], t[1]);
+            let v2 = vadd_f32(vget_low_f32(v), vget_high_f32(v));
+            let s = vget_lane_f32::<0>(v2) + vget_lane_f32::<1>(v2);
+            let mut out = self.b3[b] + s;
+            if SKIP {
+                out += z1[H1 - 1] as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
+            }
+            out
+        }
+    }
+
     /// b1, the L1 activation, L2 and L3 in f32 (fixed operation order).
     #[inline(always)]
+    #[allow(dead_code)] // the reference on aarch64 (forward_scalar)
     fn rest(&self, b: usize, z1: &[i32; H1]) -> f32 {
         let mut z = [0.0f32; H1];
         for k in 0..H1 {
@@ -457,19 +571,28 @@ pub(crate) mod kernels {
                     let at = i + 16 * g;
                     let lo = delta2(at);
                     let hi = delta2(at + HALF);
-                    if DOT {
+                    let v = if DOT {
                         let (wl, wh) = (vld1q_s16_x2(w.as_ptr().add(at)), vld1q_s16_x2(w.as_ptr().add(at + HALF)));
+                        let mut cs = [zero; 4];
                         for (j, (v, wv)) in [(lo[0], wl.0), (lo[1], wl.1), (hi[0], wh.0), (hi[1], wh.1)].into_iter().enumerate() {
                             let c = vminq_s16(vmaxq_s16(v, zero), qa);
+                            cs[j] = c;
                             let cw = vmulq_s16(c, wv);
                             s[2 * j] = vmlal_s16(s[2 * j], vget_low_s16(cw), vget_low_s16(c));
                             s[2 * j + 1] = vmlal_high_s16(s[2 * j + 1], cw, c);
                         }
-                    }
-                    let a = vqmovun_high_s16(vqmovun_s16(lo[0]), lo[1]);
-                    let b = vqmovun_high_s16(vqmovun_s16(hi[0]), hi[1]);
-                    let l = vrshrn_n_u16::<8>(vshrq_n_u16::<1>(vmull_u8(vget_low_u8(a), vget_low_u8(b))));
-                    let v = vrshrn_high_n_u16::<8>(l, vshrq_n_u16::<1>(vmull_high_u8(a, b)));
+                        // The pairwise input from the same clamped lanes:
+                        // sqrdmulh(c << 6, c') = (128 c c' + 2^15) >> 16
+                        // = (c c' + 256) >> 9, no saturation (c, c' <= 255).
+                        let p0 = vqrdmulhq_s16(vshlq_n_s16::<6>(cs[0]), cs[2]);
+                        let p1 = vqrdmulhq_s16(vshlq_n_s16::<6>(cs[1]), cs[3]);
+                        vuzp1q_u8(vreinterpretq_u8_s16(p0), vreinterpretq_u8_s16(p1))
+                    } else {
+                        let a = vqmovun_high_s16(vqmovun_s16(lo[0]), lo[1]);
+                        let b = vqmovun_high_s16(vqmovun_s16(hi[0]), hi[1]);
+                        let l = vrshrn_n_u16::<8>(vshrq_n_u16::<1>(vmull_u8(vget_low_u8(a), vget_low_u8(b))));
+                        vrshrn_high_n_u16::<8>(l, vshrq_n_u16::<1>(vmull_high_u8(a, b)))
+                    };
                     vst1q_u8(x.as_mut_ptr().add(at), v);
                     let v32 = vreinterpretq_u32_u8(v);
                     m = vorrq_u32(m, vshlq_u32(vandq_u32(vtstq_u32(v32, v32), bits), vdupq_n_s32(4 * g as i32)));
@@ -556,7 +679,7 @@ pub(crate) mod kernels {
     use std::arch::x86_64::*;
 
     #[inline(always)]
-    fn avx2() -> bool {
+    pub(crate) fn avx2() -> bool {
         if cfg!(target_feature = "avx2") {
             return true;
         }
@@ -1165,5 +1288,260 @@ mod fixture {
         eprintln!("head fixture: nonzero L1 input chunks {nnz:.1} of {CHUNKS} ({:.1}%)", 100.0 * nnz / CHUNKS as f64);
         eprintln!("head fixture: {n} positions, |engine - trainer| mean {mean:.3} cp, p95 {p95:.2}, max {worst:.2}, bias {bias:+.3}; worst {worst_fen}");
         assert!(mean < 1.0 && p95 < 3.0 && worst < 10.0, "engine and trainer disagree beyond quantisation error");
+    }
+}
+
+/// Offline FT neuron permutation for pairwise-head nets (exact: the eval
+/// is unchanged bit for bit, only the order of the L1 input changes).
+///
+/// The L1 input is scanned in 4-byte chunks and only nonzero chunks cost
+/// work, so grouping pairs that are zero together into the same chunks
+/// cuts the nonzero-chunk count. Pair `i` (accumulator neurons `i` and
+/// `i + H/2`) moves to slot `p` together with its FT columns, FT bias,
+/// linear output weights and W1 columns in both halves of the L1 input;
+/// every sum involved is an exact integer sum, so the result is identical.
+///
+/// Run (ignored test; FENs one per line, e.g. a slice of a validation set
+/// converted with scripts/head_check.py's `rec_to_fen`):
+/// `RUSTFISH_PERM_FENS=fens.txt RUSTFISH_PERM_OUT=out.bin \
+///  [RUSTFISH_PERM_TEST=heldout.txt] [RUSTFISH_HEAD_NET=in.bin] \
+///  cargo test --release head_permute -- --ignored --nocapture`
+#[cfg(test)]
+mod permute {
+    use super::super::{net_bytes, Accumulator, Network, BUCKETS, HEAD, INPUTS, KB};
+    use super::{BUCKET_WORDS, H, H1, HALF, N_IN};
+    use crate::Board;
+
+    /// Per-pair activity over samples (position x perspective) as bitsets.
+    fn activity(net: &Network, path: &str) -> (Vec<Vec<u64>>, usize) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let fens: Vec<&str> = text.lines().map(|l| l.split('|').next().unwrap().trim()).filter(|l| !l.is_empty()).collect();
+        let samples = fens.len() * 2;
+        let mut bits = vec![vec![0u64; samples.div_ceil(64)]; HALF];
+        for (n, fen) in fens.iter().enumerate() {
+            let mut board = Board::new();
+            board.set_fen(fen);
+            let acc = Accumulator::refresh(net, &board);
+            for p in 0..2 {
+                let s = 2 * n + p;
+                let a = &acc.v[p];
+                for i in 0..HALF {
+                    let x = ((a[i] as i32).clamp(0, 255) * (a[i + HALF] as i32).clamp(0, 255) + 256) >> 9;
+                    if x != 0 {
+                        bits[i][s / 64] |= 1 << (s % 64);
+                    }
+                }
+            }
+        }
+        (bits, samples)
+    }
+
+    /// Nonzero chunks (summed over samples) of slot order `perm`.
+    fn cost(bits: &[Vec<u64>], perm: &[usize]) -> u64 {
+        perm.chunks(4).map(|c| chunk_cost(bits, c)).sum()
+    }
+
+    fn chunk_cost(bits: &[Vec<u64>], c: &[usize]) -> u64 {
+        (0..bits[0].len()).map(|k| c.iter().fold(0u64, |m, &i| m | bits[i][k]).count_ones() as u64).sum()
+    }
+
+    /// Order the pairs: by activity, then pair swaps between chunks while
+    /// they reduce the nonzero-chunk total (deterministic xorshift).
+    fn optimise(bits: &[Vec<u64>]) -> Vec<usize> {
+        let freq: Vec<u32> = bits.iter().map(|b| b.iter().map(|w| w.count_ones()).sum()).collect();
+        let mut perm: Vec<usize> = (0..HALF).collect();
+        perm.sort_by_key(|&i| (std::cmp::Reverse(freq[i]), i));
+        let mut cc: Vec<u64> = perm.chunks(4).map(|c| chunk_cost(bits, c)).collect();
+        eprintln!("  sorted by activity: {}", cc.iter().sum::<u64>());
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let iters: usize = std::env::var("RUSTFISH_PERM_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000);
+        for t in 0..iters {
+            let (a, b) = ((next() % HALF as u64) as usize, (next() % HALF as u64) as usize);
+            let (ca, cb) = (a / 4, b / 4);
+            if ca == cb {
+                continue;
+            }
+            perm.swap(a, b);
+            let na = chunk_cost(bits, &perm[4 * ca..4 * ca + 4]);
+            let nb = chunk_cost(bits, &perm[4 * cb..4 * cb + 4]);
+            if na + nb < cc[ca] + cc[cb] {
+                cc[ca] = na;
+                cc[cb] = nb;
+            } else {
+                perm.swap(a, b);
+            }
+            if t % 100_000 == 0 {
+                eprintln!("  iter {t}: {}", cc.iter().sum::<u64>());
+            }
+        }
+        perm
+    }
+
+    /// Slot `p` of a row of H gets pair `perm[p]` (both halves).
+    fn permute_row(r: &mut [i16], perm: &[usize]) {
+        let old = r.to_vec();
+        for (p, &i) in perm.iter().enumerate() {
+            r[p] = old[i];
+            r[p + HALF] = old[i + HALF];
+        }
+    }
+
+    /// The net file with pair `perm[p]` moved to slot `p`.
+    fn permute_bytes(bytes: &[u8], perm: &[usize]) -> Vec<u8> {
+        let mut w: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        // FT weight rows, FT bias, then the linear output rows (us, them per bucket).
+        let rows = KB * INPUTS + 1 + BUCKETS * 2;
+        for r in w[..rows * H].chunks_exact_mut(H) {
+            permute_row(r, perm);
+        }
+        // W1 rows: the L1 input is the stm's pairs 0..HALF, then the other side's.
+        let head = rows * H + BUCKETS;
+        for b in 0..BUCKETS {
+            for k in 0..H1 {
+                let o = head + b * BUCKET_WORDS + k * N_IN;
+                permute_row(&mut w[o..o + N_IN], perm);
+            }
+        }
+        w.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    #[test]
+    #[ignore]
+    fn head_permute() {
+        assert!(HEAD && N_IN == H);
+        let bytes = match std::env::var("RUSTFISH_HEAD_NET") {
+            Ok(p) => std::fs::read(p).unwrap(),
+            Err(_) => crate::EMBEDDED_NET.to_vec(),
+        };
+        assert_eq!(bytes.len(), net_bytes(KB));
+        let net = Network::from_bytes(&bytes).unwrap();
+        let (bits, samples) = activity(&net, &std::env::var("RUSTFISH_PERM_FENS").expect("RUSTFISH_PERM_FENS"));
+        let id: Vec<usize> = (0..HALF).collect();
+        // Nonzero chunks per eval (two perspectives).
+        let per = |c: u64, s: usize| 2.0 * c as f64 / s as f64;
+        eprintln!("train ({samples} samples): identity {:.1} nonzero chunks / eval", per(cost(&bits, &id), samples));
+        let perm = optimise(&bits);
+        eprintln!("train: permuted {:.1}", per(cost(&bits, &perm), samples));
+        let out = permute_bytes(&bytes, &perm);
+        let pnet = Network::from_bytes(&out).unwrap();
+        if let Ok(t) = std::env::var("RUSTFISH_PERM_TEST") {
+            let (tb, ts) = activity(&net, &t);
+            let (pb, _) = activity(&pnet, &t);
+            eprintln!(
+                "test ({ts} samples): identity {:.1}, permuted {:.1} (permuted net, measured: {:.1})",
+                per(cost(&tb, &id), ts),
+                per(cost(&tb, &perm), ts),
+                per(cost(&pb, &id), ts)
+            );
+        }
+        if let Ok(o) = std::env::var("RUSTFISH_PERM_OUT") {
+            std::fs::write(&o, &out).unwrap();
+            eprintln!("wrote {o}");
+        }
+    }
+
+    /// Microbench of the head's parts on real accumulators (ns per eval).
+    #[test]
+    #[ignore]
+    fn head_microbench() {
+        use super::super::{out_half, simd};
+        use super::{kernels, Scratch, CHUNKS};
+        let net = Network::from_bytes(crate::EMBEDDED_NET).unwrap();
+        let text = std::fs::read_to_string(std::env::var("RUSTFISH_PERM_FENS").unwrap()).unwrap();
+        let accs: Vec<Accumulator> = text
+            .lines()
+            .take(2000)
+            .map(|fen| {
+                let mut board = Board::new();
+                board.set_fen(fen.split('|').next().unwrap().trim());
+                Accumulator::refresh(&net, &board)
+            })
+            .collect();
+        let (add, sub) = (net.row(100), net.row(200));
+        let w0 = out_half(&net, 3, true);
+        let head = net.head.as_ref().unwrap();
+        let mut out = [0i16; H];
+        let mut sc = Scratch::new();
+        let reps = 20;
+        let t = std::time::Instant::now();
+        let mut sink = 0i64;
+        for _ in 0..reps {
+            for a in &accs {
+                for p in 0..2 {
+                    sink += simd::update_dot(&mut out, &a.v[p], &[add], &[sub], w0);
+                }
+            }
+        }
+        let n = (reps * accs.len()) as f64;
+        eprintln!("update_dot x2: {:.1} ns", t.elapsed().as_nanos() as f64 / n);
+        let t = std::time::Instant::now();
+        let mut nz = 0usize;
+        for _ in 0..reps {
+            for a in &accs {
+                sc.n = 0;
+                for p in 0..2 {
+                    let hx = CHUNKS * 2;
+                    let (s, n) = kernels::update_pw::<true>(&mut out, &a.v[p], &[add], &[sub], w0, &mut sc.x.0[p * hx..(p + 1) * hx], p * hx / 4, &mut sc.nnz, sc.n);
+                    sink += s;
+                    sc.n = n;
+                }
+                nz += sc.n;
+            }
+        }
+        eprintln!("update_pw x2: {:.1} ns ({:.1} nnz)", t.elapsed().as_nanos() as f64 / n, nz as f64 / n);
+        // L1 + rest on each position's input.
+        let scs: Vec<Box<Scratch>> = accs
+            .iter()
+            .map(|a| {
+                let mut s = Box::new(Scratch::new());
+                let n = kernels::activate(&a.v[0], &mut s.x.0[..HALF], 0, &mut s.nnz, 0);
+                s.n = kernels::activate(&a.v[1], &mut s.x.0[HALF..], HALF / 4, &mut s.nnz, n);
+                s
+            })
+            .collect();
+        let mut f = 0.0f32;
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            for (j, s) in scs.iter().enumerate() {
+                let z = kernels::l1(head, j % BUCKETS, &s.x.0, &s.nnz[..s.n]);
+                sink += z[0] as i64;
+            }
+        }
+        eprintln!("l1: {:.1} ns", t.elapsed().as_nanos() as f64 / n);
+        let z1s: Vec<[i32; H1]> = scs.iter().enumerate().map(|(j, s)| kernels::l1(head, j % BUCKETS, &s.x.0, &s.nnz[..s.n])).collect();
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            for (j, z) in z1s.iter().enumerate() {
+                f += head.rest(j % BUCKETS, std::hint::black_box(z));
+            }
+        }
+        eprintln!("rest: {:.1} ns  ({sink} {f})", t.elapsed().as_nanos() as f64 / n);
+        #[cfg(target_arch = "aarch64")]
+        {
+            for (j, z) in z1s.iter().enumerate() {
+                assert_eq!(head.rest(j % BUCKETS, z).to_bits(), head.rest_neon(j % BUCKETS, z).to_bits());
+            }
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                for (j, z) in z1s.iter().enumerate() {
+                    f += head.rest_neon(j % BUCKETS, std::hint::black_box(z));
+                }
+            }
+            eprintln!("rest_neon: {:.1} ns  ({f})", t.elapsed().as_nanos() as f64 / n);
+        }
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            for (j, s) in scs.iter().enumerate() {
+                let z = kernels::l1(head, 5 + 0 * j, &s.x.0, &s.nnz[..s.n]);
+                sink += z[0] as i64;
+            }
+        }
+        eprintln!("l1 (one bucket): {:.1} ns {sink}", t.elapsed().as_nanos() as f64 / n);
     }
 }
