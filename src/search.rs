@@ -479,11 +479,6 @@ const HISTORY_MAX: i32 = 16_384;
 /// Cap on a single history bonus/malus (reached at depth 10), so one deep
 /// cutoff moves an entry at most ~9% of the way to the bound.
 const HISTORY_BONUS_MAX: i32 = 1_536;
-/// LMR adjusts the reduction for quiets whose history passes +/- this value.
-/// The old threshold was 2000 under linear `d^2` accumulation; with a 16x
-/// bonus and gravity, the same number of net same-depth cutoffs lands at
-/// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
-const LMR_HISTORY_THRESHOLD: i32 = 14_000;
 
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
@@ -2078,10 +2073,6 @@ fn negamax_body(
                 }
                 if pv_node {
                     r -= params.lmr_pv_node;
-                }
-                // Reduce more for moves with bad history
-                if quiet_history < -LMR_HISTORY_THRESHOLD {
-                    r += 1;
                 }
                 // Reduce more when our static eval is not improving.
                 if !improving {
