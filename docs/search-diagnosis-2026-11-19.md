@@ -891,8 +891,8 @@ are only 6.5% of top-5 games; the score is decided by conversion, not by losses.
 **(2) Eval optimism in lost positions: no.** We agree a game is lost a
 median 1 move after the anchor (mean 3 moves *before* it; Clover 4 after);
 just before the lost point we are +27 cp raw / +7 rescaled (Clover +73 / +45).
-In 6/13 losses we were the more pessimistic one (altair, carp: -300..-440 vs
-the anchor's -180). Outcome calibration agrees (our points by each engine's
+In 6/13 losses we were the more pessimistic one (-250..-430 vs
+the anchor's -145..-220). Outcome calibration agrees (our points by each engine's
 own score band, phase >= 4, top 5, us|opp): -2: 0.31|0.26, -1: 0.43|0.41,
 0: 0.50|0.52, but **+1: 0.55|0.63, +2: 0.74|0.95**. The optimism that
 does exist is on the *winning* side.
