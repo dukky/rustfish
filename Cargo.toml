@@ -8,6 +8,8 @@ edition = "2021"
 stats = []
 # Also re-search a sample of pruned nodes/moves to estimate pruning error rates.
 stats-verify = ["stats"]
+# Env knobs only (no counters), for fixed-node games of diagnosis variants.
+knobs = []
 
 [profile.release]
 lto = true

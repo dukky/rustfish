@@ -12,6 +12,8 @@ macro_rules! st_allow { ($s:expr, $p:expr) => { true } }
 mod bitboard;
 #[cfg(feature = "stats")]
 mod stats;
+#[cfg(any(feature = "stats", feature = "knobs"))]
+mod knobs;
 mod book;
 mod datagen;
 mod eval;

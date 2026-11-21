@@ -131,3 +131,6 @@ pub fn tr_take(ply: usize) -> (String, String) {
     let m = TR_MV.with(|t| t.borrow_mut().get_mut(ply).map(std::mem::take).unwrap_or_default());
     (w, m)
 }
+
+#[allow(unused_imports)]
+pub use crate::knobs::knob;
