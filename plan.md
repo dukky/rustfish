@@ -47,6 +47,7 @@ but it reinforces the rule: discount self-play gains ~0.3-0.5x, and nets
   - **Bug audit (19-20 Nov):** three proven long-standing bugs, each queued `:stc`: repetition check looked past null moves (61/368 bench draws false); ep square hashed after every double push even when no capture possible (one position, several keys); quiet queen promotions pruned/reduced as quiets (624/2843 pruned). Node counts within noise, so SPRT decides. NPS 'drop' is only the first second (flat 1.41-1.45M from depth 15-27): not a bug.
   - In the queue: `prune-exempt-killers` (only killers/counter exempt from move-loop
     pruning; nodes -9.6%). Next: PV stability at depth (X3), reduction/extension balance at depth.
+  - **Gauge cadence (owner, 21 Nov):** run the 200k-node Clover gauge (`peer-match.yml -f limit=nodes=200000 -f games=800`) whenever per-node value may have moved: after a new net merges, and after every ~3 merged search changes; it is the measure of the search gap, not the ladder. 21 Nov ~16:00: gauge on 1051d74 (gen 11 + speed stack) running. Search agents started 21 Nov ~15:30 (branches only): history-table quality (`hist-*`) and depth erosion / reduction-extension balance (`depth-*`).
   - Tooling: `diag-search-stats` (feature `stats`, `stats-verify`), `scripts/search_stats.py`,
     `scripts/diag-mid300.txt`; Clover matches via `peer-match.yml`. New candidates go through
     the merge queue (`queue.py add <b>:stc`), not manual `ci.py sprt`.
