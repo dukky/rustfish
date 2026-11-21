@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "capture-history-r5",
-      "mode": "stc",
-      "front": true
-    },
-    {
       "branch": "root-bad-captures-last",
       "mode": "stc"
     },
@@ -62,7 +57,17 @@
       "mode": "stc"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "capture-history-r5",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-capture-history-r5-1121-1707",
+    "sha": "a77bf17c0b91faec1dd5aea3c5115a6a132f7d88",
+    "base_sha": "7dc90ff5e5119f39424560c321f41a3e9e559eef",
+    "started": "2026-11-21T17:07:31Z",
+    "bench": 188962,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
