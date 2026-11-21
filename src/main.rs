@@ -987,21 +987,21 @@ struct SearchParams {
 impl Default for SearchParams {
     fn default() -> Self {
         Self {
-            futility_margin_d1: 94,
-            futility_margin_d2: 228,
-            reverse_futility_margin_d1: 51,
-            reverse_futility_margin_d2: 126,
-            reverse_futility_margin_d3: 268,
+            futility_margin_d1: 82,
+            futility_margin_d2: 235,
+            reverse_futility_margin_d1: 43,
+            reverse_futility_margin_d2: 109,
+            reverse_futility_margin_d3: 259,
             null_reduction_base: 3,
             threat_history: true,
-            threat_escape_bonus: 7563,
+            threat_escape_bonus: 7318,
             null_reduction_depth_div: 3,
             lmp_limit_d1: 6,
             lmr_cut_node: 2,
             lmr_pv_node: 1,
             se_negative_extension: 1,
-            lmp_limit_d2: 10,
-            lmp_limit_d3: 14,
+            lmp_limit_d2: 9,
+            lmp_limit_d3: 15,
             lmr_min_depth: 3,
             lmr_not_improving: 1,
             lmr_min_move_index: 3,
@@ -1202,21 +1202,21 @@ fn main() {
             println!("option name BookFile type string default");
             println!("option name EvalFile type string default");
             println!("option name UseNNUE type check default true");
-            println!("option name FutilityMarginD1 type spin default 94 min 0 max 500");
-            println!("option name FutilityMarginD2 type spin default 228 min 0 max 700");
-            println!("option name ReverseFutilityMarginD1 type spin default 51 min 0 max 500");
-            println!("option name ReverseFutilityMarginD2 type spin default 126 min 0 max 700");
-            println!("option name ReverseFutilityMarginD3 type spin default 268 min 0 max 900");
+            println!("option name FutilityMarginD1 type spin default 82 min 0 max 500");
+            println!("option name FutilityMarginD2 type spin default 235 min 0 max 700");
+            println!("option name ReverseFutilityMarginD1 type spin default 43 min 0 max 500");
+            println!("option name ReverseFutilityMarginD2 type spin default 109 min 0 max 700");
+            println!("option name ReverseFutilityMarginD3 type spin default 259 min 0 max 900");
             println!("option name NullReductionBase type spin default 3 min 0 max 6");
             println!("option name ThreatHistory type check default true");
-            println!("option name ThreatEscapeBonus type spin default 7563 min 0 max 30000");
+            println!("option name ThreatEscapeBonus type spin default 7318 min 0 max 30000");
             println!("option name NullReductionDepthDiv type spin default 3 min 1 max 12");
             println!("option name LmpLimitD1 type spin default 6 min 0 max 24");
             println!("option name LmrCutNode type spin default 2 min 0 max 4");
             println!("option name LmrPvNode type spin default 1 min 0 max 4");
             println!("option name SeNegativeExtension type spin default 1 min 0 max 3");
-            println!("option name LmpLimitD2 type spin default 10 min 0 max 32");
-            println!("option name LmpLimitD3 type spin default 14 min 0 max 40");
+            println!("option name LmpLimitD2 type spin default 9 min 0 max 32");
+            println!("option name LmpLimitD3 type spin default 15 min 0 max 40");
             println!("option name LmrMinDepth type spin default 3 min 1 max 12");
             println!("option name LmrNotImproving type spin default 1 min 0 max 3");
             println!("option name LmrMinMoveIndex type spin default 3 min 1 max 24");
