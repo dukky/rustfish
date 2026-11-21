@@ -2,11 +2,6 @@
   "pending": [
     {
       "branch": "main",
-      "mode": "ltc-check",
-      "base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac"
-    },
-    {
-      "branch": "main",
       "mode": "ladder"
     },
     {
@@ -56,7 +51,15 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "ltc-check",
+    "base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
+    "test_id": "q-main-ltc-check-1121-0116",
+    "sha": "eb1bce016994cdf5039564d96b426f17f325c945",
+    "base_sha": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
+    "started": "2026-11-21T01:16:49Z"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
