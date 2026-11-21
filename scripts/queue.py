@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 REPO = os.getcwd()
 STATE = os.path.join(REPO, ".queue-state")
@@ -1135,6 +1136,16 @@ def parse_add_args(args):
         else:
             raise SystemExit(f"unknown argument {a!r}")
     parse_adds(spec, expect)  # validate before pushing
+    # A net under test needs its training row first (the dashboard and
+    # check_net_records.py read net/experiments.jsonl on main).
+    rows = [json.loads(l) for l in (Path(__file__).resolve().parent.parent / "net/experiments.jsonl")
+            .read_text().splitlines() if l.strip()]
+    known = {r.get("branch") or f"nnue-{str(r.get('id', '')).lower()}" for r in rows}
+    for item in spec.split(","):
+        branch = item.split(":")[0]
+        if branch.startswith("nnue-") and branch not in known:
+            raise SystemExit(f"{branch}: no row in net/experiments.jsonl; add one "
+                             "(scripts/netloop.py record) and push it before queueing")
     req = {"add": spec, "front": bool(flags), "preempt": "--preempt" in flags}
     if expect is not None:
         req["expect"] = expect
