@@ -23,11 +23,11 @@ on:
         description: "Max play jobs at once; the merge queue passes its foreground width (MAX_FOREGROUND_SHARDS from scripts/queue-settings.json lanes)"
         default: "6"
       anchors:
-        description: "Comma-separated anchor names, or 'all'"
-        default: "all"
+        description: "Comma-separated anchor names, or 'all'. Default = the merge queue's set (scripts/queue-settings.json ladder.anchors); keep the two in sync"
+        default: "weiss-2.0,stash-35.0,reckless-0.6.0,stash-37.0,koivisto-6.0,reckless-0.7.0,carp-3.0.1,berserk-8,altair-7.0.0,koivisto-8.0,koivisto-9.0"
       anchors_file:
-        description: "Anchor list (scripts/anchors-high.json for 2300-2600)"
-        default: "scripts/anchors.json"
+        description: "Anchor list. Default elite set; scripts/anchors.json is the old weak set (we score ~100% against it: a ladder on it gives no usable rating)"
+        default: "scripts/anchors-elite.json"
       test_id:
         description: "Set by the merge queue: log the result and call the queue back"
         default: ""

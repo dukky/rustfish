@@ -249,7 +249,8 @@ def main():
 
     lp = sub.add_parser("ladder")
     lp.add_argument("--ref", default="main")
-    lp.add_argument("--games", type=int, default=96, help="games per anchor")
+    lp.add_argument("--games", type=int, default=int(LADDER_ANCHORS["games_per_anchor"]),
+                    help="games per anchor (default: the queue's)")
     lp.add_argument("--tc", default="120+1")
     lp.set_defaults(func=cmd_ladder)
 

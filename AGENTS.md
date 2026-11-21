@@ -220,15 +220,16 @@ Notes:
 
 ### CCRL-scale rating in GitHub Actions (preferred absolute strength number)
 The `CCRL ladder` workflow (`.github/workflows/ccrl-ladder.yml`) builds rustfish and
-the CCRL-rated anchors in `scripts/anchors.json`, plays them with fastchess at 120+1
+the CCRL-rated anchors in `scripts/anchors-elite.json` (the merge queue's 11-anchor set
+from `scripts/queue-settings.json`; `scripts/anchors.json` is the old weak set, useless now), plays them with fastchess at 120+1
 on GitHub runners, and fits one rating with `scripts/ccrl_ladder.py`. Nothing runs
 on this laptop:
 ```bash
-gh workflow run ccrl-ladder.yml -f games_per_anchor=96 -f tc=120+1
+python3 scripts/ci.py ladder   # same anchors, games and TC as the queue's ladder
 gh run watch   # result lands in the run's job summary + ccrl-ladder-results artifact
 ```
 Notes:
-- Add anchors (e.g. stronger ones as rustfish improves) by editing `scripts/anchors.json`
+- Add anchors (e.g. stronger ones as rustfish improves) by editing `scripts/anchors-elite.json` and the `ladder.anchors` list in `scripts/queue-settings.json`
   with ratings from the CCRL Blitz complete list.
 - Use `-f anchors=a,b,c` to rerun a subset; `-f games_per_anchor=32` for a quick look.
 - This is the number to quote; `UCI_Elo` ladders are only a rough cross-check.
