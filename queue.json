@@ -62,17 +62,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "spsa-r28-interim",
-    "mode": "stc",
-    "front": true,
-    "test_id": "q-spsa-r28-interim-1121-1450",
-    "sha": "0b021d5fd9a47a3de4f7b69d006fb4972566dee4",
-    "base_sha": "73e815fc2b7d954797540d8ad307f06aadbd2e22",
-    "started": "2026-11-21T14:50:13Z",
-    "bench": 195624,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
