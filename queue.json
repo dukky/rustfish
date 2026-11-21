@@ -56,6 +56,10 @@
     {
       "branch": "hist-lmr-drop-bad",
       "mode": "nonreg"
+    },
+    {
+      "branch": "depth-negext-verify",
+      "mode": "stc"
     }
   ],
   "current": {
