@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "capture-history-r5",
+      "mode": "stc",
+      "front": true
+    },
+    {
       "branch": "root-bad-captures-last",
       "mode": "stc"
     },
@@ -34,6 +39,10 @@
     },
     {
       "branch": "eval-drawish-pawns",
+      "mode": "stc"
+    },
+    {
+      "branch": "history-malus-150",
       "mode": "stc"
     }
   ],
