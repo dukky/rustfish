@@ -982,6 +982,8 @@ struct SearchParams {
     // Node-fraction time management, see NODE_TM_MIN_DEPTH in search.rs.
     node_tm_base: u64,
     node_tm_scale: u64,
+    // Diagnostic qsearch switches (bit set, 0 = normal), branch diag-qsearch.
+    qs_diag: u32,
 }
 
 impl Default for SearchParams {
@@ -1009,6 +1011,7 @@ impl Default for SearchParams {
             lmr_extra_move_index: 8,
             node_tm_base: 175,
             node_tm_scale: 75,
+            qs_diag: 0,
         }
     }
 }
@@ -1285,6 +1288,10 @@ fn main() {
         }
         if cmd.starts_with("evalhash") {
             handle_evalhash(cmd, &mut board, engine.active_net());
+            continue;
+        }
+        if cmd == "qsinfo" {
+            search::handle_qsinfo(&mut board, &mut engine);
             continue;
         }
         if cmd.starts_with("bench") {

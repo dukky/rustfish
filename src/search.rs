@@ -1514,7 +1514,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move, 0);
     }
 
     let alpha_orig = alpha;
@@ -1572,7 +1572,7 @@ fn negamax(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move, 0);
             }
         }
 
@@ -1707,6 +1707,7 @@ fn negamax(
                     ply + 1,
                     None,
                     Some(mv),
+                    0,
                 );
                 if score >= probcut_beta && !search.stop {
                     score = -negamax(
@@ -2116,8 +2117,90 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     let key = board_hash(board, &engine.zobrist);
     let mut search = Search::new(None);
     let mut rep_stack = vec![key];
-    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None, None);
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None, None, 0);
     (q - eval_for_side(board)).abs()
+}
+
+const QS_BAD: u32 = 1;
+const QS_CHECKS: u32 = 2;
+const QS_PROMO: u32 = 4;
+const QS_NOTT: u32 = 8;
+const QS_THREAT: u32 = 16;
+const QS_NOCORR: u32 = 32;
+const QS_DUMMY: u32 = 64;
+const QS_NO_UNDERPROMO: u32 = 128;
+
+/// Largest material the side to move has hanging, roughly: a piece attacked
+/// and undefended counts in full, a piece attacked by a lesser one counts its
+/// value minus the attacker class.
+fn hanging_value(board: &Board) -> i32 {
+    let us = board.side_to_move;
+    let them_maps = threat_maps(board, us.opposite());
+    let our_maps = threat_maps(board, us);
+    let p = &board.bb.pieces[color_index(us)];
+    let mut worst = 0;
+    for (k, kind, v) in [
+        (0usize, PieceType::Pawn, 100),
+        (1, PieceType::Knight, 320),
+        (2, PieceType::Bishop, 330),
+        (3, PieceType::Rook, 500),
+        (4, PieceType::Queen, 900),
+    ] {
+        let pcs = p[k];
+        if pcs & them_maps.all & !our_maps.all != 0 {
+            worst = worst.max(v);
+        }
+        let lesser_val = match kind {
+            PieceType::Knight | PieceType::Bishop => 100,
+            PieceType::Rook => 320,
+            PieceType::Queen => 500,
+            _ => v,
+        };
+        if pcs & them_maps.by_lesser(kind) != 0 {
+            worst = worst.max(v - lesser_val);
+        }
+    }
+    worst
+}
+
+/// `qsinfo`: static eval, full-window qsearch value and exchange features of
+/// the current position (fresh search state, side-to-move POV).
+pub(crate) fn handle_qsinfo(board: &mut Board, engine: &mut EngineState) {
+    let key = board_hash(board, &engine.zobrist);
+    let mut search = Search::new(None);
+    let mut rep_stack = vec![key];
+    let in_check = board.is_in_check(board.side_to_move);
+    let raw = engine.eval_cache.eval(board, key);
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 1, None, None, 0);
+    // Opponent's best SEE capture if it were their move (null-move threat).
+    let mut threat = 0;
+    if !in_check {
+        let mut b2 = board.clone();
+        b2.side_to_move = b2.side_to_move.opposite();
+        b2.en_passant = None;
+        let mut mv = Vec::new();
+        b2.generate_legal_moves(true, &mut mv);
+        for m in mv {
+            threat = threat.max(see(&b2, m));
+        }
+    }
+    let mut mv = Vec::new();
+    board.generate_legal_moves(true, &mut mv);
+    let mut best_cap = i32::MIN;
+    for m in mv.iter() {
+        best_cap = best_cap.max(see(board, *m));
+    }
+    println!(
+        "qsinfo static {} qs {} nodes {} incheck {} threat {} hang {} caps {} bestsee {}",
+        raw,
+        q,
+        search.nodes,
+        in_check as i32,
+        threat,
+        hanging_value(board),
+        mv.len(),
+        if mv.is_empty() { 0 } else { best_cap }
+    );
 }
 
 fn quiescence(
@@ -2133,6 +2216,8 @@ fn quiescence(
     known_in_check: Option<bool>,
     // The move that led here (continuation correction history).
     prev_move: Option<Move>,
+    // 0 at the qsearch entry from negamax, negative below (diag switches).
+    qdepth: i32,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -2164,9 +2249,10 @@ fn quiescence(
     let alpha_orig = alpha;
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
+    let qd = engine.search_params.qs_diag;
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
-        if entry.depth >= 0 {
+        if entry.depth >= 0 && qd & QS_NOTT == 0 {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => return tt_score,
@@ -2189,8 +2275,23 @@ fn quiescence(
         )
     };
     // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
-    let static_eval = raw_static_eval
-        .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
+    let static_eval = raw_static_eval.map(|raw| {
+        if qd & QS_NOCORR != 0 {
+            raw
+        } else {
+            tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply)
+        }
+    });
+    let static_eval = if qd & QS_DUMMY != 0 {
+        static_eval.map(|se| se + ((key >> (17 + ((qd >> 8) & 15))) & 1) as i32)
+    } else {
+        static_eval
+    };
+    let static_eval = if qd & QS_THREAT != 0 {
+        static_eval.map(|se| se - hanging_value(board) / 2)
+    } else {
+        static_eval
+    };
 
     // Fail-soft: `best` is the highest score seen (stand pat included) and is
     // what a fail-low node returns, as in negamax.
@@ -2213,7 +2314,7 @@ fn quiescence(
         None,
         &[None, None],
         &engine.history,
-        !in_check,
+        !in_check && qd & (QS_CHECKS | QS_PROMO) == 0,
         &mut search.move_buf,
     );
     if picker.is_empty() {
@@ -2222,6 +2323,8 @@ fn quiescence(
         }
         return best;
     }
+    let qs_first = qdepth == 0;
+    let mut check_info: Option<CheckInfo> = None;
 
     while let Some((mv, stage)) = picker.next() {
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
@@ -2230,11 +2333,31 @@ fn quiescence(
         if !in_check {
             // Stage buckets already encode the SEE sign, so only the TT move
             // (which bypassed bucketing) needs a fresh SEE here.
-            if stage == Stage::BadCapture {
-                continue;
-            }
-            if stage == Stage::Tt && !see_ge(board, mv, 0) {
-                continue;
+            let capture = is_capture_move(board, mv);
+            if !capture {
+                // Only the QS_CHECKS / QS_PROMO switches generate quiets here.
+                let promo_ok = qd & QS_PROMO != 0 && mv.promotion == Some(PieceType::Queen);
+                let check_ok = qd & QS_CHECKS != 0
+                    && qs_first
+                    && check_info.get_or_insert_with(|| CheckInfo::new(board)).gives_check(board, mv)
+                    && see_ge(board, mv, 0);
+                if !promo_ok && !check_ok {
+                    continue;
+                }
+            } else {
+                if qd & QS_NO_UNDERPROMO != 0
+                    && matches!(mv.promotion, Some(PieceType::Rook) | Some(PieceType::Bishop))
+                {
+                    continue;
+                }
+                if qd & QS_BAD == 0 {
+                    if stage == Stage::BadCapture {
+                        continue;
+                    }
+                    if stage == Stage::Tt && !see_ge(board, mv, 0) {
+                        continue;
+                    }
+                }
             }
         }
 
@@ -2246,7 +2369,7 @@ fn quiescence(
             st.prefetch_pending();
         }
         rep_stack.push(child_key);
-        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv));
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv), qdepth - 1);
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -3394,6 +3517,7 @@ mod tests {
                     3,
                     None,
                     None,
+                    0,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 3);
@@ -3435,6 +3559,7 @@ mod tests {
                     5,
                     None,
                     None,
+                    0,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 5);
