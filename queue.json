@@ -40,6 +40,10 @@
     {
       "branch": "fifty-move-mate",
       "mode": "nonreg"
+    },
+    {
+      "branch": "eval-drawish-pawns",
+      "mode": "stc"
     }
   ],
   "current": {
