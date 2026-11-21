@@ -483,7 +483,9 @@ pub(crate) mod kernels {
             let p = acc.as_ptr();
             // u8 clamp of 16 lanes (saturating narrow = clamp(0, 255)).
             let c = |o: usize| vqmovun_high_s16(vqmovun_s16(vld1q_s16(p.add(o))), vld1q_s16(p.add(o + 8)));
-            let bits = vld1q_u32([1u32, 2, 4, 8].as_ptr());
+            // Chunk-nonzero bits enter at the top (lane l: bit 28 + l) and
+            // move down 4 per group (sri), so 4 groups end at bit 16 + 4g + l.
+            let bits = vld1q_u32([1u32 << 28, 2 << 28, 4 << 28, 8 << 28].as_ptr());
             // 64 inputs (16 chunks) per step; one horizontal add for the mask.
             for i in (0..HALF).step_by(64) {
                 let mut m = vdupq_n_u32(0);
@@ -495,9 +497,9 @@ pub(crate) mod kernels {
                     let v = vrshrn_high_n_u16::<8>(lo, vshrq_n_u16::<1>(vmull_high_u8(a, b)));
                     vst1q_u8(out.as_mut_ptr().add(at), v);
                     let v32 = vreinterpretq_u32_u8(v);
-                    m = vorrq_u32(m, vshlq_u32(vandq_u32(vtstq_u32(v32, v32), bits), vdupq_n_s32(4 * g as i32)));
+                    m = vsriq_n_u32::<4>(vandq_u32(vtstq_u32(v32, v32), bits), m);
                 }
-                let mask = vaddvq_u32(m);
+                let mask = vaddvq_u32(m) >> 16;
                 n = push8(nnz, n, base + i / 4, mask);
                 n = push8(nnz, n, base + i / 4 + 8, mask >> 8);
             }
@@ -547,9 +549,12 @@ pub(crate) mod kernels {
         // SAFETY: every offset is < H - 32 (lanes) or < HALF - 16 (bytes).
         unsafe {
             let (zero, qa) = (vdupq_n_s16(0), vdupq_n_s16(255));
-            let bits = vld1q_u32([1u32, 2, 4, 8].as_ptr());
+            // Chunk-nonzero bits enter at the top (lane l: bit 28 + l) and
+            // move down 4 per group (sri), so 4 groups end at bit 16 + 4g + l.
+            let bits = vld1q_u32([1u32 << 28, 2 << 28, 4 << 28, 8 << 28].as_ptr());
             let mut s = [vdupq_n_s32(0); 8];
             let (o, sp) = (out.as_mut_ptr(), src.as_ptr());
+            let mut masks = [vdupq_n_u32(0); HALF / 64];
             // 16 pairs per step (two vectors of each half: few live registers).
             // Single-register loads/stores, not the `_x2` forms: `ld1 {a, b}`
             // has no immediate offset, so the unrolled loop computed every
@@ -599,11 +604,15 @@ pub(crate) mod kernels {
                     };
                     vst1q_u8(x.as_mut_ptr().add(at), v);
                     let v32 = vreinterpretq_u32_u8(v);
-                    m = vorrq_u32(m, vshlq_u32(vandq_u32(vtstq_u32(v32, v32), bits), vdupq_n_s32(4 * g as i32)));
+                    m = vsriq_n_u32::<4>(vandq_u32(vtstq_u32(v32, v32), bits), m);
                 }
-                let mask = vaddvq_u32(m);
-                n = push8(nnz, n, base + i / 4, mask);
-                n = push8(nnz, n, base + i / 4 + 8, mask >> 8);
+                masks[i / 64] = m;
+            }
+            // The chunk list after the lane loop, off its critical path.
+            for (j, &m) in masks.iter().enumerate() {
+                let mask = vaddvq_u32(m) >> 16;
+                n = push8(nnz, n, base + 16 * j, mask);
+                n = push8(nnz, n, base + 16 * j + 8, mask >> 8);
             }
             let sum = if DOT { s.iter().map(|&v| vaddlvq_s32(v)).sum() } else { 0 };
             (sum, n)
