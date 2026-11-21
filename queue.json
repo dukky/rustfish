@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "main",
-      "mode": "ladder"
-    },
-    {
       "branch": "lmr-history-sign",
       "mode": "stc",
       "front": true
@@ -51,7 +47,14 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "main",
+    "mode": "ladder",
+    "test_id": "q-ladder-1121-0235",
+    "sha": "58b2a6abbd89ca3888fefe36eae48d16374690f0",
+    "base_sha": "58b2a6abbd89ca3888fefe36eae48d16374690f0",
+    "started": "2026-11-21T02:35:20Z"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
