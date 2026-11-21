@@ -6,11 +6,6 @@
       "passed_over": 2
     },
     {
-      "branch": "queen-promo-tactical",
-      "mode": "nonreg",
-      "passed_over": 2
-    },
-    {
       "branch": "history-bonus-linear-r2",
       "mode": "stc"
     },
@@ -24,10 +19,6 @@
     },
     {
       "branch": "eval-drawish-pawns",
-      "mode": "stc"
-    },
-    {
-      "branch": "history-malus-150",
       "mode": "stc"
     },
     {
@@ -68,7 +59,7 @@
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
-  "next_seed": 279,
+  "next_seed": 280,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
