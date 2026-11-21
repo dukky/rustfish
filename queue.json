@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "spsa-r28-interim",
+      "mode": "stc",
+      "front": true
+    },
+    {
       "branch": "capture-history-r5",
       "mode": "stc",
       "front": true
