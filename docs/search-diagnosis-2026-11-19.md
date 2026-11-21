@@ -842,3 +842,130 @@ differently (500 judged moves) the game-state move is better by +5.5 cp mean,
 81 vs 36 better by >= 30 cp. The carry-over is a net gain: no TT-aging or
 history-decay fix is warranted by this data. (Blunders 02, 60+0.6, and 23,
 1M nodes, were not replayed: timed / other build.)
+
+## Round 8 (2026-11-21): does qsearch resolve exchanges badly?
+
+Hypothesis from H1 and round 6: exchange/sacrifice sequences are the largest
+unsolved blunder class (5/11) and our score drops most right after the
+opponent's captures, so qsearch (or the stand pat in it) might misjudge
+exchanges. Branch `diag-qsearch` (main eecbba9 + switches, not for merging):
+UCI option `QsDiag` (bit set; 0 = unchanged search, bench 268722 identical)
+and a `qsinfo` command (static eval, full-window qsearch value, and the
+opponent's best SEE capture if it were their move = "threat").
+
+| bit | switch |
+|---|---|
+| 1 | search SEE < 0 captures too (no SEE pruning in qsearch) |
+| 2 | quiet checks (SEE >= 0) at the first qsearch ply |
+| 4 | quiet queen promotions |
+| 8 | no TT cutoffs in qsearch |
+| 16 | threat-aware stand pat: stand pat - hanging value / 2 |
+| 32 | stand pat on the raw eval (no correction history) |
+| 64 (+256*k) | **dummy**: stand pat + 1 cp on a hash bit (shift k); five seeds |
+| 128 | no rook/bishop capture-promotions |
+
+**Positions.** 2957 from the 696 `fen ... moves ...` lines of
+`diag-mid300.txt` and `pgn396.txt` (both on `diag-r5`): every position right
+after a capture (class R, 2261: a recapture is usually pending) plus each
+line's final position (F, 695), move history kept
+(`scripts/diag/qs_genset.py`). Oracle: a fresh 4M-node search per position
+(median depth 20, Hash 64); 2956 with |oracle| <= 8 pawns. It is our own
+engine, so the unchanged search agrees with it more than any perturbation
+does: compare variants with the dummy band, not with the base row.
+Scripts: `qs_run.py` (`--noqs` for builds without `qsinfo`), `qs_ana_depth.py`, `qs_ana_nodes.py`,
+`qs_fit_threat.py`, `qs_epdcmp.py`; the EPD runs used `epd_depth.py` with `QsDiag` set.
+
+### 1. qsearch on its own is not biased on exchanges
+
+Error against the oracle (cp, side to move; static and qsearch are the
+root `qsinfo` values, dN = iteration N of a fresh search):
+
+| group | n | static - ref | qs - ref | abs(qs - ref) | abs(d1) | abs(d4) | abs(d8) | abs(d10) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| all | 2956 | -92 | -1.1 | 60 | 58 | 47 | 37 | 30 |
+| R (after a capture) | 2261 | -109 | +0.4 | 60 | 57 | 47 | 36 | 29 |
+| F (other) | 695 | -37 | -5.7 | 62 | 59 | 50 | 39 | 33 |
+| no threat | 1550 | -62 | -9.0 | 51 | 49 | 40 | 32 | 27 |
+| threat <= 120 | 580 | -103 | +2.6 | 68 | 66 | 52 | 41 | 33 |
+| threat > 120 | 698 | -129 | +11.1 | 73 | 68 | 57 | 42 | 36 |
+| in check | 128 | -215 | +11.1 | 70 | 66 | 56 | 44 | 32 |
+
+- After a capture the static eval is 1.1 pawns low (the recapture is pending)
+  and qsearch removes all of it (+0.4 cp mean). Its error is no larger after
+  captures than elsewhere (60 vs 62). **Exchanges themselves resolve fine.**
+- **Stand pat ignores threats against the side to move, but only a little.**
+  qs - ref rises with the opponent's best capture: -9.0 (none), +2.6
+  (<= 1.2 pawns), +9.0 (1.2-3.5), +14.9 (> 3.5). The medians are only
+  -3 vs +5 cp: the means come from the tails. No correction helps:
+  stand pat - k * threat gives MAE 59.74 / 59.75 / 60.4 / 63.1 / 94.1 for
+  k = 0, 1/32, 1/16, 1/8, 1/2, a flat -5 cp when threatened 59.68. In the
+  search (bit 16, hanging/2) it is clearly harmful: d10 MAE 30.2 -> 34.9,
+  best-move agreement 75.3 -> 70.1%. The NNUE already prices most threats.
+- **The tail is depth, not qsearch.** 125 positions (4.2%) have
+  abs(qs - ref) > 200; in the optimistic ones the mean error is 316 at qsearch,
+  279 at d1, 172 at d4, 108 at d8, 65 at d12 (pessimistic: -309 / -269 / -214 /
+  -162 / -80). Those are tactics a few plies deep; a depth-1 search is no
+  better than qsearch on them.
+
+### 2. Mechanism switches at 200k nodes (the gauge budget)
+
+| run | best move = oracle | R | threat > 120 | abs(score - ref) | depth |
+|---|---:|---:|---:|---:|---:|
+| base (oracle bias) | 79.19% | 82.71 | 89.11 | 24.04 | 12.55 |
+| **5 dummies (range)** | **77.40-78.59** | 81.11-81.91 | 86.68-89.54 | **24.02-24.84** | 12.52-12.55 |
+| 1 bad captures searched | **75.85** | 79.52 | 88.40 | **26.31** | **11.73** |
+| 2 quiet checks, first ply | 78.45 | 81.56 | 89.97 | 23.88 | 12.48 |
+| `qs-quiet-checks` (branch build) | 78.55 | 81.60 | 89.54 | 23.93 | 12.47 |
+| 4 quiet queen promotions | 78.96 | 82.35 | 89.26 | 24.77 | 12.54 |
+| 8 no qsearch TT cutoffs | 78.21 | 81.78 | 89.26 | 24.48 | 12.51 |
+| 32 no correction in stand pat | 77.44 | 81.29 | 88.68 | 25.37 | 12.49 |
+
+- **SEE pruning is right.** Searching losing captures costs 3.8x qsearch
+  nodes per leaf (5.4 -> 20.6) and +57% nodes to depth 10; it fixes a little
+  per depth (d8 MAE 36.6 -> 36.0) but loses 0.8 plies and is below the dummy
+  band at equal nodes. Pin/x-ray blind spots of SEE do not pay for this.
+- Quiet promotions, the qsearch TT, correction history in the stand pat and
+  rook/bishop capture-promotions (bit 128: identical results at depth 10) are
+  all inside the noise. Quiet checks are inside it too on this set (best
+  agreement among variants, lowest score error, both within the band).
+
+### 3. clover-misses EPD (10M nodes, fresh, Hash 64)
+
+18 blunders not found at depth <= 2 by main; "better / worse" = the avoid-move
+is left for good >= 2 plies earlier / later than main.
+
+| run | better / worse | blunder median depth | geo-mean nodes |
+|---|---|---:|---:|
+| main | - | 14.5 | 649k |
+| dummies 64 / 320 / 576 / 832 | 8/2, 5/3, 5/5, 6/2 | 14-15 | 269k-943k |
+| quiet checks, diag bit 2 | 13/1 | 14.0 | 284k |
+| quiet checks, `qs-quiet-checks` | 11/1 | 14.5 | 357k |
+
+The dummies show how noisy this set is (net +0..+6), and both quiet-check
+builds are at net +10..+12. A hint, not proof.
+
+### Bug audit of qsearch / SEE
+
+Nothing found. Checked: no stand pat in check (static eval is `None`,
+all evasions searched, mate scored ply-aware); TT bounds in qsearch (depth-0
+entries, fail-soft value stored, TT cutoffs only from depth >= 0); the cuckoo
+floor; SEE with en passant (captured pawn removed from the occupancy), capture
+promotions (promotion gain and promoted piece value), x-rays behind pawns,
+bishops, rooks, queens and the king, the king as the last attacker, and
+"no recapture" unwinding. Known by-design simplifications, not bugs: SEE
+ignores pins and a pawn recapturing onto the last rank is not promoted in
+the swap; qsearch has no quiet promotions (bit 4: no effect measured).
+
+### Reading
+
+qsearch does not mishandle exchanges: it resolves pending recaptures without
+bias, its error is the same after captures as elsewhere, and none of its
+mechanisms moves the decision quality at 200k nodes outside the dummy band,
+except searching losing captures, which is worse. The exchange-class blunders
+and the post-capture eval drops are deeper tactics (the large errors shrink
+only with depth) plus a small stand-pat optimism under threat that the
+search already handles better than any static penalty. One candidate:
+
+| branch | change | bench | evidence | prior for STC gain |
+|---|---|---|---|---|
+| `qs-quiet-checks` | at the first qsearch ply, after the captures, up to 16 quiet checks with SEE >= 0 | 292044 | EPD net +10 vs dummies +0..+6; 200k set inside the band (best agreement and lowest error of all variants); bench-13 NPS -8%, nodes -10% | low-moderate (~25%) |
