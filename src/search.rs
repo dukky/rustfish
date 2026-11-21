@@ -792,6 +792,19 @@ fn take_best_scored(moves: &mut Vec<(Move, i32)>) -> Option<Move> {
 
 const DARK_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
 
+/// Scales a raw static eval toward 0 when the side it favours has few pawns:
+/// the net scores rook endings a pawn up, a piece up without pawns and the
+/// like as wins that end drawn (ladder 2026-11-21 anchor games). Factor
+/// min(128, DrawScaleBase + DrawScalePawn * favoured side's pawns) / 128,
+/// so with the defaults 4+ pawns are untouched. The TT keeps the raw eval.
+#[inline]
+fn drawish_scale(board: &Board, eval: i32, params: &SearchParams) -> i32 {
+    let strong = if eval > 0 { board.side_to_move } else { board.side_to_move.opposite() };
+    let pawns = board.bb.pieces[color_index(strong)][0].count_ones() as i32;
+    let f = (params.draw_scale_base + params.draw_scale_pawn * pawns).min(128);
+    eval * f / 128
+}
+
 /// True for positions no sequence of legal moves can (sensibly) win:
 /// K vs K, KN vs K, KB vs K, KNN vs K, and kings plus any bishops that all
 /// stand on one square colour (covers KB vs KB same-coloured). Pure bitboard
@@ -1571,7 +1584,9 @@ fn negamax(
         )
     };
     let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
-    let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
+    let corr_eval = raw_static_eval
+        .zip(corr_idx)
+        .map(|(raw, ci)| engine.corr.apply(&ci, drawish_scale(board, raw, &engine.search_params)));
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
     // Improving: our static eval beats the one from our previous move (two plies up).
@@ -2213,7 +2228,8 @@ fn quiescence(
     };
     // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
     let static_eval = raw_static_eval
-        .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
+        .map(|raw| drawish_scale(board, raw, &engine.search_params))
+        .map(|se| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), se), ply));
 
     // Fail-soft: `best` is the highest score seen (stand pat included) and is
     // what a fail-low node returns, as in negamax.
