@@ -755,7 +755,7 @@ impl MovePicker {
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
             let is_counter = Some(mv) == counter_move;
-            let mut score = h + ch / 2;
+            let mut score = h + ch;
             if is_k0 {
                 score += 30_000;
             } else if is_counter {
