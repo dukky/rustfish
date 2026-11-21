@@ -982,6 +982,9 @@ struct SearchParams {
     // Node-fraction time management, see NODE_TM_MIN_DEPTH in search.rs.
     node_tm_base: u64,
     node_tm_scale: u64,
+    // Drawish-material eval scale, see search::drawish_scale (base 128 = off).
+    draw_scale_base: i32,
+    draw_scale_pawn: i32,
 }
 
 impl Default for SearchParams {
@@ -1009,6 +1012,8 @@ impl Default for SearchParams {
             lmr_extra_move_index: 7,
             node_tm_base: 175,
             node_tm_scale: 75,
+            draw_scale_base: 64,
+            draw_scale_pawn: 16,
         }
     }
 }
@@ -1224,6 +1229,8 @@ fn main() {
             println!("option name LmrExtraMoveIndex type spin default 7 min 1 max 32");
             println!("option name NodeTmBase type spin default 175 min 110 max 300");
             println!("option name NodeTmScale type spin default 75 min 50 max 300");
+            println!("option name DrawScaleBase type spin default 64 min 0 max 128");
+            println!("option name DrawScalePawn type spin default 16 min 0 max 64");
             println!("uciok");
             flush_stdout();
             continue;
