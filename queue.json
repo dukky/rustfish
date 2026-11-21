@@ -44,6 +44,18 @@
     {
       "branch": "history-malus-150",
       "mode": "stc"
+    },
+    {
+      "branch": "hist-lmr-both-pos",
+      "mode": "stc"
+    },
+    {
+      "branch": "hist-cont-order",
+      "mode": "stc"
+    },
+    {
+      "branch": "hist-lmr-drop-bad",
+      "mode": "nonreg"
     }
   ],
   "current": {
