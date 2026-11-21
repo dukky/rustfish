@@ -1514,7 +1514,7 @@ fn negamax(
     }
 
     if depth <= 0 {
-        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+        return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move, true);
     }
 
     let alpha_orig = alpha;
@@ -1572,7 +1572,7 @@ fn negamax(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
-                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
+                return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move, true);
             }
         }
 
@@ -1707,6 +1707,7 @@ fn negamax(
                     ply + 1,
                     None,
                     Some(mv),
+                    false,
                 );
                 if score >= probcut_beta && !search.stop {
                     score = -negamax(
@@ -2116,9 +2117,12 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     let key = board_hash(board, &engine.zobrist);
     let mut search = Search::new(None);
     let mut rep_stack = vec![key];
-    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None, None);
+    let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None, None, false);
     (q - eval_for_side(board)).abs()
 }
+
+/// Most quiet checks one first-ply qsearch node tries.
+const QS_MAX_CHECKS: usize = 16;
 
 fn quiescence(
     board: &mut Board,
@@ -2133,6 +2137,8 @@ fn quiescence(
     known_in_check: Option<bool>,
     // The move that led here (continuation correction history).
     prev_move: Option<Move>,
+    // True at the qsearch entry from negamax: quiet checks are tried there too.
+    first: bool,
 ) -> i32 {
     search.nodes += 1;
     if search.should_stop() {
@@ -2216,14 +2222,46 @@ fn quiescence(
         !in_check,
         &mut search.move_buf,
     );
-    if picker.is_empty() {
+    // Quiet checks (first qsearch ply, not in check) go after the captures;
+    // they are generated only once the captures are exhausted.
+    let mut checks_pending = first && !in_check;
+    if picker.is_empty() && !checks_pending {
         if in_check {
             return -MATE_SCORE + ply as i32;
         }
         return best;
     }
+    let mut checks = [None::<Move>; QS_MAX_CHECKS];
+    let (mut n_checks, mut next_check) = (0usize, 0usize);
 
-    while let Some((mv, stage)) = picker.next() {
+    loop {
+        let (mv, stage) = match picker.next() {
+            Some(x) => x,
+            None => {
+                if checks_pending {
+                    checks_pending = false;
+                    board.generate_legal_moves(false, &mut search.move_buf);
+                    let ci = CheckInfo::new(board);
+                    for &m in search.move_buf.iter() {
+                        if n_checks < QS_MAX_CHECKS
+                            && !is_capture_move(board, m)
+                            && ci.gives_check(board, m)
+                            && see_ge(board, m, 0)
+                        {
+                            checks[n_checks] = Some(m);
+                            n_checks += 1;
+                        }
+                    }
+                }
+                match checks.get(next_check).copied().flatten() {
+                    Some(m) if next_check < n_checks => {
+                        next_check += 1;
+                        (m, Stage::Quiet)
+                    }
+                    _ => break,
+                }
+            }
+        };
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
         engine.tt.prefetch(early);
         engine.eval_cache.prefetch(early);
@@ -2246,7 +2284,7 @@ fn quiescence(
             st.prefetch_pending();
         }
         rep_stack.push(child_key);
-        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv));
+        let score = -quiescence(board, -beta, -alpha, search, engine, rep_stack, child_key, ply + 1, None, Some(mv), false);
         rep_stack.pop();
         board.undo_move(mv, undo);
 
@@ -3394,6 +3432,7 @@ mod tests {
                     3,
                     None,
                     None,
+                    false,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 3);
@@ -3435,6 +3474,7 @@ mod tests {
                     5,
                     None,
                     None,
+                    false,
                 );
 
                 assert_eq!(score, -MATE_SCORE + 5);
