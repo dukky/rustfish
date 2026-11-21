@@ -1306,6 +1306,20 @@ fn main() {
                 stats::reset();
                 continue;
             }
+            if let Some(rest) = cmd.strip_prefix("traceline") {
+                let mut b = board.clone();
+                let mut line = Vec::new();
+                for tok in rest.split_whitespace() {
+                    let Some(mv) = movegen::parse_uci_move(&mut b, tok) else { break };
+                    line.push((board_hash(&b, &engine.zobrist), mv));
+                    b.make_move(mv);
+                }
+                // The node after the last line move is traced too, with no move.
+                let none = Move { from: 0, to: 0, promotion: None, is_en_passant: false, is_castle: false };
+                line.push((board_hash(&b, &engine.zobrist), none));
+                stats::trace_set(line);
+                continue;
+            }
             if let Some(path) = cmd.strip_prefix("statsdump ") {
                 stats::dump(path.trim());
                 continue;

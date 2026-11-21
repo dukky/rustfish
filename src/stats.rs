@@ -94,3 +94,40 @@ pub fn dump(path: &str) {
         eprintln!("statsdump: {e}");
     }
 }
+
+// ---- Line trace (`traceline <uci moves>` after `position`) ----------------
+// Every negamax node whose (ply, key) lies on the traced line prints one
+// `TRN` line on exit: window, node type, result, why it returned, and how the
+// traced move was handled there (index, stage, reduction, extension, score).
+thread_local! {
+    pub static TRACE: RefCell<Vec<(u64, crate::Move)>> = const { RefCell::new(Vec::new()) };
+    pub static TR_WHY: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    pub static TR_MV: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn trace_set(line: Vec<(u64, crate::Move)>) {
+    let n = line.len() + 1;
+    TRACE.with(|t| *t.borrow_mut() = line);
+    TR_WHY.with(|t| *t.borrow_mut() = vec![String::new(); n]);
+    TR_MV.with(|t| *t.borrow_mut() = vec![String::new(); n]);
+}
+
+/// The traced move at this node, if (ply, key) is on the traced line.
+#[inline]
+pub fn traced(ply: usize, key: u64) -> Option<crate::Move> {
+    TRACE.with(|t| t.borrow().get(ply).filter(|e| e.0 == key).map(|e| e.1))
+}
+
+pub fn tr_why(ply: usize, s: String) {
+    TR_WHY.with(|t| if let Some(x) = t.borrow_mut().get_mut(ply) { *x = s });
+}
+
+pub fn tr_mv(ply: usize, s: String) {
+    TR_MV.with(|t| if let Some(x) = t.borrow_mut().get_mut(ply) { *x = s });
+}
+
+pub fn tr_take(ply: usize) -> (String, String) {
+    let w = TR_WHY.with(|t| t.borrow_mut().get_mut(ply).map(std::mem::take).unwrap_or_default());
+    let m = TR_MV.with(|t| t.borrow_mut().get_mut(ply).map(std::mem::take).unwrap_or_default());
+    (w, m)
+}

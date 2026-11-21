@@ -627,7 +627,7 @@ impl std::ops::DerefMut for PooledMoveVec {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum Stage {
     Tt,
     GoodCapture,
@@ -1430,6 +1430,9 @@ fn search_root(
         rep_stack.pop();
         board.undo_move(mv, undo);
         search.root_nodes[root_node_index(mv)] += search.nodes - nodes_before;
+        st!{ if crate::stats::traced(0, key) == Some(mv) {
+            println!("TRR it={} idx={} a={} b={} s={} nodes={}", depth, idx, alpha, beta, score, search.nodes - nodes_before);
+        } }
         if off(16384) && !search.stop {
             println!("info string rootmove {} idx {} depth {} score {} alpha {} beta {} nodes {}", move_to_uci(mv), idx, depth, score, alpha, beta, search.nodes - nodes_before);
         }
@@ -1501,7 +1504,41 @@ fn off(bit: u32) -> bool {
     DIAG_OFF.load(std::sync::atomic::Ordering::Relaxed) & bit != 0
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn negamax(
+    board: &mut Board,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    prev_move: Option<Move>,
+    allow_null: bool,
+    known_in_check: Option<bool>,
+    cut_node: bool,
+) -> i32 {
+    #[cfg(feature = "stats")]
+    {
+        if crate::stats::traced(ply, key).is_some() {
+            let ex = search.excluded[ply].is_some();
+            let r = negamax_inner(board, depth, alpha, beta, ply, search, engine, rep_stack, key, prev_move, allow_null, known_in_check, cut_node);
+            let (why, mv) = crate::stats::tr_take(ply);
+            println!(
+                "TRN it={} ply={} d={} a={} b={} cut={} ex={} res={} why={} {}",
+                crate::stats::ROOT_DEPTH.with(|x| x.get()), ply, depth, alpha, beta, cut_node as u8, ex as u8, r,
+                if why.is_empty() { "-" } else { &why }, mv
+            );
+            return r;
+        }
+    }
+    negamax_inner(board, depth, alpha, beta, ply, search, engine, rep_stack, key, prev_move, allow_null, known_in_check, cut_node)
+}
+
+fn negamax_inner(
     board: &mut Board,
     mut depth: i32,
     mut alpha: i32,
@@ -1520,6 +1557,8 @@ fn negamax(
     cut_node: bool,
 ) -> i32 {
     search.nodes += 1;
+    #[cfg(feature = "stats")]
+    let st_tr = crate::stats::traced(ply, key);
     if search.should_stop() {
         return 0;
     }
@@ -1595,9 +1634,9 @@ fn negamax(
         if excluded.is_none() && !pv_node && !off(1024) && entry.depth as i32 >= depth {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
-                Bound::Exact => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
-                Bound::Lower if tt_score >= beta => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
-                Bound::Upper if tt_score <= alpha => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); } return tt_score }
+                Bound::Exact => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); crate::stats::tr_why(ply, "tt".into()); } return tt_score }
+                Bound::Lower if tt_score >= beta => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); crate::stats::tr_why(ply, "tt".into()); } return tt_score }
+                Bound::Upper if tt_score <= alpha => { st!{ crate::stats::inc("tt_cut", crate::stats::nd(st_nt, depth)); crate::stats::tr_why(ply, "tt".into()); } return tt_score }
                 _ => {}
             }
         }
@@ -1640,7 +1679,7 @@ fn negamax(
             if se + margin <= alpha {
                 let q = quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
                 st!{ if excluded.is_none() {
-                    crate::stats::inc("razor_fire", crate::stats::nd(st_nt, depth));
+                    crate::stats::inc("razor_fire", crate::stats::nd(st_nt, depth)); crate::stats::tr_why(ply, "razor".into());
                     if q > alpha { crate::stats::inc("razor_q_above", crate::stats::nd(st_nt, depth)); }
                 } }
                 #[cfg(feature = "stats-verify")]
@@ -1671,7 +1710,7 @@ fn negamax(
                 margin -= margin / 4;
             }
             if se - margin >= beta {
-                st!{ crate::stats::inc("rfp_fire", crate::stats::nd(st_nt, depth)); }
+                st!{ crate::stats::inc("rfp_fire", crate::stats::nd(st_nt, depth)); crate::stats::tr_why(ply, "rfp".into()); }
                 #[cfg(feature = "stats-verify")]
                 if !search.stop {
                     if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
@@ -1746,7 +1785,7 @@ fn negamax(
                 return 0;
             }
             if score >= beta {
-                st!{ crate::stats::inc("nmp_fire", crate::stats::nd(st_nt, depth)); if score >= MATE_SCORE - MAX_PLY as i32 { crate::stats::inc("nmp_mate", crate::stats::nd(st_nt, depth)); } }
+                st!{ crate::stats::tr_why(ply, "nmp".into()); crate::stats::inc("nmp_fire", crate::stats::nd(st_nt, depth)); if score >= MATE_SCORE - MAX_PLY as i32 { crate::stats::inc("nmp_mate", crate::stats::nd(st_nt, depth)); } }
                 #[cfg(feature = "stats-verify")]
                 {
                     if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
@@ -1840,7 +1879,7 @@ fn negamax(
                         Bound::Lower,
                         Some(mv),
                     );
-                    st!{ if excluded.is_none() { crate::stats::inc("probcut_fire", crate::stats::nd(st_nt, depth)); } }
+                    st!{ crate::stats::tr_why(ply, format!("probcut:{}", move_to_uci(mv))); if excluded.is_none() { crate::stats::inc("probcut_fire", crate::stats::nd(st_nt, depth)); } }
                     #[cfg(feature = "stats-verify")]
                     if excluded.is_none() {
                         if let Some(v) = st_verify_node(board, depth, beta - 1, ply, search, engine, rep_stack, key, prev_move, cut_node) {
@@ -1895,6 +1934,9 @@ fn negamax(
         if Some(mv) == excluded {
             continue;
         }
+        st!{ if st_tr == Some(mv) { crate::stats::tr_mv(ply, format!("seen idx={} st={:?} PRUNED", idx, stage)); } }
+        #[cfg(feature = "stats")]
+        let mut st_r = 0i32;
         // Start the child's TT/eval-cache loads before the pruning checks
         // and make_move; the exact-key prefetch below covers the rest.
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
@@ -1940,6 +1982,7 @@ fn negamax(
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
                         st!{ crate::stats::inc("se_multicut", crate::stats::nd(st_nt, depth)); }
+                        st!{ crate::stats::tr_why(ply, "multicut".into()); }
                         return singular_beta;
                     } else if tt_score >= beta {
                         st!{ crate::stats::inc("se_neg", crate::stats::nd(st_nt, depth)); }
@@ -2138,6 +2181,7 @@ fn negamax(
                 0
             };
             let reduced = reduction > 0;
+            st!{ st_r = reduction; }
             st!{ if excluded.is_none() {
                 crate::stats::inc(if quiet { "nw_quiet" } else { "nw_noisy" }, crate::stats::nd(st_nt, depth));
                 if reduced {
@@ -2212,6 +2256,7 @@ fn negamax(
 
         rep_stack.pop();
         board.undo_move(mv, undo);
+        st!{ if st_tr == Some(mv) { crate::stats::tr_mv(ply, format!("mv idx={} st={:?} q={} r={} ext={} chk={} s={}", idx, stage, quiet as u8, st_r, extension, gives_check as u8, score)); } }
 
         if search.stop {
             return 0;
@@ -2225,6 +2270,7 @@ fn negamax(
             alpha = score;
         }
         if alpha >= beta {
+            st!{ if st_tr.is_some() { crate::stats::tr_why(ply, format!("cut:{}@{}", move_to_uci(mv), idx)); } }
             st!{ if excluded.is_none() {
                 crate::stats::inc("fh_nodes", crate::stats::nd(st_nt, depth));
                 crate::stats::inc("cut_idx", crate::stats::ndk(st_nt, depth, idx));
@@ -2277,6 +2323,7 @@ fn negamax(
         return if best == -INF { alpha } else { best };
     }
 
+    st!{ if st_tr.is_some() { crate::stats::tr_why(ply, format!("{}:{}@{}", if best <= alpha_orig { "fl" } else { "exact" }, best_move.map(move_to_uci).unwrap_or_default(), idx)); } }
     let bound = if best <= alpha_orig {
         Bound::Upper
     } else {
