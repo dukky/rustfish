@@ -1,6 +1,15 @@
 {
   "pending": [
     {
+      "branch": "main",
+      "mode": "ltc-check",
+      "base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac"
+    },
+    {
+      "branch": "main",
+      "mode": "ladder"
+    },
+    {
       "branch": "lmr-history-sign",
       "mode": "stc",
       "front": true
@@ -47,20 +56,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "spsa-r14-interim",
-    "mode": "stc",
-    "front": true,
-    "test_id": "q-spsa-r14-interim-1121-0021",
-    "sha": "5338d9b5fc6c30c7e46bcf5065d25402a11d1f49",
-    "base_sha": "47ebb446f593fd55e59b1cbf1661ee04da7b97dd",
-    "started": "2026-11-21T00:21:36Z",
-    "bench": 204182,
-    "evalhash": "248c85c4a1cc6558"
-  },
-  "check_base": "2d945ec054a1e7fd58bd37486f28a6aa798fa1ac",
-  "merges_since_check": 4,
-  "merges_since_ladder": 4,
+  "current": null,
+  "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
+  "merges_since_check": 0,
+  "merges_since_ladder": 0,
   "next_seed": 273,
   "consecutive_bursts": 0,
   "identical_merges": [
