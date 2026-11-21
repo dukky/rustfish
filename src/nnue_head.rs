@@ -751,6 +751,7 @@ pub(crate) mod kernels {
             let (lo, hi) = (_mm256_setzero_si256(), _mm256_set1_epi16(255));
             let p = acc.as_ptr();
             let c = |o: usize| _mm256_min_epi16(_mm256_max_epi16(_mm256_loadu_si256(p.add(o) as *const __m256i), lo), hi);
+            let mut bv = _mm_set1_epi16(base as i16);
             for i in (0..HALF).step_by(32) {
                 // mulhrs(a << 6, b) = (64ab + 2^14) >> 15 = (ab + 256) >> 9.
                 let x0 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(c(i)), c(i + HALF));
@@ -758,8 +759,8 @@ pub(crate) mod kernels {
                 // packus interleaves 128-bit lanes; restore the order.
                 let v = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(x0, x1));
                 _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, v);
-                let zero = _mm256_cmpeq_epi32(v, lo);
-                n = push8(nnz, n, base + i / 4, !(_mm256_movemask_ps(_mm256_castsi256_ps(zero)) as u32));
+                n = push8z(nnz, n, bv, zero_mask(v));
+                bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
             }
         }
         n
@@ -823,6 +824,7 @@ pub(crate) mod kernels {
                 _mm256_min_epi16(_mm256_max_epi16(v, lo), hi)
             };
             let mut sum = [_mm256_setzero_si256(); 2];
+            let mut bv = _mm_set1_epi16(base as i16);
             for i in (0..HALF).step_by(32) {
                 let (a0, a1) = (delta(i), delta(i + 16));
                 let (b0, b1) = (delta(i + HALF), delta(i + HALF + 16));
@@ -838,8 +840,8 @@ pub(crate) mod kernels {
                 let x1 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(a1), b1);
                 let v = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(x0, x1));
                 _mm256_storeu_si256(x.as_mut_ptr().add(i) as *mut __m256i, v);
-                let zero = _mm256_cmpeq_epi32(v, lo);
-                n = push8(nnz, n, base + i / 4, !(_mm256_movemask_ps(_mm256_castsi256_ps(zero)) as u32));
+                n = push8z(nnz, n, bv, zero_mask(v));
+                bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
             }
             let total = if DOT {
                 // i32 lanes -> i64 (each lane sums at most 2 * H / 16 products of <= 255^2 * 127).
@@ -858,6 +860,57 @@ pub(crate) mod kernels {
                 0
             };
             (total, n)
+        }
+    }
+
+    /// For an 8-bit mask of ZERO chunks, the positions (0..8) of the
+    /// nonzero ones packed first (as u8, so one `pmovzxbw` loads them), and
+    /// how many there are. Indexing by the zero mask saves the inversion.
+    static ZLUT8: [[u8; 8]; 256] = {
+        let mut t = [[0u8; 8]; 256];
+        let mut m = 0;
+        while m < 256 {
+            let (mut j, mut n) = (0, 0);
+            while j < 8 {
+                if m >> j & 1 == 0 {
+                    t[m][n] = j as u8;
+                    n += 1;
+                }
+                j += 1;
+            }
+            m += 1;
+        }
+        t
+    };
+    static ZPOP8: [u8; 256] = {
+        let mut t = [0u8; 256];
+        let mut m = 0;
+        while m < 256 {
+            t[m] = 8 - (m as u32).count_ones() as u8;
+            m += 1;
+        }
+        t
+    };
+
+    /// The zero-chunk mask of 32 input bytes (bit j: chunk j all zero).
+    #[inline(always)]
+    unsafe fn zero_mask(v: __m256i) -> usize {
+        // SAFETY: register-only AVX2; callers enable it.
+        unsafe { _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(v, _mm256_setzero_si256()))) as usize }
+    }
+
+    /// `push8` for a zero mask (< 256), with the 8 chunk numbers of this
+    /// group already broadcast in `base` (kept in a register by the caller,
+    /// instead of rebuilding it from a scalar every group).
+    #[inline(always)]
+    unsafe fn push8z(nnz: &mut [u16; NNZ_BUF], n: usize, base: __m128i, zmask: usize) -> usize {
+        debug_assert!(zmask < 256 && n + 8 <= NNZ_BUF);
+        // SAFETY: zmask < 256 (an 8-lane movemask); n <= CHUNKS - 8 before
+        // the last group, so the 16-byte store stays inside NNZ_BUF.
+        unsafe {
+            let idx = _mm_cvtepu8_epi16(_mm_loadl_epi64(ZLUT8.get_unchecked(zmask).as_ptr() as *const __m128i));
+            _mm_storeu_si128(nnz.as_mut_ptr().add(n) as *mut __m128i, _mm_add_epi16(idx, base));
+            n + *ZPOP8.get_unchecked(zmask) as usize
         }
     }
 
@@ -1565,6 +1618,30 @@ mod permute {
             .map(|(j, z)| (0..KA).filter(|&k| z[k] as f32 * (1.0 / Z1_DIV) + head.b1[j % BUCKETS][k] > 0.0).count())
             .sum();
         eprintln!("active L1 neurons: {:.2} of {KA}", active as f64 / z1s.len() as f64);
+        {
+            // Largest |w| pair sum (maddubs lanes) over chunks, per bucket.
+            let m = (0..BUCKETS)
+                .map(|b| {
+                    let w = &head.w1[b].0;
+                    (0..w.len() / 2).map(|p| (w[2 * p] as i32).abs() + (w[2 * p + 1] as i32).abs()).max().unwrap()
+                })
+                .max()
+                .unwrap();
+            eprintln!("max |w| pair sum: {m}");
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            for (j, z) in z1s.iter().enumerate() {
+                assert_eq!(head.rest(j % BUCKETS, z).to_bits(), unsafe { head.rest_avx2(j % BUCKETS, z) }.to_bits());
+            }
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                for (j, z) in z1s.iter().enumerate() {
+                    f += unsafe { head.rest_avx2(j % BUCKETS, std::hint::black_box(z)) };
+                }
+            }
+            eprintln!("rest_avx2: {:.1} ns  ({f})", t.elapsed().as_nanos() as f64 / n);
+        }
         #[cfg(target_arch = "aarch64")]
         {
             for (j, z) in z1s.iter().enumerate() {
