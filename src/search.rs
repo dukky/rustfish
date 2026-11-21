@@ -1387,6 +1387,14 @@ fn search_root(
                 !off(4096),
             );
             let s_nw = score;
+            st!{ if reduction > 0 && score <= alpha && off(1 << 20) && !search.stop {
+                crate::stats::SUSPEND.with(|c| c.set(c.get() + 1));
+                let v = -negamax(board, depth - 1, -alpha - 1, -alpha, 1, search, engine, rep_stack, child_key, Some(mv), true, None, true);
+                crate::stats::SUSPEND.with(|c| c.set(c.get() - 1));
+                let k = if score == alpha { 1 } else { 0 };
+                crate::stats::inc("vroot_try", crate::stats::ndk(0, depth, k));
+                if v > alpha { crate::stats::inc("vroot_err", crate::stats::ndk(0, depth, k)); }
+            } }
             if reduction > 0 && score > alpha {
                 // The reduced search says this move might beat alpha; verify it
                 // at full depth before accepting the score.
@@ -2123,6 +2131,13 @@ fn negamax_inner(
         let gives_check = board.is_in_check(board.side_to_move);
 
         let mut score;
+        #[cfg(feature = "stats")]
+        let st_vfirst = if idx == 0 && extension == 0 && excluded.is_none() && depth >= 8 && !pv_node && off(1 << 20) && !crate::stats::suspended() && crate::stats::sample(4) {
+            crate::stats::SUSPEND.with(|c| c.set(c.get() + 1));
+            let v = -negamax(board, depth - 2, -beta, -alpha, ply + 1, search, engine, rep_stack, child_key, Some(mv), true, Some(gives_check), !pv_node && !cut_node);
+            crate::stats::SUSPEND.with(|c| c.set(c.get() - 1));
+            Some(v)
+        } else { None };
         if idx == 0 {
             score = -negamax(
                 board,
@@ -2139,6 +2154,20 @@ fn negamax_inner(
                 Some(gives_check),
                 !pv_node && !cut_node,
             );
+            st!{ if let Some(v) = st_vfirst { if !search.stop {
+                let k = if v >= beta && score < beta { 1 } else if v < beta && score >= beta { 3 } else { 0 };
+                crate::stats::inc("vfirst_try", crate::stats::nd(st_nt, depth));
+                if k > 0 { crate::stats::inc("vfirst", crate::stats::ndk(st_nt, depth, k)); }
+            } } }
+            st!{ if extension != 0 && excluded.is_none() && off(1 << 20) && !search.stop && !crate::stats::suspended() {
+                crate::stats::SUSPEND.with(|c| c.set(c.get() + 1));
+                let v = -negamax(board, depth - 1, -beta, -alpha, ply + 1, search, engine, rep_stack, child_key, Some(mv), true, Some(gives_check), !pv_node && !cut_node);
+                crate::stats::SUSPEND.with(|c| c.set(c.get() - 1));
+                let key_ = if extension < 0 { "vneg" } else { "vsing" };
+                let k = if score >= beta && v < beta { 1 } else if score < beta && v >= beta { 3 } else if (score > alpha) != (v > alpha) { 2 } else { 0 };
+                crate::stats::inc(if extension < 0 { "vneg_try" } else { "vsing_try" }, crate::stats::nd(st_nt, depth));
+                if k > 0 { crate::stats::inc(key_, crate::stats::ndk(st_nt, depth, k)); }
+            } }
         } else {
             let reduction = if quiet
                 && !in_check
@@ -2210,6 +2239,14 @@ fn negamax_inner(
 
             st!{ if excluded.is_none() && reduced && score > alpha && !search.stop {
                 crate::stats::inc("lmr_fh", crate::stats::nd(st_nt, depth));
+            } }
+            st!{ if excluded.is_none() && reduced && score <= alpha && depth >= 5 && off(1 << 20) && !search.stop && !crate::stats::suspended() && crate::stats::sample(4) {
+                crate::stats::SUSPEND.with(|c| c.set(c.get() + 1));
+                let v = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1, search, engine, rep_stack, child_key, Some(mv), true, Some(gives_check), !cut_node);
+                crate::stats::SUSPEND.with(|c| c.set(c.get() - 1));
+                let k = (reduction as usize).min(8) + if score == alpha { 8 } else { 0 };
+                crate::stats::inc("vlmr_try", crate::stats::ndk(st_nt, depth, k));
+                if v > alpha { crate::stats::inc("vlmr_err", crate::stats::ndk(st_nt, depth, k)); }
             } }
             if reduced && score > alpha {
                 score = -negamax(
