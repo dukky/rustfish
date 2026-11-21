@@ -551,18 +551,22 @@ pub(crate) mod kernels {
             let mut s = [vdupq_n_s32(0); 8];
             let (o, sp) = (out.as_mut_ptr(), src.as_ptr());
             // 16 pairs per step (two vectors of each half: few live registers).
+            // Single-register loads/stores, not the `_x2` forms: `ld1 {a, b}`
+            // has no immediate offset, so the unrolled loop computed every
+            // address separately; these become `ldp`/`stp` off one base.
+            let ld2 = |p: *const i16| [vld1q_s16(p), vld1q_s16(p.add(8))];
             let delta2 = |at: usize| {
-                let v = vld1q_s16_x2(sp.add(at));
-                let mut v = [v.0, v.1];
+                let mut v = ld2(sp.add(at));
                 for a in adds {
-                    let x = vld1q_s16_x2(a.as_ptr().add(at));
-                    v = [vaddq_s16(v[0], x.0), vaddq_s16(v[1], x.1)];
+                    let x = ld2(a.as_ptr().add(at));
+                    v = [vaddq_s16(v[0], x[0]), vaddq_s16(v[1], x[1])];
                 }
                 for r in subs {
-                    let x = vld1q_s16_x2(r.as_ptr().add(at));
-                    v = [vsubq_s16(v[0], x.0), vsubq_s16(v[1], x.1)];
+                    let x = ld2(r.as_ptr().add(at));
+                    v = [vsubq_s16(v[0], x[0]), vsubq_s16(v[1], x[1])];
                 }
-                vst1q_s16_x2(o.add(at), int16x8x2_t(v[0], v[1]));
+                vst1q_s16(o.add(at), v[0]);
+                vst1q_s16(o.add(at + 8), v[1]);
                 v
             };
             for i in (0..HALF).step_by(64) {
@@ -572,9 +576,9 @@ pub(crate) mod kernels {
                     let lo = delta2(at);
                     let hi = delta2(at + HALF);
                     let v = if DOT {
-                        let (wl, wh) = (vld1q_s16_x2(w.as_ptr().add(at)), vld1q_s16_x2(w.as_ptr().add(at + HALF)));
+                        let (wl, wh) = (ld2(w.as_ptr().add(at)), ld2(w.as_ptr().add(at + HALF)));
                         let mut cs = [zero; 4];
-                        for (j, (v, wv)) in [(lo[0], wl.0), (lo[1], wl.1), (hi[0], wh.0), (hi[1], wh.1)].into_iter().enumerate() {
+                        for (j, (v, wv)) in [(lo[0], wl[0]), (lo[1], wl[1]), (hi[0], wh[0]), (hi[1], wh[1])].into_iter().enumerate() {
                             let c = vminq_s16(vmaxq_s16(v, zero), qa);
                             cs[j] = c;
                             let cw = vmulq_s16(c, wv);
