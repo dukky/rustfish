@@ -59,16 +59,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "nmp-tt-store",
-    "mode": "stc",
-    "test_id": "q-nmp-tt-store-1121-2241",
-    "sha": "1d7a8650ab385a58390d33fb69b6731f9a9f3471",
-    "base_sha": "b900cd6ae0c92cda9399d50faac15c18fca5270b",
-    "started": "2026-11-21T22:41:23Z",
-    "bench": 190813,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
