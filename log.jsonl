@@ -615,3 +615,4 @@
 {"branch": "speed-picker-branchless", "logged_at": "2026-11-20T19:57:12Z", "mode": "speedup", "outcome": "requeued", "reason": "speedup merge refused: main moved"}
 {"branch": "speed-picker-branchless", "logged_at": "2026-11-20T19:58:43Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "8ae740e76956a4378e36a771ab80168d03c43bc5"}
 {"branch": "speed-movegen-sink", "logged_at": "2026-11-20T19:59:39Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "236428649b409390d91eba1c664a707dba04c1c5"}
+{"branch": "killer-reset-per-parent", "elo": -0.42, "elo_ci95": [-3.23, 2.38], "games": 16512, "llr": -7.133, "logged_at": "2026-11-21T00:20:38Z", "mode": "stc", "outcome": "rejected", "sha": "293a7fa2922918d98b2c061a276463149d853509", "test_id": "q-killer-reset-per-parent-1120-1731", "verdict": "H0"}
