@@ -1124,6 +1124,9 @@ def show_rates():
 def parse_add_args(args):
     """['spec', '--front', '--expect', '12'] -> request dict; SystemExit on bad args."""
     spec, flags, expect, rest = args[0], set(), None, list(args[1:])
+    if spec.startswith("-"):
+        raise SystemExit(f"{spec!r} is not a branch (usage: queue.py add <branch>[:mode][,...] "
+                         "[--front] [--preempt] [--expect ELO])")
     while rest:
         a = rest.pop(0)
         if a in ("--front", "--preempt"):
