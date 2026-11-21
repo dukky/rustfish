@@ -1981,6 +1981,11 @@ fn negamax(
                 if priority_quiet {
                     r -= 1;
                 }
+                // Both histories positive: the two signals agree, and such quiets
+                // cut ~3x as often as quiets with only one positive (depth 4+).
+                if quiet_history > 0 && quiet_continuation > 0 {
+                    r -= 1;
+                }
                 // Node type: expected cut nodes reduce more, PV nodes less.
                 if cut_node {
                     r += params.lmr_cut_node;
