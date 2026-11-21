@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "combo-small-positives",
+      "mode": "stc",
+      "front": true
+    },
+    {
       "branch": "nmp-mate-clamp",
       "mode": "nonreg",
       "passed_over": 2
@@ -59,7 +64,7 @@
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
-  "next_seed": 280,
+  "next_seed": 281,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
