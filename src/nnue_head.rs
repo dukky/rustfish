@@ -1451,24 +1451,48 @@ mod permute {
     #[ignore]
     fn head_microbench() {
         use super::super::{out_half, simd};
-        use super::{kernels, Scratch, CHUNKS};
+        use super::{kernels, Scratch, CHUNKS, KA, Z1_DIV};
         let net = Network::from_bytes(crate::EMBEDDED_NET).unwrap();
-        let text = std::fs::read_to_string(std::env::var("RUSTFISH_PERM_FENS").unwrap()).unwrap();
-        let accs: Vec<Accumulator> = text
-            .lines()
-            .take(2000)
-            .map(|fen| {
-                let mut board = Board::new();
-                board.set_fen(fen.split('|').next().unwrap().trim());
-                Accumulator::refresh(&net, &board)
-            })
-            .collect();
+        let accs: Vec<Accumulator> = if let Ok(path) = std::env::var("RUSTFISH_PERM_FENS") {
+            let text = std::fs::read_to_string(path).unwrap();
+            text.lines()
+                .take(2000)
+                .map(|fen| {
+                    let mut board = Board::new();
+                    board.set_fen(fen.split('|').next().unwrap().trim());
+                    Accumulator::refresh(&net, &board)
+                })
+                .collect()
+        } else {
+            // Random walks from the bench positions.
+            let mut seed = 0x1234_5678_u64;
+            let mut v = Vec::new();
+            let mut moves = Vec::new();
+            for fen in crate::uci::BENCH_FENS {
+                for _ in 0..16 {
+                    let mut board = Board::new();
+                    board.set_fen(fen);
+                    for _ in 0..10 {
+                        board.generate_legal_moves(false, &mut moves);
+                        if moves.is_empty() {
+                            break;
+                        }
+                        let mv = moves[(crate::tt::splitmix64(&mut seed) % moves.len() as u64) as usize];
+                        board.make_move(mv);
+                        v.push(Accumulator::refresh(&net, &board));
+                    }
+                }
+            }
+            v
+        };
         let (add, sub) = (net.row(100), net.row(200));
         let w0 = out_half(&net, 3, true);
         let head = net.head.as_ref().unwrap();
         let mut out = [0i16; H];
         let mut sc = Scratch::new();
-        let reps = 20;
+        // RUSTFISH_MB_HOT: 8 accumulators only (L1-resident, like the
+        // parent ply's in search).
+        let (accs, reps) = if std::env::var("RUSTFISH_MB_HOT").is_ok() { (accs[..8].to_vec(), 20 * accs.len() / 8) } else { (accs, 20) };
         let t = std::time::Instant::now();
         let mut sink = 0i64;
         for _ in 0..reps {
@@ -1522,6 +1546,12 @@ mod permute {
             }
         }
         eprintln!("rest: {:.1} ns  ({sink} {f})", t.elapsed().as_nanos() as f64 / n);
+        let active: usize = z1s
+            .iter()
+            .enumerate()
+            .map(|(j, z)| (0..KA).filter(|&k| z[k] as f32 * (1.0 / Z1_DIV) + head.b1[j % BUCKETS][k] > 0.0).count())
+            .sum();
+        eprintln!("active L1 neurons: {:.2} of {KA}", active as f64 / z1s.len() as f64);
         #[cfg(target_arch = "aarch64")]
         {
             for (j, z) in z1s.iter().enumerate() {

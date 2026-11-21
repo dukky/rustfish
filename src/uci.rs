@@ -535,7 +535,7 @@ pub(crate) fn handle_selftest(cmd: &str, board: &mut Board) {
 
 const BENCH_DEPTH: i32 = 9;
 const BENCH_HASH_MB: usize = 16;
-const BENCH_FENS: [&str; 13] = [
+pub(crate) const BENCH_FENS: [&str; 13] = [
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "r1bq1rk1/pppn1ppp/3bpn2/3p4/2PP4/2N1PN2/PPQ2PPP/R1B1KB1R w KQ - 2 8",
     "r3k2r/p1ppqpb1/bn2pnp1/2pP4/1p2P3/2N2N2/PPQBBPPP/R3K2R w KQkq - 0 1",
