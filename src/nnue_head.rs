@@ -159,8 +159,7 @@ impl HeadNet {
             let s = unsafe { &mut *s.get() };
             let n = kernels::activate(us, &mut s.x.0[..HALF], 0, &mut s.nnz, 0);
             let n = kernels::activate(them, &mut s.x.0[HALF..], HALF / 4, &mut s.nnz, n);
-            let z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..n]);
-            self.rest_fast(b, &z1)
+            self.l1_rest(b, &s.x.0, &s.nnz[..n])
         })
     }
 
@@ -168,8 +167,20 @@ impl HeadNet {
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn forward_scratch(&self, b: usize, s: &Scratch) -> f32 {
-        let z1 = kernels::l1(self, b, &s.x.0, &s.nnz[..s.n]);
-        self.rest_fast(b, &z1)
+        self.l1_rest(b, &s.x.0, &s.nnz[..s.n])
+    }
+
+    /// L1 on `x` (nonzero chunks `nnz`), then `rest`. On x86 one kernel
+    /// per L1 flavour does both, so z1 stays in registers.
+    #[inline(always)]
+    fn l1_rest(&self, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        #[cfg(target_arch = "x86_64")]
+        return kernels::l1_rest(self, b, x, nnz);
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let z1 = kernels::l1(self, b, x, nnz);
+            self.rest_fast(b, &z1)
+        }
     }
 
     /// Scalar twin of `forward` (tests).
@@ -185,15 +196,11 @@ impl HeadNet {
 
     /// `rest`, explicitly vectorised where available (bit-identical; the
     /// fixture test checks `forward` against `forward_scalar`).
+    #[cfg(not(target_arch = "x86_64"))]
     #[inline(always)]
     fn rest_fast(&self, b: usize, z1: &[i32; H1]) -> f32 {
         #[cfg(target_arch = "aarch64")]
         return self.rest_neon(b, z1);
-        #[cfg(target_arch = "x86_64")]
-        if kernels::avx2() {
-            // SAFETY: AVX2 detected.
-            return unsafe { self.rest_avx2(b, z1) };
-        }
         #[cfg(not(target_arch = "aarch64"))]
         return self.rest(b, z1);
     }
@@ -202,18 +209,47 @@ impl HeadNet {
     /// order (separate mul and add, never fused), so bit-identical.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
+    #[allow(dead_code)] // tests
     unsafe fn rest_avx2(&self, b: usize, z1: &[i32; H1]) -> f32 {
+        use std::arch::x86_64::*;
+        // SAFETY: AVX2 is enabled; in-bounds unaligned loads.
+        unsafe {
+            let p = z1.as_ptr() as *const __m256i;
+            self.rest_avx2_v(b, [_mm256_loadu_si256(p), _mm256_loadu_si256(p.add(1))])
+        }
+    }
+
+    /// `rest_avx2` on z1 in two registers (callers enable AVX2).
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn rest_avx2_v(&self, b: usize, z1: [std::arch::x86_64::__m256i; 2]) -> f32 {
         use std::arch::x86_64::*;
         // SAFETY: fixed-size arrays, all accesses in bounds (unaligned loads).
         unsafe {
             let (zero, one) = (_mm256_setzero_ps(), _mm256_set1_ps(1.0));
             let inv = _mm256_set1_ps(1.0 / Z1_DIV);
-            let mut u = [0.0f32; H1];
-            for q in 0..H1 / 8 {
-                let zi = _mm256_loadu_si256(z1.as_ptr().add(8 * q) as *const __m256i);
+            let mut u = [zero; H1 / 8];
+            for (q, u) in u.iter_mut().enumerate() {
+                let zi = z1[q];
                 let z = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(zi), inv), _mm256_loadu_ps(self.b1[b].as_ptr().add(8 * q)));
                 let c = _mm256_min_ps(_mm256_max_ps(z, zero), one);
-                _mm256_storeu_ps(u.as_mut_ptr().add(8 * q), _mm256_mul_ps(c, c));
+                *u = _mm256_mul_ps(c, c);
+            }
+            // u[k] broadcast in registers (128-bit half duplicated, then an
+            // in-lane shuffle), not a store and 16 reloads: shorter latency
+            // from u to the first L2 product.
+            let d = [
+                _mm256_permute2f128_ps::<0x00>(u[0], u[0]),
+                _mm256_permute2f128_ps::<0x11>(u[0], u[0]),
+                _mm256_permute2f128_ps::<0x00>(u[1], u[1]),
+                _mm256_permute2f128_ps::<0x11>(u[1], u[1]),
+            ];
+            let mut uk = [zero; H1];
+            for (q, &h) in d.iter().enumerate() {
+                uk[4 * q] = _mm256_shuffle_ps::<0x00>(h, h);
+                uk[4 * q + 1] = _mm256_shuffle_ps::<0x55>(h, h);
+                uk[4 * q + 2] = _mm256_shuffle_ps::<0xAA>(h, h);
+                uk[4 * q + 3] = _mm256_shuffle_ps::<0xFF>(h, h);
             }
             let w2 = &self.w2[b];
             let mut z2 = [zero; H2 / 8];
@@ -221,9 +257,8 @@ impl HeadNet {
                 *z = _mm256_loadu_ps(self.b2[b].as_ptr().add(8 * r));
             }
             for k in 0..KA {
-                let uk = _mm256_set1_ps(u[k]);
                 for (r, z) in z2.iter_mut().enumerate() {
-                    *z = _mm256_add_ps(*z, _mm256_mul_ps(_mm256_loadu_ps(w2[k].as_ptr().add(8 * r)), uk));
+                    *z = _mm256_add_ps(*z, _mm256_mul_ps(_mm256_loadu_ps(w2[k].as_ptr().add(8 * r)), uk[k]));
                 }
             }
             let mut t = [zero; H2 / 8];
@@ -239,7 +274,7 @@ impl HeadNet {
             let s = _mm_cvtss_f32(h) + _mm_cvtss_f32(_mm_shuffle_ps::<1>(h, h));
             let mut out = self.b3[b] + s;
             if SKIP {
-                out += z1[H1 - 1] as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
+                out += _mm256_extract_epi32::<7>(z1[1]) as f32 * (1.0 / Z1_DIV) + self.b1[b][H1 - 1];
             }
             out
         }
@@ -341,6 +376,7 @@ pub(crate) const NNZ_BUF: usize = CHUNKS + 8;
 
 /// For an 8-bit mask of nonzero chunks, their positions (0..8) packed
 /// first (unused slots 0), and how many there are.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // x86 uses kernels::push8z
 static NNZ_LUT8: [[u16; 8]; 256] = {
     let mut t = [[0u16; 8]; 256];
     let mut m = 0;
@@ -357,6 +393,7 @@ static NNZ_LUT8: [[u16; 8]; 256] = {
     }
     t
 };
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // x86 uses kernels::push8z
 static POP8: [u8; 256] = {
     let mut t = [0u8; 256];
     let mut m = 0;
@@ -369,6 +406,7 @@ static POP8: [u8; 256] = {
 
 /// Append the nonzero chunks among `mask` (8 bits, chunks `c0..c0 + 8`):
 /// one table load, one 8-lane add and one 16-byte store, no branches.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // x86 uses kernels::push8z
 #[inline(always)]
 pub(crate) fn push8(nnz: &mut [u16; NNZ_BUF], n: usize, c0: usize, mask: u32) -> usize {
     let m = (mask & 0xFF) as usize;
@@ -727,6 +765,7 @@ pub(crate) mod kernels {
         }
     }
 
+    #[allow(dead_code)] // tests (the engine uses l1_rest)
     #[inline(always)]
     pub(crate) fn l1(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         if !avx2() {
@@ -741,6 +780,40 @@ pub(crate) mod kernels {
                 _ => l1_v0(w, x, nnz),
             }
         }
+    }
+
+    /// `net.rest(b, &l1(net, b, x, nnz))`, one kernel per L1 flavour.
+    #[inline(always)]
+    pub(crate) fn l1_rest(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        if !avx2() {
+            return net.rest(b, &scalar::l1(net, b, x, nnz));
+        }
+        // SAFETY: AVX2 (and, per branch, the VNNI flavour) is available.
+        unsafe {
+            match vnni() {
+                1 => l1_rest_v1(net, b, x, nnz),
+                2 => l1_rest_v2(net, b, x, nnz),
+                _ => l1_rest_v0(net, b, x, nnz),
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn l1_rest_v0(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        // SAFETY: AVX2 is enabled.
+        unsafe { net.rest_avx2_v(b, l1_avx2::<0>(&net.w1[b].0, x, nnz)) }
+    }
+
+    #[target_feature(enable = "avx2,avxvnni")]
+    unsafe fn l1_rest_v1(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        // SAFETY: AVX-VNNI is enabled.
+        unsafe { net.rest_avx2_v(b, l1_avx2::<1>(&net.w1[b].0, x, nnz)) }
+    }
+
+    #[target_feature(enable = "avx2,avx512f,avx512vnni,avx512vl")]
+    unsafe fn l1_rest_v2(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        // SAFETY: AVX512-VNNI + VL are enabled.
+        unsafe { net.rest_avx2_v(b, l1_avx2::<2>(&net.w1[b].0, x, nnz)) }
     }
 
     #[target_feature(enable = "avx2")]
@@ -951,26 +1024,42 @@ pub(crate) mod kernels {
         }
     }
 
+    #[allow(dead_code)] // tests (the engine uses l1_rest)
     #[target_feature(enable = "avx2")]
     unsafe fn l1_v0(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         // SAFETY: AVX2 is enabled.
-        unsafe { l1_avx2::<0>(w, x, nnz) }
+        unsafe { store16(l1_avx2::<0>(w, x, nnz)) }
     }
 
+    #[allow(dead_code)] // tests (the engine uses l1_rest)
     #[target_feature(enable = "avx2,avxvnni")]
     unsafe fn l1_v1(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         // SAFETY: AVX-VNNI is enabled.
-        unsafe { l1_avx2::<1>(w, x, nnz) }
+        unsafe { store16(l1_avx2::<1>(w, x, nnz)) }
     }
 
+    #[allow(dead_code)] // tests (the engine uses l1_rest)
     #[target_feature(enable = "avx2,avx512f,avx512vnni,avx512vl")]
     unsafe fn l1_v2(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
         // SAFETY: AVX512-VNNI + VL are enabled.
-        unsafe { l1_avx2::<2>(w, x, nnz) }
+        unsafe { store16(l1_avx2::<2>(w, x, nnz)) }
     }
 
+    #[allow(dead_code)] // tests (the engine uses l1_rest)
     #[inline(always)]
-    unsafe fn l1_avx2<const V: u8>(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+    unsafe fn store16(z: [__m256i; 2]) -> [i32; H1] {
+        let mut out = [0i32; H1];
+        // SAFETY: two in-bounds unaligned stores; callers enable AVX2.
+        unsafe {
+            _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, z[0]);
+            _mm256_storeu_si256(out.as_mut_ptr().add(8) as *mut __m256i, z[1]);
+        }
+        out
+    }
+
+    /// z1 of neurons 0..8 and 8..16.
+    #[inline(always)]
+    unsafe fn l1_avx2<const V: u8>(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [__m256i; 2] {
         // SAFETY: every chunk index is < CHUNKS, so all loads are in bounds.
         // A chunk's 4 input bytes repeat in every i32 lane; its 64 weight
         // bytes are neurons 0..8 (first vector) and 8..16 (second).
@@ -995,10 +1084,7 @@ pub(crate) mod kernels {
                 a[0] = dpbusd::<V>(a[0], x0, _mm256_load_si256(wp.add(2 * c0)));
                 a[1] = dpbusd::<V>(a[1], x0, _mm256_load_si256(wp.add(2 * c0 + 1)));
             }
-            let mut out = [0i32; H1];
-            _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, _mm256_add_epi32(a[0], a[2]));
-            _mm256_storeu_si256(out.as_mut_ptr().add(8) as *mut __m256i, _mm256_add_epi32(a[1], a[3]));
-            out
+            [_mm256_add_epi32(a[0], a[2]), _mm256_add_epi32(a[1], a[3])]
         }
     }
 
@@ -1663,5 +1749,23 @@ mod permute {
             }
         }
         eprintln!("l1 (one bucket): {:.1} ns {sink}", t.elapsed().as_nanos() as f64 / n);
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            for (j, s) in scs.iter().enumerate() {
+                f += head.l1_rest(j % BUCKETS, std::hint::black_box(&s.x.0), &s.nnz[..s.n]);
+            }
+        }
+        eprintln!("l1_rest: {:.1} ns {f}", t.elapsed().as_nanos() as f64 / n);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                for (j, s) in scs.iter().enumerate() {
+                    let z = kernels::l1(head, j % BUCKETS, std::hint::black_box(&s.x.0), &s.nnz[..s.n]);
+                    f += unsafe { head.rest_avx2(j % BUCKETS, &z) };
+                }
+            }
+            eprintln!("l1 + rest_avx2: {:.1} ns {f}", t.elapsed().as_nanos() as f64 / n);
+        }
     }
 }
