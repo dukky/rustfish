@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "nnue-g11h1024kb8mpw",
+      "mode": "net-gate",
+      "front": true
+    },
+    {
       "branch": "lmr-history-sign",
       "mode": "stc",
       "front": true
