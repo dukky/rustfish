@@ -842,3 +842,93 @@ differently (500 judged moves) the game-state move is better by +5.5 cp mean,
 81 vs 36 better by >= 30 cp. The carry-over is a net gain: no TT-aging or
 history-decay fix is warranted by this data. (Blunders 02, 60+0.6, and 23,
 1M nodes, were not replayed: timed / other build.)
+
+## Anchor games, ladder 2026-11-21 (does the Clover picture generalise?)
+
+Source: CCRL ladder run 44856716941, 120+1, 8moves_v3 (balanced) book, 440
+games vs 11 anchors (3318-3631), rustfish 58b2a6a, rated 3618 [3602, 3633];
+no time losses. Game records only. Script: `scripts/diag/anchor_games.py`
+(stdlib; replays SAN for phase/material). It re-implements the round-6 method
+(those scripts were scratch), checked on the round-6 60+0.6 Clover PGNs
+(44545275669): side split 2.3% / 47.7%, the better/worse-side median tracks
+(m0 +118|+91 ... m30 +6|+72) and the loss step-size split (33/34/22/11%)
+reproduce exactly; lost-point phase 130/61/18 open/mg/eg (round 6: 144 open),
+no-blunder 196/209 (198), agree lag median 4 / mean 4.5 (2.5-3.5 / 4.5),
+our-minus-Clover at the lost point +73 cp raw (82-95). So the Clover column
+below is the same script on the same games. Opponent = judge; scale ratio
+opp/ours from adjacent same-sign middlegame pairs (both 0.5-4 pawns):
+Clover 1.14, top-5 anchors 0.89 (koivisto 1.10-1.11, berserk 0.84,
+altair 0.69, carp 0.62); "rescaled" divides each opponent's score by its own.
+
+| | Clover 60+0.6 (UHO) | top 5 anchors | other 6 anchors |
+|---|---|---|---|
+| games, score | 396, 25.0% | 200, 52.0% (+21 =166 -13) | 240, 79.8% (+145 =93 -2) |
+| losses: lost point open / mg / eg | 130 / 61 / 18 | **0 / 9 / 4** | 1 / 1 / 0 |
+| median move after book, men | 18, 25 | **53, 15** | 10, 26 |
+| losses w/o a single >= 1.5 move | 196/209 (94%) | **13/13** | 2/2 |
+| agree lag, our moves (median / mean) | 4 / 4.5 | **1 / -3.3** | 26 |
+| ours - opp at the lost point, raw / rescaled | +73 / +45 | **+27 / +7** | +18 / +168 (n=2) |
+| clock at lost point us / opp | 17.4 / 27.7 s | 23.3 / 28.1 s | - |
+
+Per top anchor: koivisto-9.0 45% (+0 =36 -4; lost at median move 40, mg 4/4,
+ours-opp +71 / +47, lag 1.5), koivisto-8.0 52.5% (-3; eg 2, mg 1; -83 / -103,
+lag 3), altair-7.0.0 53.8% (-3; mg 3; -209 / -110, lag -24: we saw it first),
+berserk-8 52.5% (-2; eg 2; +9 / +54), carp-3.0.1 56.3% (-1; -129 / -2).
+
+**(1) Slow squeeze: the slowness generalises, the "early" and "UHO" parts
+do not.** All 13 top-5 losses are slow (largest single opponent-judged loss
+29-141 cp; 41% of the drift in < 25 cp steps, 29% 25-50, 24% 50-100, 5%
+>= 100), and **12/13 are as Black** (top 5: White +17 =82 -1, 58%; Black +4
+=84 -12, 46%; rest: White 87/33/0, Black 58/60/2): from the slightly worse
+side of a balanced opening the anchor drifts from about -0.5 to -2 over 30-50
+moves (e.g. koivisto-9 -59, -132, -137, -319 at m0/10/20/30). But they are
+decided late (median move 53 after the book, 15 men, 9 mg / 4 eg), and on
+average the anchors do **not** squeeze: worse-side medians opp|us m0 -70|-50,
+m10 -77|-54, m20 -48|-30, m30 -22|0 (Clover: -123, -166, -249, -376). Mean
+opponent-judged loss per our move is ~0 vs the top 5 (Clover 4.5-5.8). Losses
+are only 6.5% of top-5 games; the score is decided by conversion, not by losses.
+
+**(2) Eval optimism in lost positions: no.** We agree a game is lost a
+median 1 move after the anchor (mean 3 moves *before* it; Clover 4 after);
+just before the lost point we are +27 cp raw / +7 rescaled (Clover +73 / +45).
+In 6/13 losses we were the more pessimistic one (altair, carp: -300..-440 vs
+the anchor's -180). Outcome calibration agrees (our points by each engine's
+own score band, phase >= 4, top 5, us|opp): -2: 0.31|0.26, -1: 0.43|0.41,
+0: 0.50|0.52, but **+1: 0.55|0.63, +2: 0.74|0.95**. The optimism that
+does exist is on the *winning* side.
+
+**New: positive-side optimism, drawn "advantages".** Our own score reached
+>= +1.5 in 26/166 top-5 draws, the anchor's in 5/166 (>= +1.0: 42 vs 19);
+in 9 of the 26 we stayed >= +1.5 for 10-53 moves. Typical finals: KRPvKR
+(6), KRvKB, KRBvKR, KRRvKRB (50-move), KBPvKB / KBPPvKNP, i.e. classic
+drawish material scored at +2-3; at our peak the anchor said a median +0.9.
+Real wins are converted: endgames where both say >= +2: 19/0/0 top 5,
+111/1/0 pooled; the anchors' >= +1.5 edges that became draws: 5 (top 5).
+Wins: we see the won point a median 14 moves (top 5) before the anchor.
+We print |score| <= 0.01 on 25.8% of top-5 moves (anchors 14.3%; koivisto
+7.3% vs our 33%), consistent with a draw-heavy pairing, not a leak.
+
+**Time.** No time losses. We use less clock than the anchors: s/move in
+draws 2.80 vs 3.00 (open 4.09|4.31, mg 2.35|2.48, eg 1.49|1.60), minimum
+remaining clock 25 s vs 15 s in draws, 24 s vs 3.8 s in our wins (the
+anchors get short; berserk 2.1 s at our lost points). In losses we spent
+more in the first 20 moves after the book (86.8 s vs 79.9 wins / 81.5 draws)
+and had 23 s vs the anchor's 28 s at the lost point: harder positions, not a
+TM failure. Depth reported: open 23.7|23.4, mg 25.8|24.2, eg 35.5|27.5
+(not comparable across engines, but we are not visibly short on depth at
+120+1). Against Clover at 60+0.6 the clock picture differs: 56.6 s vs
+45.8 s in the first 20 moves, we are behind on the clock when lost.
+
+**Reading.** Against the 3525-3631 anchors at 120+1 with a balanced book,
+the Clover loss shape (early UHO squeeze, ~1 pawn too optimistic) is mostly
+Clover/UHO-specific: losses are rare, late, slow, from the Black side, and our
+eval is not more optimistic than the anchor's when losing. The top-5 deficit
+is converting: 21 wins in 200, 26 draws in which we believed >= +1.5 and the
+anchor did not. That points at (a) eval calibration of drawish advantages
+(rook endings a pawn up, exchange-up with few pawns, bishop endings) for the
+net/data pipeline, e.g. check the net's score on these finals vs their
+self-play outcomes and whether the WDL target scale treats them right, and
+(b) the time reserve (we finish with ~10 s more than the anchors; the
+`tm-inc-reserve` direction), before more search work aimed at the squeeze.
+Caveat: 13 losses / 26 optimistic draws are small samples; the Clover
+games remain the place to study the squeeze itself.
