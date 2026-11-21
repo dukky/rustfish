@@ -189,11 +189,19 @@ def cmd_sprt(args):
     print("logged to tests/sprt-log.jsonl")
 
 
+LADDER_ANCHORS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "queue-settings.json")))["ladder"]
+
+
 def cmd_ladder(args):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     gh("workflow", "run", "ccrl-ladder.yml", "--ref", args.ref,
        "-f", f"games_per_anchor={args.games}", "-f", f"tc={args.tc}",
-       "-f", f"max_parallel={FOREGROUND}", capture=False)
+       "-f", f"max_parallel={FOREGROUND}",
+       # the queue's anchor set (elite anchors); the anchors.json default is the
+       # old weak set, which we now score ~100% against
+       *[a for k in ("anchors_file", "anchors") for a in ("-f", f"{k}={LADDER_ANCHORS[k]}")],
+       capture=False)
     time.sleep(10)
     run = json.loads(gh("run", "list", "--workflow", "ccrl-ladder.yml", "--limit", "1",
                         "--json", "databaseId,url,headSha"))[0]
