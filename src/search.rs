@@ -1960,6 +1960,28 @@ fn negamax(
                 Some(gives_check),
                 !pv_node && !cut_node,
             );
+            // A negatively extended TT move that still beats beta at a node
+            // not expected to cut is verified at full depth. On depth-14
+            // searches these shallow cuts were wrong 11% of the time at
+            // expected-ALL nodes (a plain one-ply reduction of the first move:
+            // about 1%), and each wrong cut refutes the parent's move.
+            if extension < 0 && !cut_node && score >= beta && !search.stop {
+                score = -negamax(
+                    board,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    search,
+                    engine,
+                    rep_stack,
+                    child_key,
+                    Some(mv),
+                    true,
+                    Some(gives_check),
+                    !pv_node && !cut_node,
+                );
+            }
         } else {
             let reduction = if quiet
                 && !in_check
