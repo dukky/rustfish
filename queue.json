@@ -1,10 +1,6 @@
 {
   "pending": [
     {
-      "branch": "lmr-index-1based",
-      "mode": "stc"
-    },
-    {
       "branch": "root-bad-captures-last",
       "mode": "stc"
     },
@@ -41,7 +37,16 @@
       "mode": "stc"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "lmr-index-1based",
+    "mode": "stc",
+    "test_id": "q-lmr-index-1based-1121-0912",
+    "sha": "3d0ab7276406407ec85ed1e108b6a18107033797",
+    "base_sha": "5fa543fadc1039ce4e8b9f675fd21c99b808fe41",
+    "started": "2026-11-21T09:12:12Z",
+    "bench": 200125,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
