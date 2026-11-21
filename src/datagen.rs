@@ -213,12 +213,15 @@ fn worker(shared: &Shared) {
     engine.set_hash(DATAGEN_HASH_MB);
     engine.own_book = false;
     engine.threads = 1;
+    // Training targets stay the net's own scale: no halfmove eval shrink.
+    engine.search_params.draw_hmc_horizon = 0;
     // Opening probes get their own small engine, so the game engine is exactly
     // "freshly cleared" when a game's first real search starts.
     let mut probe = EngineState::new();
     probe.set_hash(1);
     probe.own_book = false;
     probe.threads = 1;
+    probe.search_params.draw_hmc_horizon = 0;
     let go = format!("go nodes {}", shared.nodes);
     let go_probe = format!("go nodes {}", OPENING_PROBE_NODES);
 

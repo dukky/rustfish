@@ -982,6 +982,8 @@ struct SearchParams {
     // Node-fraction time management, see NODE_TM_MIN_DEPTH in search.rs.
     node_tm_base: u64,
     node_tm_scale: u64,
+    // Halfmove-clock eval shrink horizon, see search::halfmove_scale (0 = off).
+    draw_hmc_horizon: i32,
 }
 
 impl Default for SearchParams {
@@ -1009,6 +1011,7 @@ impl Default for SearchParams {
             lmr_extra_move_index: 7,
             node_tm_base: 175,
             node_tm_scale: 75,
+            draw_hmc_horizon: 200,
         }
     }
 }
@@ -1224,6 +1227,7 @@ fn main() {
             println!("option name LmrExtraMoveIndex type spin default 7 min 1 max 32");
             println!("option name NodeTmBase type spin default 175 min 110 max 300");
             println!("option name NodeTmScale type spin default 75 min 50 max 300");
+            println!("option name DrawHmcHorizon type spin default 200 min 0 max 1000");
             println!("uciok");
             flush_stdout();
             continue;
