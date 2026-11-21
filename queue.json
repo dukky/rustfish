@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "lmr-history-sign",
-      "mode": "stc",
-      "front": true
-    },
-    {
       "branch": "capture-history-r5",
       "mode": "stc",
       "front": true
@@ -47,7 +42,17 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "lmr-history-sign",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-lmr-history-sign-1121-0516",
+    "sha": "3f711834ef1cc1f2c21c303ca59ae1a30f21c325",
+    "base_sha": "5ca0b75831d85ef87d8ebe2227de3b6fa4e738b5",
+    "started": "2026-11-21T05:16:24Z",
+    "bench": 185885,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
