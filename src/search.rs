@@ -1167,13 +1167,13 @@ fn root_node_index(mv: Move) -> usize {
 }
 
 /// Soft target and hard limit in ms for a clock search. The soft target is
-/// time/movestogo plus most of the increment; the hard limit allows a few
+/// time/movestogo plus the whole increment; the hard limit allows a few
 /// times that but never more than 4/5 of the usable clock.
 fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, overhead: u64) -> (u64, u64) {
     let usable = time_left.saturating_sub(overhead).max(1);
     let mtg = movestogo.unwrap_or(DEFAULT_MOVES_TO_GO).clamp(1, DEFAULT_MOVES_TO_GO);
     let cap = if mtg == 1 { usable * 4 / 5 } else { usable / 2 };
-    let soft = (usable / mtg + inc * 3 / 4).min(cap).max(1);
+    let soft = (usable / mtg + inc).min(cap).max(1);
     let hard = (soft * HARD_LIMIT_FACTOR).min(usable * 4 / 5).max(soft);
     (soft, hard)
 }
