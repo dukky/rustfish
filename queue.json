@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "capture-history-r5",
-      "mode": "stc",
-      "front": true
-    },
-    {
       "branch": "lmr-index-1based",
       "mode": "stc"
     },
