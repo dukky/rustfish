@@ -19,20 +19,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "negamax-rep-floor",
-    "mode": "nonreg",
-    "passed_over": 5,
-    "test_id": "q-negamax-rep-floor-1122-1529",
-    "sha": "44805bf1e80b91fa02ff35c8d028747f856e7b7d",
-    "base_sha": "4570bfc1b8b1518c63efc7492d31593e96886153",
-    "started": "2026-11-22T15:29:16Z",
-    "bench": 193456,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
-  "merges_since_check": 3,
-  "merges_since_ladder": 3,
+  "merges_since_check": 4,
+  "merges_since_ladder": 4,
   "next_seed": 299,
   "consecutive_bursts": 0,
   "identical_merges": [
