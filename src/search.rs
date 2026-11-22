@@ -1981,6 +1981,15 @@ fn negamax_body(
             quiets_tried.push(mv);
         }
 
+        // A late quiet that hangs material (SEE < 0) is reduced one more ply.
+        // What-if sampler (ext-diag): one extra ply of reduction on such moves
+        // hides a full-depth fail high 0.02% of the time, against 0.14% for all
+        // reduced quiets.
+        let quiet_loses_material = quiet
+            && !in_check
+            && depth >= params.lmr_min_depth
+            && idx >= params.lmr_min_move_index
+            && !see_ge(board, mv, 0);
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
@@ -2043,6 +2052,9 @@ fn negamax_body(
                 // Reduce more when our static eval is not improving.
                 if !improving {
                     r += params.lmr_not_improving;
+                }
+                if quiet_loses_material {
+                    r += 1;
                 }
                 r.clamp(0, depth - 2)
             } else {
