@@ -46,19 +46,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "history-bonus-linear-r2",
-    "mode": "stc",
-    "test_id": "q-history-bonus-linear-r2-1122-0612",
-    "sha": "5025884294a0c9cae63e22e2288c8f407e12ee44",
-    "base_sha": "a78b105bc8aa60af9c154696a1f1849bc9fc5dbf",
-    "started": "2026-11-22T06:12:28Z",
-    "bench": 193456,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1,
+  "merges_since_check": 2,
+  "merges_since_ladder": 2,
   "next_seed": 290,
   "consecutive_bursts": 0,
   "identical_merges": [
