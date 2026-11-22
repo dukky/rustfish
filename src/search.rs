@@ -1584,11 +1584,16 @@ fn negamax(
 
     if let Some(se) = static_eval {
         if beta - alpha <= 1 && depth <= 2 {
-            let margin = if depth == 1 {
+            let mut margin = if depth == 1 {
                 params.futility_margin_d1
             } else {
                 params.futility_margin_d2
             };
+            // Expected cut nodes razor 100 cp later: near the margin their
+            // full search beat alpha 8-13% of the time (tree audit 2026-11-22).
+            if cut_node {
+                margin += 100;
+            }
             if se + margin <= alpha {
                 return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
             }
