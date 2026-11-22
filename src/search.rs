@@ -1541,7 +1541,11 @@ fn negamax(
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
-        if excluded.is_none() && !pv_node && entry.depth as i32 >= depth {
+        // A moveless entry means this node will take the IIR ply below, so
+        // its search would be exactly as deep as an entry one ply shallower.
+        let iir = entry.best.is_none() && depth >= IIR_MIN_DEPTH;
+        let needed = if iir { depth - 1 } else { depth };
+        if excluded.is_none() && !pv_node && entry.depth as i32 >= needed {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
                 Bound::Exact => return tt_score,
