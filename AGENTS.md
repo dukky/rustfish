@@ -356,7 +356,7 @@ python3 scripts/gauntlet.py \
 - `Clear Hash`
 - `Move Overhead` — ms reserved per move (default 10)
 - `UseNNUE` — NNUE eval (default on; off = HCE), `EvalFile` — load a net file instead of the embedded one
-- `OwnBook` — built-in opening book (effective default **off**; note the `uci` output still advertises `default true`)
+- `OwnBook` — built-in opening book (default off)
 - `BookStyle` — opening-book personality: `normal`, `grinder`, `chaos`; `BookFile`
 - ~20 search tunables (`FutilityMarginD1`, `Lmr*`, `NodeTm*`, ...) for SPSA; see `uci` output
 
