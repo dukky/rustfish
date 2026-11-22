@@ -33,16 +33,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "depth-negext-verify",
-    "mode": "stc",
-    "test_id": "q-depth-negext-verify-1122-1153",
-    "sha": "0debe27f6d5465ec04e18e64f16162a259528832",
-    "base_sha": "5025884294a0c9cae63e22e2288c8f407e12ee44",
-    "started": "2026-11-22T11:53:38Z",
-    "bench": 193456,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
