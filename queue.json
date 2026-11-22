@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "fifty-move-mate",
-      "mode": "nonreg",
-      "passed_over": 5
-    },
-    {
       "branch": "hist-lmr-drop-bad",
       "mode": "nonreg",
       "passed_over": 2
@@ -19,7 +14,17 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "fifty-move-mate",
+    "mode": "nonreg",
+    "passed_over": 5,
+    "test_id": "q-fifty-move-mate-1122-1605",
+    "sha": "e8a34956396a91aac4bffab3498c951390312689",
+    "base_sha": "44805bf1e80b91fa02ff35c8d028747f856e7b7d",
+    "started": "2026-11-22T16:05:06Z",
+    "bench": 193456,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
