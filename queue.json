@@ -1,15 +1,20 @@
 {
   "pending": [
     {
-      "branch": "bug-root-failow-nomove",
-      "mode": "nonreg"
-    },
-    {
       "branch": "nnue-g11sh1024kb8mpw",
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "bug-root-failow-nomove",
+    "mode": "nonreg",
+    "test_id": "q-bug-root-failow-nomove-1122-2338",
+    "sha": "836b44c99cd8368f58786ee3fe02f1232953f6a9",
+    "base_sha": "2bb6342c714675ab6930876bb15740c30037829f",
+    "started": "2026-11-22T23:39:00Z",
+    "bench": 186105,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
