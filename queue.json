@@ -1,6 +1,11 @@
 {
   "pending": [
     {
+      "branch": "nnue-g11sh1024kb8mpw",
+      "mode": "net-gate",
+      "front": true
+    },
+    {
       "branch": "hist-lmr-drop-bad",
       "mode": "nonreg",
       "passed_over": 2
@@ -25,7 +30,7 @@
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
-  "next_seed": 302,
+  "next_seed": 303,
   "consecutive_bursts": 0,
   "identical_merges": [
     "b7828e730c21cacd8e24c767b6598c1a3e0bfed3",
