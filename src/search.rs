@@ -248,6 +248,8 @@ fn update_correction(
 pub(crate) static GO_ISSUED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STOP_UPTO: AtomicU64 = AtomicU64::new(0);
 pub(crate) static ACTIVE_GO: AtomicU64 = AtomicU64::new(0);
+/// Set by the stdin reader when it reads `quit` (see the `go infinite` wait).
+pub(crate) static QUIT_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn stop_requested() -> bool {
     let active = ACTIVE_GO.load(Ordering::Relaxed);
@@ -1110,6 +1112,18 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
             if elapsed >= target {
                 break;
             }
+        }
+    }
+
+    // UCI: an infinite search reports its move only after `stop`, even when
+    // it ran out of depth first (a forced mate reaches MAX_SEARCH_DEPTH in
+    // milliseconds). Searches not driven by stdin (ACTIVE_GO == 0) never wait.
+    if infinite {
+        while ACTIVE_GO.load(Ordering::Relaxed) != 0
+            && !stop_requested()
+            && !QUIT_SEEN.load(Ordering::Relaxed)
+        {
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
