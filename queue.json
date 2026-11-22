@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "combo-small-positives",
-      "mode": "stc",
-      "front": true
-    },
-    {
       "branch": "nmp-mate-clamp",
       "mode": "nonreg",
       "passed_over": 2
@@ -55,7 +50,17 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "combo-small-positives",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-combo-small-positives-1122-0330",
+    "sha": "4830671b1bd73595a932fbc5ed32c23faac6f2a6",
+    "base_sha": "a78b105bc8aa60af9c154696a1f1849bc9fc5dbf",
+    "started": "2026-11-22T03:30:12Z",
+    "bench": 175896,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
