@@ -3,18 +3,23 @@
     {
       "branch": "hist-lmr-drop-bad",
       "mode": "nonreg",
-      "passed_over": 2
-    },
-    {
-      "branch": "caphist-see-prune-r5",
-      "mode": "stc"
+      "passed_over": 3
     },
     {
       "branch": "bug-root-failow-nomove",
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "caphist-see-prune-r5",
+    "mode": "stc",
+    "test_id": "q-caphist-see-prune-r5-1122-2019",
+    "sha": "ebf7ec361630afbb2cdd9e5144b0b7ef0a0722d5",
+    "base_sha": "5a844a37faa087224916c5fc42d34114d60a8047",
+    "started": "2026-11-22T20:19:33Z",
+    "bench": 183990,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
