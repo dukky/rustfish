@@ -40,16 +40,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "hist-lmr-both-pos",
-    "mode": "stc",
-    "test_id": "q-hist-lmr-both-pos-1122-0724",
-    "sha": "40f5d094f2e66662ce1375be8b7f4343ed47064b",
-    "base_sha": "5025884294a0c9cae63e22e2288c8f407e12ee44",
-    "started": "2026-11-22T07:24:35Z",
-    "bench": 199255,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
