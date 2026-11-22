@@ -14,17 +14,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "nnue-g11sh1024kb8mpw",
-    "mode": "net-gate",
-    "front": true,
-    "test_id": "q-nnue-g11sh1024kb8mpw-1122-2005",
-    "sha": "f991bbbff1c4a08332feee35ec59a634829d35f6",
-    "base_sha": "7c614e66cf8d580180e35831e73fff91ce8934e2",
-    "started": "2026-11-22T20:05:31Z",
-    "bench": 194049,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
