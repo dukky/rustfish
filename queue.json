@@ -65,16 +65,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "root-order-nodes",
-    "mode": "stc",
-    "test_id": "q-root-order-nodes-1121-2316",
-    "sha": "35a6fa992d9008b5358861c392388ec552e25ffb",
-    "base_sha": "8ffaefd0646047cee26f51852098fd574e377f2a",
-    "started": "2026-11-21T23:16:30Z",
-    "bench": 186716,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
