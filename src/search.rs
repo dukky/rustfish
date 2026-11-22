@@ -1607,6 +1607,12 @@ fn negamax(
             if improving {
                 margin -= margin / 4;
             }
+            // Expected cut nodes at depth >= 3 use 80% of the margin: there
+            // the pruned node's full search failed low only 0.0-0.2% of the
+            // time, even right at the margin (tree audit 2026-11-22).
+            if depth >= 3 && cut_node {
+                margin = margin * 80 / 100;
+            }
             if se - margin >= beta {
                 return se;
             }
