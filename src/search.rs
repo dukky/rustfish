@@ -1570,8 +1570,12 @@ fn negamax(
     };
     let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
     let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
-    let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
-    search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
+    // A singular verification search shares the node's TT entry, but that
+    // bound includes the excluded move, so it says nothing about the rest.
+    let static_eval = corr_eval.map(|ce| if excluded.is_some() { ce } else { tt_refine_eval(tt_entry, ce, ply) });
+    if excluded.is_none() {
+        search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
+    }
     // Improving: our static eval beats the one from our previous move (two plies up).
     let improving = match static_eval {
         Some(se) if ply >= 2 && search.static_evals[ply - 2] != NO_EVAL => {
