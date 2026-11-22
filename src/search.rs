@@ -1662,8 +1662,11 @@ fn negamax(
 
     // ProbCut: if a good capture beats beta by a wide margin in qsearch and
     // then in a shallow (depth - PROBCUT_REDUCTION) null-window search, the
-    // full-depth search would almost surely fail high too.
+    // full-depth search would almost surely fail high too. Not in a singular
+    // verification search: it would search the excluded move (its picker
+    // does not skip it) and store a bound for the full node.
     if !in_check
+        && excluded.is_none()
         && beta - alpha <= 1
         && depth >= PROBCUT_MIN_DEPTH
         && beta.abs() < MATE_SCORE - MAX_PLY as i32 * 2
