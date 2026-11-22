@@ -60,17 +60,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "bug-se-no-tt-refine",
-    "mode": "stc",
-    "front": true,
-    "test_id": "q-bug-se-no-tt-refine-1122-0139",
-    "sha": "0a92be585acb895afdb9b30e138aff73c09ec7e5",
-    "base_sha": "dd5698ba64d96536e748369809388956d5205620",
-    "started": "2026-11-22T01:39:43Z",
-    "bench": 188029,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
