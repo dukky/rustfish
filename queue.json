@@ -1,11 +1,6 @@
 {
   "pending": [
     {
-      "branch": "bug-iir-tt-depth",
-      "mode": "stc",
-      "front": true
-    },
-    {
       "branch": "bug-se-no-tt-refine",
       "mode": "stc",
       "front": true
@@ -65,7 +60,17 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "bug-iir-tt-depth",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-bug-iir-tt-depth-1122-0046",
+    "sha": "1e8ce6ed1b09667425f82dd2524c35daa2aa2f86",
+    "base_sha": "d0a5bb64a0bb9e69988e0204d26a900dca54f8c0",
+    "started": "2026-11-22T00:46:32Z",
+    "bench": 188159,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
