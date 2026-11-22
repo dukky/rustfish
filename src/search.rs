@@ -479,6 +479,12 @@ const HISTORY_MAX: i32 = 16_384;
 /// Cap on a single history bonus/malus (reached at depth 10), so one deep
 /// cutoff moves an entry at most ~9% of the way to the bound.
 const HISTORY_BONUS_MAX: i32 = 1_536;
+/// LMR reduces a quiet one ply less when its child's static eval (our view)
+/// is above alpha - this margin. Measured with a what-if sampler (ext-diag): a
+/// reduced quiet that fails low but beats alpha at full depth is 6-10x more
+/// likely when the move's static result is within 25 cp of alpha or above
+/// (0.7-2.0%) than when it is 100+ cp below (0.005-0.1%).
+const LMR_CHILD_EVAL_SAFE_MARGIN: i32 = 25;
 
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
@@ -2081,6 +2087,14 @@ fn negamax_body(
                 // Reduce more when our static eval is not improving.
                 if !improving {
                     r += params.lmr_not_improving;
+                }
+                // A move whose static result already reaches (nearly) alpha is
+                // where a reduction hides a fail high: reduce it one ply less.
+                // The child evaluates itself from the same cache entry anyway.
+                if !gives_check
+                    && -engine.eval_cache.eval(board, child_key) > alpha - LMR_CHILD_EVAL_SAFE_MARGIN
+                {
+                    r -= 1;
                 }
                 r.clamp(0, depth - 2)
             } else {
