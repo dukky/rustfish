@@ -28,6 +28,9 @@ pub(crate) fn spawn_input_reader() -> mpsc::Receiver<String> {
             if cmd == "go" || cmd.starts_with("go ") {
                 GO_ISSUED.fetch_add(1, Ordering::SeqCst);
             }
+            if cmd == "quit" {
+                crate::search::QUIT_SEEN.store(true, Ordering::SeqCst);
+            }
             if tx.send(line).is_err() {
                 break;
             }
