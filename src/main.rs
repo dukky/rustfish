@@ -1,4 +1,8 @@
 mod bitboard;
+#[cfg(feature = "stats")]
+mod stats;
+#[cfg(any(feature = "stats", feature = "knobs"))]
+mod knobs;
 mod book;
 mod datagen;
 mod eval;
@@ -1286,6 +1290,17 @@ fn main() {
         if cmd.starts_with("evalhash") {
             handle_evalhash(cmd, &mut board, engine.active_net());
             continue;
+        }
+        #[cfg(feature = "stats")]
+        {
+            if cmd == "statsreset" {
+                stats::reset();
+                continue;
+            }
+            if let Some(path) = cmd.strip_prefix("statsdump ") {
+                stats::dump(path.trim());
+                continue;
+            }
         }
         if cmd.starts_with("bench") {
             handle_bench(cmd, &mut board, &mut engine);

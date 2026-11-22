@@ -3,6 +3,12 @@ name = "rustfish"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Qsearch statistics for diagnosis (qs-diag branch only).
+stats = []
+# Env knobs only (no counters), for candidate prunes.
+knobs = []
+
 [profile.release]
 lto = true
 codegen-units = 1

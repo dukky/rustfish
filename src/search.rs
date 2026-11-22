@@ -488,6 +488,14 @@ const LMR_HISTORY_THRESHOLD: i32 = 14_000;
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
 fn history_bonus(depth: i32) -> i32 {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        // No-op control: TNOISE=<percent> scales the bonus by +-1%.
+        let n = crate::knobs::knob("TNOISE", 100);
+        if n != 100 {
+            return (160 * depth * n / 100).min(HISTORY_BONUS_MAX);
+        }
+    }
     (160 * depth).min(HISTORY_BONUS_MAX)
 }
 
@@ -2191,7 +2199,64 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     (q - eval_for_side(board)).abs()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn quiescence(
+    board: &mut Board,
+    alpha: i32,
+    beta: i32,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    ply: usize,
+    known_in_check: Option<bool>,
+    prev_move: Option<Move>,
+) -> i32 {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        let q = crate::knobs::QPLY.with(|c| {
+            let v = c.get();
+            c.set(v + 1);
+            v
+        });
+        let r = quiescence_impl(board, alpha, beta, search, engine, rep_stack, key, ply, known_in_check, prev_move, q);
+        crate::knobs::QPLY.with(|c| c.set(q));
+        r
+    }
+    #[cfg(not(any(feature = "stats", feature = "knobs")))]
+    quiescence_impl(board, alpha, beta, search, engine, rep_stack, key, ply, known_in_check, prev_move, 0)
+}
+
+#[cfg(any(feature = "stats", feature = "knobs"))]
+#[inline]
+fn qk(name: &'static str, default: i32) -> i32 {
+    crate::knobs::knob(name, default)
+}
+
+/// Stats helpers: qsearch ply bucket, slack bucket (25 cp steps over +-1000).
+#[cfg(feature = "stats")]
+mod qst {
+    pub const SB: usize = 81;
+    #[inline]
+    pub fn qp(q: usize) -> usize {
+        q.min(15)
+    }
+    #[inline]
+    pub fn qg(q: usize) -> usize {
+        match q {
+            0 => 0,
+            1 | 2 => 1,
+            _ => 2,
+        }
+    }
+    #[inline]
+    pub fn sb(slack: i32) -> usize {
+        (((slack.clamp(-1000, 1000) + 1000 + 12) / 25) as usize).min(SB - 1)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quiescence_impl(
     board: &mut Board,
     mut alpha: i32,
     beta: i32,
@@ -2204,21 +2269,32 @@ fn quiescence(
     known_in_check: Option<bool>,
     // The move that led here (continuation correction history).
     prev_move: Option<Move>,
+    qply: usize,
 ) -> i32 {
+    let _ = qply;
     search.nodes += 1;
+    #[cfg(feature = "stats")]
+    crate::stats::inc("q_nodes", qst::qp(qply));
+    #[cfg(feature = "stats")]
+    macro_rules! qret { ($r:expr) => { crate::stats::inc("q_ret", $r * 16 + qst::qp(qply)) } }
+    #[cfg(not(feature = "stats"))]
+    macro_rules! qret { ($r:expr) => { () } }
     if search.should_stop() {
         return 0;
     }
 
     if board.halfmove_clock >= 100 {
+        qret!(0);
         return fifty_move_score(board, ply);
     }
 
     if is_repetition(rep_stack, key, board.halfmove_clock) {
+        qret!(0);
         return 0;
     }
     // ply > 0 keeps qsearch_gap (tuner, called at ply 0) unaffected.
     if ply > 0 && is_insufficient_material(board) {
+        qret!(0);
         return 0;
     }
     // Fail-soft floor: a forced draw is available when the repetition check
@@ -2240,9 +2316,18 @@ fn quiescence(
         if entry.depth >= 0 {
             let tt_score = score_from_tt(entry.score, ply);
             match entry.bound {
-                Bound::Exact => return tt_score,
-                Bound::Lower if tt_score >= beta => return tt_score,
-                Bound::Upper if tt_score <= alpha => return tt_score,
+                Bound::Exact => {
+                    qret!(1);
+                    return tt_score;
+                }
+                Bound::Lower if tt_score >= beta => {
+                    qret!(1);
+                    return tt_score;
+                }
+                Bound::Upper if tt_score <= alpha => {
+                    qret!(1);
+                    return tt_score;
+                }
                 _ => {}
             }
         }
@@ -2268,7 +2353,12 @@ fn quiescence(
     let mut best = floor;
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
+            qret!(2);
             return stand_pat;
+        }
+        #[cfg(feature = "stats")]
+        if stand_pat > alpha {
+            crate::stats::inc("q_spraise", qst::qp(qply));
         }
         best = best.max(stand_pat);
         if stand_pat > alpha {
@@ -2287,12 +2377,26 @@ fn quiescence(
         !in_check,
         &mut search.move_buf,
     );
+    #[cfg(feature = "stats")]
+    if in_check {
+        crate::stats::inc("q_check", qst::qp(qply));
+    }
     if picker.is_empty() {
+        qret!(3);
         if in_check {
             return -MATE_SCORE + ply as i32;
         }
         return best;
     }
+    #[cfg(feature = "stats")]
+    let node_sb = static_eval.map(|e| qst::sb(e - alpha_orig)).unwrap_or(0);
+    #[cfg(feature = "stats")]
+    let mut idx: usize = 0;
+    // (class, slack bucket, qply group, see bucket, gives check, sub index) of the current best move.
+    #[cfg(feature = "stats")]
+    let mut best_info: Option<(usize, usize, usize, usize, usize, usize, usize)> = None;
+    #[cfg(feature = "stats")]
+    let mut best_dv: Option<usize> = None;
 
     while let Some((mv, stage)) = picker.next() {
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
@@ -2309,6 +2413,111 @@ fn quiescence(
             }
         }
 
+        // Move facts for the stats and the knobs.
+        let victim = if mv.is_en_passant {
+            piece_value(PieceType::Pawn)
+        } else {
+            board.squares[mv.to as usize].map(|p| piece_value(p.kind)).unwrap_or(0)
+        };
+        let promo_gain = mv.promotion.map(|p| piece_value(p) - piece_value(PieceType::Pawn)).unwrap_or(0);
+        let gain = victim + promo_gain;
+        #[cfg(any(feature = "stats", feature = "knobs"))]
+        let mv_see = if in_check { 0 } else { see(board, mv) };
+        #[cfg(any(feature = "stats", feature = "knobs"))]
+        let mv_gc = if in_check { false } else { CheckInfo::new(board).gives_check(board, mv) };
+        #[cfg(any(feature = "stats", feature = "knobs"))]
+        if let Some(sp) = static_eval {
+            // Candidate prunes (diagnosis knobs; all off by default).
+            let under = matches!(mv.promotion, Some(p) if p != PieceType::Queen);
+            if under && qk("QUP", 0) == 1 {
+                continue;
+            }
+            let is_promo = mv.promotion.is_some();
+            let dm = qk("QDM", -1);
+            if dm >= 0 && (!is_promo || qk("QDP", 0) == 1) && !(mv_gc && qk("QDCHK", 0) == 1) {
+                let est = if qk("QDSEE", 0) == 1 { mv_see } else { gain };
+                let fut = sp + est + dm;
+                if fut <= alpha {
+                    if qk("QDFS", 1) == 1 {
+                        best = best.max(fut);
+                    }
+                    continue;
+                }
+            }
+            // Per-victim deficit prune: skip a non-checking, non-promoting
+            // capture when alpha - stand pat >= the victim's threshold
+            // (QW* for SEE > 0, QE* for SEE == 0; -1 = off).
+            if !is_promo && !mv_gc {
+                let vk = if mv.is_en_passant {
+                    PieceType::Pawn
+                } else {
+                    board.squares[mv.to as usize].map(|p| p.kind).unwrap_or(PieceType::Pawn)
+                };
+                let names: [&'static str; 5] = if mv_see > 0 {
+                    ["QWP", "QWN", "QWB", "QWR", "QWQ"]
+                } else {
+                    ["QEP", "QEN", "QEB", "QER", "QEQQ"]
+                };
+                let mut d = qk(names[(vk as usize).min(4)], -1);
+                let w = qk(["QWP", "QWN", "QWB", "QWR", "QWQ"][(vk as usize).min(4)], -1);
+                if d < 0 && mv_see == 0 {
+                    // Equal captures default to the winning-capture threshold.
+                    d = w;
+                }
+                // As on the branch: past the winning threshold the bound is that threshold.
+                if w >= 0 && alpha - sp >= w {
+                    d = w;
+                }
+                if d >= 0 && alpha - sp >= d {
+                    if qk("QDFS", 1) == 1 {
+                        best = best.max(sp + d);
+                    }
+                    continue;
+                }
+            }
+            let eqp = qk("QEQ", 99);
+            if mv_see == 0 && !is_promo && qply as i32 >= eqp && (qk("QEQA", 0) == 0 || sp <= alpha) && !(mv_gc && qk("QEQCHK", 0) == 1) {
+                continue;
+            }
+        }
+        #[cfg(feature = "stats")]
+        let (m_cls, m_sb, m_qg, m_seeb, m_gc, m_ssb) = {
+            let cls = if in_check {
+                if is_capture_move(board, mv) { 5 } else { 6 }
+            } else if let Some(p) = mv.promotion {
+                if p == PieceType::Queen { 3 } else { 4 }
+            } else if mv_see > 0 {
+                if stage == Stage::Tt { 0 } else { 1 }
+            } else {
+                2
+            };
+            let sp = static_eval.unwrap_or(alpha);
+            (
+                cls,
+                qst::sb(sp + gain - alpha),
+                qst::qg(qply),
+                (mv_see.max(0) / 100).min(10) as usize,
+                mv_gc as usize,
+                qst::sb(sp + mv_see - alpha),
+            )
+        };
+        #[cfg(feature = "stats")]
+        let nodes_before = search.nodes;
+        // Deficit table: (qply group, equal?, victim kind, gives check) x bucket of alpha - stand pat.
+        #[cfg(feature = "stats")]
+        let dv_idx = static_eval.map(|sp| {
+            let vk = if mv.promotion.is_some() {
+                5
+            } else if mv.is_en_passant {
+                0
+            } else {
+                board.squares[mv.to as usize].map(|p| p.kind as usize).unwrap_or(0).min(4)
+            };
+            let eq = (mv_see == 0) as usize;
+            (((m_qg * 2 + eq) * 6 + vk) * 2 + m_gc) * qst::SB + qst::sb(alpha - sp)
+        });
+        let _ = gain;
+
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
@@ -2323,6 +2532,67 @@ fn quiescence(
 
         if search.stop {
             return 0;
+        }
+
+        #[cfg(feature = "stats")]
+        {
+            use crate::stats::{add, inc};
+            let raised = score > alpha;
+            let cut = score >= beta;
+            let o = |base: usize| [(base * 4, true), (base * 4 + 1, raised), (base * 4 + 2, cut)];
+            let qp = qst::qp(qply);
+            for (i, f) in o(m_cls * 16 + qp) {
+                if f { inc("q_mv", i); }
+            }
+            add("q_sub", m_cls * 16 + qp, search.nodes - nodes_before);
+            if !in_check {
+                let c2 = match m_cls { 0 | 1 => 0, 2 => 1, _ => 2 };
+                for (i, f) in o((m_qg * 3 + c2) * qst::SB + m_sb) {
+                    if f { inc("q_sl", i); }
+                }
+                for (i, f) in o((m_qg * 3 + c2) * qst::SB + m_ssb) {
+                    if f { inc("q_sls", i); }
+                }
+                for (i, f) in o((m_gc * 3 + c2) * qst::SB + m_sb) {
+                    if f { inc("q_chk", i); }
+                }
+                for (i, f) in o(m_qg * 11 + m_seeb) {
+                    if f { inc("q_see", i); }
+                }
+                for (i, f) in o(node_sb * 16 + idx.min(15)) {
+                    if f { inc("q_idx", i); }
+                }
+                add("q_slsub", (m_qg * 3 + c2) * qst::SB + m_sb, search.nodes - nodes_before);
+                // Excess of the result over the optimistic estimate (25 cp buckets).
+                if let Some(di) = dv_idx {
+                    inc("q_dv", di * 2);
+                    add("q_dvsub", di, search.nodes - nodes_before);
+                }
+                let sp = static_eval.unwrap_or(0);
+                inc("q_ex", (m_qg * 3 + c2) * qst::SB + qst::sb(score - (sp + victim + promo_gain)));
+            }
+            if raised {
+                best_info = Some((m_cls, m_sb, m_qg, m_seeb, m_gc, m_ssb, idx.min(15)));
+                best_dv = dv_idx;
+            }
+            idx += 1;
+            if cut {
+                qret!(4);
+                if let Some(di) = best_dv {
+                    inc("q_dv", di * 2 + 1);
+                }
+                if let Some((c, sbk, g, se, gc, ssb, ix)) = best_info {
+                    inc("q_det", c * 16 + qp);
+                    if c < 5 {
+                        let c2 = match c { 0 | 1 => 0, 2 => 1, _ => 2 };
+                        inc("q_detsl", (g * 3 + c2) * qst::SB + sbk);
+                        inc("q_detsls", (g * 3 + c2) * qst::SB + ssb);
+                        inc("q_detchk", (gc * 3 + c2) * qst::SB + sbk);
+                        inc("q_detsee", g * 11 + se);
+                        inc("q_detidx", node_sb * 16 + ix);
+                    }
+                }
+            }
         }
 
         if score >= beta {
@@ -2349,6 +2619,28 @@ fn quiescence(
     // pruned), so best > -INF here unless the position had no moves.
     let best = if best == -INF { alpha } else { best };
     let bound = if best <= alpha_orig { Bound::Upper } else { Bound::Exact };
+    #[cfg(feature = "stats")]
+    {
+        use crate::stats::inc;
+        let qp = qst::qp(qply);
+        qret!(if bound == Bound::Exact { 6 } else { 5 });
+        if bound == Bound::Exact {
+            if let Some(di) = best_dv {
+                inc("q_dv", di * 2 + 1);
+            }
+            if let Some((c, sbk, g, se, gc, ssb, ix)) = best_info {
+                inc("q_det", c * 16 + qp);
+                if c < 5 {
+                    let c2 = match c { 0 | 1 => 0, 2 => 1, _ => 2 };
+                    inc("q_detsl", (g * 3 + c2) * qst::SB + sbk);
+                    inc("q_detsls", (g * 3 + c2) * qst::SB + ssb);
+                    inc("q_detchk", (gc * 3 + c2) * qst::SB + sbk);
+                    inc("q_detsee", g * 11 + se);
+                    inc("q_detidx", node_sb * 16 + ix);
+                }
+            }
+        }
+    }
     engine
         .tt
         .store(key, 0, score_to_tt(best, ply), raw_static_eval, bound, best_move.or(tt_move));
