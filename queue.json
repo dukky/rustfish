@@ -9,20 +9,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "hist-lmr-drop-bad",
-    "mode": "nonreg",
-    "passed_over": 3,
-    "test_id": "q-hist-lmr-drop-bad-1122-2149",
-    "sha": "2bb6342c714675ab6930876bb15740c30037829f",
-    "base_sha": "9f845ee25159e399d24d55e978fcaacfe6aa700f",
-    "started": "2026-11-22T21:49:53Z",
-    "bench": 183990,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
-  "merges_since_check": 1,
-  "merges_since_ladder": 1,
+  "merges_since_check": 2,
+  "merges_since_ladder": 2,
   "next_seed": 308,
   "consecutive_bursts": 0,
   "identical_merges": [
