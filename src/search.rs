@@ -2237,6 +2237,14 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     (q - eval_for_side(board)).abs()
 }
 
+/// Qsearch deficit thresholds per victim (P, N, B, R, Q): (SEE > 0, SEE == 0)
+/// captures are pruned when alpha - stand pat reaches them. Chosen where the
+/// pruned set's verify rate (the move would have set the node's result) is
+/// about 0.25% or less, measured on 962 positions at depth 13.
+const NEVER: i32 = i32::MAX;
+const QS_DEFICIT: [(i32, i32); 5] = [(400, 300), (800, 500), (900, 600), (NEVER, 800), (NEVER, NEVER)];
+const QS_DEFICIT_MIN: i32 = 300;
+
 fn quiescence(
     board: &mut Board,
     mut alpha: i32,
@@ -2340,6 +2348,7 @@ fn quiescence(
         return best;
     }
 
+    let mut check_info: Option<CheckInfo> = None;
     while let Some((mv, stage)) = picker.next() {
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
         engine.tt.prefetch(early);
@@ -2352,6 +2361,37 @@ fn quiescence(
             }
             if stage == Stage::Tt && !see_ge(board, mv, 0) {
                 continue;
+            }
+            // Deficit prune: a quiet-result capture (no promotion, no check)
+            // whose stand pat trails alpha by at least the victim's threshold
+            // almost never reaches alpha (thresholds and verify rates:
+            // docs/qsearch-audit-2026-11-22.md on qs-diag). The node then
+            // scores at most stand pat + threshold <= alpha for that move.
+            if let Some(sp) = static_eval {
+                let deficit = alpha - sp;
+                if deficit >= QS_DEFICIT_MIN && mv.promotion.is_none() {
+                    let victim = if mv.is_en_passant {
+                        PieceType::Pawn
+                    } else {
+                        board.squares[mv.to as usize].map(|p| p.kind).unwrap_or(PieceType::Pawn)
+                    };
+                    let (win_t, eq_t) = QS_DEFICIT[(victim as usize).min(4)];
+                    if deficit >= eq_t {
+                        let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
+                        if !ci.gives_check(board, mv) {
+                            if deficit >= win_t {
+                                best = best.max(sp + win_t);
+                                continue;
+                            }
+                            // Between the two thresholds only an equal
+                            // capture (SEE exactly 0) is pruned.
+                            if !see_ge(board, mv, 1) {
+                                best = best.max(sp + eq_t);
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
         }
 
