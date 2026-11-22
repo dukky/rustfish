@@ -28,20 +28,10 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "nmp-mate-clamp",
-    "mode": "nonreg",
-    "passed_over": 7,
-    "test_id": "q-nmp-mate-clamp-1122-1359",
-    "sha": "4570bfc1b8b1518c63efc7492d31593e96886153",
-    "base_sha": "5025884294a0c9cae63e22e2288c8f407e12ee44",
-    "started": "2026-11-22T13:59:46Z",
-    "bench": 193456,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
-  "merges_since_check": 2,
-  "merges_since_ladder": 2,
+  "merges_since_check": 3,
+  "merges_since_ladder": 3,
   "next_seed": 296,
   "consecutive_bursts": 0,
   "identical_merges": [
