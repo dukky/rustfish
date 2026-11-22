@@ -55,17 +55,7 @@
       "mode": "nonreg"
     }
   ],
-  "current": {
-    "branch": "tree-pruning-stack",
-    "mode": "stc",
-    "front": true,
-    "test_id": "q-tree-pruning-stack-1122-0251",
-    "sha": "eb25065767d49fc044789991b3f0082c7064a51c",
-    "base_sha": "a78b105bc8aa60af9c154696a1f1849bc9fc5dbf",
-    "started": "2026-11-22T02:52:00Z",
-    "bench": 184622,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
