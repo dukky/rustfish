@@ -1480,9 +1480,13 @@ fn search_root(
     } else {
         Bound::Exact
     };
+    // As in negamax: after a fail low (an aspiration miss) the best move is
+    // only the highest of upper bounds, so keep the stored move (the last
+    // iteration's best), which the re-search then orders first.
+    let tt_best = if bound == Bound::Upper { None } else { best_move };
     engine
         .tt
-        .store(key, depth, score_to_tt(best_score, 0), None, bound, best_move);
+        .store(key, depth, score_to_tt(best_score, 0), None, bound, tt_best);
 
     (best_score, best_move, true)
 }
