@@ -488,6 +488,19 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// HISTORY_MAX * (1 - e^(-16 * 2000 / HISTORY_MAX)) ~= 0.86 * HISTORY_MAX.
 const LMR_HISTORY_THRESHOLD: i32 = 14_000;
 
+#[inline(always)]
+fn dk(name: &'static str, default: i32) -> i32 {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        crate::knobs::knob(name, default)
+    }
+    #[cfg(not(any(feature = "stats", feature = "knobs")))]
+    {
+        let _ = name;
+        default
+    }
+}
+
 fn history_bonus(depth: i32) -> i32 {
     #[cfg(any(feature = "stats", feature = "knobs"))]
     {
@@ -648,6 +661,8 @@ enum Stage {
 struct MovePicker {
     /// Diag knob BADPOS=1: bad captures before plain quiets.
     bad_early: bool,
+    /// Diag BADPOS=2/3: bad captures interleaved into the priority list.
+    early_bad: Vec<Move>,
     tt_move: Option<Move>,
     tt_yielded: bool,
     bufs: PickerBufs,
@@ -684,6 +699,7 @@ impl MovePicker {
         if move_buf.is_empty() {
             return Self {
                 bad_early: false,
+                early_bad: Vec::new(),
                 tt_move: None,
                 tt_yielded: true,
                 bufs,
@@ -708,10 +724,15 @@ impl MovePicker {
             crate::knobs::knob("EQPOS", 0), crate::knobs::knob("BADPOS", 0), crate::knobs::knob("K1B", 30_000),
             crate::knobs::knob("CTRB", 20_000), crate::knobs::knob("K2B", 10_000), crate::knobs::knob("CHW", 1),
             crate::knobs::knob("PLAINCH", 0));
+        #[cfg(any(feature = "stats", feature = "knobs"))]
+        let kb_badthr = crate::knobs::knob("BADTHR", 200);
+        #[cfg(not(any(feature = "stats", feature = "knobs")))]
+        let kb_badthr = 200;
         #[cfg(not(any(feature = "stats", feature = "knobs")))]
         let (kb_eq, kb_bad, kb_k1, kb_ctr, kb_k2, kb_chw, kb_plainch) = (0, 0, 30_000, 20_000, 10_000, 1, 0);
         let mut picker = Self {
             bad_early: kb_bad == 1 && !captures_only,
+            early_bad: Vec::new(),
             tt_move: None,
             tt_yielded: false,
             bufs,
@@ -738,6 +759,11 @@ impl MovePicker {
                 if see_score == 0 && kb_eq > 0 && !captures_only {
                     let base = match kb_eq { 1 => 25_000, 2 => 15_000, _ => 5_000 };
                     b.priority_quiets.push((mv, base + e.1));
+                    continue;
+                }
+                if see_score < 0 && !captures_only && (kb_bad == 2 || (kb_bad == 3 && see_score > -kb_badthr)) {
+                    b.priority_quiets.push((mv, 5_000 + see_score));
+                    picker.early_bad.push(mv);
                     continue;
                 }
                 push_either(&mut b.good_captures, &mut b.bad_captures, see_score >= 0, e, e);
@@ -791,7 +817,7 @@ impl MovePicker {
             .map(|mv| (mv, Stage::GoodCapture))
             .or_else(|| {
                 take_best_scored(&mut self.bufs.priority_quiets)
-                    .map(|mv| (mv, Stage::PriorityQuiet))
+                    .map(|mv| (mv, if self.early_bad.contains(&mv) { Stage::BadCapture } else { Stage::PriorityQuiet }))
             })
             .or_else(|| {
                 if self.bad_early {
@@ -1710,11 +1736,15 @@ fn negamax_inner(
 
     if let Some(se) = static_eval {
         if beta - alpha <= 1 && depth <= 2 && !off(64) && st_allow!(search, ply) {
-            let margin = if depth == 1 {
+            let mut margin = if depth == 1 {
                 params.futility_margin_d1
             } else {
                 params.futility_margin_d2
             };
+            // Diag RAZCUT: extra razor margin at expected cut nodes.
+            if cut_node {
+                margin += dk("RAZCUT", 0);
+            }
             st!{ if excluded.is_none() { crate::stats::inc("razor_try", crate::stats::nd(st_nt, depth)); } }
             if se + margin <= alpha {
                 let q = quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
@@ -1730,7 +1760,14 @@ fn negamax_inner(
                         st_verify_end();
                     }
                 }
-                return q;
+                // Diag RAZRET=1 (all depths) / 2 (depth 2 only): a qsearch that beats
+                // alpha does not end the node; fall through to the full search.
+                let rr = dk("RAZRET", 0);
+                if q > alpha && (rr == 1 || (rr == 2 && depth == 2)) && !search.stop {
+                    // fall through
+                } else {
+                    return q;
+                }
             }
         }
 
@@ -1749,6 +1786,10 @@ fn negamax_inner(
             };
             if improving {
                 margin -= margin / 4;
+            }
+            // Diag RFPCUT / RFPALL: margin percent by expected node type at depth >= 3.
+            if depth >= 3 {
+                margin = margin * dk(if cut_node { "RFPCUT" } else { "RFPALL" }, 100) / 100;
             }
             if se - margin >= beta {
                 st!{ crate::stats::inc("rfp_fire", crate::stats::nd(st_nt, depth)); crate::stats::tr_why(ply, "rfp".into()); }
@@ -1966,6 +2007,9 @@ fn negamax_inner(
     let side = board.side_to_move;
     let mut quiets_tried = PooledMoveVec::take();
     let mut idx = 0usize;
+    // Diag BADIDX=1: losing captures searched so far do not count toward the LMP/LMR index.
+    let mut bad_seen = 0usize;
+    let badidx = dk("BADIDX", 0) == 1;
     let mut check_info: Option<CheckInfo> = None;
     #[cfg(feature = "stats")]
     let mut st_first_cls: usize = 0;
@@ -2097,7 +2141,7 @@ fn negamax_inner(
                 2 => params.lmp_limit_d2,
                 _ => params.lmp_limit_d3,
             };
-            if idx >= limit {
+            if idx - if badidx { bad_seen } else { 0 } >= limit {
                 st!{ if excluded.is_none() { crate::stats::inc("lmp", crate::stats::nd(st_nt, depth)); } }
                 #[cfg(feature = "stats-verify")]
                 st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, "vlmp", "vlmp_k", st_nt, (idx - limit) as i32);
@@ -2114,7 +2158,7 @@ fn negamax_inner(
             && depth <= 8
             && idx > 0
             && !off(4)
-            && static_eval.is_some_and(|se| se + params.futility_margin_d1 * depth / 2 <= alpha)
+            && static_eval.is_some_and(|se| se + params.futility_margin_d1 * depth / 2 * (if depth >= 3 { dk("FUTD3", 100) } else { 100 }) / 100 <= alpha)
         {
             let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
             if !ci.gives_check(board, mv) {
@@ -2225,10 +2269,10 @@ fn negamax_inner(
                 && !in_check
                 && !off(1)
                 && depth >= params.lmr_min_depth
-                && idx >= params.lmr_min_move_index
+                && idx - if badidx { bad_seen } else { 0 } >= params.lmr_min_move_index
             {
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
-                let m = idx.min(LMR_MAX_MOVES - 1);
+                let m = (idx - if badidx { bad_seen } else { 0 }).min(LMR_MAX_MOVES - 1);
                 let mut r = engine.lmr_table[d][m];
                 if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
                     r += 1;
@@ -2429,6 +2473,7 @@ fn negamax_inner(
             return alpha;
         }
         st!{ st_fail_cls[st_cls] += st_sub; if quiet && !prune_exempt { st_quiets_seen += 1; } }
+        if stage == Stage::BadCapture { bad_seen += 1; }
         idx += 1;
     }
 
