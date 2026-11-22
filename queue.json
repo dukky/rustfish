@@ -3,21 +3,17 @@
     {
       "branch": "nmp-mate-clamp",
       "mode": "nonreg",
-      "passed_over": 5
+      "passed_over": 6
     },
     {
       "branch": "negamax-rep-floor",
       "mode": "nonreg",
-      "passed_over": 2
+      "passed_over": 3
     },
     {
       "branch": "fifty-move-mate",
       "mode": "nonreg",
-      "passed_over": 2
-    },
-    {
-      "branch": "hist-cont-order",
-      "mode": "stc"
+      "passed_over": 3
     },
     {
       "branch": "hist-lmr-drop-bad",
@@ -40,7 +36,16 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "hist-cont-order",
+    "mode": "stc",
+    "test_id": "q-hist-cont-order-1122-0912",
+    "sha": "a6945a5fb8e40b4f6f8f8f3f95c6cb8f31b774bf",
+    "base_sha": "5025884294a0c9cae63e22e2288c8f407e12ee44",
+    "started": "2026-11-22T09:12:43Z",
+    "bench": 194159,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 2,
   "merges_since_ladder": 2,
