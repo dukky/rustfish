@@ -3,21 +3,17 @@
     {
       "branch": "negamax-rep-floor",
       "mode": "nonreg",
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "fifty-move-mate",
       "mode": "nonreg",
-      "passed_over": 4
+      "passed_over": 5
     },
     {
       "branch": "hist-lmr-drop-bad",
       "mode": "nonreg",
-      "passed_over": 1
-    },
-    {
-      "branch": "caphist-capture-lmr-r5",
-      "mode": "stc"
+      "passed_over": 2
     },
     {
       "branch": "caphist-see-prune-r5",
@@ -28,7 +24,16 @@
       "mode": "nonreg"
     }
   ],
-  "current": null,
+  "current": {
+    "branch": "caphist-capture-lmr-r5",
+    "mode": "stc",
+    "test_id": "q-caphist-capture-lmr-r5-1122-1435",
+    "sha": "cbad59c4b4e7a76371119959a2dcf8499c336031",
+    "base_sha": "4570bfc1b8b1518c63efc7492d31593e96886153",
+    "started": "2026-11-22T14:35:44Z",
+    "bench": 189201,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "eb1bce016994cdf5039564d96b426f17f325c945",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
