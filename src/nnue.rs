@@ -829,12 +829,20 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
 /// 128-byte lines).
 const PREFETCH_STRIDE: usize = if cfg!(target_arch = "aarch64") { 64 } else { 32 };
 
+/// Lanes of a feature row `prefetch_row` touches: the first lines only.
+/// The update reads each row front to back, so the hardware stream
+/// prefetcher picks up the rest; issuing a prefetch for every line of every
+/// row (up to 8 rows x 32 lines per eval) cost more in load slots than the
+/// tail lines saved.
+const PREFETCH_LANES: usize = PF_LINES * PREFETCH_STRIDE;
+const PF_LINES: usize = 8;
+
 /// Hint the CPU to start loading a feature row. No architectural effect.
 #[inline(always)]
 fn prefetch_row(row: &[i16; H]) {
     let p = row.as_ptr();
     let mut i = 0;
-    while i < H {
+    while i < PREFETCH_LANES.min(H) {
         // SAFETY: prefetches are hints that never fault or write memory, and
         // p + i stays inside the row.
         unsafe {
