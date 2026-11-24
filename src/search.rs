@@ -409,7 +409,7 @@ fn threat_slot(threats: u64, mv: Move) -> (usize, usize) {
 
 fn history_score(history: &HistoryTable, side: Color, threats: u64, mv: Move) -> i32 {
     let (tf, tt) = threat_slot(threats, mv);
-    history[color_index(side)][tf][tt][mv.from as usize][mv.to as usize]
+    history[color_index(side)][tf][tt][mv.from as usize][mv.to as usize] as i32
 }
 
 /// Opponent threat maps at a node that orders quiets; all-zero (and free)
@@ -469,13 +469,15 @@ fn continuation_history_score(
     prev_move
         .map(|prev| {
             engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
-                [mv.to as usize]
+                [mv.to as usize] as i32
         })
         .unwrap_or(0)
 }
 
 /// Bound on |history| and |continuation history| under the gravity update.
 const HISTORY_MAX: i32 = 16_384;
+// The tables store i16 (see `HistoryTable`).
+const _: () = assert!(HISTORY_MAX <= i16::MAX as i32);
 /// Cap on a single history bonus/malus (reached at depth 10), so one deep
 /// cutoff moves an entry at most ~9% of the way to the bound.
 const HISTORY_BONUS_MAX: i32 = 1_536;
@@ -489,9 +491,12 @@ fn history_bonus(depth: i32) -> i32 {
 /// "Gravity" update: h += delta - h * |delta| / HISTORY_MAX. Large values
 /// move less in their own direction and more against it, so entries
 /// self-limit to [-HISTORY_MAX, HISTORY_MAX] without a hard clamp.
-fn apply_gravity(h: &mut i32, delta: i32) {
+fn apply_gravity(h: &mut i16, delta: i32) {
     let delta = delta.clamp(-HISTORY_MAX, HISTORY_MAX);
-    *h += delta - *h * delta.abs() / HISTORY_MAX;
+    let v = *h as i32;
+    // |v| <= HISTORY_MAX and |delta| <= HISTORY_MAX keep the result within
+    // +-HISTORY_MAX, so the i16 store is exact.
+    *h = (v + delta - v * delta.abs() / HISTORY_MAX) as i16;
 }
 
 fn apply_history_delta(engine: &mut EngineState, side: Color, threats: u64, mv: Move, delta: i32) {
@@ -533,7 +538,7 @@ fn capture_slot(board: &Board, mv: Move) -> (usize, usize, usize) {
 
 fn capture_history_score(engine: &EngineState, side: Color, board: &Board, mv: Move) -> i32 {
     let (m, t, v) = capture_slot(board, mv);
-    engine.capture_history[color_index(side)][m][t][v]
+    engine.capture_history[color_index(side)][m][t][v] as i32
 }
 
 fn apply_capture_history_delta(engine: &mut EngineState, side: Color, board: &Board, mv: Move, delta: i32) {
@@ -752,8 +757,8 @@ impl MovePicker {
             }
 
             let (tf, tt) = threat_slot(threats, mv);
-            let h = side_hist[tf][tt][mv.from as usize][mv.to as usize];
-            let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize]).unwrap_or(0);
+            let h = side_hist[tf][tt][mv.from as usize][mv.to as usize] as i32;
+            let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize] as i32).unwrap_or(0);
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
             let is_counter = Some(mv) == counter_move;
