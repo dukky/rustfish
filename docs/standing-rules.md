@@ -53,8 +53,9 @@ kept here: each machine has a gitignored `CLAUDE.local.md` for those.
   bulk datagen or training.
 - **Never stop datagen** on the data machine without the owner's say-so, and
   restart it when it stops (power cut, end of a seed batch).
-- **GPU power cap:** long training runs only at the owner-set cap (125 W
-  historically; the owner may choose 150-180 W). Never change the power limit
+- **GPU power cap:** long training runs only at the owner-set cap (150 W
+  from 2026-11-24; 125 W before). A reboot resets it to the default ~275 W;
+  the owner sets it by hand. Never change the power limit
   yourself. At the default (uncapped) limit, short experiments only.
 - Cancelling CI runs and killing owner-started GPU jobs need the owner's OK.
 - The owner's laptop may be in use or asleep: no measurement runs there
