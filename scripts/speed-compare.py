@@ -63,10 +63,10 @@ def main():
 
     nps = {n: [] for n, _ in ok}
     for r in range(a.rounds):
+        # Plain rotation: over len(ok) rounds every binary runs once in every
+        # position (use a multiple of the binary count as --rounds).
         k = r % len(ok)
         order = ok[k:] + ok[:k]
-        if r % 2:
-            order = order[::-1]
         for n, p in order:
             nps[n].append(int(field(run(p, [f"bench {a.depth}"], env), "Nodes/second")))
         print(f"round {r + 1}: " + " ".join(f"{n}={nps[n][-1]}" for n, _ in ok), flush=True)
