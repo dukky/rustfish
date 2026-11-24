@@ -1,0 +1,200 @@
+name: Speed compare
+
+# Exact-speedup measurement on GitHub's x86 runners (the desktop is shared and
+# the laptop is in use, so neither gives valid NPS). Builds a base ref and
+# candidate refs (x86-64-v3, as CI does), checks bench nodes + evalhash are
+# identical, then runs interleaved bench NPS rounds on several runners
+# (scripts/speed-compare.py) and aggregates the per-runner median paired gain.
+# On runners with AVX-512 it measures twice: default kernels and AVX2-only
+# (RUSTFISH_NO_AVX512=1). Optionally perf-profiles refs into a source-level
+# time map (scripts/speed-profile.py).
+#
+# Runs on pushes to speed-diag that touch scripts/speed-compare.env (refs and
+# settings live there, so no dispatch from the default branch is needed), or
+# by hand once merged. Short testing use only: a few minutes per runner.
+
+on:
+  push:
+    branches: [speed-diag]
+    paths: [scripts/speed-compare.env]
+  workflow_dispatch:
+    inputs:
+      base: { description: base ref, default: origin/main }
+      cands: { description: space-separated candidate refs, default: "" }
+      profile: { description: space-separated refs to perf-profile, default: "" }
+      runners: { description: number of compare runners, default: "6" }
+      rounds: { description: interleaved rounds per runner, default: "12" }
+      depth: { description: bench depth for NPS, default: "13" }
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.cfg.outputs.base }}
+      cands: ${{ steps.cfg.outputs.cands }}
+      profile: ${{ steps.cfg.outputs.profile }}
+      profile_matrix: ${{ steps.cfg.outputs.profile_matrix }}
+      runners: ${{ steps.cfg.outputs.runners }}
+      rounds: ${{ steps.cfg.outputs.rounds }}
+      depth: ${{ steps.cfg.outputs.depth }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        env:
+          IN_BASE: ${{ inputs.base }}
+          IN_CANDS: ${{ inputs.cands }}
+          IN_PROFILE: ${{ inputs.profile }}
+          IN_RUNNERS: ${{ inputs.runners }}
+          IN_ROUNDS: ${{ inputs.rounds }}
+          IN_DEPTH: ${{ inputs.depth }}
+        run: |
+          BASE=origin/main; CANDS=; PROFILE=; RUNNERS=6; ROUNDS=12; DEPTH=13
+          if [ "${{ github.event_name }}" = push ]; then . scripts/speed-compare.env; else
+            BASE=$IN_BASE; CANDS=$IN_CANDS; PROFILE=$IN_PROFILE; RUNNERS=$IN_RUNNERS; ROUNDS=$IN_ROUNDS; DEPTH=$IN_DEPTH; fi
+          [ -n "$CANDS" ] || RUNNERS=0
+          {
+            echo "base=$BASE"; echo "cands=$CANDS"; echo "profile=$PROFILE"
+            echo "runners=$(python3 -c "import json,sys; print(json.dumps(list(range(1, int(sys.argv[1]) + 1))))" "$RUNNERS")"
+            echo "profile_matrix=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" $PROFILE)"
+            echo "rounds=$ROUNDS"; echo "depth=$DEPTH"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  compare:
+    needs: setup
+    if: needs.setup.outputs.runners != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(needs.setup.outputs.runners) }}
+    name: compare ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: CPU
+        run: |
+          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | sed 's/^Flags:.*avx512bw.*/AVX-512: yes/; s/^Flags:.*/AVX-512: no/' | tee cpu.txt
+      - name: Build refs
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+          BASE: ${{ needs.setup.outputs.base }}
+          CANDS: ${{ needs.setup.outputs.cands }}
+        run: |
+          mkdir -p bins
+          for ref in $BASE $CANDS; do
+            r=$ref; git rev-parse -q --verify "$r^{commit}" >/dev/null || r=origin/$ref
+            n=$(echo "$ref" | sed 's#^origin/##; s#/#-#g')
+            while [ -e "wt/$n" ]; do n=$n-aa; done   # same ref twice = A/A control
+            echo "$n" >> names.txt
+            git worktree add -q --detach "wt/$n" "$r"
+            echo "$n = $(git rev-parse --short "$r")" | tee -a refs.txt
+            (cd "wt/$n" && cargo build --release -q) && cp "wt/$n/target/release/rustfish" "bins/$n"
+          done
+      - name: Compare
+        run: |
+          b=$(head -1 names.txt); args=()
+          for c in $(tail -n +2 names.txt); do args+=("$c=bins/$c"); done
+          set +e; rc=0
+          python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds ${{ needs.setup.outputs.rounds }} \
+            --depth ${{ needs.setup.outputs.depth }} --label default --json res-default.json | tee cmp.txt || rc=1
+          if grep -q 'AVX-512: yes' cpu.txt; then
+            python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds ${{ needs.setup.outputs.rounds }} \
+              --depth ${{ needs.setup.outputs.depth }} --env RUSTFISH_NO_AVX512=1 --label avx2 --json res-avx2.json | tee -a cmp.txt || rc=1
+          fi
+          { echo "### runner ${{ matrix.runner }}"; echo '```'; cat cpu.txt refs.txt; grep -E 'vs|MISMATCH|bench' cmp.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          for f in res-*.json; do python3 - "$f" <<'EOF'
+          import json, sys
+          d = json.load(open(sys.argv[1])); d["cpu"] = open("cpu.txt").read().split("\n")[0]
+          json.dump(d, open(sys.argv[1], "w"))
+          EOF
+          done
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: speed-${{ matrix.runner }}
+          path: res-*.json
+
+  summary:
+    needs: [setup, compare]
+    if: always() && needs.compare.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: res }
+      - name: Aggregate
+        run: |
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json, statistics
+          rows = {}
+          for f in sorted(glob.glob("res/*/res-*.json")):
+              d = json.load(open(f))
+              for c, r in d["cands"].items():
+                  rows.setdefault((c, d["label"]), []).append((r["median"], d["cpu"], d["base_nps_median"]))
+              for m in d.get("mismatch", []):
+                  print(f"MISMATCH {m} on {f}")
+          print("### Paired bench NPS gain over base (median per runner)\n")
+          print("| candidate | kernels | runners | median | min | max | per runner |")
+          print("|---|---|---|---|---|---|---|")
+          for (c, label), v in sorted(rows.items()):
+              g = [x[0] * 100 for x in v]
+              per = ", ".join(f"{x[0] * 100:+.1f} ({x[1].split(':')[-1].strip()[:28]})" for x in v)
+              print(f"| {c} | {label} | {len(g)} | {statistics.median(g):+.2f}% | {min(g):+.2f}% | {max(g):+.2f}% | {per} |")
+          EOF
+
+  profile:
+    needs: setup
+    if: needs.setup.outputs.profile_matrix != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.setup.outputs.profile_matrix) }}
+    name: profile ${{ matrix.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: perf
+        run: |
+          sudo apt-get update -q >/dev/null
+          sudo apt-get install -y -q "linux-tools-$(uname -r)" linux-tools-common >/dev/null || sudo apt-get install -y -q linux-tools-azure linux-tools-common >/dev/null
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          perf --version
+      - name: Build with line info (non-PIE)
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3 -C relocation-model=static
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+          REF: ${{ matrix.ref }}
+        run: |
+          r=$REF; git rev-parse -q --verify "$r^{commit}" >/dev/null || r=origin/$REF
+          git worktree add -q --detach wt "$r"
+          (cd wt && cargo build --release -q)
+          cp wt/target/release/rustfish prof-bin; file prof-bin
+          echo "ref $REF = $(git rev-parse --short "$r")" > prof.txt
+          lscpu | grep 'Model name' >> prof.txt
+      - name: Profile
+        run: |
+          for mode in default avx2; do
+            if [ $mode = avx2 ]; then export RUSTFISH_NO_AVX512=1; fi
+            printf 'bench 14\nquit\n' > in.txt
+            echo "== $mode" >> prof.txt
+            perf stat -e cycles,instructions,branches,branch-misses,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses \
+              -o stat-$mode.txt -- ./prof-bin < in.txt | grep -E 'Nodes|SIMD' | tee -a prof.txt
+            cat stat-$mode.txt >> prof.txt
+            perf record -q -F 3999 -o perf-$mode.data -- ./prof-bin < in.txt > /dev/null
+            python3 scripts/speed-profile.py prof-bin perf-$mode.data --top 70 > map-$mode.txt
+            if ! grep -q avx512bw /proc/cpuinfo; then break; fi
+          done
+          { echo "### profile ${{ matrix.ref }}"; echo '```'; cat prof.txt; head -90 map-default.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: profile-${{ strategy.job-index }}
+          path: |
+            prof.txt
+            map-*.txt
