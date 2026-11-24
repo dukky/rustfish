@@ -782,14 +782,36 @@ pub(crate) mod kernels {
         }
     }
 
+    /// The 512-bit L1 flavour, when AVX-512 is enabled (`nnue::avx512`):
+    /// 0 = none, 1 = AVX-512BW `maddubs`, 2 = AVX512-VNNI (unless
+    /// RUSTFISH_NO_VNNI is set).
+    #[inline(always)]
+    fn l1_512() -> u8 {
+        static HAVE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *HAVE.get_or_init(|| {
+            if !crate::nnue::avx512::enabled() {
+                0
+            } else if std::env::var("RUSTFISH_NO_VNNI").is_err() && is_x86_feature_detected!("avx512vnni") {
+                2
+            } else {
+                1
+            }
+        })
+    }
+
     /// `net.rest(b, &l1(net, b, x, nnz))`, one kernel per L1 flavour.
     #[inline(always)]
     pub(crate) fn l1_rest(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
         if !avx2() {
             return net.rest(b, &scalar::l1(net, b, x, nnz));
         }
-        // SAFETY: AVX2 (and, per branch, the VNNI flavour) is available.
+        // SAFETY: AVX2 (and, per branch, the VNNI / AVX-512 flavour) is available.
         unsafe {
+            match l1_512() {
+                2 => return l1_rest_z2(net, b, x, nnz),
+                1 => return l1_rest_z1(net, b, x, nnz),
+                _ => {}
+            }
             match vnni() {
                 1 => l1_rest_v1(net, b, x, nnz),
                 2 => l1_rest_v2(net, b, x, nnz),
@@ -814,6 +836,94 @@ pub(crate) mod kernels {
     unsafe fn l1_rest_v2(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
         // SAFETY: AVX512-VNNI + VL are enabled.
         unsafe { net.rest_avx2_v(b, l1_avx2::<2>(&net.w1[b].0, x, nnz)) }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn l1_rest_z1(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        // SAFETY: AVX-512F/BW are enabled.
+        unsafe { net.rest_avx2_v(b, split16(l1_avx512::<1>(&net.w1[b].0, x, nnz))) }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn l1_rest_z2(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16]) -> f32 {
+        // SAFETY: AVX512-VNNI is enabled.
+        unsafe { net.rest_avx2_v(b, split16(l1_avx512::<2>(&net.w1[b].0, x, nnz))) }
+    }
+
+    /// z1 in one zmm (neuron k = i32 lane k) -> neurons 0..8 and 8..16.
+    #[inline(always)]
+    unsafe fn split16(z: __m512i) -> [__m256i; 2] {
+        // SAFETY: register-only; callers enable AVX-512F.
+        unsafe { [_mm512_castsi512_si256(z), _mm512_extracti64x4_epi64::<1>(z)] }
+    }
+
+    /// `acc += Σ_j x[4l+j] * w[4l+j]` per i32 lane, 512-bit: AVX-512BW
+    /// `maddubs` + `madd` (V = 1; pair sums < 2^15, no saturation) or
+    /// AVX512-VNNI `vpdpbusd` (V = 2). Exact, like the 256-bit flavours.
+    #[inline(always)]
+    unsafe fn dpbusd512<const V: u8>(mut acc: __m512i, x: __m512i, w: __m512i) -> __m512i {
+        // SAFETY: the l1_rest_z* wrapper of flavour V enables its features.
+        unsafe {
+            if V == 2 {
+                std::arch::asm!("vpdpbusd {0}, {1}, {2}", inout(zmm_reg) acc, in(zmm_reg) x, in(zmm_reg) w, options(pure, nomem, nostack));
+                acc
+            } else {
+                _mm512_add_epi32(acc, _mm512_madd_epi16(_mm512_maddubs_epi16(x, w), _mm512_set1_epi16(1)))
+            }
+        }
+    }
+
+    /// z1 of all 16 neurons: a chunk's 64 weight bytes are one zmm (neuron
+    /// k in i32 lane k), its 4 input bytes broadcast to every lane.
+    #[inline(always)]
+    unsafe fn l1_avx512<const V: u8>(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> __m512i {
+        // SAFETY: every chunk index is < CHUNKS, so all loads are in bounds;
+        // W1Bucket is 64-byte aligned, so each chunk's line is too.
+        unsafe {
+            let mut a = [_mm512_setzero_si512(); 4];
+            let xp = x.as_ptr() as *const i32;
+            let wp = w.as_ptr() as *const __m512i;
+            let ld = |c: u16| {
+                let c = c as usize;
+                (_mm512_set1_epi32(xp.add(c).read_unaligned()), _mm512_load_si512(wp.add(c)))
+            };
+            let mut quads = nnz.chunks_exact(4);
+            for q in &mut quads {
+                for j in 0..4 {
+                    let (xv, wv) = ld(q[j]);
+                    a[j] = dpbusd512::<V>(a[j], xv, wv);
+                }
+            }
+            for (j, &c) in quads.remainder().iter().enumerate() {
+                let (xv, wv) = ld(c);
+                a[j] = dpbusd512::<V>(a[j], xv, wv);
+            }
+            _mm512_add_epi32(_mm512_add_epi32(a[0], a[1]), _mm512_add_epi32(a[2], a[3]))
+        }
+    }
+
+    /// The 512-bit flavours on this machine, as z1 (tests).
+    #[cfg(test)]
+    fn l1_all_512(net: &HeadNet, b: usize, x: &[u8; N_IN], nnz: &[u16], v: &mut Vec<[i32; H1]>) {
+        #[target_feature(enable = "avx512f,avx512bw")]
+        unsafe fn z1(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+            // SAFETY: AVX-512F/BW are enabled.
+            unsafe { store16(split16(l1_avx512::<1>(w, x, nnz))) }
+        }
+        #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+        unsafe fn z2(w: &[i8; CHUNKS * H1 * 4], x: &[u8; N_IN], nnz: &[u16]) -> [i32; H1] {
+            // SAFETY: AVX512-VNNI is enabled.
+            unsafe { store16(split16(l1_avx512::<2>(w, x, nnz))) }
+        }
+        let w = &net.w1[b].0;
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+            // SAFETY: detected above.
+            v.push(unsafe { z1(w, x, nnz) });
+            if is_x86_feature_detected!("avx512vnni") {
+                // SAFETY: detected above.
+                v.push(unsafe { z2(w, x, nnz) });
+            }
+        }
     }
 
     #[target_feature(enable = "avx2")]
@@ -1104,6 +1214,7 @@ pub(crate) mod kernels {
                     v.push(l1_v2(w, x, nnz));
                 }
             }
+            l1_all_512(net, b, x, nnz, &mut v);
         }
         v
     }
