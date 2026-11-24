@@ -687,3 +687,4 @@
 {"branch": "ext-lmr-see-loss", "logged_at": "2026-11-24T21:05:10Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "qs-deficit-prune", "elo": -0.44, "elo_ci95": [-4.29, 3.41], "games": 8640, "llr": -3.811, "logged_at": "2026-11-24T21:39:30Z", "mode": "stc", "outcome": "rejected", "sha": "4fa519a9e5f9cc9a17625f7c26024ad161627a10", "test_id": "q-qs-deficit-prune-1124-2027", "verdict": "H0"}
 {"branch": "ext-child-eval-lmr", "logged_at": "2026-11-24T21:39:33Z", "mode": "stc", "outcome": "needs-human", "reason": "rebase conflict"}
+{"base_sha": "1ebe004080c920f3f790b8b15248732b061212e0", "branch": "ext-child-eval-lmr-r2", "logged_at": "2026-11-24T21:50:11Z", "mode": "stc", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "545675023193c298597838603eea64633b8262ac", "test_id": "q-ext-child-eval-lmr-r2-1124-2150"}
