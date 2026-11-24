@@ -77,7 +77,7 @@ jobs:
         with: { fetch-depth: 0 }
       - name: CPU
         run: |
-          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | sed 's/^Flags:.*avx512bw.*/AVX-512: yes/; s/^Flags:.*/AVX-512: no/' | tee cpu.txt
+          { lscpu | grep 'Model name'; lscpu | grep -E '^CPU\(s\)'; lscpu | grep Flags | sed 's/^Flags:.*avx512bw.*/AVX-512: yes/; s/^Flags:.*/AVX-512: no/'; } | tee cpu.txt
       - name: Build refs
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
