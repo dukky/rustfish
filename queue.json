@@ -1,10 +1,5 @@
 {
-  "pending": [
-    {
-      "branch": "ext-child-eval-lmr",
-      "mode": "stc"
-    }
-  ],
+  "pending": [],
   "current": null,
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 3,
