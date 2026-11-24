@@ -856,6 +856,17 @@ pub(crate) mod kernels {
         if !avx2() {
             return scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n);
         }
+        if crate::nnue::avx512::enabled() {
+            // SAFETY: AVX-512F/BW detected at runtime.
+            unsafe {
+                return match (adds.len(), subs.len()) {
+                    (1, 1) => update_pw_avx512::<DOT, 1, 1>(out, src, adds, subs, w, x, base, nnz, n),
+                    (1, 2) => update_pw_avx512::<DOT, 1, 2>(out, src, adds, subs, w, x, base, nnz, n),
+                    (2, 2) => update_pw_avx512::<DOT, 2, 2>(out, src, adds, subs, w, x, base, nnz, n),
+                    _ => scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n),
+                };
+            }
+        }
         // SAFETY: AVX2 is available.
         unsafe {
             match (adds.len(), subs.len()) {
@@ -929,6 +940,85 @@ pub(crate) mod kernels {
                 let mut l = [0i64; 4];
                 _mm256_storeu_si256(l.as_mut_ptr() as *mut __m256i, _mm256_add_epi64(s, t));
                 l.iter().sum()
+            } else {
+                0
+            };
+            (total, n)
+        }
+    }
+
+    /// `update_pw_avx2` with 512-bit vectors: the same integer operations
+    /// lane for lane (wrapping i16 update, exact i32 products, the
+    /// `mulhrs` pairwise rounding), 64 lanes and 16 chunks per step, so the
+    /// output, the nonzero-chunk list (same order) and the sum are
+    /// identical.
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn update_pw_avx512<const DOT: bool, const NA: usize, const NS: usize>(
+        out: &mut [i16; H],
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        x: &mut [u8],
+        base: usize,
+        nnz: &mut [u16; NNZ_BUF],
+        mut n: usize,
+    ) -> (i64, usize) {
+        assert!(x.len() == HALF && HALF % 64 == 0 && adds.len() == NA && subs.len() == NS);
+        // SAFETY: AVX-512F/BW per caller; offsets are <= H - 32 (lanes) /
+        // HALF - 64 (bytes).
+        unsafe {
+            let (lo, hi) = (_mm512_setzero_si512(), _mm512_set1_epi16(255));
+            let ld = |p: *const i16| _mm512_loadu_si512(p as *const __m512i);
+            let mut delta = |o: usize| {
+                let mut v = ld(src.as_ptr().add(o));
+                for a in &adds[..NA] {
+                    v = _mm512_add_epi16(v, ld(a.as_ptr().add(o)));
+                }
+                for s in &subs[..NS] {
+                    v = _mm512_sub_epi16(v, ld(s.as_ptr().add(o)));
+                }
+                _mm512_storeu_si512(out.as_mut_ptr().add(o) as *mut __m512i, v);
+                _mm512_min_epi16(_mm512_max_epi16(v, lo), hi)
+            };
+            // packus interleaves the two sources per 128-bit lane (8 bytes
+            // each); this puts x0's four qwords first, then x1's.
+            let order = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
+            let mut sum = [_mm512_setzero_si512(); 2];
+            let mut bv = _mm_set1_epi16(base as i16);
+            for i in (0..HALF).step_by(64) {
+                let (a0, a1) = (delta(i), delta(i + 32));
+                let (b0, b1) = (delta(i + HALF), delta(i + HALF + 32));
+                if DOT {
+                    // c in [0, 255], |w| <= 127: c * w fits i16, madd sums two
+                    // exact i32 products; each i32 lane sums at most
+                    // 4 * HALF / 64 products of <= 255^2 * 127 (< 2^31).
+                    for (k, (c, o)) in [(a0, i), (a1, i + 32), (b0, i + HALF), (b1, i + HALF + 32)].into_iter().enumerate() {
+                        let cw = _mm512_mullo_epi16(c, ld(w.as_ptr().add(o)));
+                        sum[k & 1] = _mm512_add_epi32(sum[k & 1], _mm512_madd_epi16(cw, c));
+                    }
+                }
+                // mulhrs(a << 6, b) = (64ab + 2^14) >> 15 = (ab + 256) >> 9.
+                let x0 = _mm512_mulhrs_epi16(_mm512_slli_epi16::<6>(a0), b0);
+                let x1 = _mm512_mulhrs_epi16(_mm512_slli_epi16::<6>(a1), b1);
+                let v = _mm512_permutexvar_epi64(order, _mm512_packus_epi16(x0, x1));
+                _mm512_storeu_si512(x.as_mut_ptr().add(i) as *mut __m512i, v);
+                // Bit j: chunk j of these 16 is all zero.
+                let z = _mm512_cmpeq_epi32_mask(v, _mm512_setzero_si512()) as usize;
+                n = push8z(nnz, n, bv, z & 0xFF);
+                bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
+                n = push8z(nnz, n, bv, z >> 8);
+                bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
+            }
+            let total = if DOT {
+                let wide = |v: __m512i| {
+                    _mm512_add_epi64(
+                        _mm512_cvtepi32_epi64(_mm512_castsi512_si256(v)),
+                        _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64::<1>(v)),
+                    )
+                };
+                _mm512_reduce_add_epi64(_mm512_add_epi64(wide(sum[0]), wide(sum[1])))
             } else {
                 0
             };
