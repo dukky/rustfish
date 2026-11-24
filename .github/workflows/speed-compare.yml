@@ -182,12 +182,12 @@ jobs:
         run: |
           for mode in default avx2; do
             if [ $mode = avx2 ]; then export RUSTFISH_NO_AVX512=1; fi
-            printf 'bench 14\nquit\n' > in.txt
+            printf 'bench 16\nquit\n' > in.txt
             echo "== $mode" >> prof.txt
             perf stat -e cycles,instructions,branches,branch-misses,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses \
               -o stat-$mode.txt -- ./prof-bin < in.txt | grep -E 'Nodes|SIMD' | tee -a prof.txt
             cat stat-$mode.txt >> prof.txt
-            perf record -q -F 3999 -o perf-$mode.data -- ./prof-bin < in.txt > /dev/null
+            perf record -q -F 4999 -o perf-$mode.data -- ./prof-bin < in.txt > /dev/null
             python3 scripts/speed-profile.py prof-bin perf-$mode.data --top 70 > map-$mode.txt
             if ! grep -q avx512bw /proc/cpuinfo; then break; fi
           done
