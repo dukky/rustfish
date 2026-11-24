@@ -10,7 +10,8 @@ Dependencies: none beyond Rust stdlib and project-local scripts using Python std
 ---
 
 ## New to this project?
-Start with `docs/handoff.md`: the loop to follow, what is safe to do, what
+Read `docs/standing-rules.md` (the owner's rules, for every machine and session) and `plan.md`.
+Then `docs/handoff.md`: the loop to follow, what is safe to do, what
 never to do, and a backlog of precisely specified ideas.
 
 ## Development workflow (read first)
