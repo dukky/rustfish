@@ -575,12 +575,30 @@ struct RootWorkerResult {
     ordered_root_moves: Vec<Move>,
 }
 
+/// A picker list as two parallel arrays, so the best-score scan in
+/// `take_best_scored` runs over packed i32s (vectorised) instead of
+/// 12-byte (Move, i32) pairs with a data-dependent branch per entry.
+#[derive(Default)]
+struct Scored {
+    moves: Vec<Move>,
+    scores: Vec<i32>,
+}
+
+impl Scored {
+    fn clear(&mut self) {
+        self.moves.clear();
+        self.scores.clear();
+        self.moves.reserve(PICK_CAP);
+        self.scores.reserve(PICK_CAP);
+    }
+}
+
 #[derive(Default)]
 struct PickerBufs {
-    good_captures: Vec<(Move, i32)>,
-    priority_quiets: Vec<(Move, i32)>,
-    quiets: Vec<(Move, i32)>,
-    bad_captures: Vec<(Move, i32)>,
+    good_captures: Scored,
+    priority_quiets: Scored,
+    quiets: Scored,
+    bad_captures: Scored,
 }
 
 impl PickerBufs {
@@ -589,7 +607,6 @@ impl PickerBufs {
     fn clear(&mut self) {
         for v in [&mut self.good_captures, &mut self.priority_quiets, &mut self.quiets, &mut self.bad_captures] {
             v.clear();
-            v.reserve(PICK_CAP);
         }
     }
 }
@@ -601,16 +618,24 @@ const PICK_CAP: usize = 256;
 /// `to0`: both values are written into spare capacity and only one length
 /// moves. Same contents as the branchy push.
 #[inline(always)]
-fn push_either(v0: &mut Vec<(Move, i32)>, v1: &mut Vec<(Move, i32)>, to0: bool, e0: (Move, i32), e1: (Move, i32)) {
-    let (n0, n1) = (v0.len(), v1.len());
-    assert!(n0 < v0.capacity() && n1 < v1.capacity());
-    // SAFETY: both slots are inside the capacity (checked above), and the
-    // lengths grow by exactly the one element written at the old end.
+fn push_either(v0: &mut Scored, v1: &mut Scored, to0: bool, e0: (Move, i32), e1: (Move, i32)) {
+    let (n0, n1) = (v0.moves.len(), v1.moves.len());
+    assert!(
+        n0 < v0.moves.capacity() && n0 < v0.scores.capacity() && n1 < v1.moves.capacity() && n1 < v1.scores.capacity()
+    );
+    debug_assert!(v0.scores.len() == n0 && v1.scores.len() == n1);
+    // SAFETY: all four slots are inside the capacity (checked above), the
+    // two arrays of a list always have the same length, and the lengths
+    // grow by exactly the one element written at the old end.
     unsafe {
-        v0.as_mut_ptr().add(n0).write(e0);
-        v1.as_mut_ptr().add(n1).write(e1);
-        v0.set_len(n0 + to0 as usize);
-        v1.set_len(n1 + !to0 as usize);
+        v0.moves.as_mut_ptr().add(n0).write(e0.0);
+        v0.scores.as_mut_ptr().add(n0).write(e0.1);
+        v1.moves.as_mut_ptr().add(n1).write(e1.0);
+        v1.scores.as_mut_ptr().add(n1).write(e1.1);
+        v0.moves.set_len(n0 + to0 as usize);
+        v0.scores.set_len(n0 + to0 as usize);
+        v1.moves.set_len(n1 + !to0 as usize);
+        v1.scores.set_len(n1 + !to0 as usize);
     }
 }
 
@@ -805,20 +830,13 @@ impl MovePicker {
     }
 }
 
-fn take_best_scored(moves: &mut Vec<(Move, i32)>) -> Option<Move> {
-    if moves.is_empty() {
-        return None;
-    }
-
-    let mut best_idx = 0usize;
-    let mut best_score = moves[0].1;
-    for (idx, &(_, score)) in moves.iter().enumerate().skip(1) {
-        if score > best_score {
-            best_score = score;
-            best_idx = idx;
-        }
-    }
-    Some(moves.swap_remove(best_idx).0)
+/// Remove and return the move with the highest score, the first one on
+/// ties (as a strict `>` scan would), with swap_remove order.
+fn take_best_scored(l: &mut Scored) -> Option<Move> {
+    let best = *l.scores.iter().max()?;
+    let idx = l.scores.iter().position(|&s| s == best).unwrap();
+    l.scores.swap_remove(idx);
+    Some(l.moves.swap_remove(idx))
 }
 
 const DARK_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
