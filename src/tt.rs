@@ -178,6 +178,25 @@ fn unpack_data(data: u64) -> TTEntry {
     }
 }
 
+/// Hint the CPU to start loading the cache line at `ptr`. Pure performance
+/// hint: never faults, no architectural effect.
+#[inline(always)]
+pub(crate) fn prefetch_ptr(ptr: *const u8) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: PRFM is a hint; it never faults or writes memory.
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, readonly, preserves_flags));
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: PREFETCHT0 is a hint (SSE, part of the x86-64 baseline); it
+    // never faults or writes memory.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(ptr as *const i8);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let _ = ptr;
+}
+
 impl TransTable {
     pub(crate) fn new(megabytes: usize) -> Self {
         let bytes = megabytes.max(1) * 1024 * 1024;

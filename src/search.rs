@@ -189,6 +189,20 @@ impl CorrectionHistory {
         sum >> CORR_WEIGHT_SHIFT
     }
 
+    /// Hint the CPU to load the entries `correction(idx)` reads (issued
+    /// by the parent right after make_move, with the TT prefetch). No
+    /// architectural effect.
+    #[inline(always)]
+    fn prefetch(&self, idx: &CorrIdx) {
+        let t = &self.tables[idx.stm];
+        for k in 0..CK_COUNT {
+            crate::tt::prefetch_ptr(&t[k][idx.slots[k] as usize] as *const i16 as *const u8);
+        }
+        if let Some(i) = idx.cont {
+            crate::tt::prefetch_ptr(&self.cont[idx.stm][i as usize] as *const i16 as *const u8);
+        }
+    }
+
     /// Raw static eval -> corrected static eval.
     #[inline]
     fn apply(&self, idx: &CorrIdx, raw: i32) -> i32 {
@@ -2027,6 +2041,7 @@ fn negamax_body(
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
         engine.eval_cache.prefetch(child_key);
+        engine.corr.prefetch(&CorrIdx::new(board, Some(mv)));
         if let Some(st) = board.nnue.as_deref() {
             st.prefetch_pending();
         }
@@ -2359,6 +2374,7 @@ fn quiescence(
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
         engine.eval_cache.prefetch(child_key);
+        engine.corr.prefetch(&CorrIdx::new(board, Some(mv)));
         if let Some(st) = board.nnue.as_deref() {
             st.prefetch_pending();
         }
