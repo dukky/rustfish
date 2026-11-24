@@ -5,17 +5,7 @@
       "mode": "stc"
     }
   ],
-  "current": {
-    "branch": "qs-deficit-prune",
-    "mode": "stc",
-    "front": true,
-    "test_id": "q-qs-deficit-prune-1124-2027",
-    "sha": "4fa519a9e5f9cc9a17625f7c26024ad161627a10",
-    "base_sha": "836b44c99cd8368f58786ee3fe02f1232953f6a9",
-    "started": "2026-11-24T20:27:47Z",
-    "bench": 173687,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 3,
   "merges_since_ladder": 3,

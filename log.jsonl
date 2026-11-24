@@ -685,3 +685,4 @@
 {"base_sha": "836b44c99cd8368f58786ee3fe02f1232953f6a9", "branch": "qs-deficit-prune", "logged_at": "2026-11-24T20:27:47Z", "mode": "stc", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "4fa519a9e5f9cc9a17625f7c26024ad161627a10", "test_id": "q-qs-deficit-prune-1124-2027"}
 {"branch": "ext-lmr-pair", "logged_at": "2026-11-24T21:05:10Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
 {"branch": "ext-lmr-see-loss", "logged_at": "2026-11-24T21:05:10Z", "mode": "stc", "outcome": "removed", "reason": "queue.py remove"}
+{"branch": "qs-deficit-prune", "elo": -0.44, "elo_ci95": [-4.29, 3.41], "games": 8640, "llr": -3.811, "logged_at": "2026-11-24T21:39:30Z", "mode": "stc", "outcome": "rejected", "sha": "4fa519a9e5f9cc9a17625f7c26024ad161627a10", "test_id": "q-qs-deficit-prune-1124-2027", "verdict": "H0"}
