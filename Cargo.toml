@@ -3,6 +3,12 @@ name = "rustfish"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# SEE-scale audit counters and sampled decision logs (see-diag branch only).
+stats = []
+# Env knobs only (no counters), for candidate thresholds.
+knobs = []
+
 [profile.release]
 lto = true
 codegen-units = 1

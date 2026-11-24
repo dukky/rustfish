@@ -358,6 +358,13 @@ pub(crate) struct Search {
     /// the current path (0 when there is none); repetition lookahead must
     /// not reach behind it.
     null_idx: usize,
+    /// see-diag: ply whose ProbCut is disabled (node verification re-search).
+    #[cfg(feature = "stats")]
+    st_no_pc_ply: usize,
+    /// see-diag: open ProbCut-failed node record per ply
+    /// (nodes at start, attempt nodes, depth, node type, se - beta, moves tried).
+    #[cfg(feature = "stats")]
+    st_pc_open: Vec<Option<(u64, u64, i32, usize, i32, u32)>>,
 }
 
 impl Search {
@@ -373,6 +380,10 @@ impl Search {
             move_buf: Vec::with_capacity(256),
             root_nodes: Vec::new(),
             null_idx: 0,
+            #[cfg(feature = "stats")]
+            st_no_pc_ply: usize::MAX,
+            #[cfg(feature = "stats")]
+            st_pc_open: vec![None; MAX_PLY],
         }
     }
 
@@ -483,6 +494,14 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
 fn history_bonus(depth: i32) -> i32 {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        // No-op control: TNOISE=<percent> scales the bonus by +-1%.
+        let n = crate::knobs::knob("TNOISE", 100);
+        if n != 100 {
+            return (160 * depth * n / 100).min(HISTORY_BONUS_MAX);
+        }
+    }
     (160 * depth).min(HISTORY_BONUS_MAX)
 }
 
@@ -1576,8 +1595,43 @@ fn negamax(
     )
 }
 
-/// negamax after the draw and repetition checks.
+/// negamax after the draw and repetition checks (see-diag: logs the outcome
+/// of nodes whose ProbCut attempt failed).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn negamax_body(
+    board: &mut Board,
+    depth: i32,
+    alpha: i32,
+    beta: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    prev_move: Option<Move>,
+    allow_null: bool,
+    known_in_check: Option<bool>,
+    cut_node: bool,
+) -> i32 {
+    let r = negamax_body_impl(
+        board, depth, alpha, beta, ply, search, engine, rep_stack, key, prev_move, allow_null,
+        known_in_check, cut_node,
+    );
+    #[cfg(feature = "stats")]
+    if let Some((n0, na, d, nt, slack, tried)) = search.st_pc_open[ply].take() {
+        if !crate::stats::suspended() && !search.stop {
+            crate::stats::log(format_args!(
+                "pcn {} {} {} {} {} {} {}",
+                d, nt, slack, tried, na, search.nodes - n0 - na, (r >= beta) as u8
+            ));
+        }
+    }
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn negamax_body_impl(
     board: &mut Board,
     mut depth: i32,
     mut alpha: i32,
@@ -1773,6 +1827,7 @@ fn negamax_body(
         && beta - alpha <= 1
         && depth >= PROBCUT_MIN_DEPTH
         && beta.abs() < MATE_SCORE - MAX_PLY as i32 * 2
+        && st_pc_allowed(search, ply)
     {
         let probcut_beta = beta + PROBCUT_MARGIN;
         let tt_says_no = tt_entry
@@ -1782,6 +1837,14 @@ fn negamax_body(
             .unwrap_or(false);
         if let (false, Some(se)) = (tt_says_no, static_eval) {
             let see_threshold = probcut_beta - se;
+            #[cfg(feature = "stats")]
+            let st_on = !crate::stats::suspended();
+            #[cfg(feature = "stats")]
+            let st_n0 = search.nodes;
+            #[cfg(feature = "stats")]
+            let mut st_tried = 0u32;
+            #[cfg(feature = "stats")]
+            let st_nt = if cut_node { 1 } else { 2 };
             let mut picker = MovePicker::new(
                 board,
                 engine,
@@ -1794,8 +1857,27 @@ fn negamax_body(
                 &mut search.move_buf,
             );
             while let Some((mv, stage)) = picker.next() {
-                if stage == Stage::BadCapture || !see_ge(board, mv, see_threshold) {
+                if stage == Stage::BadCapture || !pc_pass(board, mv, see_threshold) {
+                    #[cfg(feature = "stats")]
+                    if st_on && crate::stats::sample(4) {
+                        let (q, r, cost) = st_pc_try(board, mv, depth, probcut_beta, ply, search, engine, rep_stack, key, cut_node);
+                        if !search.stop {
+                            crate::stats::log(format_args!(
+                                "pcf {} {} {} {} {} {} {} {} {}",
+                                depth, st_nt, see(board, mv), see_tab(board, mv, &ev_tab()), see_threshold,
+                                (stage == Stage::BadCapture) as u8, q - probcut_beta, r - probcut_beta, cost
+                            ));
+                        }
+                    }
                     continue;
+                }
+                #[cfg(feature = "stats")]
+                let st_m0 = search.nodes;
+                #[cfg(feature = "stats")]
+                let mut st_red = -INF;
+                #[cfg(feature = "stats")]
+                {
+                    st_tried += 1;
                 }
                 let undo = board.make_move(mv);
                 let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
@@ -1814,6 +1896,8 @@ fn negamax_body(
                     None,
                     Some(mv),
                 );
+                #[cfg(feature = "stats")]
+                let st_q = score;
                 if score >= probcut_beta && !search.stop {
                     score = -negamax(
                         board,
@@ -1830,13 +1914,46 @@ fn negamax_body(
                         None,
                         !cut_node,
                     );
+                    #[cfg(feature = "stats")]
+                    {
+                        st_red = score;
+                    }
                 }
                 rep_stack.pop();
                 board.undo_move(mv, undo);
                 if search.stop {
                     return 0;
                 }
+                #[cfg(feature = "stats")]
+                if st_on {
+                    crate::stats::log(format_args!(
+                        "pct {} {} {} {} {} {} {} {}",
+                        depth, st_nt, see(board, mv), see_tab(board, mv, &ev_tab()), see_threshold,
+                        st_q - probcut_beta, if st_red == -INF { -INF } else { st_red - probcut_beta }, search.nodes - st_m0
+                    ));
+                }
                 if score >= probcut_beta {
+                    #[cfg(feature = "stats")]
+                    if st_on && crate::stats::sample(4) {
+                        crate::stats::suspend(true);
+                        let (n, skip) = (search.nodes, search.st_no_pc_ply);
+                        search.st_no_pc_ply = ply;
+                        let v = negamax(
+                            board, depth, beta - 1, beta, ply, search, engine, rep_stack, key, prev_move,
+                            allow_null, Some(false), cut_node,
+                        );
+                        search.st_no_pc_ply = skip;
+                        let cost = search.nodes - n;
+                        search.nodes = n;
+                        crate::stats::suspend(false);
+                        if !search.stop {
+                            crate::stats::log(format_args!(
+                                "pcv {} {} {} {} {} {} {} {}",
+                                depth, st_nt, see(board, mv), see_tab(board, mv, &ev_tab()), see_threshold,
+                                score - probcut_beta, (v < beta) as u8, cost
+                            ));
+                        }
+                    }
                     engine.tt.store(
                         key,
                         depth - 3,
@@ -1847,6 +1964,10 @@ fn negamax_body(
                     );
                     return score;
                 }
+            }
+            #[cfg(feature = "stats")]
+            if st_on {
+                search.st_pc_open[ply] = Some((st_n0, search.nodes - st_n0, depth, st_nt, se - beta, st_tried));
             }
         }
     }
@@ -1997,7 +2118,25 @@ fn negamax_body(
             && idx > 0
             && depth <= SEE_QUIET_MAX_DEPTH
             && best > -(MATE_SCORE - 1000)
-            && !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth)
+            && {
+                #[cfg(feature = "stats")]
+                if !crate::stats::suspended() && crate::stats::sample(8) {
+                    let s = see(board, mv);
+                    if s < 0 {
+                        let pruned = !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth);
+                        let (v, cost) = st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, cut_node);
+                        if !search.stop {
+                            let gc = CheckInfo::new(board).gives_check(board, mv);
+                            crate::stats::log(format_args!(
+                                "qui {} {} {} {} {} {} {} {} {}",
+                                depth, if cut_node { 1 } else { 2 }, s, see_tab(board, mv, &ev_tab()), pruned as u8,
+                                (v > alpha) as u8, cost, idx, gc as u8
+                            ));
+                        }
+                    }
+                }
+                quiet_see_prune(board, mv, depth)
+            }
         {
             continue;
         }
@@ -2008,11 +2147,24 @@ fn negamax_body(
             && depth <= SEE_PRUNE_MAX_DEPTH
             && idx > 0
             && best > -(MATE_SCORE - 1000)
-            && !see_ge(
-                board,
-                mv,
-                -SEE_PRUNE_CAPTURE_MARGIN * depth - capture_history_score(engine, side, board, mv) / CAPTURE_HISTORY_SEE_DIV,
-            )
+            && {
+                let ch = capture_history_score(engine, side, board, mv);
+                #[cfg(feature = "stats")]
+                if !crate::stats::suspended() && crate::stats::sample(4) {
+                    let s = see(board, mv);
+                    let pruned = !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth - ch / CAPTURE_HISTORY_SEE_DIV);
+                    let (v, cost) = st_verify_move(board, mv, depth, alpha, ply, search, engine, rep_stack, key, cut_node);
+                    if !search.stop {
+                        let gc = CheckInfo::new(board).gives_check(board, mv);
+                        crate::stats::log(format_args!(
+                            "cap {} {} {} {} {} {} {} {} {} {}",
+                            depth, if cut_node { 1 } else { 2 }, s, see_tab(board, mv, &ev_tab()), ch, pruned as u8,
+                            (v > alpha) as u8, cost, idx, gc as u8
+                        ));
+                    }
+                }
+                capture_see_prune(board, mv, depth, ch)
+            }
         {
             continue;
         }
@@ -2225,6 +2377,232 @@ fn negamax_body(
         .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, tt_best);
 
     best
+}
+
+// ---- see-diag: decision rules (knobs) and verification helpers ----------
+
+#[cfg(any(feature = "stats", feature = "knobs"))]
+#[inline]
+fn kb(name: &'static str, default: i32) -> i32 {
+    crate::knobs::knob(name, default)
+}
+
+/// Eval-scale piece values (knobs EVP..EVQ; defaults: medians of the static-eval drop when the piece is removed, 962 positions (`pscale`)).
+#[allow(dead_code)]
+fn ev_tab() -> [i32; 6] {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        [kb("EVP", 100), kb("EVN", 342), kb("EVB", 379), kb("EVR", 512), kb("EVQ", 1024), 20_000]
+    }
+    #[cfg(not(any(feature = "stats", feature = "knobs")))]
+    {
+        [100, 342, 379, 512, 1024, 20_000]
+    }
+}
+
+fn st_pc_allowed(_search: &Search, _ply: usize) -> bool {
+    #[cfg(feature = "stats")]
+    {
+        _search.st_no_pc_ply != _ply
+    }
+    #[cfg(not(feature = "stats"))]
+    {
+        true
+    }
+}
+
+/// ProbCut candidate filter. Knobs: PCEV=1 uses eval-scale SEE; PCSH shifts
+/// the threshold (cp, added).
+#[inline]
+fn pc_pass(board: &Board, mv: Move, thr: i32) -> bool {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        let sh = kb("PCSH", 0);
+        if kb("PCEV", 0) != 0 {
+            return see_tab(board, mv, &ev_tab()) >= thr + sh;
+        }
+        return see_ge(board, mv, thr + sh);
+    }
+    #[allow(unreachable_code)]
+    see_ge(board, mv, thr)
+}
+
+/// Quiet SEE prune (true = prune). Knobs: QPM margin (per depth^2), QPEV=1
+/// eval-scale SEE, QPLIN=<m> linear margin m*depth instead, QPCAP=<cp> caps
+/// the margin (prune any non-exempt quiet losing more than cap).
+#[inline]
+fn quiet_see_prune(board: &Board, mv: Move, depth: i32) -> bool {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        let lin = kb("QPLIN", 0);
+        let mut thr = if lin > 0 { -lin * depth } else { -kb("QPM", SEE_QUIET_MARGIN) * depth * depth };
+        let cap = kb("QPCAP", 0);
+        if cap > 0 {
+            thr = thr.max(-cap);
+        }
+        if kb("QPEV", 0) != 0 {
+            return see_tab(board, mv, &ev_tab()) < thr;
+        }
+        return !see_ge(board, mv, thr);
+    }
+    #[allow(unreachable_code)]
+    !see_ge(board, mv, -SEE_QUIET_MARGIN * depth * depth)
+}
+
+/// Capture SEE prune for bad captures (true = prune). Knobs: CPM margin per
+/// depth, CPEV=1 eval-scale SEE, CPCH capture-history divisor (0 = off),
+/// CPCAP=<cp> caps the depth margin.
+#[inline]
+fn capture_see_prune(board: &Board, mv: Move, depth: i32, ch: i32) -> bool {
+    #[cfg(any(feature = "stats", feature = "knobs"))]
+    {
+        let div = kb("CPCH", CAPTURE_HISTORY_SEE_DIV);
+        let cap = kb("CPCAP", 0);
+        let base = -kb("CPM", SEE_PRUNE_CAPTURE_MARGIN) * depth;
+        let thr = if cap > 0 { base.max(-cap) } else { base } - if div > 0 { ch / div } else { 0 };
+        if kb("CPEV", 0) != 0 {
+            return see_tab(board, mv, &ev_tab()) < thr;
+        }
+        return !see_ge(board, mv, thr);
+    }
+    #[allow(unreachable_code)]
+    !see_ge(board, mv, -SEE_PRUNE_CAPTURE_MARGIN * depth - ch / CAPTURE_HISTORY_SEE_DIV)
+}
+
+/// see-diag: search a pruned (or prunable) move at depth - 1 with a null
+/// window on alpha; returns (score, nodes). Not counted, nodes restored.
+#[cfg(feature = "stats")]
+#[allow(clippy::too_many_arguments)]
+fn st_verify_move(
+    board: &mut Board,
+    mv: Move,
+    depth: i32,
+    alpha: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    cut_node: bool,
+) -> (i32, u64) {
+    crate::stats::suspend(true);
+    let nodes = search.nodes;
+    let undo = board.make_move(mv);
+    let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
+    rep_stack.push(child_key);
+    let gives_check = board.is_in_check(board.side_to_move);
+    let v = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1, search, engine, rep_stack, child_key, Some(mv), true, Some(gives_check), !cut_node);
+    rep_stack.pop();
+    board.undo_move(mv, undo);
+    let cost = search.nodes - nodes;
+    search.nodes = nodes;
+    crate::stats::suspend(false);
+    (v, cost)
+}
+
+/// see-diag: the ProbCut attempt (qsearch, then the reduced search if the
+/// qsearch passes) for a move the filter skipped; returns (qsearch score,
+/// reduced score or -INF, nodes). Not counted, nodes restored.
+#[cfg(feature = "stats")]
+#[allow(clippy::too_many_arguments)]
+fn st_pc_try(
+    board: &mut Board,
+    mv: Move,
+    depth: i32,
+    pb: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    cut_node: bool,
+) -> (i32, i32, u64) {
+    crate::stats::suspend(true);
+    let nodes = search.nodes;
+    let undo = board.make_move(mv);
+    let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
+    rep_stack.push(child_key);
+    let q = -quiescence(board, -pb, -pb + 1, search, engine, rep_stack, child_key, ply + 1, None, Some(mv));
+    let mut r = -INF;
+    if q >= pb && !search.stop {
+        r = -negamax(board, depth - 1 - PROBCUT_REDUCTION, -pb, -pb + 1, ply + 1, search, engine, rep_stack, child_key, Some(mv), true, None, !cut_node);
+    }
+    rep_stack.pop();
+    board.undo_move(mv, undo);
+    let cost = search.nodes - nodes;
+    search.nodes = nodes;
+    crate::stats::suspend(false);
+    (q, r, cost)
+}
+
+/// see-diag `pscale`: for each non-king piece, static eval and qsearch
+/// value of its owner with and without it (castling and en passant cleared);
+/// prints `ps <kind> <static delta> <qsearch delta>` per piece.
+#[cfg(feature = "stats")]
+pub(crate) fn piece_scale(board: &mut Board, engine: &mut EngineState) {
+    let base = st_fen(board, None);
+    let mut lines = Vec::new();
+    let qval = |b: &mut Board, engine: &mut EngineState| {
+        let key = board_hash(b, &engine.zobrist);
+        let mut search = Search::new(None);
+        let mut rep_stack = vec![key];
+        let q = quiescence(b, -INF, INF, &mut search, engine, &mut rep_stack, key, 1, None, None);
+        (eval_for_side(b), q)
+    };
+    board.set_fen(&base);
+    if board.is_in_check(board.side_to_move) {
+        return;
+    }
+    let (e0, q0) = qval(board, engine);
+    let stm = board.side_to_move;
+    let snapshot: Vec<(u8, Piece)> = (0..64u8).filter_map(|sq| board.squares[sq as usize].map(|p| (sq, p))).collect();
+    for (sq, p) in snapshot {
+        if p.kind == PieceType::King {
+            continue;
+        }
+        let fen = st_fen(board, Some(sq));
+        board.set_fen(&fen);
+        let ok = !board.is_in_check(stm.opposite());
+        if ok {
+            let (e1, q1) = qval(board, engine);
+            let sign = if p.color == stm { 1 } else { -1 };
+            lines.push(format!("ps {} {} {}", p.kind as usize, sign * (e0 - e1), sign * (q0 - q1)));
+        }
+        board.set_fen(&base);
+    }
+    for l in lines {
+        println!("{l}");
+    }
+    println!("psdone");
+}
+
+#[cfg(feature = "stats")]
+fn st_fen(board: &Board, skip: Option<u8>) -> String {
+    let mut f = String::new();
+    for rank in (0..8).rev() {
+        let mut empty = 0;
+        for file in 0..8 {
+            let sq = rank * 8 + file;
+            match board.squares[sq as usize].filter(|_| Some(sq) != skip) {
+                Some(p) => {
+                    if empty > 0 {
+                        f.push_str(&empty.to_string());
+                        empty = 0;
+                    }
+                    let c = ['p', 'n', 'b', 'r', 'q', 'k'][p.kind as usize];
+                    f.push(if p.color == Color::White { c.to_ascii_uppercase() } else { c });
+                }
+                None => empty += 1,
+            }
+        }
+        if empty > 0 {
+            f.push_str(&empty.to_string());
+        }
+        if rank > 0 {
+            f.push('/');
+        }
+    }
+    format!("{} {} - - 0 1", f, if board.side_to_move == Color::White { "w" } else { "b" })
 }
 
 /// |quiescence - static eval| for the side to move; 0 means the position is quiet.
@@ -2825,6 +3203,137 @@ fn see(board: &Board, mv: Move) -> i32 {
             PieceType::Knight => {}
         }
         occupant_value = piece_value(kind);
+        side = side.opposite();
+
+        if gain[depth].max(-gain[depth - 1]) < 0 {
+            break;
+        }
+    }
+
+    while depth > 0 {
+        gain[depth - 1] = -std::cmp::max(-gain[depth - 1], gain[depth]);
+        depth -= 1;
+    }
+
+    gain[0]
+}
+
+#[allow(dead_code)]
+#[inline]
+fn tv(tab: &[i32; 6], k: PieceType) -> i32 {
+    tab[k as usize]
+}
+
+/// `see` with another piece-value table (see-diag: eval-scale SEE).
+#[allow(dead_code)]
+fn see_tab(board: &Board, mv: Move, tab: &[i32; 6]) -> i32 {
+    use crate::bitboard::{bishop_attacks, rook_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKERS};
+
+    if mv.is_castle {
+        return 0;
+    }
+
+    let moving = match board.squares[mv.from as usize] {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    let mut occ = board.bb.occ_all();
+
+    let captured = if mv.is_en_passant {
+        let cap_sq = if moving.color == Color::White { mv.to - 8 } else { mv.to + 8 };
+        occ &= !(1u64 << cap_sq);
+        board.squares[cap_sq as usize]
+    } else {
+        board.squares[mv.to as usize]
+    };
+    // A quiet move starts the swap from 0: nothing is won on arrival.
+    let captured_value = captured.map(|c| tv(tab, c.kind)).unwrap_or(0);
+
+    occ &= !(1u64 << mv.from);
+    occ |= 1u64 << mv.to;
+    let placed_kind = mv.promotion.unwrap_or(moving.kind);
+
+    // Only a promotion changes the value of the capturing piece; a plain
+    // capture must not be charged the pawn value.
+    let promo_delta = mv
+        .promotion
+        .map(|p| tv(tab, p) - tv(tab, PieceType::Pawn))
+        .unwrap_or(0);
+
+    let mut gain = [0i32; 32];
+    let mut depth = 0usize;
+    gain[0] = captured_value + promo_delta;
+
+    let pc = &board.bb.pieces;
+    let t = mv.to as usize;
+    let diag_sliders = pc[0][2] | pc[0][4] | pc[1][2] | pc[1][4];
+    let ortho_sliders = pc[0][3] | pc[0][4] | pc[1][3] | pc[1][4];
+    let mut attackers = (PAWN_ATTACKERS[0][t] & pc[0][0])
+        | (PAWN_ATTACKERS[1][t] & pc[1][0])
+        | (KNIGHT_ATTACKS[t] & (pc[0][1] | pc[1][1]))
+        | (KING_ATTACKS[t] & (pc[0][5] | pc[1][5]))
+        | (bishop_attacks(t, occ) & diag_sliders)
+        | (rook_attacks(t, occ) & ortho_sliders);
+
+    let mut side = board.side_to_move.opposite();
+    let mut occupant_value = tv(tab, placed_kind);
+
+    loop {
+        depth += 1;
+        if depth >= gain.len() {
+            depth -= 1;
+            break;
+        }
+
+        // Pieces already used (and the captured en-passant pawn / mover)
+        // are no longer in `occ`.
+        attackers &= occ;
+        let c = color_index(side);
+        let mine = attackers & board.bb.occ[c];
+        // No recapture: gain[depth] was never written, so step back to the
+        // last real entry before unwinding (otherwise the stale 0 clamps the
+        // previous capture's gain to <= 0).
+        if mine == 0 {
+            depth -= 1;
+            break;
+        }
+
+        let p = &pc[c];
+        let (bit, kind) = if mine & p[0] != 0 {
+            let b = mine & p[0];
+            (b & b.wrapping_neg(), PieceType::Pawn)
+        } else if mine & p[1] != 0 {
+            let b = mine & p[1];
+            (b & b.wrapping_neg(), PieceType::Knight)
+        } else if mine & p[2] != 0 {
+            (pick_slider(mine & p[2], t, SEE_BISHOP_ORDER), PieceType::Bishop)
+        } else if mine & p[3] != 0 {
+            (pick_slider(mine & p[3], t, SEE_ROOK_ORDER), PieceType::Rook)
+        } else if mine & p[4] != 0 {
+            (pick_slider(mine & p[4], t, SEE_QUEEN_ORDER), PieceType::Queen)
+        } else {
+            let b = mine & p[5];
+            (b & b.wrapping_neg(), PieceType::King)
+        };
+
+        gain[depth] = occupant_value - gain[depth - 1];
+
+        occ &= !bit;
+        match kind {
+            PieceType::Pawn | PieceType::Bishop => {
+                attackers |= bishop_attacks(t, occ) & diag_sliders;
+            }
+            PieceType::Rook => attackers |= rook_attacks(t, occ) & ortho_sliders,
+            // The king is adjacent to the target, so it can uncover a
+            // slider on any line.
+            PieceType::Queen | PieceType::King => {
+                attackers |= (bishop_attacks(t, occ) & diag_sliders)
+                    | (rook_attacks(t, occ) & ortho_sliders);
+            }
+            PieceType::Knight => {}
+        }
+        occupant_value = tv(tab, kind);
         side = side.opposite();
 
         if gain[depth].max(-gain[depth - 1]) < 0 {
