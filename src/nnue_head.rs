@@ -861,16 +861,29 @@ pub(crate) mod kernels {
     /// `maddubs` + `madd` (V = 1; pair sums < 2^15, no saturation) or
     /// AVX512-VNNI `vpdpbusd` (V = 2). Exact, like the 256-bit flavours.
     #[inline(always)]
-    unsafe fn dpbusd512<const V: u8>(mut acc: __m512i, x: __m512i, w: __m512i) -> __m512i {
+    unsafe fn dpbusd512<const V: u8>(acc: __m512i, x: __m512i, w: __m512i) -> __m512i {
         // SAFETY: the l1_rest_z* wrapper of flavour V enables its features.
         unsafe {
             if V == 2 {
-                std::arch::asm!("vpdpbusd {0}, {1}, {2}", inout(zmm_reg) acc, in(zmm_reg) x, in(zmm_reg) w, options(pure, nomem, nostack));
-                acc
+                dpz2(acc, x, w)
             } else {
-                _mm512_add_epi32(acc, _mm512_madd_epi16(_mm512_maddubs_epi16(x, w), _mm512_set1_epi16(1)))
+                dpz1(acc, x, w)
             }
         }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn dpz1(acc: __m512i, x: __m512i, w: __m512i) -> __m512i {
+        _mm512_add_epi32(acc, _mm512_madd_epi16(_mm512_maddubs_epi16(x, w), _mm512_set1_epi16(1)))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn dpz2(mut acc: __m512i, x: __m512i, w: __m512i) -> __m512i {
+        // SAFETY: register-only instruction; AVX512-VNNI is enabled.
+        unsafe { std::arch::asm!("vpdpbusd {0}, {1}, {2}", inout(zmm_reg) acc, in(zmm_reg) x, in(zmm_reg) w, options(pure, nomem, nostack)) };
+        acc
     }
 
     /// z1 of all 16 neurons: a chunk's 64 weight bytes are one zmm (neuron
