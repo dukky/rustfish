@@ -490,6 +490,10 @@ Rules added from the 2026-11-04..06 history:
   loss before games, every run logged including failures.
 - No strategic pivot on a sample that cannot support it (e.g. 200 games).
 - Every ladder anchor's score is sanity-checked against its neighbours.
+- **README.md is part of every ladder update (owner, 2026-11-24):** when a
+  ladder lands (or the targets, net architecture or data size change), update
+  README.md's strength line, targets table and engine row in the same commit
+  as plan.md's Strength row. It had sat at ~3508 (10 Nov) for two weeks.
 
 Division of labour (from 2026-11-11): GitHub Actions plays every test game
 and the ladders; the desktop generates data and trains production nets; the
