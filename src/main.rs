@@ -947,11 +947,14 @@ impl Board {
 
 /// Butterfly history, [side][from attacked][to attacked][from][to]: the two
 /// threat bits say whether the opponent attacks the from/to square.
-type HistoryTable = [[[[[i32; 64]; 64]; 2]; 2]; 2];
+/// The history tables store i16: gravity (`search::apply_gravity`) bounds
+/// every entry to +-HISTORY_MAX = 16384, so i16 holds them exactly and the
+/// tables take half the cache (the continuation table is 1 MB, not 2).
+type HistoryTable = [[[[[i16; 64]; 64]; 2]; 2]; 2];
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
-type ContinuationHistoryTable = [[[[i32; 64]; 64]; 64]; 2];
+type ContinuationHistoryTable = [[[[i16; 64]; 64]; 64]; 2];
 /// Capture history, [side][moving piece kind][to][victim kind].
-type CaptureHistoryTable = [[[[i32; 6]; 64]; 6]; 2];
+type CaptureHistoryTable = [[[[i16; 6]; 64]; 6]; 2];
 
 #[derive(Clone, Copy)]
 struct SearchParams {
