@@ -65,6 +65,9 @@ kept here: each machine has a gitignored `CLAUDE.local.md` for those.
 - Scratch work and git worktrees go in a scratch directory, never inside the
   repo checkout; never `rm -rf`, `git checkout --`, `git reset --hard`,
   `git stash`, or shell redirects into the repo.
+- Delete only explicitly named files (`unlink <file>` or `rm <file>` with a
+  full name), never globbed or variable-built `rm` patterns, and only after
+  checking what they are (e.g. a packed copy verified position for position).
 - Kill only your own processes, by PID, never `pkill -f <pattern>` on a
   shared machine.
 - Subagents work on branches and report; the coordinating session decides
