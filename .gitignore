@@ -9,3 +9,4 @@ scripts/__pycache__/
 __pycache__/
 .main-build/
 target-native/
+CLAUDE.local.md
