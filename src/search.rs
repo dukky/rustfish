@@ -2015,8 +2015,15 @@ fn negamax_body(
             continue;
         }
 
+        // A rook taking a knight or bishop (the exchange sacrifice) is kept
+        // at depth 1: there it proves right more often than other losing
+        // captures the SEE prune would drop.
         if stage == Stage::BadCapture
             && !in_check
+            && !(depth == 1
+                && board.squares[mv.from as usize].is_some_and(|p| p.kind == PieceType::Rook)
+                && board.squares[mv.to as usize]
+                    .is_some_and(|p| matches!(p.kind, PieceType::Knight | PieceType::Bishop)))
             && beta - alpha <= 1
             && depth <= SEE_PRUNE_MAX_DEPTH
             && idx > 0
