@@ -1,4 +1,4 @@
-name: Speed compare
+name: Policy speed compare
 
 # Exact-speedup measurement on GitHub's x86 runners (the desktop is shared and
 # the laptop is in use, so neither gives valid NPS). Builds a base ref and
@@ -15,8 +15,8 @@ name: Speed compare
 
 on:
   push:
-    branches: [speed-diag]
-    paths: [scripts/speed-compare.env]
+    branches: [policy-speed]
+    paths: [scripts/policy-speed.env]
   workflow_dispatch:
     inputs:
       base: { description: base ref, default: origin/main }
@@ -52,7 +52,7 @@ jobs:
           IN_DEPTH: ${{ inputs.depth }}
         run: |
           BASE=origin/main; CANDS=; PROFILE=; RUNNERS=6; ROUNDS=12; DEPTH=13
-          if [ "${{ github.event_name }}" = push ]; then . scripts/speed-compare.env; else
+          if [ "${{ github.event_name }}" = push ]; then . scripts/policy-speed.env; else
             BASE=$IN_BASE; CANDS=$IN_CANDS; PROFILE=$IN_PROFILE; RUNNERS=$IN_RUNNERS; ROUNDS=$IN_ROUNDS; DEPTH=$IN_DEPTH; fi
           [ -n "$CANDS" ] || RUNNERS=0
           {
