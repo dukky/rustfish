@@ -73,6 +73,12 @@ impl EvalCache {
         let _ = ptr;
     }
 
+    /// The cached eval of `key`, if present (no evaluation).
+    #[inline(always)]
+    pub(crate) fn get(&self, key: u64) -> Option<i32> {
+        self.entries[key as usize & EVAL_CACHE_MASK].get(key)
+    }
+
     /// `key` must be the zobrist key of `board` (as maintained by search).
     #[inline]
     pub(crate) fn eval(&mut self, board: &Board, key: u64) -> i32 {

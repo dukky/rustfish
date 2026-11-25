@@ -48,6 +48,9 @@ pub(crate) const H2: usize = 32;
 const HEAD_Q: f32 = 8192.0;
 /// Pairwise inputs per perspective, and in all.
 const HALF: usize = H / 2;
+/// Row-count parameter of the `update_pw` kernels meaning "the slice's
+/// length" (a refresh's runtime number of rows) instead of a fixed count.
+const ANY: usize = usize::MAX;
 const N_IN: usize = H;
 /// 4-byte chunks of the L1 input.
 pub(crate) const CHUNKS: usize = N_IN / 4;
@@ -565,7 +568,7 @@ pub(crate) mod kernels {
             (1, 1) => update_pw_n::<DOT, 1, 1>(out, src, adds, subs, w, x, base, nnz, n),
             (1, 2) => update_pw_n::<DOT, 1, 2>(out, src, adds, subs, w, x, base, nnz, n),
             (2, 2) => update_pw_n::<DOT, 2, 2>(out, src, adds, subs, w, x, base, nnz, n),
-            _ => scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n),
+            _ => update_pw_n::<DOT, ANY, ANY>(out, src, adds, subs, w, x, base, nnz, n),
         }
     }
 
@@ -582,8 +585,10 @@ pub(crate) mod kernels {
         nnz: &mut [u16; NNZ_BUF],
         mut n: usize,
     ) -> (i64, usize) {
-        assert!(x.len() == HALF && HALF % 64 == 0 && adds.len() == NA && subs.len() == NS);
-        let (adds, subs) = (&adds[..NA], &subs[..NS]);
+        let na = if NA == ANY { adds.len() } else { NA };
+        let ns = if NS == ANY { subs.len() } else { NS };
+        assert!(x.len() == HALF && HALF % 64 == 0 && adds.len() == na && subs.len() == ns);
+        let (adds, subs) = (&adds[..na], &subs[..ns]);
         // SAFETY: every offset is < H - 32 (lanes) or < HALF - 16 (bytes).
         unsafe {
             let (zero, qa) = (vdupq_n_s16(0), vdupq_n_s16(255));
@@ -862,7 +867,7 @@ pub(crate) mod kernels {
                 (1, 1) => update_pw_avx2::<DOT, 1, 1>(out, src, adds, subs, w, x, base, nnz, n),
                 (1, 2) => update_pw_avx2::<DOT, 1, 2>(out, src, adds, subs, w, x, base, nnz, n),
                 (2, 2) => update_pw_avx2::<DOT, 2, 2>(out, src, adds, subs, w, x, base, nnz, n),
-                _ => scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n),
+                _ => update_pw_avx2::<DOT, ANY, ANY>(out, src, adds, subs, w, x, base, nnz, n),
             }
         }
     }
@@ -880,17 +885,19 @@ pub(crate) mod kernels {
         nnz: &mut [u16; NNZ_BUF],
         mut n: usize,
     ) -> (i64, usize) {
-        assert!(x.len() == HALF && HALF % 32 == 0 && adds.len() == NA && subs.len() == NS);
+        let na = if NA == ANY { adds.len() } else { NA };
+        let ns = if NS == ANY { subs.len() } else { NS };
+        assert!(x.len() == HALF && HALF % 32 == 0 && adds.len() == na && subs.len() == ns);
         // SAFETY: AVX2 per caller; offsets are < H - 16 (lanes) / HALF - 32 (bytes).
         unsafe {
             let (lo, hi) = (_mm256_setzero_si256(), _mm256_set1_epi16(255));
             let ld = |p: *const i16| _mm256_loadu_si256(p as *const __m256i);
             let mut delta = |o: usize| {
                 let mut v = ld(src.as_ptr().add(o));
-                for a in &adds[..NA] {
+                for a in &adds[..na] {
                     v = _mm256_add_epi16(v, ld(a.as_ptr().add(o)));
                 }
-                for s in &subs[..NS] {
+                for s in &subs[..ns] {
                     v = _mm256_sub_epi16(v, ld(s.as_ptr().add(o)));
                 }
                 _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
