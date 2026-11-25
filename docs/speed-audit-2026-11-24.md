@@ -191,3 +191,75 @@ Fix (exact): bigger eval cache. Results (one runner per cell; A/A within
 / Xeon H16.) `speed-ec-packed` is the pick: ~+1-2% from 1 s up, ~-1% at
 100 ms. It recovers about a quarter of the decline; the rest is the tree
 itself (more distinct positions per node), not a cache defect.
+
+## Round 4 (25 Nov, main 04d6cc9, bench 187769): recovering the long-search NPS
+
+Counters from the diag-only branch `speed-r4-diag` (do not merge): eval
+sources and refresh diffs, 8 peer_nps FENs, node-limited on the desktop
+(load-independent counts), Hash 64:
+
+| per node | 100k nodes | 3M nodes |
+|---|---|---|
+| NNUE evals | 0.435 | 0.476 |
+| from qsearch stand pat | 0.229 | 0.217 |
+| from negamax static eval | 0.127 | 0.147 |
+| from the LMR child-eval check | 0.078 | 0.112 |
+| LMR child eval: eval-cache hit rate | 0.60 | 0.45 |
+| LMR child eval: cache miss but child TT eval present | 0.1% of calls | 1.7% of calls |
+| king-bucket refreshes | 0.066 | 0.074 |
+| rows per refresh from the finny entry | 6.15 | 6.07 |
+| nearest stack ancestor in the same bucket available | 21% | 24% |
+| rows per refresh, best of entry / ancestor | 5.91 | 5.86 (-3.5%) |
+
+Readings:
+- **The per-king-bucket refresh cache already exists** (finny table, since
+  king buckets landed in ffc7802: per perspective x bucket x mirror, last
+  accumulator + piece bitboards, refresh applies only the difference). Its
+  diffs are ~6 rows; refreshing from the nearest same-bucket ancestor on the
+  stack instead would save only 3.5% of the rows. Nothing left there.
+- **No NNUE eval is unused.** In-check nodes already skip the eval; the TT
+  eval is already preferred over the eval cache. The LMR child-eval check
+  (the evals/node growth with length is mostly this site and negamax) is
+  consumed by the child itself (it hits the cache next), except the 1.7%
+  where the child's TT entry already holds the eval. The qsearch lever
+  (skipping the child's make + eval) is delta pruning, in SPRT separately
+  (`qs-delta`).
+
+Branches (all exact: bench 187769, `bench 15` 4168952 and evalhash
+identical on the desktop with default, `RUSTFISH_NO_AVX512=1`,
+`RUSTFISH_NO_VNNI=1`; perfttest, selftest 200, `cargo test --release`,
+plain `cargo check`; arm job identical). Bench-13 paired NPS, median of 6
+runner medians [min, max], two runs; nps-length vs the mean of main and its
+A/A copy (Xeon 6975P-C Hash 16 / EPYC 7763 Hash 64):
+
+| branch | change | bench NPS default | bench NPS AVX2 | arm | 100 ms | 1 s | 3 s | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `speed-lazy-legal` | out of check, king moves and castling decided by the node's enemy attack mask (`ThreatMaps::all`, already built for quiet ordering, now before generation) instead of an attack test per square | +0.28 [-0.12, +1.17]; +0.15 [-0.27, +0.58] | -0.05; -0.03 | -0.33; -0.58 | -0.2 / -0.7 | +0.6 / -0.3 | +0.4 / -0.3 | neutral, not worth queueing |
+| `speed-refresh-cache` | refresh at an eval ends in the fused `update_pw` kernel (runtime row count) + entry copy, instead of update passes + dot + activation passes | -0.44 [-1.51, +0.53]; -0.58 [-1.12, +0.46] | -1.34; -0.74 | -2.16; -0.10 | -1.1 / -1.3 | -0.6 / -0.6 | -1.2 / -1.0 | drop |
+| `speed-refresh-cache2` | the same, kernel call out of line | -0.98 [-1.14, -0.04] | -0.64 | -0.54 | - | - | - | drop |
+| `speed-fewer-evals` | LMR child eval: eval cache, then the child's TT eval, then the net | +0.15 [-0.49, +1.63] | -0.13 | +0.66 | -0.5 / 0.0 | -0.1 / -0.5 | +0.5 / -0.2 | neutral (1.7% of one site's evals), drop |
+| `speed-r4-stack` | all three | -0.62 [-2.96, -0.38] | -1.13 | -1.79 | -1.3 / -0.9 | -1.1 / -0.9 | -0.4 / -0.3 | drop |
+
+A/A this round: bench medians +0.11 / +0.13 (default), -0.11 / -0.10
+(AVX2); nps-length main vs aa within 0.7%.
+
+Why the fused refresh loses: the separate dot and activation passes read an
+accumulator that is already in L1, so they are cheap, while the
+runtime-length AVX2 `update_pw` is slower than the fixed 4+4 `update_dual`
+(AVX-512 on the default kernels) and adds a 2 KB copy.
+
+Full lazy legality (verify at pick time) was not built: in the stack profile
+the remaining legality work is `legal_state` 0.6% and the leftover attack
+tests ~0.8% (qsearch king captures, in-check nodes), so its ceiling is ~1%,
+and keeping the move order exact needs the picker's `swap_remove`
+tie-breaking emulated (verify a picked best move and every trailing element
+before it is swapped forward, delete illegal ones order-preserving). Not
+worth the risk for that ceiling.
+
+Conclusion: the ~9% NPS fall from 100 ms to 3 s is the tree itself (more
+distinct positions per node: more eval-cache misses and refreshes), and the
+machinery that serves it (finny table, eval cache, TT eval reuse, lazy
+accumulators) is already near what the counters allow. Remaining NPS levers
+are elsewhere: move ordering (~18%), the FT update's memory traffic, and
+search changes that skip work (`speed-tt-first`, `qs-delta`) through the
+SPRT. Nothing from round 4 is for the queue.
