@@ -495,7 +495,7 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
 /// The entry gets the result by copy. Same values as `refresh_cached`
 /// followed by `screlu_dot` and `activate`.
 #[allow(clippy::too_many_arguments)]
-#[inline(always)]
+#[inline(never)]
 fn refresh_cached_pw<const EVAL: bool>(
     net: &Network,
     e: &mut CacheEntry,
