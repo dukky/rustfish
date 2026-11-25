@@ -2117,9 +2117,11 @@ fn negamax_body(
                 }
                 // A move whose static result already reaches (nearly) alpha is
                 // where a reduction hides a fail high: reduce it one ply less.
-                // The child evaluates itself from the same cache entry anyway.
-                if !gives_check
-                    && -engine.eval_cache.eval(board, child_key) > alpha - LMR_CHILD_EVAL_SAFE_MARGIN
+                // The child evaluates itself from the same cache entry anyway;
+                // a child already in the TT has its raw eval there (the same
+                // value: both hold the net's eval under a full-key match), so
+                // that costs no network evaluation.
+                if !gives_check && -child_raw_eval(engine, board, child_key) > alpha - LMR_CHILD_EVAL_SAFE_MARGIN
                 {
                     r -= 1;
                 }
@@ -2276,6 +2278,20 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     let mut rep_stack = vec![key];
     let q = quiescence(board, -INF, INF, &mut search, engine, &mut rep_stack, key, 0, None, None);
     (q - eval_for_side(board)).abs()
+}
+
+/// The raw static eval of the child position `key`: eval cache, else the
+/// child's TT entry, else a fresh (cached) evaluation. The value does not
+/// depend on which source answers.
+#[inline(always)]
+fn child_raw_eval(engine: &mut EngineState, board: &Board, key: u64) -> i32 {
+    if let Some(e) = engine.eval_cache.get(key) {
+        return e;
+    }
+    if let Some(e) = engine.tt.probe(key).and_then(|entry| entry.static_eval()) {
+        return e;
+    }
+    engine.eval_cache.eval(board, key)
 }
 
 fn quiescence(
