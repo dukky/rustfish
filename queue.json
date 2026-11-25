@@ -1,6 +1,16 @@
 {
   "pending": [],
-  "current": null,
+  "current": {
+    "branch": "ext-child-eval-lmr-r2",
+    "mode": "nonreg",
+    "front": true,
+    "test_id": "q-ext-child-eval-lmr-r2-1125-0126",
+    "sha": "706132086112b13c2c1734674d58a25d90863118",
+    "base_sha": "235a745b5b7bfe92d23d0bcd4bf78c96fc01ff41",
+    "started": "2026-11-25T01:26:45Z",
+    "bench": 185766,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 4,
   "merges_since_ladder": 4,
