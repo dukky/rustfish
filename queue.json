@@ -1,5 +1,11 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "datagen-randplies",
+      "mode": "speedup",
+      "front": true
+    }
+  ],
   "current": null,
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 1,
