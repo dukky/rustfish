@@ -40,6 +40,7 @@ jobs:
       runners: ${{ steps.cfg.outputs.runners }}
       rounds: ${{ steps.cfg.outputs.rounds }}
       depth: ${{ steps.cfg.outputs.depth }}
+      flags: ${{ steps.cfg.outputs.flags }}
     steps:
       - uses: actions/checkout@v4
       - id: cfg
@@ -51,7 +52,7 @@ jobs:
           IN_ROUNDS: ${{ inputs.rounds }}
           IN_DEPTH: ${{ inputs.depth }}
         run: |
-          BASE=origin/main; CANDS=; PROFILE=; RUNNERS=6; ROUNDS=12; DEPTH=13
+          BASE=origin/main; CANDS=; PROFILE=; RUNNERS=6; ROUNDS=12; DEPTH=13; ALLOW_DIFF=
           if [ "${{ github.event_name }}" = push ]; then . scripts/speed-compare.env; else
             BASE=$IN_BASE; CANDS=$IN_CANDS; PROFILE=$IN_PROFILE; RUNNERS=$IN_RUNNERS; ROUNDS=$IN_ROUNDS; DEPTH=$IN_DEPTH; fi
           [ -n "$CANDS" ] || RUNNERS=0
@@ -59,7 +60,7 @@ jobs:
             echo "base=$BASE"; echo "cands=$CANDS"; echo "profile=$PROFILE"
             echo "runners=$(python3 -c "import json,sys; print(json.dumps(list(range(1, int(sys.argv[1]) + 1))))" "$RUNNERS")"
             echo "profile_matrix=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" $PROFILE)"
-            echo "rounds=$ROUNDS"; echo "depth=$DEPTH"
+            echo "rounds=$ROUNDS"; echo "depth=$DEPTH"; echo "flags=${ALLOW_DIFF:+--allow-diff}"
           } | tee -a "$GITHUB_OUTPUT"
 
   compare:
@@ -100,7 +101,7 @@ jobs:
           for c in $(tail -n +2 names.txt); do args+=("$c=bins/$c"); done
           set +e; rc=0
           python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds ${{ needs.setup.outputs.rounds }} \
-            --depth ${{ needs.setup.outputs.depth }} --label default --json res-default.json | tee cmp.txt || rc=1
+            --depth ${{ needs.setup.outputs.depth }} ${{ needs.setup.outputs.flags }} --label default --json res-default.json | tee cmp.txt || rc=1
           if grep -q 'AVX-512: yes' cpu.txt; then
             python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds ${{ needs.setup.outputs.rounds }} \
               --depth ${{ needs.setup.outputs.depth }} --env RUSTFISH_NO_AVX512=1 --label avx2 --json res-avx2.json | tee -a cmp.txt || rc=1
@@ -135,6 +136,8 @@ jobs:
               d = json.load(open(f))
               for c, r in d["cands"].items():
                   rows.setdefault((c, d["label"]), []).append((r["median"], d["cpu"], d["base_nps_median"]))
+                  if "time_median" in r:
+                      rows.setdefault((c, d["label"] + " time-to-depth"), []).append((r["time_median"], d["cpu"], r["nodes"]))
               for m in d.get("mismatch", []):
                   print(f"MISMATCH {m} on {f}")
           print("### Paired bench NPS gain over base (median per runner)\n")
@@ -225,5 +228,5 @@ jobs:
           done
           b=$(head -1 names.txt); args=()
           for c in $(tail -n +2 names.txt); do args+=("$c=bins/$c"); done
-          python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds 6 --depth 13 --label arm | tee cmp.txt
+          python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds 6 --depth ${{ needs.setup.outputs.depth }} ${{ needs.setup.outputs.flags }} --label arm | tee cmp.txt
           { echo "### arm ($(lscpu | grep 'Model name' | head -1))"; echo '```'; grep -E 'vs|MISMATCH|bench|test result' cmp.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

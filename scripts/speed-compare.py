@@ -41,6 +41,8 @@ def main():
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--json")
     ap.add_argument("--label", default="")
+    ap.add_argument("--allow-diff", action="store_true",
+                    help="search changes: skip the identity check, also report time-to-depth and nodes")
     a = ap.parse_args()
     env = dict(os.environ)
     for kv in a.env:
@@ -56,19 +58,25 @@ def main():
         eh = " ".join(l.split(":", 1)[1].strip() for l in e.splitlines() if "hash" in l.lower() and ":" in l)
         ident[name] = (field(b, "Nodes searched"), eh, field(b, "NNUE SIMD"))
         print(f"{name}: bench {ident[name][0]} evalhash {eh} simd {ident[name][2]}", flush=True)
-    ok = [(n, p) for n, p in bins if ident[n][:2] == ident[base][:2]]
-    bad = [n for n, _ in bins if ident[n][:2] != ident[base][:2]]
+    same = (lambda n: True) if a.allow_diff else (lambda n: ident[n][:2] == ident[base][:2])
+    ok = [(n, p) for n, p in bins if same(n)]
+    bad = [n for n, _ in bins if not same(n)]
     for n in bad:
         print(f"MISMATCH: {n} does not search identically to {base}", flush=True)
 
     nps = {n: [] for n, _ in ok}
+    ms = {n: [] for n, _ in ok}
+    nodes = {}
     for r in range(a.rounds):
         # Plain rotation: over len(ok) rounds every binary runs once in every
         # position (use a multiple of the binary count as --rounds).
         k = r % len(ok)
         order = ok[k:] + ok[:k]
         for n, p in order:
-            nps[n].append(int(field(run(p, [f"bench {a.depth}"], env), "Nodes/second")))
+            out = run(p, [f"bench {a.depth}"], env)
+            nps[n].append(int(field(out, "Nodes/second")))
+            ms[n].append(int(field(out, "Total time (ms)")))
+            nodes[n] = int(field(out, "Nodes searched"))
         print(f"round {r + 1}: " + " ".join(f"{n}={nps[n][-1]}" for n, _ in ok), flush=True)
 
     res = {"label": a.label, "simd": ident[base][2], "bench": ident[base][0], "mismatch": bad,
@@ -77,8 +85,12 @@ def main():
         if n == base:
             continue
         ratios = [c / b - 1 for c, b in zip(nps[n], nps[base])]
+        tr = [c / b - 1 for c, b in zip(ms[n], ms[base])]
         res["cands"][n] = {"median": statistics.median(ratios), "mean": statistics.fmean(ratios),
-                           "min": min(ratios), "max": max(ratios), "nps_median": statistics.median(nps[n])}
+                           "min": min(ratios), "max": max(ratios), "nps_median": statistics.median(nps[n]),
+                           "time_median": statistics.median(tr), "nodes": nodes[n], "base_nodes": nodes[base]}
+        print(f"{a.label} {n} vs {base}: time-to-depth {a.depth} median {statistics.median(tr) * 100:+.2f}% "
+              f"nodes {nodes[n]} vs {nodes[base]} ({(nodes[n] / nodes[base] - 1) * 100:+.2f}%)", flush=True)
         print(f"{a.label} {n} vs {base}: median {res['cands'][n]['median'] * 100:+.2f}% "
               f"mean {res['cands'][n]['mean'] * 100:+.2f}% "
               f"[{res['cands'][n]['min'] * 100:+.1f}, {res['cands'][n]['max'] * 100:+.1f}] "
