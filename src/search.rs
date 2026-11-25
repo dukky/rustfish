@@ -986,6 +986,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
     // Timed and infinite searches deepen until stopped; a bare `go` keeps the old fixed depth.
     let timed = movetime.is_some() || wtime.is_some() || btime.is_some() || node_limit.is_some();
+    let depth_given = depth.is_some();
     let depth = depth.unwrap_or(if timed || infinite { MAX_SEARCH_DEPTH } else { 8 });
 
     let (time_left, inc) = match board.side_to_move {
@@ -1017,6 +1018,15 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     if root_moves.is_empty() {
         return None;
     }
+    // A forced reply needs no thinking time: under clock management, search
+    // one ply (so a score and PV are still reported) and play it. Fixed
+    // depth, node, movetime and infinite searches (bench, datagen) are left
+    // alone.
+    let depth = if root_moves.len() == 1 && soft_ms.is_some() && !depth_given && node_limit.is_none() {
+        1
+    } else {
+        depth
+    };
 
     let hash = board_hash(board, &engine.zobrist);
     let tt_root_move = engine.tt.probe(hash).and_then(|e| e.best);
