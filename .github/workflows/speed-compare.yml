@@ -198,3 +198,32 @@ jobs:
           path: |
             prof.txt
             map-*.txt
+
+  arm:
+    # Apple-Silicon-class check: the NEON path must build, pass the tests and
+    # search identically (bench + evalhash); also a short interleaved NPS look.
+    needs: setup
+    if: needs.setup.outputs.cands != ''
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Build, test and compare
+        env:
+          BASE: ${{ needs.setup.outputs.base }}
+          CANDS: ${{ needs.setup.outputs.cands }}
+        run: |
+          mkdir -p bins; : > names.txt
+          for ref in $BASE $CANDS; do
+            r=$ref; git rev-parse -q --verify "$r^{commit}" >/dev/null || r=origin/$ref
+            n=$(echo "$ref" | sed 's#^origin/##; s#/#-#g')
+            while [ -e "wt/$n" ]; do n=$n-aa; done
+            echo "$n" >> names.txt
+            git worktree add -q --detach "wt/$n" "$r"
+            (cd "wt/$n" && cargo build --release -q && cargo test --release -q 2>&1 | grep -E 'test result|FAILED|panicked') && cp "wt/$n/target/release/rustfish" "bins/$n"
+          done
+          b=$(head -1 names.txt); args=()
+          for c in $(tail -n +2 names.txt); do args+=("$c=bins/$c"); done
+          python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds 6 --depth 13 --label arm | tee cmp.txt
+          { echo "### arm ($(lscpu | grep 'Model name' | head -1))"; echo '```'; grep -E 'vs|MISMATCH|bench|test result' cmp.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
