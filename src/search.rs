@@ -488,6 +488,73 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// (0.7-2.0%) than when it is 100+ cp below (0.005-0.1%).
 const LMR_CHILD_EVAL_SAFE_MARGIN: i32 = 25;
 
+/// LMR protection scorer: a linear score (in 1/1000 units) of features known
+/// at the reduction point, fitted listwise (scripts/policy/recall.py on the
+/// policy-oracle branch, depth-17 oracle labels on 962 positions) to rank a
+/// node's best reduced quiet first. It ranks the oracle best first in 82% of
+/// nodes (history alone 59%). Moves scoring above the threshold keep main's
+/// reduction; the rest are reduced more (see the LMR block in negamax_body).
+struct LmrProtectFeatures {
+    history: i32,
+    continuation: i32,
+    killer0: bool,
+    killer1: bool,
+    counter: bool,
+    gives_check: bool,
+    /// SEE of the move (made before the move).
+    see: i32,
+    /// `kind_index` of the moving piece.
+    kind: usize,
+    from_attacked: bool,
+    to_attacked: bool,
+    /// Child static eval minus alpha (our view).
+    child_eval: i32,
+    /// Node static eval minus alpha.
+    static_eval: i32,
+    improving: bool,
+    idx: usize,
+    /// The reduction before the child-eval and protection adjustments.
+    r: i32,
+    depth: i32,
+    /// 0 = PV, 1 = expected cut, 2 = expected all node.
+    node_type: usize,
+    /// TT entry bound at the node: 0 = none, 1 = exact, 2 = lower, 3 = upper.
+    tt_bound: usize,
+}
+
+/// Scorer threshold (1/1000 units) and the extra plies for the moves at or
+/// below it (in the recall test about 22% of reduced quiets scored above 5370). Desktop
+/// pilot vs main (depth 14 on 696 positions with a depth-20 oracle, root-move
+/// regret se ~0.85 cp; 400 games at 40 ms/move): t=5370 -9% nodes, -0.4 cp,
+/// +5 +-24 Elo; t=6900 -17% nodes, +0.3 cp, -18 +-22; unprotected +1 -26%
+/// nodes, +0.9 cp, -17 +-23. Screens only; acceptance is the SPRT.
+const LMR_PROTECT_THRESHOLD: i32 = 5370;
+const LMR_PROTECT_EXTRA: i32 = 1;
+
+/// 1000 * w_idx * ln(1 + idx).
+const LMR_PROTECT_IDX: [i16; LMR_MAX_MOVES] = [
+    0, 280, 443, 560, 650, 723, 785, 839, 887, 929, 968, 1003, 1035, 1065, 1093, 1119, 1143, 1167, 1188, 1209,
+    1229, 1248, 1265, 1283, 1299, 1315, 1330, 1345, 1359, 1373, 1386, 1399, 1411, 1423, 1435, 1446, 1457, 1468,
+    1479, 1489, 1499, 1509, 1518, 1527, 1536, 1545, 1554, 1562, 1571, 1579, 1587, 1595, 1602, 1610, 1617, 1625,
+    1632, 1639, 1646, 1652, 1659, 1666, 1672, 1679,
+];
+const LMR_PROTECT_KIND: [i32; 6] = [628, 1018, 866, 900, 1209, 775];
+const LMR_PROTECT_NODE_TYPE: [i32; 3] = [983, 2402, 2012];
+const LMR_PROTECT_TT_BOUND: [i32; 4] = [1406, 908, 1455, 1628];
+
+fn lmr_protect_score(f: &LmrProtectFeatures) -> i32 {
+    let mut s = 294 * f.history / 4000 + 428 * f.continuation / 4000;
+    s += -211 * f.killer0 as i32 - 119 * f.killer1 as i32 + 420 * f.counter as i32;
+    s += 2234 * f.gives_check as i32;
+    s += 1685 * f.see.clamp(-900, 900) / 300 - 1018 * (f.see < 0) as i32;
+    s += 794 * f.from_attacked as i32 + 416 * f.to_attacked as i32;
+    s += 2870 * f.child_eval.clamp(-600, 600) / 200 + 1013 * (f.child_eval > -25) as i32;
+    s += -1277 * f.static_eval.clamp(-600, 600) / 200 + 504 * f.improving as i32;
+    s += LMR_PROTECT_IDX[f.idx.min(LMR_MAX_MOVES - 1)] as i32;
+    s += -806 * f.r / 3 + 1842 * f.depth / 10;
+    s + LMR_PROTECT_KIND[f.kind] + LMR_PROTECT_NODE_TYPE[f.node_type] + LMR_PROTECT_TT_BOUND[f.tt_bound]
+}
+
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
 fn history_bonus(depth: i32) -> i32 {
@@ -2056,6 +2123,14 @@ fn negamax_body(
             captures_tried.push(mv);
         }
 
+        // Pre-move inputs of the LMR protection scorer, for moves LMR will reduce.
+        let lmr_candidate = quiet && !in_check && depth >= params.lmr_min_depth && idx >= params.lmr_min_move_index;
+        let (pre_see, pre_kind) = if lmr_candidate {
+            (see(board, mv), board.squares[mv.from as usize].map_or(0, |p| crate::bitboard::kind_index(p.kind)))
+        } else {
+            (0, 0)
+        };
+
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
@@ -2084,11 +2159,7 @@ fn negamax_body(
                 !pv_node && !cut_node,
             );
         } else {
-            let reduction = if quiet
-                && !in_check
-                && depth >= params.lmr_min_depth
-                && idx >= params.lmr_min_move_index
-            {
+            let reduction = if lmr_candidate {
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
                 let m = idx.min(LMR_MAX_MOVES - 1);
                 let mut r = engine.lmr_table[d][m];
@@ -2115,13 +2186,47 @@ fn negamax_body(
                 if !improving {
                     r += params.lmr_not_improving;
                 }
+                // The child evaluates itself from the same cache entry anyway.
+                let child_eval = -engine.eval_cache.eval(board, child_key) - alpha;
+                let protect_score = lmr_protect_score(&LmrProtectFeatures {
+                    history: quiet_history,
+                    continuation: quiet_continuation,
+                    killer0: Some(mv) == killers[0],
+                    killer1: Some(mv) == killers[1],
+                    counter: Some(mv) == counter_move,
+                    gives_check,
+                    see: pre_see,
+                    kind: pre_kind,
+                    from_attacked: (threats >> mv.from) & 1 != 0,
+                    to_attacked: (threats >> mv.to) & 1 != 0,
+                    child_eval,
+                    static_eval: static_eval.map_or(-600, |se| se - alpha),
+                    improving,
+                    idx,
+                    r,
+                    depth,
+                    node_type: if pv_node {
+                        0
+                    } else if cut_node {
+                        1
+                    } else {
+                        2
+                    },
+                    tt_bound: match tt_entry.map(|e| e.bound) {
+                        None => 0,
+                        Some(Bound::Exact) => 1,
+                        Some(Bound::Lower) => 2,
+                        Some(Bound::Upper) => 3,
+                    },
+                });
                 // A move whose static result already reaches (nearly) alpha is
                 // where a reduction hides a fail high: reduce it one ply less.
-                // The child evaluates itself from the same cache entry anyway.
-                if !gives_check
-                    && -engine.eval_cache.eval(board, child_key) > alpha - LMR_CHILD_EVAL_SAFE_MARGIN
-                {
+                if !gives_check && child_eval > -LMR_CHILD_EVAL_SAFE_MARGIN {
                     r -= 1;
+                }
+                // Moves the protection scorer does not pick are reduced more.
+                if protect_score <= LMR_PROTECT_THRESHOLD {
+                    r += LMR_PROTECT_EXTRA;
                 }
                 r.clamp(0, depth - 2)
             } else {
