@@ -199,3 +199,111 @@ The older branch `feat-policy-order-v0` (24 Nov: Python ranker prototype
 with a requirements.txt, top-1 13.5% vs 12.2% on 74 positions) is
 superseded by this note. Its tools also need non-stdlib Python packages, which the
 project's stdlib-only tooling rule excludes.
+
+## Upper bounds for the remaining shapes (2026-11-25, later)
+
+Three shapes the note above left open: a policy used for **reductions**,
+ordering **only at deep nodes**, and **root-only** ordering. Same oracle
+setup (962 positions, oracle = depth-17 TT, arms at depth 13, desktop, 2
+processes, nice 19; raw output `~/agent-runs/policy/out/U{1,2,3}`), plus a
+quality measure. Summary: `scripts/policy/ub_sum.py`.
+
+New `oracletest` pieces (feature `policy-oracle`, default build unchanged):
+- LMR modes, applied to the reduction `r` of every LMR-reduced quiet before
+  the clamp: 10 = oracle best -1; 11 = oracle-bad +1 (the child's oracle
+  upper bound is at least `badcp` below the node's oracle lower bound, the
+  child entry at least as deep as the reduced search; 6th arm field, 100 or
+  0); 12 = both; 13 = both, right at pct% of nodes, inverted at the rest;
+  14 / 15 / 19 = no-oracle controls, every reduced move +1 / -1 / +2;
+  17 / 18 = every reduced move +1 / +2 but the oracle best -1 (pct = recall:
+  at the other nodes the best move is not protected); 20 = control for 18:
+  +2 everywhere with a pseudo-random ~0.5% of reduced moves protected (the
+  oracle best's rate).
+- Mode 16: root only, the deep search's best move first at every iteration.
+- `v=14`: every distinct root move any arm chose (and the deep move) is
+  re-searched (child at depth 14, fresh state). **Value loss** = best
+  verified score among the candidates - the arm's move's verified score (cp,
+  capped at 300), averaged over positions; `dloss` = paired difference vs
+  the base arm.
+
+Noise floor: no-op arms (history bonus x0.98/0.99/1.01/1.02) give log node
+ratios -0.012..+0.005 (se 0.010) and dloss -1.3..+2.4 cp (se 1.2-1.5). The
+base arm and a rerun of arm 18 on a rebuilt binary are bit-identical in
+nodes. The quality measure does resolve LMR changes: the no-oracle +1 / +2
+controls lose +4.2 / +5.5 cp (2.3 / 3 se).
+
+| shape | arm | nodes (sum) | log ratio (se) | dloss cp (se) | root agree % | cost (GitHub, NPS) |
+|---|---|---|---|---|---|---|
+| | base | 1.000 | 0 | 0 | 70.4 | |
+| noise | no-op x0.98..x1.02 | 0.992..1.019 | -0.012..+0.005 (0.010) | -1.3..+2.4 (1.3) | 64.6..69.0 | A/A -0.1..+0.6% |
+| LMR, 1-ply tweaks | 10: oracle best -1 | 1.008 | +0.003 (0.013) | -4.5 (1.7) | 67.9 | |
+| | 11: bad +1 (100 cp) | 0.993 | -0.020 (0.012) | -0.6 (1.6) | 66.5 | |
+| | 11: bad +1 (0 cp) | 0.951 | -0.055 (0.013) | +2.0 (1.7) | 66.5 | |
+| | 12: both (0 cp) | 0.965 | -0.040 (0.013) | -2.2 (1.8) | 65.7 | |
+| | 13: both, 80% right | 0.993 | -0.025 (0.013) | -4.7 (1.6) | 67.9 | |
+| | 13: both, 60% right | 0.999 | -0.011 (0.013) | -1.7 (1.7) | 66.1 | |
+| LMR controls | 14: all +1 | 0.810 | -0.216 (0.013) | **+4.2** (1.9) | 62.2 | |
+| | 15: all -1 | 1.360 | +0.283 (0.014) | -3.9 (1.7) | 69.0 | |
+| | 19: all +2 | 0.691 | -0.364 (0.013) | **+5.5** (1.9) | 60.6 | |
+| | 20: all +2, random 0.5% protected | 0.691 | -0.363 (0.014) | **+7.9** (2.0) | 61.1 | |
+| **LMR, aggressive + protected best** | 17: all +1, best -1 | 0.813 | -0.200 (0.013) | -1.0 (1.8) | 67.6 | |
+| | **18: all +2, best -1** | **0.700** | **-0.344 (0.012)** | **-1.2 (1.7)** | 67.2 | |
+| | 18, recall 80% | 0.709 | -0.342 (0.013) | +1.4 (1.8) | 64.7 | |
+| | 18, recall 50% | 0.688 | -0.368 (0.013) | +2.8 (1.9) | 64.1 | |
+| | cost: cold scorer at depth >= 3, H32 / H64 | | | | | **-1.9% / -3.0%** |
+| deep ordering | 4 (perfect quiet bonus), all depths, ref. | 0.872 | -0.129 (0.013) | -7.8 (1.6) | 74.2 | gate B: 4.3-5.4% |
+| | 4, depth >= 6 | 0.948 | -0.055 (0.012) | -2.9 (1.7) | 71.0 | H64 -0.5/-0.7%; H256 -2.0% |
+| | 4, depth >= 8 | 0.976 | -0.017 (0.012) | -2.9 (1.7) | 71.9 | H64 -0.1% |
+| | cold-hook plumbing control (never scores) | | | | | +0.1% (noise) |
+| root only | 16: deep best first at the root | 0.964 | -0.033 (0.013) | -2.4 (1.9) | 76.6 | ~0 (once per iteration) |
+
+Cost rows: speed-compare on `policy-speed`, two rounds (runs 45562257199,
+45568671662), 6 runners x 10 rounds, bench depth 13, bench nodes identical
+to main on every runner, default kernels (AVX2-only within 0.5 pp). Branches
+`policy-deep-{d3,d3h32,d6,d6h256,d8,d6never}`: the gate-B dummy scorer
+(random weights, `black_box(s) & 0`), called once per node from
+`negamax_body` after the picker is built, through a `#[cold]
+#[inline(never)]` method; nothing in `MovePicker::next` or the move loop.
+**This placement removes the 3.1% layout cost of the gate-B hook** (the
+never-scoring control is +0.1%, inside the A/A spread); what is left is the
+arithmetic, paid in proportion to the nodes that run it.
+
+Readings:
+- **Reductions are the one shape with a large bound.** The 1-ply oracle
+  tweaks are small (2-5% nodes or a few cp, near the noise), because the
+  oracle best is among the LMR-reduced moves only ~0.5% of the time. But
+  that 0.5% is what makes aggressive LMR unsafe: +2 plies everywhere saves
+  31% of nodes and loses 5.5 cp; the same with the oracle best protected
+  saves 30% and loses nothing measurable (-1.2 ± 1.7). Protecting a random
+  move at the same rate (arm 20) does not help (+7.9), so it is the right
+  move, not the protection rate. Recall degrades it smoothly: 80% recall
+  +1.4 cp, 50% +2.8 cp, at the same ~30% saving. False positives are
+  cheap in nodes (arm 20 vs 19: equal nodes).
+- **Contamination caveat (strong here):** the protected move is the
+  depth-17 best, and the quality measure rewards finding it, so arm 18's
+  quality is an upper bound. Fixed-depth nodes at equal root-move quality
+  are not Elo; the existing LMR terms were tuned with today's reductions.
+  One run per arm; the controls (14/19/20, five no-op seeds) are what make
+  the reading credible.
+- Deep-only ordering: at depth >= 6 the perfect bound is 5.2% nodes for
+  0.5-0.7% NPS; with the gate-A precision discount (80% precise keeps about
+  45% of the perfect saving) it is ~2% net, about +1-2 Elo. Depth >= 8: 2.4%
+  perfect.
+- Root only: perfect root ordering saves 3.6% nodes (2.5 se); the TT move
+  and iterative deepening already get most of it.
+
+| shape | upper bound (nodes at depth 13) | quality | cost | verdict |
+|---|---|---|---|---|
+| reductions: aggressive LMR, policy protects the best late move | **-30%** (recall 80%: -29%) | equal within noise (+1.4 cp at 80% recall), vs +5.5 cp unprotected | 1.9% (H32) / 3.0% (H64) at depth >= 3 | **conditional go**: worth a cheap recall test (gate C-lite) before any model |
+| reductions: 1-ply tweaks (best -1, bad +1) | -2..-5% | -4.5..+2 cp | same | no-go on its own (subsumed by the row above) |
+| ordering only at depth >= 6 / 8 | -5.2% / -2.4% perfect, ~-2% realistic | n/a | 0.5-0.7% / ~0% | **no-go** (+1-2 Elo at best) |
+| root only | -3.6% perfect | n/a | ~0 | **no-go** (bound too small) |
+
+Next step, if the coordinator takes the reductions row: a label test
+without any engine change. From oracle runs, dump the in-tree nodes where
+the oracle best move is LMR-reduced, with the reduced move set, and measure
+how often a cheap scorer (history-only baseline first, then a small model
+on our own data) ranks the oracle best first or in its top 2 among the
+reduced moves. Needed: well above the history baseline, and close to 80%
+recall at top 1-2. Only then an integration, with a real SPRT; LMR
+constants would need retuning around the +2 shift.
