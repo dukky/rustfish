@@ -114,3 +114,26 @@ on most runners.
   profile `negamax_body` line by line on the merged stack.
 - AVX-512 kernels pay on Zen 5 only; revisit with a per-CPU choice only if
   the rating machines are known to be Zen 5 / Intel.
+
+## Round 2 (25 Nov, main 30f83d4 / 1a453b8)
+
+| branch | change | x86 NPS | x86 time-to-depth (bench 13) | arm | verdict |
+|---|---|---|---|---|---|
+| `speed-tt-first` (search change, `Bench: 183218`) | yield a verified TT move (`Board::tt_move_legal`, exact except castling / ep, which fall back) before generating and scoring the rest; the rest is scored after the TT move's subtree, so order and nodes change | -2.41% [-2.61, -0.88] | **-6.44%** [-7.89, -6.25] (faster) | NPS -0.02%, time -8.68% | SPRT |
+| `speed-eval2` (exact) | two pending plies updated in one AVX2 pass (`update_pw2`) | -1.96% [-3.55, -0.43] | +2.00% | -2.55% (two-step fallback: the refactor alone costs) | drop |
+
+Nodes to depth, main -> tt-first (deterministic, desktop): d9 198243 ->
+183218 (-7.6%), d11 610971 -> 673470 (+10.2%), d13 1624905 -> 1483487
+(-8.7%), d15 4226748 -> 3887979 (-8.0%). The NPS drop is the changed node
+mix (fewer generate-and-score nodes are skipped than the tree shrinks);
+time to depth is what counts, and the SPRT decides.
+
+Cheaper SEE: not pursued. Capture ordering uses the exact SEE value
+(`capture_stage_score_from_see`, 1024 * (16 * victim + SEE)), so no early
+exit keeps the order; SEE is ~3.5% in all.
+
+Line profile of `negamax_body` on `speed-stack-r1` (EPYC 7763, AVX2): 8.5%
+self, no line above 1.1% (eval-cache probe 0.8%, `rep_stack.push` 0.7%,
+move-loop overhead): nothing worth a branch. On the stack the profile is now
+FT fused update 21.9% incl., picker 8.7%, head L1 6.7%, movegen 6.4%,
+refresh 3.5%; the row prefetch has dropped out of the top items.
