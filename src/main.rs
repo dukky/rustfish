@@ -863,6 +863,8 @@ impl Board {
         }
     }
 
+    /// `captures_only` is the quiescence move set: captures (with every
+    /// promotion piece) plus non-capturing queen promotions.
     fn generate_legal_moves(&mut self, captures_only: bool, buf: &mut Vec<Move>) {
         let side = self.side_to_move;
         let st = self.legal_state(side);
