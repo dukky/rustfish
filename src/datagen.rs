@@ -1,6 +1,6 @@
 //! Self-play data generation (training data for NNUE and the Texel tuner).
 //!
-//! `datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N]`
+//! `datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N] [randplies=N]`
 //! plays fixed-node self-play games from random openings and writes one
 //! position per line in the shared training format:
 //!
@@ -13,7 +13,8 @@
 //! CI shards that split one seed into disjoint game ranges concatenate into
 //! exactly the file a single run would have written.
 //!
-//! Openings are startpos plus 8 or 9 uniformly random legal plies; starts that
+//! Openings are startpos plus 8 or 9 uniformly random legal plies (`randplies=N`:
+//! N or N+1, default 8, so either side can be to move); starts that
 //! a short search scores beyond OPENING_MAX_SCORE are rejected. A position is
 //! recorded unless the side to move is in check, the search's best move is a
 //! capture or promotion, or the score is a mate score. Games end on mate,
@@ -39,7 +40,8 @@ use std::io::BufWriter;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-const RANDOM_PLIES_MIN: usize = 8; // 8 or 9, so either side can be to move
+const RANDOM_PLIES_MIN: usize = 8; // default: 8 or 9, so either side can be to move
+const RANDOM_PLIES_MAX: usize = 40;
 const OPENING_PROBE_NODES: u64 = 1000;
 const OPENING_MAX_SCORE: i32 = 400;
 const MAX_GAME_PLIES: usize = 400;
@@ -63,6 +65,7 @@ struct Shared {
     end_game: u64,
     nodes: u64,
     soft_nodes: Option<u64>,
+    rand_plies: usize,
     seed: u64,
     next_game: AtomicU64,
     games_done: AtomicU64,
@@ -81,12 +84,20 @@ pub(crate) fn handle_datagen(cmd: &str) {
     // Positional arguments, then optional `key=value` options in any order.
     let tokens: Vec<&str> = cmd.split_whitespace().filter(|t| !t.contains('=')).collect();
     let mut soft_nodes = None;
+    let mut rand_plies = RANDOM_PLIES_MIN;
     for opt in cmd.split_whitespace().filter(|t| t.contains('=')) {
         match opt.split_once('=') {
             Some(("softnodes", v)) => match v.parse::<u64>() {
                 Ok(n) if n > 0 => soft_nodes = Some(n),
                 _ => {
                     eprintln!("datagen: bad softnodes value {:?}", v);
+                    return;
+                }
+            },
+            Some(("randplies", v)) => match v.parse::<usize>() {
+                Ok(n) if (1..=RANDOM_PLIES_MAX).contains(&n) => rand_plies = n,
+                _ => {
+                    eprintln!("datagen: bad randplies value {:?} (1..={})", v, RANDOM_PLIES_MAX);
                     return;
                 }
             },
@@ -97,7 +108,7 @@ pub(crate) fn handle_datagen(cmd: &str) {
         }
     }
     let Some(path) = tokens.get(1) else {
-        eprintln!("usage: datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N]");
+        eprintln!("usage: datagen <out.txt> <games> [nodes] [threads] [seed] [first_game] [softnodes=N] [randplies=N]");
         return;
     };
     let arg = |i: usize, default: u64| tokens.get(i).and_then(|t| t.parse::<u64>().ok()).unwrap_or(default);
@@ -119,6 +130,7 @@ pub(crate) fn handle_datagen(cmd: &str) {
         end_game: first_game.saturating_add(games),
         nodes,
         soft_nodes,
+        rand_plies,
         seed,
         next_game: AtomicU64::new(first_game),
         games_done: AtomicU64::new(0),
@@ -137,12 +149,13 @@ pub(crate) fn handle_datagen(cmd: &str) {
         start: Instant::now(),
     });
     eprintln!(
-        "datagen: games {}..{} seed {} nodes {} softnodes {} threads {} -> {}",
+        "datagen: games {}..{} seed {} nodes {} softnodes {} randplies {} threads {} -> {}",
         first_game,
         shared.end_game,
         seed,
         nodes,
         soft_nodes.map_or("off".to_string(), |n| n.to_string()),
+        rand_plies,
         threads,
         path
     );
@@ -229,7 +242,7 @@ fn worker(shared: &Shared) {
         }
         let mut rng = splitmix64(splitmix64(shared.seed) ^ g);
         let mut game = Game::default();
-        play_game(&mut board, &mut engine, &mut probe, &go, &go_probe, soft_nodes, &mut rng, &mut game);
+        play_game(&mut board, &mut engine, &mut probe, &go, &go_probe, soft_nodes, shared.rand_plies, &mut rng, &mut game);
 
         let (res_str, idx) = match game.result {
             r if r > 0 => ("1.0", 0),
@@ -283,7 +296,7 @@ fn push_history(board: &Board, engine: &mut EngineState) {
     engine.position_history.push(h);
 }
 
-/// Start position plus 8 or 9 random legal plies, retried until the game is
+/// Start position plus `rand_plies` or one more random legal plies, retried until the game is
 /// still going and a short search does not find it lopsided. Leaves `engine`
 /// cleared with the opening in its position history; returns the ply count.
 fn random_opening(
@@ -291,11 +304,12 @@ fn random_opening(
     engine: &mut EngineState,
     probe: &mut EngineState,
     go_probe: &str,
+    rand_plies: usize,
     rng: &mut u64,
 ) -> usize {
     let mut moves = Vec::new();
     'retry: loop {
-        let plies = RANDOM_PLIES_MIN + (next_rand(rng) & 1) as usize;
+        let plies = rand_plies + (next_rand(rng) & 1) as usize;
         board.set_startpos();
         probe.clear_for_new_game();
         push_history(board, probe);
@@ -349,10 +363,11 @@ fn play_game(
     go: &str,
     go_probe: &str,
     soft_nodes: u64,
+    rand_plies: usize,
     rng: &mut u64,
     game: &mut Game,
 ) {
-    let start_ply = random_opening(board, engine, probe, go_probe, rng);
+    let start_ply = random_opening(board, engine, probe, go_probe, rand_plies, rng);
     let mut moves = Vec::new();
     let mut win_run = 0u32;
     let mut win_sign = 0i32;
