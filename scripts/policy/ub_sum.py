@@ -2,7 +2,7 @@
 """Summarise `oracletest ... v=<d>` output (policy upper bounds: LMR, deep
 ordering, root ordering).
 
-usage: ub_sum.py <shard files...> [--base 0:0:100:100]
+usage: ub_sum.py <shard files...> [--base 0:0:100:100] [--half 0|1]
 Per arm: nodes vs base (sum ratio; mean per-position log ratio, se), root
 agreement with the deep search, and value loss of the chosen root move: each
 distinct chosen move is re-searched (child at depth v, fresh state); loss =
@@ -13,6 +13,7 @@ best / oracle-bad.
 """
 import math
 import sys
+import zlib
 
 
 def parse(paths):
@@ -23,7 +24,7 @@ def parse(paths):
             if not t:
                 continue
             if t[0] == "POS":
-                cur = {"arms": {}, "ver": {}}
+                cur = {"arms": {}, "ver": {}, "half": zlib.crc32(line.encode()) % 2}
                 pos.append(cur)
             elif t[0] == "DEEP" and cur is not None:
                 cur["deep"] = dict(kv.split("=", 1) for kv in t[1:])
@@ -49,7 +50,14 @@ def main():
         i = args.index("--base")
         base = args[i + 1]
         del args[i:i + 2]
+    half = None
+    if "--half" in args:
+        i = args.index("--half")
+        half = int(args[i + 1])
+        del args[i:i + 2]
     pos = parse(args)
+    if half is not None:
+        pos = [p for p in pos if p["half"] == half]  # recall.py split: 1 = test half
     arms = []
     for p in pos:
         for a in p["arms"]:
