@@ -426,17 +426,17 @@ struct CacheEntry {
     bb: PieceBBs,
 }
 
-/// Refresh perspective `persp` in king context `k` for the position `bb`
-/// through its cache entry; the result goes to `out` and the entry.
-/// Exact: wrapping i16 sums do not depend on the order of the rows.
-fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, bb: &PieceBBs, out: &mut [i16; H]) {
+/// Feature rows that turn the cache entry's pieces `old` into `new` for
+/// perspective `persp` in king context `k`: (adds, count, subs, count).
+#[inline(always)]
+fn diff_features(persp: Color, k: KingCtx, new: &PieceBBs, old: &PieceBBs) -> ([usize; 32], usize, [usize; 32], usize) {
     let mut adds = [0usize; 32];
     let mut subs = [0usize; 32];
     let (mut na, mut ns) = (0, 0);
     for c in 0..2 {
         for t in 0..6 {
-            let (new, old) = (bb[c][t], e.bb[c][t]);
-            let (mut a, mut s) = (new & !old, old & !new);
+            let (nw, od) = (new[c][t], old[c][t]);
+            let (mut a, mut s) = (nw & !od, od & !nw);
             while a != 0 && na < 32 {
                 adds[na] = feature_ck(persp, c, t, a.trailing_zeros() as u8, k);
                 na += 1;
@@ -450,12 +450,29 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
             debug_assert!(a == 0 && s == 0, "more than 32 pieces");
         }
     }
+    (adds, na, subs, ns)
+}
+
+/// Rows per refresh pass (each side).
+const REFRESH_ROWS: usize = 4;
+
+/// The rows of one refresh pass: `idx[at..at + len]` (`len` <= 4; the
+/// unused array slots repeat a valid row and are never read).
+#[inline(always)]
+fn pass_rows<'a>(net: &'a Network, idx: &[usize; 32], at: usize, len: usize) -> [&'a [i16; H]; REFRESH_ROWS] {
+    std::array::from_fn(|x| net.row(idx[(at + x.min(len.saturating_sub(1))).min(31)]))
+}
+
+/// Refresh perspective `persp` in king context `k` for the position `bb`
+/// through its cache entry; the result goes to `out` and the entry.
+/// Exact: wrapping i16 sums do not depend on the order of the rows.
+fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, bb: &PieceBBs, out: &mut [i16; H]) {
+    let (adds, na, subs, ns) = diff_features(persp, k, bb, &e.bb);
     let (mut i, mut j) = (0, 0);
     while i < na || j < ns {
-        let ka = (na - i).min(4);
-        let ks = (ns - j).min(4);
-        let ar: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(adds[(i + x.min(ka.saturating_sub(1))).min(31)]));
-        let sr: [&[i16; H]; 4] = std::array::from_fn(|x| net.row(subs[(j + x.min(ks.saturating_sub(1))).min(31)]));
+        let ka = (na - i).min(REFRESH_ROWS);
+        let ks = (ns - j).min(REFRESH_ROWS);
+        let (ar, sr) = (pass_rows(net, &adds, i, ka), pass_rows(net, &subs, j, ks));
         // In place on the entry, every chunk also stored to `out` (the last
         // one's stores leave it final), so neither side needs a copy.
         let acc = e.acc.as_mut_ptr();
@@ -469,6 +486,53 @@ fn refresh_cached(net: &Network, e: &mut CacheEntry, persp: Color, k: KingCtx, b
         *out = e.acc;
     }
     e.bb = *bb;
+}
+
+/// `refresh_cached` for an evaluation (`HEAD`): the last pass is the fused
+/// update kernel, so it also yields the output sum against `w` (with
+/// `EVAL`) and the head's pairwise input `x` of the result, as the update
+/// path does, instead of two more passes over the refreshed accumulator.
+/// The entry gets the result by copy. Same values as `refresh_cached`
+/// followed by `screlu_dot` and `activate`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn refresh_cached_pw<const EVAL: bool>(
+    net: &Network,
+    e: &mut CacheEntry,
+    persp: Color,
+    k: KingCtx,
+    bb: &PieceBBs,
+    out: &mut [i16; H],
+    w: &[i16; H],
+    x: &mut [u8],
+    base: usize,
+    nnz: &mut [u16; head::NNZ_BUF],
+    n: usize,
+) -> (i64, usize) {
+    let (adds, na, subs, ns) = diff_features(persp, k, bb, &e.bb);
+    e.bb = *bb;
+    if na == 0 && ns == 0 {
+        *out = e.acc;
+        let sum = if EVAL { simd::screlu_dot(out, w) } else { 0 };
+        return (sum, head::kernels::activate(out, x, base, nnz, n));
+    }
+    // All but the last pass in place on the entry.
+    let (mut i, mut j) = (0, 0);
+    while na - i > REFRESH_ROWS || ns - j > REFRESH_ROWS {
+        let ka = (na - i).min(REFRESH_ROWS);
+        let ks = (ns - j).min(REFRESH_ROWS);
+        let (ar, sr) = (pass_rows(net, &adds, i, ka), pass_rows(net, &subs, j, ks));
+        let acc = e.acc.as_mut_ptr();
+        // SAFETY: as in `refresh_cached` (`out` is overwritten below).
+        unsafe { simd::update_dual(acc, out.as_mut_ptr(), acc, &ar[..ka], &sr[..ks]) };
+        i += ka;
+        j += ks;
+    }
+    let (ka, ks) = (na - i, ns - j);
+    let (ar, sr) = (pass_rows(net, &adds, i, ka), pass_rows(net, &subs, j, ks));
+    let r = head::kernels::update_pw::<EVAL>(out, &e.acc, &ar[..ka], &sr[..ks], w, x, base, nnz, n);
+    e.acc = *out;
+    r
 }
 
 /// Feature changes of one move: at most two additions and two removals
@@ -786,13 +850,18 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
         if L::REFRESH && dst.refresh[pi] {
             let mut c = cache.borrow_mut();
             let bb = dst.bb;
-            refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
-            if EVAL {
-                sum += simd::screlu_dot(&dst.acc.v[pi], w);
-            }
+            let e = &mut c[pi * 2 * L::KB + k.slot()];
             if let Some(a) = act.as_deref_mut() {
                 let hx = head::CHUNKS * 2;
-                a.n = head::kernels::activate(&dst.acc.v[pi], &mut a.x.0[half * hx..(half + 1) * hx], half * hx / 4, &mut a.nnz, a.n);
+                let (x, nnz) = (&mut a.x.0[half * hx..(half + 1) * hx], &mut a.nnz);
+                let (s, n) = refresh_cached_pw::<EVAL>(net, e, persp, k, &bb, &mut dst.acc.v[pi], w, x, half * hx / 4, nnz, a.n);
+                a.n = n;
+                sum += s;
+                continue;
+            }
+            refresh_cached(net, e, persp, k, &bb, &mut dst.acc.v[pi]);
+            if EVAL {
+                sum += simd::screlu_dot(&dst.acc.v[pi], w);
             }
             continue;
         }
