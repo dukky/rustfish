@@ -1615,6 +1615,7 @@ fn negamax_body(
     known_in_check: Option<bool>,
     cut_node: bool,
 ) -> i32 {
+    crate::stats::inc(0);
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
     if in_check {
         depth += 1;
@@ -2293,6 +2294,7 @@ fn quiescence(
     prev_move: Option<Move>,
 ) -> i32 {
     search.nodes += 1;
+    crate::stats::inc(1);
     if search.should_stop() {
         return 0;
     }
