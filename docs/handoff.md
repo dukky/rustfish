@@ -26,6 +26,7 @@ below keeps running without a Claude session except the items marked *laptop*.
   - **Datagen** (desktop, tmux `datagen6`, `~/rustfish-data/runlong-2039.sh`, D2039-D2048, 8 threads,
     packs .rfp). Restart it with the next seeds when it ends (~Mon 30 Nov) or after a reboot.
   - Speed round 4 finished: no gain (the long-search NPS drop is the tree, not a defect); nothing to queue.
+  - **Ablation batch 1** (desktop GPU, `~/rustfish-data/gpu-jobs/ablate1.sh`, starts by itself after gen 12, done ~23:00 Wed): ctlA, ctlB, arm0 nets in `~/rustfish-data/ablate1/`; embedding them and the fixed-node SPRTs need a session (plan.md Deferred actions).
 - **Next after gen 12:** the net recipe ablation program (plan.md: control seeds, then single-stage vs
   chain, 10 vs 4 plain epochs, lambda 0.7, m1 stage, lr; data arm D1 opening variety) judged by
   fixed-node games (`ci.py sprt <arm> --nodes 200000` vs the control arm). Then, after the SPSA, the tree-size program: LMR-protection recall test first, then aggressive LMR + protection
