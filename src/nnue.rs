@@ -835,7 +835,7 @@ const PREFETCH_STRIDE: usize = if cfg!(target_arch = "aarch64") { 64 } else { 32
 /// row (up to 8 rows x 32 lines per eval) cost more in load slots than the
 /// tail lines saved.
 const PREFETCH_LANES: usize = PF_LINES * PREFETCH_STRIDE;
-const PF_LINES: usize = 8;
+const PF_LINES: usize = 2;
 
 /// Hint the CPU to start loading a feature row. No architectural effect.
 #[inline(always)]
