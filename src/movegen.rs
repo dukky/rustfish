@@ -69,6 +69,17 @@ pub(crate) fn generate_pseudo_moves(board: &Board, captures_only: bool, moves: &
                     }
                 }
             }
+        } else if is_promo {
+            let one = if us == Color::White { sq + 8 } else { sq - 8 };
+            if occ & (1u64 << one) == 0 {
+                moves.push(Move {
+                    from: sq,
+                    to: one,
+                    promotion: Some(PieceType::Queen),
+                    is_en_passant: false,
+                    is_castle: false,
+                });
+            }
         }
 
         // A pawn's attack squares equal the enemy pawn-attacker set of its
@@ -338,6 +349,19 @@ pub(crate) fn generate_legal_moves_fused(
                         }
                     }
                 }
+            }
+        } else if is_promo {
+            // Quiescence move set: a quiet queen promotion is as forcing as
+            // a capture (under-promotions stay out).
+            let one = if us == Color::White { sq + 8 } else { sq - 8 };
+            if occ & (1u64 << one) == 0 && allowed & (1u64 << one) != 0 {
+                sink.push(Move {
+                    from: sq,
+                    to: one,
+                    promotion: Some(PieceType::Queen),
+                    is_en_passant: false,
+                    is_castle: false,
+                });
             }
         }
 

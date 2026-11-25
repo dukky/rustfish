@@ -3595,6 +3595,43 @@ mod tests {
             .unwrap();
     }
 
+    /// qsearch's move set holds a quiet queen promotion (not the under-
+    /// promotions) and finds it: stand pat alone would miss the queen.
+    #[test]
+    fn quiescence_searches_quiet_queen_promotions() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut board = Board::new();
+                board.set_fen("8/4P1k1/8/8/8/8/8/4K3 w - - 0 1");
+                let mut moves = Vec::new();
+                board.generate_legal_moves(true, &mut moves);
+                let promos: Vec<_> = moves.iter().map(|m| (m.from, m.to, m.promotion)).collect();
+                assert_eq!(promos, vec![(52, 60, Some(PieceType::Queen))]);
+
+                let mut engine = EngineState::new();
+                let key = board_hash(&board, &engine.zobrist);
+                let mut rep_stack = vec![key];
+                let mut search = Search::new(None);
+                let score = quiescence(
+                    &mut board,
+                    -INF,
+                    INF,
+                    &mut search,
+                    &mut engine,
+                    &mut rep_stack,
+                    key,
+                    0,
+                    None,
+                    None,
+                );
+                assert!(score > 600, "qsearch score {score}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn quiescence_tt_probe_is_ply_aware_for_mates() {
         thread::Builder::new()
