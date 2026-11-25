@@ -721,6 +721,13 @@ impl<L: Layout> NnueState<L> {
     #[inline]
     pub(crate) fn evaluate(&self, stm: Color, pieces: u32) -> i32 {
         let net = &*self.net;
+        crate::stats::inc(6);
+        match self.top - self.computed.get() {
+            0 => {}
+            1 => crate::stats::inc(7),
+            2 => crate::stats::inc(8),
+            _ => crate::stats::inc(9),
+        }
         if self.computed.get() < self.top && net.small_out {
             // Bring all but the last pending ply up to date, then update
             // both perspectives for that ply and take their output sums in
@@ -784,6 +791,7 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
         let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
         let half = if persp == stm { 0 } else { 1 };
         if L::REFRESH && dst.refresh[pi] {
+            crate::stats::inc(10);
             let mut c = cache.borrow_mut();
             let bb = dst.bb;
             refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);

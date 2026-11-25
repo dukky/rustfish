@@ -80,8 +80,10 @@ impl EvalCache {
         // too, so they are memoised the same way (the cache is cleared
         // whenever the evaluator changes). The search consumes side-to-move
         // evals: `eval_for_side` is that wrapper for both evaluators.
+        crate::stats::inc(4);
         let slot = &mut self.entries[key as usize & EVAL_CACHE_MASK];
         if let Some(eval) = slot.get(key) {
+            crate::stats::inc(5);
             return eval;
         }
         let eval = if board.nnue.is_some() {

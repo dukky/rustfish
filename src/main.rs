@@ -12,6 +12,20 @@ mod search;
 mod tt;
 mod tune;
 mod uci;
+pub(crate) mod stats {
+    //! Diagnostic counters (diag branch only).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub(crate) const NAMES: [&str; 12] = ["negamax", "qnodes", "tt_probe", "tt_hit", "ec_probe", "ec_hit", "nnue_eval", "pend1", "pend2", "pend3p", "refresh", "tt_store"];
+    pub(crate) static C: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+    #[inline(always)]
+    pub(crate) fn inc(i: usize) {
+        C[i].fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn dump() -> String {
+        let v: Vec<u64> = C.iter().map(|c| c.swap(0, Ordering::Relaxed)).collect();
+        NAMES.iter().zip(v).map(|(n, x)| format!("{n}={x}")).collect::<Vec<_>>().join(" ")
+    }
+}
 
 use std::cmp::Reverse;
 use std::io::{self, BufRead, Write};
@@ -1265,6 +1279,7 @@ fn main() {
             search::ACTIVE_GO.store(go_seq, std::sync::atomic::Ordering::SeqCst);
             let best = handle_go(cmd, &mut board, &mut engine);
             search::ACTIVE_GO.store(0, std::sync::atomic::Ordering::SeqCst);
+            println!("info string stats {}", crate::stats::dump());
             println!("bestmove {}", best.unwrap_or_else(|| "0000".to_string()));
             flush_stdout();
             continue;
