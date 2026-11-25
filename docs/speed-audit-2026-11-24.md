@@ -1,0 +1,116 @@
+# Speed audit, 24-25 Nov 2026 (exact speedups only)
+
+Goal: more nodes per second without changing the search (bench nodes and
+`evalhash` identical to `main`). Reference gap: Clover 9.1 ~842k nps vs our
+~519k on the same machine.
+
+## Method
+
+- **Profiles** on GitHub x86 runners (`.github/workflows/speed-compare.yml`,
+  `profile` job): x86-64-v3, non-PIE, line tables, `perf record -F 4999` on
+  `bench 16` (6.87M nodes), attributed by **source line through the inline
+  chain** with `addr2line -i` (`scripts/speed-profile.py`; lto inlines nearly
+  everything into `negamax_body`, so real symbols say little). Two runs: AMD
+  EPYC 9V74 (Zen 4, `bench 14`, 8.5k samples, main aef19c5) and Intel Xeon
+  6975P-C (Granite Rapids, `bench 16`, 19.7k samples, main fa393f0), each with
+  the default (AVX-512) kernels and with `RUSTFISH_NO_AVX512=1` (AVX2).
+- **NPS** only on GitHub runners (desktop shared, laptop in use):
+  `scripts/speed-compare.py` builds base + candidates, refuses any candidate
+  whose bench nodes or evalhash differ, then runs `bench 13` interleaved with
+  plain rotation (each binary in each position equally often), 10-12 rounds
+  per runner, 6 runners (a mix of EPYC 7763 / 9V74 / 9V45, Xeon 8370C / 85xx /
+  6973P / 6975P), on AVX-512 runners once per kernel set. Reported number: the
+  per-runner median of the paired per-round ratios, then the median and
+  spread across runners. Every run includes an A/A control (main vs a copy).
+  An `arm` job (ubuntu-24.04-arm) builds, tests and identity-checks the NEON
+  path and gives a short NPS look.
+- **A/A noise** (6 runners): median of runner medians -0.04..+0.26%, single
+  runners -1.1..+2.0%. Gains below ~0.5% need several runs.
+- First run had a rotation bug (rotation + reversal kept the base first with
+  two binaries; A/A read +0.35%); fixed before the numbers below.
+
+## Time map (x86, self time by source function / file, % of samples)
+
+Intel 6975P-C, AVX-512 kernels (the AMD Zen 4 profile is within ~1-2 points
+on every item; the AVX2 run is the same picture):
+
+| area | % | main items |
+|---|---|---|
+| NNUE FT fused update + pairwise activation (`apply_delta_with` -> `update_pw_avx2`) | 16.5 incl. | row loads (L2/L3 misses on the 12.6 MB FT), stores, `mulhrs`/pack, nonzero-chunk list (`zero_mask`, `push8z`) |
+| **NNUE row prefetch (`prefetch_pending` -> `prefetch_row`)** | **9.7** incl. (8.3 on the one `_mm_prefetch` line) | 32 prefetches per 2 KB row, 4-8 rows per move |
+| MovePicker::new (scoring, history reads, SEE calls) | 8.9 incl. | cont-history row reads 1.8-4.4 (cache misses), SEE 3.5-3.9, `push_either` 1.1 |
+| negamax_body self | 6.2 self / 11.5 incl. | spread over many lines |
+| L1 + L2/L3 of the pairwise head (`l1_rest_v1/v2`) | 6.2 incl. | dpbusd 1.3, `rest_avx2_v` 3.1 |
+| legal move generation | 6.5 incl. | `generate_legal_moves_fused` 3.2, magic lookups 1.2 |
+| MovePicker::next / `take_best_scored` | 4.6 incl. / 3.9 | the max scan |
+| static eval wrapper (`evaluate`, `finish`, scratch) | 3.7 | `head::finish` f64 math 1.4 |
+| make/undo | 4.8 | NNUE `push_move` 1.4 |
+| TT probe | 3.2 (6.1 on Zen 4) | the bucket load right after the prefetch |
+| SEE / see_ge (other callers) | 2.8 | |
+| accumulator refresh (`update_dual`, `refresh_cached`) | 3.1 | king-bucket changes |
+| correction history read (`correction`) | 1.8-2.9 | 4 random i16 loads |
+| child-key prefetch (`approx_child_hash`) | 2.5 | |
+| qsearch self | 2.5 | |
+
+By file: search.rs 30%, nnue_head.rs 24%, nnue.rs 18.5%, tt.rs 8.4%,
+movegen.rs 5.8%, main.rs 5.3%, bitboard.rs 2%. IPC 2.44 (13.7G cycles,
+33.4G instructions for 6.87M nodes: ~2000 cycles and ~4900 instructions per
+node), 2.5% branch misses, 6.8% L1D load misses.
+
+The NNUE (update + head + prefetch + refresh + eval wrapper) is ~40% of the
+time; move ordering (picker, SEE, next) ~18%; movegen ~6.5%.
+
+## Results (paired bench-13 NPS vs main, median of 6 runner medians [min, max])
+
+On main 30f83d4 (bench 198243) unless noted.
+
+| branch | change | x86 default kernels | x86 AVX2 kernels | arm (1 runner) | verdict |
+|---|---|---|---|---|---|
+| `speed-pf8` | prefetch only the first 8 of 32 lines of each pending FT row | **+1.68%** [+0.07, +3.37]; earlier runs on aef19c5/fa393f0: +2.13, +1.40, +0.98 | +1.47 [+0.28, +3.60] | +0.33 | keep |
+| `speed-pf1` / `speed-pf2` | first 1 / 2 lines | +1.57 [+0.64, +3.86] / +1.56 [-0.28, +3.68] (same run: pf8 +1.96 [+0.68, +3.61]) | +1.84 / +1.73 (pf8 +2.07) | +0.53 / +0.83 (pf8 +1.25) | pf8 best |
+| `speed-pf4` | first 4 lines | +1.30 [-1.13, +3.29]; earlier +2.10 | +1.80 | +1.25 | pf8 more consistent |
+| `speed-pf16` | first 16 lines (aef19c5) | +2.16 [+0.31, +3.14] | +1.98 | - | similar to pf8 |
+| `speed-pf0` | no prefetch at all (control, aef19c5) | +0.90 [-0.11, +4.62] | +2.35 [-1.03, +3.10] | - | full prefetch costs more than it saves on Intel; partial is best |
+| `speed-hist-i16` | butterfly, continuation and capture history in i16 (gravity bounds them to +-16384) | **+0.81%** [+0.35, +2.43]; earlier +0.57, +0.38 | +0.35 [0.00, +1.51] | +1.03 | keep |
+| **`speed-stack-r1`** | hist-i16 + pf8 | **+2.51%** [+1.21, +4.05] | +2.62 [+2.20, +3.72] | +0.94 | **merge this** |
+| `speed-pw-avx512` | 512-bit fused FT update | +0.15 [-2.86, +2.34]: Zen 5 +2.1/+2.3, Zen 4 -2.9, Intel +0.4 | -0.95 (kernel unused) | - | drop (Zen 4 double-pumps 512-bit; mixed) |
+| `speed-l1-avx512` | 512-bit L1 (BW / VNNI) | -0.26 [-0.85, +1.14] | +0.19 | - | drop (neutral) |
+| `speed-corr-prefetch` | prefetch the child's correction entries after make_move | -0.78 [-1.59, +2.49] | -0.91 | - | drop (the extra CorrIdx per child costs more) |
+| `speed-pick-soa` | picker lists as parallel move/score arrays, `max()` + `position()` | **-5.61%** [-6.58, -5.00] | -5.65 | - | drop (the existing scan is already good) |
+
+All branches listed were bench- and evalhash-identical (desktop check with
+default, `RUSTFISH_NO_AVX512=1` and `RUSTFISH_NO_VNNI=1`; perfttest,
+`selftest 200`, `cargo test --release`; plain `cargo check` for the
+runtime-dispatch path; arm job: build, tests, bench, evalhash).
+
+## Why the prefetch change works
+
+`prefetch_pending` issued one `prefetcht0` per 64-byte line of every row the
+pending update reads: 32 per row, 128-256 per move. On Intel that line alone
+was 8.3% of all samples (fill-buffer / load-port pressure; the instructions
+retire behind earlier misses). The update reads each row front to back, so
+the hardware stream prefetcher covers the tail once the first lines arrive:
+prefetching the first 8 lines keeps the latency benefit at a quarter of the
+instructions. No prefetch at all is still better than prefetching everything
+on most runners.
+
+## Ideas that would change nodes or eval (for an SPRT, not exact)
+
+- Lazy move generation / scoring (yield the TT move before generating):
+  quiet scores read history that the TT move's subtree updates, so the move
+  order changes; a cutoff on the TT move would skip ~10% of the time
+  (picker + movegen + SEE). Worth an SPRT as a search change.
+- Staged capture/quiet generation for the same reason.
+- Integer `head::finish` (f64 now): would need the trainer's rounding to
+  match; small (1.4%).
+
+## Next steps
+
+- Merge `speed-stack-r1` (= `speed-hist-i16` + `speed-pf8`, +2.5% x86, +0.9%
+  arm) via the `speedup` queue mode; the other branches are dropped.
+- Bigger items left: the FT update itself (memory bound: 12.6 MB FT, rows
+  missing L2) and move ordering (~18%). Exact options: fewer pending-update
+  passes (evals with 2+ pending plies), cheaper SEE on the obvious cases,
+  profile `negamax_body` line by line on the merged stack.
+- AVX-512 kernels pay on Zen 5 only; revisit with a per-CPU choice only if
+  the rating machines are known to be Zen 5 / Intel.
