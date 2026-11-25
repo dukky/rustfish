@@ -671,6 +671,8 @@ struct MovePicker {
     total: usize,
     /// Opponent attack mask the quiet history was read with (see `history_threats`).
     threats: u64,
+    /// Lazy policy scoring done (gate-B prototype).
+    policy_done: bool,
 }
 
 impl Drop for MovePicker {
@@ -705,6 +707,7 @@ impl MovePicker {
                 bufs,
                 total: 0,
                 threats: 0,
+                policy_done: true,
             };
         }
 
@@ -725,7 +728,9 @@ impl MovePicker {
             bufs,
             total: 0,
             threats,
+            policy_done: captures_only,
         };
+        let mut pctx: Option<crate::policy::Ctx> = None;
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
         let side_hist = &history[color_index(side)];
@@ -773,6 +778,11 @@ impl MovePicker {
                 .map(piece_value)
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
+            if crate::policy::MODE == 0 {
+                let c = pctx.get_or_insert_with(|| crate::policy::context(board));
+                let ps = crate::policy::score(c, board, crate::policy::piece_kind(board, mv.from), mv.from, mv.to);
+                score += std::hint::black_box(ps) & 0;
+            }
             let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
             let priority = is_k0 | is_k1 | is_counter | (h > 0) | (ch > 0);
             let b = &mut picker.bufs;
@@ -784,6 +794,23 @@ impl MovePicker {
 
     fn is_empty(&self) -> bool {
         self.total == 0
+    }
+
+    /// Gate-B lazy variant: score every remaining quiet (and the one just
+    /// yielded) once, when the picker first reaches a quiet stage.
+    #[inline(never)]
+    fn policy_rescore(&mut self, board: &Board, first: Move) {
+        self.policy_done = true;
+        let c = crate::policy::context(board);
+        let mut acc = crate::policy::score(&c, board, crate::policy::piece_kind(board, first.from), first.from, first.to);
+        for list in [&mut self.bufs.priority_quiets, &mut self.bufs.quiets] {
+            for e in list.iter_mut() {
+                let ps = crate::policy::score(&c, board, crate::policy::piece_kind(board, e.0.from), e.0.from, e.0.to);
+                acc = acc.wrapping_add(ps);
+                e.1 += std::hint::black_box(ps) & 0;
+            }
+        }
+        std::hint::black_box(acc);
     }
 
     fn next(&mut self) -> Option<(Move, Stage)> {
@@ -1883,6 +1910,13 @@ fn negamax_body(
     let mut check_info: Option<CheckInfo> = None;
 
     while let Some((mv, stage)) = picker.next() {
+        if crate::policy::MODE == 1
+            && !picker.policy_done
+            && depth >= crate::policy::MIN_DEPTH
+            && matches!(stage, Stage::PriorityQuiet | Stage::Quiet)
+        {
+            picker.policy_rescore(board, mv);
+        }
         if Some(mv) == excluded {
             continue;
         }
