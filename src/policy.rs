@@ -19,7 +19,7 @@ pub(crate) const H: usize = 64;
 /// Score only at nodes of at least this depth.
 pub(crate) const MIN_DEPTH: i32 = 6;
 /// Plumbing control: the hook is compiled in but never scores.
-pub(crate) const NEVER: bool = false;
+pub(crate) const NEVER: bool = true;
 
 #[repr(C, align(64))]
 pub(crate) struct PolicyNet {
