@@ -137,3 +137,57 @@ self, no line above 1.1% (eval-cache probe 0.8%, `rep_stack.push` 0.7%,
 move-loop overhead): nothing worth a branch. On the stack the profile is now
 FT fused update 21.9% incl., picker 8.7%, head L1 6.7%, movegen 6.4%,
 refresh 3.5%; the row prefetch has dropped out of the top items.
+
+## Round 3 (25 Nov): NPS against search length (main f33163d, bench 185766)
+
+Tool: `.github/workflows/nps-length.yml` + `scripts/nps-length.py` (25 of the
+peer_nps FENs, `ucinewgame` + `go movetime T` per search, binaries
+interleaved per search, main twice as A/A), counters from the diag-only
+branch `speed-diag-stats` (`info string stats ...`).
+
+NPS by movetime (total nodes / total time; A/A within ~0.5%):
+
+| runner, Hash | 100 ms | 300 ms | 1000 ms | 3000 ms | 100 -> 3000 |
+|---|---|---|---|---|---|
+| EPYC 7763, 16 MB | 1.69M | 1.64M | 1.56M | 1.53M | -9.8% |
+| EPYC 9V45, 64 MB | 2.61M | 2.50M | 2.42M | 2.37M | -9.3% |
+| EPYC 9V45, 256 MB | 2.88M | 2.76M | 2.69M | 2.62M | -9.1% |
+
+Same slope for every Hash. Counters per node, 100 ms -> 3000 ms (all three
+Hash sizes agree to ~0.01):
+
+| | 100 ms | 300 ms | 1000 ms | 3000 ms |
+|---|---|---|---|---|
+| TT hit / probe | 0.211 | 0.216 | 0.208 | 0.211 |
+| eval-cache hit / probe | 0.432 | 0.414 | 0.378 | 0.352 |
+| NNUE evals / node | 0.472 | 0.493 | 0.528 | 0.553 (+17%) |
+| king-bucket refreshes / node | 0.067 | 0.070 | 0.075 | 0.079 (+18%) |
+| qsearch share | 0.331 | 0.327 | 0.325 | 0.319 |
+
+Node-limited runs on the desktop (load-independent) show the same:
+100k -> 4M nodes, eval-cache hit 0.458 -> 0.365, NNUE evals per node 0.440 ->
+0.515. perf, 100 ms vs 3 s searches (EPYC 9V45): the fused FT update grows
+16.5 -> 17.9% and TT probe 7.4 -> 8.5% of samples; TT/eval-cache clearing
+(0.7%) only appears in the short runs.
+
+Reading: the TT is not the cause (hit rate flat over Hash 16-256 and over
+length; NPS slope independent of Hash). The decline is the NNUE work per
+node: longer searches reach more distinct positions, the fixed 2^17-entry
+eval cache (2 MB) hits less, and refreshes rise. With NNUE ~40% of the time,
++17% evals per node is ~-7% NPS, which is most of the measured -9%.
+
+Fix (exact): bigger eval cache. Results (one runner per cell; A/A within
+0.5%):
+
+| branch | entries / memory | 100 ms | 1000 ms | 3000 ms |
+|---|---|---|---|---|
+| `speed-ec18` | 2^18, 4 MB | +0.3 / -0.4 | +0.4 / +0.3 | +0.3 / +1.0 |
+| `speed-ec19` | 2^19, 8 MB | -0.2 / -0.7 / -1.1 / -0.5 | +1.2 / +1.3 / -0.3 / +1.2 | +1.1 / +2.2 / +1.0 / +1.0 |
+| `speed-ec20` | 2^20, 16 MB | -0.1 / -1.5 | +0.8 / +0.1 | +1.7 / +1.5 |
+| **`speed-ec-packed`** | 2^20 in 8-byte entries (valid bit, key tag, i16 eval; still a full-key match), 8 MB | -0.5 / -1.1 | **+1.9 / +0.8** | **+1.7 / +1.8** |
+| `speed-ec-packed21` | 2^21 packed, 16 MB | -1.1 / -1.9 | +1.2 / -0.3 | +1.6 / +1.5 |
+
+(pairs: Xeon 6975P-C Hash 64 / Hash 16; ec18-ec20 first run: EPYC 7763 H64
+/ Xeon H16.) `speed-ec-packed` is the pick: ~+1-2% from 1 s up, ~-1% at
+100 ms. It recovers about a quarter of the decline; the rest is the tree
+itself (more distinct positions per node), not a cache defect.
