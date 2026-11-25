@@ -866,6 +866,14 @@ impl Board {
     /// `captures_only` is the quiescence move set: captures (with every
     /// promotion piece) plus non-capturing queen promotions.
     fn generate_legal_moves(&mut self, captures_only: bool, buf: &mut Vec<Move>) {
+        self.generate_legal_moves_att(captures_only, buf, None);
+    }
+
+    /// `generate_legal_moves`; `enemy_attacks` (every square the side not to
+    /// move attacks, e.g. `ThreatMaps::all`) lets the generator settle king
+    /// moves with one mask when not in check. Same moves, same order.
+    #[inline(always)]
+    fn generate_legal_moves_att(&mut self, captures_only: bool, buf: &mut Vec<Move>, enemy_attacks: Option<u64>) {
         let side = self.side_to_move;
         let st = self.legal_state(side);
         // En passant is the one case the pin/check masks cannot decide
@@ -897,7 +905,7 @@ impl Board {
                 }
             }
         }
-        generate_legal_moves_fused(self, captures_only, &st, ep_legal_from, buf);
+        generate_legal_moves_fused(self, captures_only, &st, ep_legal_from, enemy_attacks, buf);
     }
 
     #[cfg(test)]
@@ -1359,6 +1367,10 @@ mod legal_filter_tests {
             board.generate_legal_moves_reference(captures_only, &mut reference);
             assert!(*board == before, "board changed by movegen: {ctx}");
             assert_eq!(fused, reference, "captures_only={captures_only} {ctx}");
+            // With the enemy attack mask (as the move picker passes it).
+            let att = crate::movegen::threat_maps(board, board.side_to_move.opposite()).all;
+            board.generate_legal_moves_att(captures_only, &mut fused, Some(att));
+            assert_eq!(fused, reference, "attack mask, captures_only={captures_only} {ctx}");
         }
     }
 

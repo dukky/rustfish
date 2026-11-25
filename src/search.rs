@@ -703,7 +703,16 @@ impl MovePicker {
         captures_only: bool,
         move_buf: &mut Vec<Move>,
     ) -> Self {
-        board.generate_legal_moves(captures_only, move_buf);
+        let params = &engine.search_params;
+        // Only nodes that generate quiets need the threat maps; their full
+        // enemy attack mask also settles the king's moves in the generator.
+        let maps = if captures_only {
+            ThreatMaps::default()
+        } else {
+            node_threat_maps(board, params)
+        };
+        let have_maps = !captures_only && (params.threat_history || params.threat_escape_bonus != 0);
+        board.generate_legal_moves_att(captures_only, move_buf, have_maps.then_some(maps.all));
         let mut bufs = PICKER_BUF_POOL
             .with(|pool| pool.borrow_mut().pop())
             .unwrap_or_default();
@@ -720,13 +729,6 @@ impl MovePicker {
         }
 
         let side = board.side_to_move;
-        let params = &engine.search_params;
-        // Only nodes that generated quiets need the threat maps.
-        let maps = if captures_only {
-            ThreatMaps::default()
-        } else {
-            node_threat_maps(board, params)
-        };
         let threats = history_threats(&maps, params);
         let escape = params.threat_escape_bonus;
         let threatened = threatened_pieces(board, &maps, escape);

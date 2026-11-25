@@ -264,12 +264,16 @@ impl MoveSink {
 /// check/pin masks applied per piece instead of per move. En passant
 /// legality is decided by the caller (`ep_legal_from`: pawns whose en
 /// passant capture is legal); king destinations are tested with the king
-/// lifted off the board.
+/// lifted off the board. `enemy_attacks`, when given, is every square the
+/// opponent attacks (with the real occupancy): out of check that decides
+/// king destinations and castling paths in one mask (no slider can x-ray
+/// through a king it does not attack), instead of one attack test each.
 pub(crate) fn generate_legal_moves_fused(
     board: &Board,
     captures_only: bool,
     st: &LegalState,
     ep_legal_from: u64,
+    enemy_attacks: Option<u64>,
     moves: &mut Vec<Move>,
 ) {
     use crate::bitboard::{
@@ -427,14 +431,33 @@ pub(crate) fn generate_legal_moves_fused(
         let enemy = us.opposite();
         // Sliders x-ray through the king's origin square.
         let occ_no_king = occ & !(1u64 << sq);
+        let att = if st.check_count == 0 { enemy_attacks } else { None };
         let mut targets = KING_ATTACKS[sq as usize] & target_mask;
+        if let Some(a) = att {
+            targets &= !a;
+        }
         while targets != 0 {
             let to = targets.trailing_zeros() as u8;
             targets &= targets - 1;
-            if !is_square_attacked_occ(board, to, enemy, occ_no_king) {
+            if att.is_some() || !is_square_attacked_occ(board, to, enemy, occ_no_king) {
                 push_move(&mut sink, sq, to);
             }
         }
+        // The king's square and the squares it crosses are not attacked,
+        // and its destination is safe with the king lifted.
+        let castle_ok = |path: u64, dest: u8| match att {
+            Some(a) => a & path == 0,
+            None => {
+                let mut p = path;
+                while p != 0 {
+                    if is_square_attacked(board, p.trailing_zeros() as u8, enemy) {
+                        return false;
+                    }
+                    p &= p - 1;
+                }
+                !is_square_attacked_occ(board, dest, enemy, occ_no_king)
+            }
+        };
 
         if !captures_only {
             if us == Color::White && sq == 4 {
@@ -446,10 +469,7 @@ pub(crate) fn generate_legal_moves_fused(
                         })
                     && board.squares[5].is_none()
                     && board.squares[6].is_none()
-                    && !is_square_attacked(board, 4, Color::Black)
-                    && !is_square_attacked(board, 5, Color::Black)
-                    && !is_square_attacked(board, 6, Color::Black)
-                    && !is_square_attacked_occ(board, 6, enemy, occ_no_king)
+                    && castle_ok((1u64 << 4) | (1u64 << 5) | (1u64 << 6), 6)
                 {
                     sink.push(Move {
                         from: 4,
@@ -468,10 +488,7 @@ pub(crate) fn generate_legal_moves_fused(
                     && board.squares[3].is_none()
                     && board.squares[2].is_none()
                     && board.squares[1].is_none()
-                    && !is_square_attacked(board, 4, Color::Black)
-                    && !is_square_attacked(board, 3, Color::Black)
-                    && !is_square_attacked(board, 2, Color::Black)
-                    && !is_square_attacked_occ(board, 2, enemy, occ_no_king)
+                    && castle_ok((1u64 << 4) | (1u64 << 3) | (1u64 << 2), 2)
                 {
                     sink.push(Move {
                         from: 4,
@@ -491,10 +508,7 @@ pub(crate) fn generate_legal_moves_fused(
                         })
                     && board.squares[61].is_none()
                     && board.squares[62].is_none()
-                    && !is_square_attacked(board, 60, Color::White)
-                    && !is_square_attacked(board, 61, Color::White)
-                    && !is_square_attacked(board, 62, Color::White)
-                    && !is_square_attacked_occ(board, 62, enemy, occ_no_king)
+                    && castle_ok((1u64 << 60) | (1u64 << 61) | (1u64 << 62), 62)
                 {
                     sink.push(Move {
                         from: 60,
@@ -513,10 +527,7 @@ pub(crate) fn generate_legal_moves_fused(
                     && board.squares[59].is_none()
                     && board.squares[58].is_none()
                     && board.squares[57].is_none()
-                    && !is_square_attacked(board, 60, Color::White)
-                    && !is_square_attacked(board, 59, Color::White)
-                    && !is_square_attacked(board, 58, Color::White)
-                    && !is_square_attacked_occ(board, 58, enemy, occ_no_king)
+                    && castle_ok((1u64 << 60) | (1u64 << 59) | (1u64 << 58), 58)
                 {
                     sink.push(Move {
                         from: 60,
