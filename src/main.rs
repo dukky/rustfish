@@ -7,6 +7,7 @@ mod eval_params;
 mod hugemem;
 mod movegen;
 mod nnue;
+mod policy;
 mod psqt;
 mod search;
 mod tt;

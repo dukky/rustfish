@@ -797,6 +797,23 @@ impl MovePicker {
         self.total == 0
     }
 
+    /// Deep-node policy scorer (cost only: the score is added as
+    /// `black_box(s) & 0`, so the tree is main's).
+    #[cold]
+    #[inline(never)]
+    fn policy_score_deep(&mut self, board: &Board) {
+        let c = crate::policy::context(board);
+        let mut acc = 0i32;
+        for list in [&mut self.bufs.priority_quiets, &mut self.bufs.quiets] {
+            for e in list.iter_mut() {
+                let ps = crate::policy::score(&c, board, crate::policy::piece_kind(board, e.0.from), e.0.from, e.0.to);
+                acc = acc.wrapping_add(ps);
+                e.1 += std::hint::black_box(ps) & 0;
+            }
+        }
+        std::hint::black_box(acc);
+    }
+
     fn next(&mut self) -> Option<(Move, Stage)> {
         if !self.tt_yielded {
             self.tt_yielded = true;
@@ -1882,6 +1899,9 @@ fn negamax_body(
             return -MATE_SCORE + ply as i32;
         }
         return 0;
+    }
+    if depth >= crate::policy::MIN_DEPTH && !(crate::policy::NEVER && std::hint::black_box(true)) {
+        picker.policy_score_deep(board);
     }
 
     let threats = picker.threats;
