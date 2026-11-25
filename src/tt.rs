@@ -240,10 +240,12 @@ impl TransTable {
     }
 
     pub(crate) fn probe(&self, key: u64) -> Option<TTEntry> {
+        crate::stats::inc(2);
         for slot in self.bucket(key).slots.iter() {
             let data = slot.data.load(Ordering::Relaxed);
             let check = slot.key.load(Ordering::Relaxed);
             if check ^ data == key && data_depth(data) >= 0 {
+                crate::stats::inc(3);
                 return Some(unpack_data(data));
             }
         }
@@ -259,6 +261,7 @@ impl TransTable {
         bound: Bound,
         best: Option<Move>,
     ) {
+        crate::stats::inc(11);
         let current_age = self.inner.current_age.load(Ordering::Relaxed);
         let bucket = self.bucket(key);
 
