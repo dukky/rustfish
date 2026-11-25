@@ -702,3 +702,4 @@
 {"branch": "speed-tt-first", "elo": 0.56, "elo_ci95": [-2.3, 3.42], "games": 15552, "llr": -4.556, "logged_at": "2026-11-25T06:05:27Z", "mode": "stc", "outcome": "rejected", "sha": "9f50aef91b3448a05768c766ce16ede7ef3388a5", "test_id": "q-speed-tt-first-1125-0359", "verdict": "H0"}
 {"branch": "feat-policy-order-v0", "logged_at": "2026-11-25T06:32:24Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "0c20b0d3dd67a927c625b4f98553d56e51123880"}
 {"base_sha": "3e6150784f4ea65c21dd9d79814c3a34462505a3", "branch": "small-fixes-stack", "logged_at": "2026-11-25T06:59:27Z", "mode": "stc", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "fe7d017a64edc3e9629d7245637f3b48414bb3e2", "test_id": "q-small-fixes-stack-1125-0659"}
+{"branch": "speed-ec-packed", "logged_at": "2026-11-25T07:36:46Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "ed1e6cc31923ad62b21d9ef427f038e686284248"}
