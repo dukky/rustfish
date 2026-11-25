@@ -71,7 +71,10 @@ kept here: each machine has a gitignored `CLAUDE.local.md` for those.
   checking what they are (e.g. a packed copy verified position for position).
 - Kill only your own processes, by PID, never `pkill -f <pattern>` on a
   shared machine.
-- Subagents work on branches and report; the coordinating session decides
-  what enters the merge queue.
+- Subagents and outside agents work on branches and report; only the
+  coordinating session (or the owner) adds items to the merge queue. The
+  queue's `speedup` mode merges anything bench-identical, including docs and
+  tools, so nothing goes there without review (25 Nov: a non-stdlib Python
+  prototype reached main that way and was reverted).
 - Usage: heavy agent fan-out only when the owner asks for it; prefer work that
   runs without tokens (the queue, datagen, training).
