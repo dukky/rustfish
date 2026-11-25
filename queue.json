@@ -1,19 +1,9 @@
 {
   "pending": [],
-  "current": {
-    "branch": "small-fixes-stack",
-    "mode": "stc",
-    "front": true,
-    "test_id": "q-small-fixes-stack-1125-0659",
-    "sha": "fe7d017a64edc3e9629d7245637f3b48414bb3e2",
-    "base_sha": "3e6150784f4ea65c21dd9d79814c3a34462505a3",
-    "started": "2026-11-25T06:59:27Z",
-    "bench": 187769,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
-  "merges_since_check": 0,
-  "merges_since_ladder": 0,
+  "merges_since_check": 1,
+  "merges_since_ladder": 1,
   "next_seed": 334,
   "consecutive_bursts": 0,
   "identical_merges": [

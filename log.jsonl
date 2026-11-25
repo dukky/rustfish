@@ -703,3 +703,4 @@
 {"branch": "feat-policy-order-v0", "logged_at": "2026-11-25T06:32:24Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "0c20b0d3dd67a927c625b4f98553d56e51123880"}
 {"base_sha": "3e6150784f4ea65c21dd9d79814c3a34462505a3", "branch": "small-fixes-stack", "logged_at": "2026-11-25T06:59:27Z", "mode": "stc", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "fe7d017a64edc3e9629d7245637f3b48414bb3e2", "test_id": "q-small-fixes-stack-1125-0659"}
 {"branch": "speed-ec-packed", "logged_at": "2026-11-25T07:36:46Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "ed1e6cc31923ad62b21d9ef427f038e686284248"}
+{"branch": "small-fixes-stack", "elo": 9.4, "elo_ci95": [4.29, 14.51], "games": 4992, "llr": 5.085, "logged_at": "2026-11-25T08:06:12Z", "mode": "stc", "outcome": "merged", "sha": "fe7d017a64edc3e9629d7245637f3b48414bb3e2", "test_id": "q-small-fixes-stack-1125-0659", "verdict": "H1"}
