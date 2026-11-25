@@ -9,7 +9,7 @@
 use crate::eval::{eval_for_side, eval_for_side_cached, PawnTable};
 use crate::Board;
 
-const EVAL_CACHE_BITS: u32 = 20;
+const EVAL_CACHE_BITS: u32 = 21;
 const EVAL_CACHE_SIZE: usize = 1 << EVAL_CACHE_BITS;
 const EVAL_CACHE_MASK: usize = EVAL_CACHE_SIZE - 1;
 
