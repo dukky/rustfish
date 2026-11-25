@@ -59,6 +59,7 @@ def feats(v):
 
 
 NF = len(feats([0] * len(COLS)))
+TARGETS = (0.5, 0.8)
 
 
 def linear_fit(train, epochs=6, lr=0.05, l2=1e-4):
@@ -131,7 +132,7 @@ def evaluate(name, score, test_nodes, rnd):
     S = sorted(((score(v) + 1e-9 * rnd.random(), v[C["label"]]) for rows in test_nodes if rows[0][C["sampled"]] for v in rows), reverse=True)
     nsamp = len(S)
     out = []
-    for target in (0.5, 0.8):
+    for target in TARGETS:
         k = max(1, int(target * len(P)))
         t = P[k - 1]
         prot = sum(1 for s, _ in S if s >= t)
@@ -155,7 +156,11 @@ def main():
         i = args.index("--weights")
         wout = args[i + 1]
         del args[i:i + 2]
-    args = [a for a in args if a != "--mlp"]
+    global TARGETS
+    if "--curve" in args:
+        TARGETS = (0.2, 0.35, 0.5, 0.65, 0.8, 0.9)
+        print("curve columns: (rate, prec) at recall " + " ".join(str(t) for t in TARGETS))
+    args = [a for a in args if a not in ("--mlp", "--curve")]
     nodes, split = load(args)
     train = [rows for (p, _), rows in nodes.items() if split[p] == 0]
     test = [rows for (p, _), rows in nodes.items() if split[p] == 1]
