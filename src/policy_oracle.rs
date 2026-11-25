@@ -34,6 +34,8 @@
 //!        19 = control: every LMR-reduced move +2 (no oracle)
 //!        (17/18: pct = recall, the share of nodes where the best is protected)
 //!        20 = control: 18 with a pseudo-random ~0.5% of moves protected
+//!        21 = base tree, dumps every LMR-reduced quiet (`R` lines) at nodes
+//!             where the oracle best is among them, plus 5% of all nodes
 //! A `v=<depth>` token verifies every distinct root move chosen (search of
 //! the child at that depth) and prints `VER <move> <score>` for value loss.
 //! Outside mode 16 the root itself is never touched (search_root orders it).
@@ -219,6 +221,77 @@ pub(crate) fn root_first(key: u64) -> Option<Move> {
     })
 }
 
+// ---- mode 21: LMR recall dump (tree = base arm) ----
+thread_local! {
+    static DUMP: RefCell<(Vec<Vec<String>>, Vec<bool>, Vec<bool>, u64)> = RefCell::new((Vec::new(), Vec::new(), Vec::new(), 0));
+}
+
+pub(crate) fn dumping() -> bool {
+    ST.with(|s| s.borrow().mode == 21)
+}
+
+fn flush_ply(d: &mut (Vec<Vec<String>>, Vec<bool>, Vec<bool>, u64), ply: usize) {
+    if ply < d.0.len() {
+        if d.1[ply] || d.2[ply] {
+            for r in d.0[ply].iter() {
+                println!("{}", r);
+            }
+        }
+        d.0[ply].clear();
+        d.1[ply] = false;
+        d.2[ply] = false;
+    }
+}
+
+/// A new move-loop node at this ply: the previous one there is finished.
+pub(crate) fn node_start(ply: usize, key: u64) {
+    if !dumping() {
+        return;
+    }
+    DUMP.with(|d| {
+        let mut d = d.borrow_mut();
+        while d.0.len() <= ply {
+            d.0.push(Vec::new());
+            d.1.push(false);
+            d.2.push(false);
+        }
+        flush_ply(&mut d, ply);
+        d.3 += 1;
+        // 5% of nodes kept whatever their labels (negatives for precision).
+        d.2[ply] = (key.wrapping_mul(0xD6E8_FEB8_6659_FD93) >> 32) % 20 == 0;
+    });
+}
+
+pub(crate) fn dump_flush_all() {
+    DUMP.with(|d| {
+        let mut d = d.borrow_mut();
+        for p in 0..d.0.len() {
+            flush_ply(&mut d, p);
+        }
+    });
+}
+
+/// One LMR-reduced quiet: `R node sampled label depth nt idx r h ch k0 k1 cm chk see kind fromatt toatt se childeval-alpha improving ttbound hasoracle`.
+pub(crate) fn dump_row(ply: usize, label: bool, f: &[i32]) {
+    DUMP.with(|d| {
+        let mut d = d.borrow_mut();
+        if ply >= d.0.len() {
+            return;
+        }
+        let node = d.3;
+        let sampled = d.2[ply] as u8;
+        let mut line = format!("R {} {} {}", node, sampled, label as u8);
+        for x in f {
+            line.push(' ');
+            line.push_str(&x.to_string());
+        }
+        d.0[ply].push(line);
+        if label {
+            d.1[ply] = true;
+        }
+    });
+}
+
 pub(crate) fn with<R>(f: impl FnOnce(&mut Counters) -> R) -> R {
     ST.with(|s| f(&mut s.borrow_mut().c))
 }
@@ -298,6 +371,7 @@ pub(crate) fn handle_oracletest(cmd: &str, board: &mut Board, engine: &mut Engin
         let bm = crate::search::handle_go(&format!("go depth {}", shallow), board, engine).unwrap_or_default();
         let score = crate::search::LAST_SEARCH_SCORE.with(|s| s.get());
         let nodes = engine.last_search_nodes;
+        dump_flush_all();
         ST.with(|s| print_counters(arm, &s.borrow().c, nodes, &bm, score));
         if !chosen.contains(&bm) {
             chosen.push(bm.clone());

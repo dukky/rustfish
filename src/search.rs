@@ -1985,6 +1985,7 @@ fn negamax_body(
     }
     #[cfg(feature = "policy-oracle")]
     let (po_mv, po_db, po_nt, po_start, po_applied) = {
+        crate::policy_oracle::node_start(ply, key);
         let (omv, mode) = crate::policy_oracle::lookup(key, depth);
         let applied = omv.is_some_and(|m| picker.apply_oracle(m, mode));
         let db = crate::policy_oracle::dbucket(depth);
@@ -2159,6 +2160,13 @@ fn negamax_body(
         }
         #[cfg(feature = "policy-oracle")]
         let po_move_start = search.nodes;
+        #[cfg(feature = "policy-oracle")]
+        let po_pre = if quiet && crate::policy_oracle::dumping() {
+            let kind = board.squares[mv.from as usize].map(|p| crate::bitboard::kind_index(p.kind) as i32).unwrap_or(-1);
+            [see(board, mv), kind, ((threats >> mv.from) & 1) as i32, ((threats >> mv.to) & 1) as i32]
+        } else {
+            [0; 4]
+        };
 
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
@@ -2218,6 +2226,38 @@ fn negamax_body(
                 // Reduce more when our static eval is not improving.
                 if !improving {
                     r += params.lmr_not_improving;
+                }
+                #[cfg(feature = "policy-oracle")]
+                if crate::policy_oracle::dumping() {
+                    let ce = -engine.eval_cache.eval(board, child_key);
+                    let ttb = match tt_entry.map(|e| e.bound) {
+                        None => 0,
+                        Some(Bound::Exact) => 1,
+                        Some(Bound::Lower) => 2,
+                        Some(Bound::Upper) => 3,
+                    };
+                    let f = [
+                        depth,
+                        po_nt as i32,
+                        idx as i32,
+                        r,
+                        quiet_history,
+                        quiet_continuation,
+                        (Some(mv) == killers[0]) as i32,
+                        (Some(mv) == killers[1]) as i32,
+                        (Some(mv) == counter_move) as i32,
+                        gives_check as i32,
+                        po_pre[0],
+                        po_pre[1],
+                        po_pre[2],
+                        po_pre[3],
+                        static_eval.map(|e| e - alpha).unwrap_or(-99999),
+                        ce - alpha,
+                        improving as i32,
+                        ttb,
+                        po_mv.is_some() as i32,
+                    ];
+                    crate::policy_oracle::dump_row(ply, po_mv == Some(mv), &f);
                 }
                 #[cfg(feature = "policy-oracle")]
                 {
