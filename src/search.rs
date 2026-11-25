@@ -2278,6 +2278,9 @@ pub(crate) fn qsearch_gap(board: &mut Board, engine: &mut EngineState) -> i32 {
     (q - eval_for_side(board)).abs()
 }
 
+/// Margin over the victim value for qsearch delta pruning (centipawns).
+const QS_DELTA_MARGIN: i32 = 200;
+
 fn quiescence(
     board: &mut Board,
     mut alpha: i32,
@@ -2393,6 +2396,22 @@ fn quiescence(
             }
             if stage == Stage::Tt && !see_ge(board, mv, 0) {
                 continue;
+            }
+            // Delta pruning: a capture that cannot lift the stand pat to
+            // alpha even with the whole victim (plus any promotion) and a
+            // margin is not searched, which also saves the child's eval.
+            if let Some(sp) = static_eval {
+                let victim = if mv.is_en_passant {
+                    piece_value(PieceType::Pawn)
+                } else {
+                    board.squares[mv.to as usize].map(|p| piece_value(p.kind)).unwrap_or(0)
+                };
+                let promo = mv.promotion.map(|p| piece_value(p) - piece_value(PieceType::Pawn)).unwrap_or(0);
+                let optimistic = sp + victim + promo + QS_DELTA_MARGIN;
+                if optimistic <= alpha {
+                    best = best.max(optimistic);
+                    continue;
+                }
             }
         }
 
