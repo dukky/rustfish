@@ -18,6 +18,7 @@
 //!   margin = draft slack (entry.depth >= node depth + margin)
 //!   pct    = apply at this share (0-100) of nodes, chosen by key hash
 //!   noise  = history bonus x noise/100 (no-op control seeds: 99/100/101)
+//!   mindepth (optional 5th field) = oracle only at nodes of at least this depth
 //! The root itself is never touched (search_root orders it).
 
 use super::*;
@@ -67,12 +68,13 @@ pub(crate) struct State {
     pub margin: i32,
     pub pct: u64,
     pub noise: i32,
+    pub min_depth: i32,
     pub c: Counters,
 }
 
 thread_local! {
     pub(crate) static ST: RefCell<State> = RefCell::new(State {
-        oracle: None, mode: 0, margin: 0, pct: 100, noise: 100, c: Counters::default(),
+        oracle: None, mode: 0, margin: 0, pct: 100, noise: 100, min_depth: 0, c: Counters::default(),
     });
 }
 
@@ -85,6 +87,9 @@ pub(crate) fn lookup(key: u64, depth: i32) -> (Option<Move>, u8) {
     ST.with(|s| {
         let s = s.borrow();
         let Some(o) = s.oracle.as_ref() else { return (None, 0) };
+        if depth < s.min_depth {
+            return (None, 0);
+        }
         let mv = o
             .probe(key)
             .filter(|e| e.depth as i32 >= depth + s.margin)
@@ -155,6 +160,7 @@ pub(crate) fn handle_oracletest(cmd: &str, board: &mut Board, engine: &mut Engin
             s.margin = p.get(1).copied().unwrap_or(0) as i32;
             s.pct = p.get(2).copied().unwrap_or(100) as u64;
             s.noise = p.get(3).copied().unwrap_or(100) as i32;
+            s.min_depth = p.get(4).copied().unwrap_or(0) as i32;
             s.c = Counters::default();
         });
         engine.set_hash(hash);
