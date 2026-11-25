@@ -18,7 +18,7 @@ pub(crate) const H: usize = 64;
 /// 1 = lazy (quiets scored only when the picker first reaches a quiet stage).
 pub(crate) const MODE: u8 = 1;
 /// Score only at nodes of at least this depth.
-pub(crate) const MIN_DEPTH: i32 = 1;
+pub(crate) const MIN_DEPTH: i32 = 999;
 
 #[repr(C, align(64))]
 pub(crate) struct PolicyNet {
