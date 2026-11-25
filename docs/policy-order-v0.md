@@ -51,7 +51,47 @@ Training cost is dominated by **label generation**, not the model:
   is the real project.
 - A transformer/LLM policy is not justified at this compute scale.
 
-Acceptance is **nodes-to-depth at equal tactical quality**, not top-1
-accuracy. The current 200-position linear smoke test (top-1 13.5% vs 12.2%
-heuristic) is only a pipeline check.
+## Follow-up experiment (997 positions)
+
+I expanded to **997 labelled positions** from the ladder PGNs (50k-node
+labels, game-level split). Neither the linear ranker nor a 32/64-hidden MLP
+improved:
+
+- linear: top-1 **5.5%**, mean rank 16.9
+- MLP 64: top-1 **10.9%**, mean rank 14.5 (diverged with lr 0.01; lower-lr
+  run was worse)
+- 200-position linear smoke test: **13.5%** (small-sample variance; do not
+  treat it as the model's real quality)
+
+The conclusion is not “more data will fix it.” The offline feature set is
+missing the live signals that make ordering work: history, killers, TT move,
+SEE, static-eval delta and threat flags. The next iteration must extract
+those from the search, not add parameters to this model.
+
+## Handover
+
+**Status:** Phase 0/1 scaffold complete; no engine integration; no queue
+candidate. Branch `feat-policy-order-v0` contains the pipeline, NPS budget,
+and this note. It is being queued as a **docs/tools speedup** so it lands on
+main and Claude can pick it up.
+
+**Next steps for Claude:**
+
+1. Add live-search features to the labeler: SEE, history, killer/counter,
+   TT move, static-eval delta, threat flags.
+2. Generate 10k–100k labels at a deeper fixed-node teacher; keep game-level
+   splits.
+3. Train a small MLP only after the feature set changes; do not tune the
+   current 18-feature model.
+4. Gate on nodes-to-depth at equal tactical quality, then fixed-node vs
+   main/Clover, then LTC. Start at 1–5% of nodes; no every-node inference.
+5. If ordering shows a signal, implement `PolicyOrder` in `MovePicker`;
+   policy must never prune before ordering is proven.
+
+**Resources:** use the 9600X for deep-search label generation (not datagen);
+use the 1080 Ti only for model training. AVX-512 is for local/Lichess; CCRL
+needs an AVX2 path.
+
+Do not copy Clover or Lc0 source; this is an independent feature scorer.
+
 
