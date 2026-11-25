@@ -14,6 +14,7 @@
 //!            ahead of killers/counter): what a bounded quiet bonus can do
 //!        5 = oracle quiet first among the non-priority quiets only
 //!        6 = wrong-oracle control: another quiet takes mode 4's slot
+//!        7 = imperfect scorer: mode 4 at pct% of oracle nodes, mode 6 at the rest
 //!   margin = draft slack (entry.depth >= node depth + margin)
 //!   pct    = apply at this share (0-100) of nodes, chosen by key hash
 //!   noise  = history bonus x noise/100 (no-op control seeds: 99/100/101)
@@ -89,6 +90,10 @@ pub(crate) fn lookup(key: u64, depth: i32) -> (Option<Move>, u8) {
             .filter(|e| e.depth as i32 >= depth + s.margin)
             .and_then(|e| e.best);
         let h = key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+        if s.mode == 7 {
+            // Imperfect scorer: right (mode 4) at pct% of nodes, else wrong (mode 6).
+            return (mv, if mv.is_none() { 0 } else if (h % 100) < s.pct { 4 } else { 6 });
+        }
         let on = mv.is_some() && (h % 100) < s.pct;
         (mv, if on { s.mode } else { 0 })
     })
