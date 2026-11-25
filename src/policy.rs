@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 /// Hidden width; set per measurement branch.
 pub(crate) const H: usize = 64;
 /// Score only at nodes of at least this depth.
-pub(crate) const MIN_DEPTH: i32 = 6;
+pub(crate) const MIN_DEPTH: i32 = 3;
 /// Plumbing control: the hook is compiled in but never scores.
 pub(crate) const NEVER: bool = false;
 
