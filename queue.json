@@ -1,12 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "speed-tt-first",
-      "mode": "stc",
-      "front": true
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "speed-tt-first",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-speed-tt-first-1125-0359",
+    "sha": "9f50aef91b3448a05768c766ce16ede7ef3388a5",
+    "base_sha": "8fedc7c99ff60cd2f61740395b5d94754bdd478b",
+    "started": "2026-11-25T03:59:15Z",
+    "bench": 203742,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 0,
   "merges_since_ladder": 0,
