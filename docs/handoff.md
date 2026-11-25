@@ -25,9 +25,7 @@ below keeps running without a Claude session except the items marked *laptop*.
     laptop (it stops at the first failure). If the gate is close, run an LTC SPRT, as for gen 11.
   - **Datagen** (desktop, tmux `datagen6`, `~/rustfish-data/runlong-2039.sh`, D2039-D2048, 8 threads,
     packs .rfp). Restart it with the next seeds when it ends (~Mon 30 Nov) or after a reboot.
-  - **Speed agent round 4** (*laptop session*): per-king-bucket refresh cache (exact), fewer NNUE evals
-    (SPRT), lazy legality (exact); branches `speed-*`, tooling and doc on `speed-diag`. If the session
-    died, its branches are on GitHub: exact ones go to the queue as `:speedup`, the rest `:stc`.
+  - Speed round 4 finished: no gain (the long-search NPS drop is the tree, not a defect); nothing to queue.
 - **Next after gen 12:** the net recipe ablation program (plan.md: control seeds, then single-stage vs
   chain, 10 vs 4 plain epochs, lambda 0.7, m1 stage, lr; data arm D1 opening variety) judged by
   fixed-node games (`ci.py sprt <arm> --nodes 200000` vs the control arm). Then the tree-size program
