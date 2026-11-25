@@ -853,6 +853,29 @@ impl MovePicker {
                 list[pos].1 = i32::MAX / 2;
                 true
             }
+            // Wrong-oracle control: a different quiet (chosen by the oracle
+            // move's squares) takes mode 4's slot.
+            6 if quiet => {
+                let pool_len = b.priority_quiets.len() + b.quiets.len();
+                if pool_len < 2 {
+                    return false;
+                }
+                let mut k = (mv.from as usize * 64 + mv.to as usize) % pool_len;
+                loop {
+                    let e = if k < b.priority_quiets.len() { b.priority_quiets[k].0 } else { b.quiets[k - b.priority_quiets.len()].0 };
+                    if e != mv {
+                        break;
+                    }
+                    k = (k + 1) % pool_len;
+                }
+                let e = if k < b.priority_quiets.len() {
+                    b.priority_quiets.swap_remove(k)
+                } else {
+                    b.quiets.swap_remove(k - b.priority_quiets.len())
+                };
+                b.priority_quiets.push((e.0, i32::MAX / 2));
+                true
+            }
             _ => false,
         }
     }

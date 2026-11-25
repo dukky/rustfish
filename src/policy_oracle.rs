@@ -13,6 +13,7 @@
 //!        4 = oracle quiet first among the quiets (after good captures,
 //!            ahead of killers/counter): what a bounded quiet bonus can do
 //!        5 = oracle quiet first among the non-priority quiets only
+//!        6 = wrong-oracle control: another quiet takes mode 4's slot
 //!   margin = draft slack (entry.depth >= node depth + margin)
 //!   pct    = apply at this share (0-100) of nodes, chosen by key hash
 //!   noise  = history bonus x noise/100 (no-op control seeds: 99/100/101)
