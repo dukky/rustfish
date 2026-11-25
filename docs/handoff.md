@@ -4,6 +4,40 @@ For an agent (any model) continuing this project. It narrows the job to work
 that the pipeline checks automatically, so mistakes cost CI time, not
 strength. Read this, then `plan.md`, then `docs/development.md`.
 
+## State at 2026-11-25 ~10:00 (read this first after a pause)
+
+The owner may hit the weekly usage limit (resets Wed 25 Nov 19:00 UK). Everything
+below keeps running without a Claude session except the items marked *laptop*.
+
+- **Strength:** 3618 CCRL Blitz (ladder 25 Nov, `eb3b4a4`). Merged since: `small-fixes-stack` +9.4,
+  `speed-ec-packed` (speedup). Clover 9.1 at 10+0.1: -166.5; same NPS on short searches,
+  rustfish needs 2.1x the nodes to depth 12 (the main gap: tree size).
+- **Running, unattended:**
+  - **SPSA** (GitHub, run 45558507472, 40 rounds, ~1.4 h each, ends ~Fri 27 Nov ~14:00): the queue
+    runs on 12 test shards meanwhile (`scripts/queue-settings.json` lanes 7/7). At round ~15
+    (~Thu 26 Nov early) queue the interim theta as a branch `:stc --front`; at the end restore 18
+    shards / lanes 1/1 and queue the final theta (see plan.md "Deferred actions").
+  - **Gen 12 training** (desktop GPU, `~/rustfish-data/gpu-jobs/gen12.sh`, log `gpu-jobs/gen12/summary.log`;
+    gen 11 recipe, pool12 7.84B, val-g12), done ~13:30 Wed 25 Nov. *Laptop:* a background trigger runs
+    `~/rustfish-data/gen12-embed.sh` when the log says `done` (permute on the desktop, embed on
+    branch `nnue-g12h1024kb8mpw`, head fixture, bench/tests, experiments row on main, `queue.py add
+    nnue-g12h1024kb8mpw:net-gate --front`). If the session died, run that script by hand from the
+    laptop (it stops at the first failure). If the gate is close, run an LTC SPRT, as for gen 11.
+  - **Datagen** (desktop, tmux `datagen6`, `~/rustfish-data/runlong-2039.sh`, D2039-D2048, 8 threads,
+    packs .rfp). Restart it with the next seeds when it ends (~Mon 30 Nov) or after a reboot.
+  - **Speed agent round 4** (*laptop session*): per-king-bucket refresh cache (exact), fewer NNUE evals
+    (SPRT), lazy legality (exact); branches `speed-*`, tooling and doc on `speed-diag`. If the session
+    died, its branches are on GitHub: exact ones go to the queue as `:speedup`, the rest `:stc`.
+- **Next after gen 12:** the net recipe ablation program (plan.md: control seeds, then single-stage vs
+  chain, 10 vs 4 plain epochs, lambda 0.7, m1 stage, lr; data arm D1 opening variety) judged by
+  fixed-node games (`ci.py sprt <arm> --nodes 200000` vs the control arm). Then the tree-size program
+  after the SPSA. Policy: only the reductions shape is open (oracle -30% nodes at equal quality;
+  recall test not done: `policy-oracle` doc).
+- **Owner decisions pending:** Tailscale SSH ACL `check` -> `accept` for the desktop (stops 12-hourly
+  re-auth); whether to rent hourly compute for datagen (decide after gen 12's gate shows data scaling).
+- **Rules:** `docs/standing-rules.md` (incl. GPU cap 150 W, never change it; only the coordinator
+  queues; explicit deletes only).
+
 ## How the project works, in one paragraph
 
 `main` is the champion. Every engine change is a branch. The merge queue on
@@ -69,7 +103,7 @@ in `net/experiments.jsonl`. `netloop.py auto` runs unattended but only
 ingests data now (its short fine-tunes never won). The protocol and results
 are in `docs/nnue-experiments.md`.
 
-### Current state (2026-11-20)
+### Current state (2026-11-20; superseded by the section at the top)
 
 - **Search parity is the main lever now** (`plan.md`, short term). Clover 9.1
   (3725, same net class) is the black-box gauge: we are +91 at depth 1 but
