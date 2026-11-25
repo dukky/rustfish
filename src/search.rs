@@ -1466,6 +1466,13 @@ fn search_root(
         &search.killers[0],
         &engine.history,
     );
+    #[cfg(feature = "policy-oracle")]
+    if let Some(m) = crate::policy_oracle::root_first(key) {
+        if let Some(i) = root_moves.iter().position(|&x| x == m) {
+            let mv = root_moves.remove(i);
+            root_moves.insert(0, mv);
+        }
+    }
 
     let mut best_move = None;
     let mut best_score = -INF;
@@ -2211,6 +2218,10 @@ fn negamax_body(
                 // Reduce more when our static eval is not improving.
                 if !improving {
                     r += params.lmr_not_improving;
+                }
+                #[cfg(feature = "policy-oracle")]
+                {
+                    r += crate::policy_oracle::lmr_adjust(key, child_key, depth, po_mv, mv);
                 }
                 r.clamp(0, depth - 2)
             } else {
