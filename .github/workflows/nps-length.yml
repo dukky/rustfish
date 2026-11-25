@@ -19,11 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       hashes: ${{ steps.cfg.outputs.hashes }}
+      profile: ${{ steps.cfg.outputs.profile }}
     steps:
       - uses: actions/checkout@v4
       - id: cfg
         run: |
           . scripts/nps-length.env
+          echo "profile=$PROFILE" >> "$GITHUB_OUTPUT"
           echo "hashes=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" $HASHES)" | tee -a "$GITHUB_OUTPUT"
 
   length:
@@ -60,6 +62,7 @@ jobs:
 
   profile:
     needs: setup
+    if: needs.setup.outputs.profile != ''
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
