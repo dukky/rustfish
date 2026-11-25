@@ -28,8 +28,8 @@ below keeps running without a Claude session except the items marked *laptop*.
   - Speed round 4 finished: no gain (the long-search NPS drop is the tree, not a defect); nothing to queue.
 - **Next after gen 12:** the net recipe ablation program (plan.md: control seeds, then single-stage vs
   chain, 10 vs 4 plain epochs, lambda 0.7, m1 stage, lr; data arm D1 opening variety) judged by
-  fixed-node games (`ci.py sprt <arm> --nodes 200000` vs the control arm). Then the tree-size program
-  after the SPSA. Policy: only the reductions shape is open (oracle -30% nodes at equal quality;
+  fixed-node games (`ci.py sprt <arm> --nodes 200000` vs the control arm). Then, after the SPSA, the tree-size program: LMR-protection recall test first, then aggressive LMR + protection
+  (plan.md Deferred actions). Policy: only the reductions shape is open (oracle -30% nodes at equal quality;
   recall test not done: `policy-oracle` doc).
 - **Owner decisions pending:** Tailscale SSH ACL `check` -> `accept` for the desktop (stops 12-hourly
   re-auth); whether to rent hourly compute for datagen (decide after gen 12's gate shows data scaling).

@@ -536,7 +536,7 @@ merging (the queue does that).
 
 ## Deferred actions (each has a trigger; re-check this list whenever a job finishes)
 
-- **SPSA final theta tested (~Fri 27 Nov):** then the tree-size program: rustfish needs 2.1x Clover's nodes to depth 12 (25 Nov CI run); controlled tests of more aggressive reductions/pruning paired with the measured safety rules (child-eval LMR is merged), judged at fixed time and by games, not nodes.
+- **SPSA final theta tested (~Fri 27 Nov) -> tree-size program (owner, 25 Nov), in this order:** (1) **LMR-protection recall test** (no engine change; tooling on `policy-oracle`, desktop runs): dump the nodes where the depth-17 oracle's best move is among the LMR-reduced moves (~0.5% of them) with the features available there (history, cont-history, SEE, checks, static and child eval vs alpha, TT bound, killer/counter, threats) plus matched non-best reduced moves; measure top-1/top-2 precision/recall of (a) existing signals, (b) a fitted linear score (split by position), (c) a tiny MLP, against the random-0.5% control. Gate: ~50-80% recall at useful precision. (2) If it passes: engine branches pairing LMR +1/+2 with the protection rule (oracle bound: LMR +2 with the best move protected = -30% nodes at equal quality; 50% recall still -31% / +2.8 cp), measured at fixed time and by SPRT/LTC, not nodes. (3) If it fails: smaller aggression steps with the measured safety rules only. Context: rustfish needs 2.1x Clover's nodes to depth 12; ordering near-optimal, SEE/ProbCut margins calibrated, exact speed work exhausted.
 
 - **Gen 12 done (~25 Nov 14:00-15:00, watcher b263k5l64 runs gen12-embed.sh and queues the net-gate):** then start the recipe ablation program on the GPU (control seeds first, then arm 1: plain 10 vs 4).
 
