@@ -1,11 +1,15 @@
 {
-  "pending": [
-    {
-      "branch": "combo-small-positives-r2",
-      "mode": "stc"
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "combo-small-positives-r2",
+    "mode": "stc",
+    "test_id": "q-combo-small-positives-r2-1125-0035",
+    "sha": "4019f8ea0fc7d8ca33c7a05b55c50bfd083ca549",
+    "base_sha": "fa393f05db2784708a54bdb74c08d31e5046710e",
+    "started": "2026-11-25T00:35:29Z",
+    "bench": 198243,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "e8a34956396a91aac4bffab3498c951390312689",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
