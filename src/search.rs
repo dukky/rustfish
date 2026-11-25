@@ -682,6 +682,15 @@ struct MovePicker {
     total: usize,
     /// Opponent attack mask the quiet history was read with (see `history_threats`).
     threats: u64,
+    /// The TT move was verified legal on its own and is yielded before any
+    /// other move is generated; the rest are generated and scored when the
+    /// TT move did not cut (`fill`), with the history tables as they are then.
+    pending: bool,
+    maps: ThreatMaps,
+    counter_move: Option<Move>,
+    prev_move: Option<Move>,
+    killers: [Option<Move>; 2],
+    captures_only: bool,
 }
 
 impl Drop for MovePicker {
@@ -692,6 +701,7 @@ impl Drop for MovePicker {
 }
 
 impl MovePicker {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         board: &mut Board,
         engine: &EngineState,
@@ -699,54 +709,70 @@ impl MovePicker {
         counter_move: Option<Move>,
         prev_move: Option<Move>,
         killers: &[Option<Move>; 2],
-        history: &HistoryTable,
         captures_only: bool,
         move_buf: &mut Vec<Move>,
     ) -> Self {
-        board.generate_legal_moves(captures_only, move_buf);
         let mut bufs = PICKER_BUF_POOL
             .with(|pool| pool.borrow_mut().pop())
             .unwrap_or_default();
         bufs.clear();
-
-        if move_buf.is_empty() {
-            return Self {
-                tt_move: None,
-                tt_yielded: true,
-                bufs,
-                total: 0,
-                threats: 0,
-            };
-        }
-
-        let side = board.side_to_move;
         let params = &engine.search_params;
-        // Only nodes that generated quiets need the threat maps.
+        // Only nodes that generate quiets need the threat maps.
         let maps = if captures_only {
             ThreatMaps::default()
         } else {
             node_threat_maps(board, params)
         };
-        let threats = history_threats(&maps, params);
-        let escape = params.threat_escape_bonus;
-        let threatened = threatened_pieces(board, &maps, escape);
         let mut picker = Self {
             tt_move: None,
             tt_yielded: false,
             bufs,
             total: 0,
-            threats,
+            threats: history_threats(&maps, params),
+            pending: false,
+            maps,
+            counter_move,
+            prev_move,
+            killers: *killers,
+            captures_only,
         };
+        if let Some(mv) = tt_move {
+            if !captures_only && board.tt_move_legal(mv) {
+                picker.tt_move = Some(mv);
+                picker.total = 1;
+                picker.pending = true;
+                return picker;
+            }
+        }
+        picker.fill(board, engine, tt_move, move_buf);
+        picker
+    }
+
+    /// Generate and score every legal move except `tt_move`.
+    fn fill(&mut self, board: &mut Board, engine: &EngineState, tt_move: Option<Move>, move_buf: &mut Vec<Move>) {
+        board.generate_legal_moves(self.captures_only, move_buf);
+        self.total = move_buf.len();
+        if move_buf.is_empty() {
+            self.tt_yielded = true;
+            return;
+        }
+        let side = board.side_to_move;
+        let params = &engine.search_params;
+        let maps = &self.maps;
+        let threats = self.threats;
+        let escape = params.threat_escape_bonus;
+        let threatened = threatened_pieces(board, maps, escape);
+        let (killers, counter_move, captures_only) = (self.killers, self.counter_move, self.captures_only);
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
-        let side_hist = &history[color_index(side)];
-        let cont_row = prev_move
+        let side_hist = &engine.history[color_index(side)];
+        let cont_row = self
+            .prev_move
             .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
 
         for mv in move_buf.iter().copied() {
-            picker.total += 1;
             if Some(mv) == tt_move {
-                picker.tt_move = Some(mv);
+                self.tt_move = Some(mv);
                 continue;
             }
 
@@ -757,7 +783,7 @@ impl MovePicker {
                 let score = capture_stage_score_from_see(board, mv, see_score)
                     + if captures_only { 0 } else { capture_history_score(engine, side, board, mv) / CAPTURE_HISTORY_DIV };
                 let e = (mv, score);
-                let b = &mut picker.bufs;
+                let b = &mut self.bufs;
                 push_either(&mut b.good_captures, &mut b.bad_captures, see_score >= 0, e, e);
                 continue;
             }
@@ -784,25 +810,28 @@ impl MovePicker {
                 .map(piece_value)
                 .unwrap_or(0)
                 .saturating_sub(piece_value(PieceType::Pawn));
-            let esc = threat_escape_bonus(board, &maps, threatened, mv, escape);
+            let esc = threat_escape_bonus(board, maps, threatened, mv, escape);
             let priority = is_k0 | is_k1 | is_counter | (h > 0) | (ch > 0);
-            let b = &mut picker.bufs;
+            let b = &mut self.bufs;
             push_either(&mut b.priority_quiets, &mut b.quiets, priority, (mv, score + esc), (mv, score.max(h) + esc));
         }
-
-        picker
     }
 
     fn is_empty(&self) -> bool {
         self.total == 0
     }
 
-    fn next(&mut self) -> Option<(Move, Stage)> {
+    fn next(&mut self, board: &mut Board, engine: &EngineState, move_buf: &mut Vec<Move>) -> Option<(Move, Stage)> {
         if !self.tt_yielded {
             self.tt_yielded = true;
             if let Some(mv) = self.tt_move {
                 return Some((mv, Stage::Tt));
             }
+        }
+        if self.pending {
+            self.pending = false;
+            let tt = self.tt_move;
+            self.fill(board, engine, tt, move_buf);
         }
 
         take_best_scored(&mut self.bufs.good_captures)
@@ -1802,11 +1831,10 @@ fn negamax_body(
                 None,
                 None,
                 &[None, None],
-                &engine.history,
                 true,
                 &mut search.move_buf,
             );
-            while let Some((mv, stage)) = picker.next() {
+            while let Some((mv, stage)) = picker.next(board, engine, &mut search.move_buf) {
                 if stage == Stage::BadCapture || !see_ge(board, mv, see_threshold) {
                     continue;
                 }
@@ -1873,7 +1901,6 @@ fn negamax_body(
         counter_move,
         prev_move,
         &killers,
-        &engine.history,
         false,
         &mut search.move_buf,
     );
@@ -1893,7 +1920,7 @@ fn negamax_body(
     let mut idx = 0usize;
     let mut check_info: Option<CheckInfo> = None;
 
-    while let Some((mv, stage)) = picker.next() {
+    while let Some((mv, stage)) = picker.next(board, engine, &mut search.move_buf) {
         if Some(mv) == excluded {
             continue;
         }
@@ -2350,7 +2377,6 @@ fn quiescence(
         None,
         None,
         &[None, None],
-        &engine.history,
         !in_check,
         &mut search.move_buf,
     );
@@ -2361,7 +2387,7 @@ fn quiescence(
         return best;
     }
 
-    while let Some((mv, stage)) = picker.next() {
+    while let Some((mv, stage)) = picker.next(board, engine, &mut search.move_buf) {
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
         engine.tt.prefetch(early);
         engine.eval_cache.prefetch(early);

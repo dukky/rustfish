@@ -710,9 +710,125 @@ impl CheckInfo {
     }
 }
 
+impl Board {
+    /// Whether `mv` (typically a TT move, which may come from another
+    /// position) is one of the legal moves `generate_legal_moves(false, ..)`
+    /// would produce here, flags included, decided without generating.
+    /// Castling and en passant always answer false (the caller then falls
+    /// back to full generation), so a true answer is always exact.
+    pub(crate) fn tt_move_legal(&self, mv: Move) -> bool {
+        use crate::bitboard::{KING_ATTACKS, PAWN_ATTACKERS};
+        if mv.is_castle || mv.is_en_passant || mv.from >= 64 || mv.to >= 64 || mv.from == mv.to {
+            return false;
+        }
+        let us = self.side_to_move;
+        let Some(piece) = self.squares[mv.from as usize] else { return false };
+        if piece.color != us {
+            return false;
+        }
+        let c = color_index(us);
+        let bb = &self.bb;
+        let own = bb.occ[c];
+        let them = bb.occ[1 - c];
+        let occ = own | them;
+        let to_bit = 1u64 << mv.to;
+        if own & to_bit != 0 {
+            return false;
+        }
+        if matches!(self.squares[mv.to as usize], Some(p) if p.kind == PieceType::King) {
+            return false;
+        }
+        let st = self.legal_state(us);
+        if piece.kind == PieceType::King {
+            if mv.promotion.is_some() || KING_ATTACKS[mv.from as usize] & to_bit == 0 {
+                return false;
+            }
+            return !is_square_attacked_occ(self, mv.to, us.opposite(), occ & !(1u64 << mv.from));
+        }
+        if st.check_count >= 2 || st.allowed(mv.from) & to_bit == 0 {
+            return false;
+        }
+        if piece.kind == PieceType::Pawn {
+            let r = mv.from / 8;
+            let promo_rank = if us == Color::White { 6 } else { 1 };
+            let start_rank = if us == Color::White { 1 } else { 6 };
+            let is_promo = r == promo_rank;
+            match mv.promotion {
+                None if is_promo => return false,
+                Some(_) if !is_promo => return false,
+                Some(PieceType::Pawn | PieceType::King) => return false,
+                _ => {}
+            }
+            let one = if us == Color::White { mv.from + 8 } else { mv.from.wrapping_sub(8) };
+            if mv.to == one {
+                return occ & to_bit == 0;
+            }
+            if r == start_rank {
+                let two = if us == Color::White { mv.from + 16 } else { mv.from - 16 };
+                if mv.to == two {
+                    return occ & (1u64 << one) == 0 && occ & to_bit == 0;
+                }
+            }
+            return PAWN_ATTACKERS[1 - c][mv.from as usize] & to_bit & them != 0;
+        }
+        if mv.promotion.is_some() {
+            return false;
+        }
+        piece_attacks(mv.from, piece, occ) & to_bit != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tt_move_legal` is exact: true only for generated legal moves, and
+    /// true for every generated move but castling / en passant.
+    #[test]
+    fn tt_move_legal_matches_generation() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+        ];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let promos = [None, Some(PieceType::Queen), Some(PieceType::Rook), Some(PieceType::Bishop), Some(PieceType::Knight)];
+        for fen in fens {
+            let mut board = Board::new();
+            board.set_fen(fen);
+            for _ in 0..60 {
+                let mut legal = Vec::new();
+                board.generate_legal_moves(false, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                for &mv in &legal {
+                    assert_eq!(board.tt_move_legal(mv), !mv.is_castle && !mv.is_en_passant, "{fen} {mv:?}");
+                }
+                for from in 0..64u8 {
+                    for to in 0..64u8 {
+                        for promotion in promos {
+                            let mv = Move { from, to, promotion, is_en_passant: false, is_castle: false };
+                            if board.tt_move_legal(mv) {
+                                assert!(legal.contains(&mv), "{fen} {mv:?} accepted but not legal");
+                            }
+                        }
+                    }
+                }
+                let mv = legal[(rnd() % legal.len() as u64) as usize];
+                board.make_move(mv);
+            }
+        }
+    }
 
     #[test]
     fn gives_check_matches_make_move() {
