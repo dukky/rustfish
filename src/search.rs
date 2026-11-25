@@ -483,6 +483,11 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
 fn history_bonus(depth: i32) -> i32 {
+    #[cfg(feature = "policy-oracle")]
+    {
+        return (160 * depth).min(HISTORY_BONUS_MAX) * crate::policy_oracle::noise() / 100;
+    }
+    #[allow(unreachable_code)]
     (160 * depth).min(HISTORY_BONUS_MAX)
 }
 
@@ -671,6 +676,10 @@ struct MovePicker {
     total: usize,
     /// Opponent attack mask the quiet history was read with (see `history_threats`).
     threats: u64,
+    #[cfg(feature = "policy-oracle")]
+    oracle: Option<(Move, Stage)>,
+    #[cfg(feature = "policy-oracle")]
+    oracle_first: bool,
 }
 
 impl Drop for MovePicker {
@@ -705,6 +714,10 @@ impl MovePicker {
                 bufs,
                 total: 0,
                 threats: 0,
+                #[cfg(feature = "policy-oracle")]
+                oracle: None,
+                #[cfg(feature = "policy-oracle")]
+                oracle_first: false,
             };
         }
 
@@ -725,6 +738,10 @@ impl MovePicker {
             bufs,
             total: 0,
             threats,
+            #[cfg(feature = "policy-oracle")]
+            oracle: None,
+            #[cfg(feature = "policy-oracle")]
+            oracle_first: false,
         };
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
@@ -786,12 +803,76 @@ impl MovePicker {
         self.total == 0
     }
 
+    /// Gate-A oracle placement (see policy_oracle.rs); true if it moved anything.
+    #[cfg(feature = "policy-oracle")]
+    fn apply_oracle(&mut self, mv: Move, mode: u8) -> bool {
+        if mode == 0 || Some(mv) == self.tt_move {
+            return false;
+        }
+        let b = &mut self.bufs;
+        let lists: [(&mut Vec<(Move, i32)>, Stage); 4] = [
+            (&mut b.good_captures, Stage::GoodCapture),
+            (&mut b.priority_quiets, Stage::PriorityQuiet),
+            (&mut b.quiets, Stage::Quiet),
+            (&mut b.bad_captures, Stage::BadCapture),
+        ];
+        let mut found = None;
+        for (li, (list, stage)) in lists.into_iter().enumerate() {
+            if let Some(pos) = list.iter().position(|e| e.0 == mv) {
+                found = Some((li, pos, stage));
+                break;
+            }
+        }
+        let Some((li, pos, stage)) = found else { return false };
+        let quiet = matches!(stage, Stage::PriorityQuiet | Stage::Quiet);
+        let list = match li {
+            0 => &mut b.good_captures,
+            1 => &mut b.priority_quiets,
+            2 => &mut b.quiets,
+            _ => &mut b.bad_captures,
+        };
+        match mode {
+            1 | 2 => {
+                list.swap_remove(pos);
+                self.oracle = Some((mv, stage));
+                self.oracle_first = mode == 1;
+                true
+            }
+            3 if quiet => {
+                list.swap_remove(pos);
+                self.oracle = Some((mv, stage));
+                self.oracle_first = false;
+                true
+            }
+            4 if quiet => {
+                list.swap_remove(pos);
+                b.priority_quiets.push((mv, i32::MAX / 2));
+                true
+            }
+            5 if stage == Stage::Quiet => {
+                list[pos].1 = i32::MAX / 2;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn next(&mut self) -> Option<(Move, Stage)> {
+        #[cfg(feature = "policy-oracle")]
+        if self.oracle_first {
+            if let Some(o) = self.oracle.take() {
+                return Some(o);
+            }
+        }
         if !self.tt_yielded {
             self.tt_yielded = true;
             if let Some(mv) = self.tt_move {
                 return Some((mv, Stage::Tt));
             }
+        }
+        #[cfg(feature = "policy-oracle")]
+        if let Some(o) = self.oracle.take() {
+            return Some(o);
         }
 
         take_best_scored(&mut self.bufs.good_captures)
@@ -1872,6 +1953,28 @@ fn negamax_body(
         }
         return 0;
     }
+    #[cfg(feature = "policy-oracle")]
+    let (po_mv, po_db, po_nt, po_start, po_applied) = {
+        let (omv, mode) = crate::policy_oracle::lookup(key, depth);
+        let applied = omv.is_some_and(|m| picker.apply_oracle(m, mode));
+        let db = crate::policy_oracle::dbucket(depth);
+        let nt = if pv_node { 0 } else if cut_node { 1 } else { 2 };
+        crate::policy_oracle::with(|c| {
+            c.loops[db] += 1;
+            if let Some(m) = omv {
+                c.oracle_avail[db] += 1;
+                if Some(m) == tt_move {
+                    c.oracle_is_tt[db] += 1;
+                } else if !is_tactical_move(board, m) {
+                    c.oracle_quiet_not_tt[db] += 1;
+                }
+            }
+            if applied {
+                c.oracle_applied[db] += 1;
+            }
+        });
+        (omv, db, nt, search.nodes, applied)
+    };
 
     let threats = picker.threats;
     let mut best = -INF;
@@ -2024,6 +2127,8 @@ fn negamax_body(
         } else if is_capture_move(board, mv) {
             captures_tried.push(mv);
         }
+        #[cfg(feature = "policy-oracle")]
+        let po_move_start = search.nodes;
 
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
@@ -2159,6 +2264,44 @@ fn negamax_body(
             alpha = score;
         }
         if alpha >= beta {
+            #[cfg(feature = "policy-oracle")]
+            {
+                let class = if po_applied && Some(mv) == po_mv {
+                    6
+                } else {
+                    match stage {
+                        Stage::Tt => 0,
+                        Stage::GoodCapture => 1,
+                        Stage::BadCapture => 5,
+                        _ if prune_exempt => 2,
+                        _ if priority_quiet => 3,
+                        _ => 4,
+                    }
+                };
+                let (db, nt) = (po_db, po_nt);
+                let now = search.nodes;
+                crate::policy_oracle::with(|c| {
+                    c.fh[db][nt] += 1;
+                    c.fh_moves[db][nt] += idx as u64 + 1;
+                    c.loop_nodes[db][nt] += now - po_start;
+                    c.fh_loop_nodes[db][nt] += now - po_start;
+                    if idx == 0 {
+                        c.fh_first[db][nt] += 1;
+                    } else {
+                        c.late[db][nt][class] += 1;
+                        c.late_waste[db][nt][class] += po_move_start - po_start;
+                        if Some(mv) == po_mv {
+                            c.late_oracle_hit[db][nt][class] += 1;
+                        }
+                    }
+                    if po_mv.is_some() {
+                        c.fh_with_oracle[db] += 1;
+                        if Some(mv) == po_mv {
+                            c.fh_cutter_is_oracle[db] += 1;
+                        }
+                    }
+                });
+            }
             let bonus = history_bonus(depth);
             if !quiet && is_capture_move(board, mv) {
                 apply_capture_history_delta(engine, side, board, mv, bonus);
@@ -2204,6 +2347,11 @@ fn negamax_body(
         idx += 1;
     }
 
+    #[cfg(feature = "policy-oracle")]
+    {
+        let now = search.nodes;
+        crate::policy_oracle::with(|c| c.loop_nodes[po_db][po_nt] += now - po_start);
+    }
     if excluded.is_some() {
         // Only the excluded move was legal: alternatives are "infinitely" bad.
         return if best == -INF { alpha } else { best };

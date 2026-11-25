@@ -7,6 +7,8 @@ mod eval_params;
 mod hugemem;
 mod movegen;
 mod nnue;
+#[cfg(feature = "policy-oracle")]
+mod policy_oracle;
 mod psqt;
 mod search;
 mod tt;
@@ -1294,6 +1296,11 @@ fn main() {
         }
         if cmd.starts_with("evalhash") {
             handle_evalhash(cmd, &mut board, engine.active_net());
+            continue;
+        }
+        #[cfg(feature = "policy-oracle")]
+        if cmd.starts_with("oracletest") {
+            policy_oracle::handle_oracletest(cmd, &mut board, &mut engine);
             continue;
         }
         if cmd.starts_with("bench") {
