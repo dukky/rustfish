@@ -430,6 +430,34 @@ pub(crate) fn finish(lin_b: i16, sum: i64, head: f32, limit: i32) -> i32 {
     raw.clamp(-limit as f64, limit as f64) as i32
 }
 
+/// Rows of a two-ply update: adds and subs of the first ply, then of the second.
+pub(crate) type Rows2<'a> = [&'a [&'a [i16; H]]; 4];
+
+/// Two plies at once: `mid = src + Σ r[0] - Σ r[1]`, then `out = mid +
+/// Σ r[2] - Σ r[3]` with the rest of `kernels::update_pw` on `out` (sum
+/// against `w` with `DOT`, pairwise input, nonzero chunks); one pass over
+/// the lanes on AVX2, two passes elsewhere. Same results either way.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub(crate) fn update_pw2<const DOT: bool>(
+    mid: &mut [i16; H],
+    out: &mut [i16; H],
+    src: &[i16; H],
+    r: Rows2,
+    w: &[i16; H],
+    x: &mut [u8],
+    base: usize,
+    nnz: &mut [u16; NNZ_BUF],
+    n: usize,
+) -> (i64, usize) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(res) = kernels::update_pw2_fast::<DOT>(mid, out, src, r, w, x, base, nnz, n) {
+        return res;
+    }
+    super::update(mid, src, r[0], r[1]);
+    kernels::update_pw::<DOT>(out, mid, r[2], r[3], w, x, base, nnz, n)
+}
+
 /// Scalar twins (the reference; the only kernels on other targets).
 #[allow(dead_code)]
 pub(crate) mod scalar {
@@ -936,6 +964,111 @@ pub(crate) mod kernels {
         }
     }
 
+    /// `update_pw2` in one pass, for the common (adds, subs) counts; None
+    /// otherwise (or without AVX2).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(crate) fn update_pw2_fast<const DOT: bool>(
+        mid: &mut [i16; H],
+        out: &mut [i16; H],
+        src: &[i16; H],
+        r: Rows2,
+        w: &[i16; H],
+        x: &mut [u8],
+        base: usize,
+        nnz: &mut [u16; NNZ_BUF],
+        n: usize,
+    ) -> Option<(i64, usize)> {
+        if !avx2() {
+            return None;
+        }
+        macro_rules! go {
+            ($($a1:literal $s1:literal $a2:literal $s2:literal),*) => {
+                match (r[0].len(), r[1].len(), r[2].len(), r[3].len()) {
+                    // SAFETY: AVX2 is available; the counts match the constants.
+                    $(($a1, $s1, $a2, $s2) => Some(unsafe { update_pw2_avx2::<DOT, $a1, $s1, $a2, $s2>(mid, out, src, r, w, x, base, nnz, n) }),)*
+                    _ => None,
+                }
+            };
+        }
+        go!(1 1 1 1, 1 1 1 2, 1 2 1 1, 1 2 1 2, 2 2 1 1, 1 1 2 2)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx2")]
+    unsafe fn update_pw2_avx2<const DOT: bool, const NA1: usize, const NS1: usize, const NA2: usize, const NS2: usize>(
+        mid: &mut [i16; H],
+        out: &mut [i16; H],
+        src: &[i16; H],
+        r: Rows2,
+        w: &[i16; H],
+        x: &mut [u8],
+        base: usize,
+        nnz: &mut [u16; NNZ_BUF],
+        mut n: usize,
+    ) -> (i64, usize) {
+        assert!(x.len() == HALF && HALF % 32 == 0);
+        assert!(r[0].len() == NA1 && r[1].len() == NS1 && r[2].len() == NA2 && r[3].len() == NS2);
+        // SAFETY: AVX2 per caller; offsets are < H - 16 (lanes) / HALF - 32 (bytes).
+        unsafe {
+            let (lo, hi) = (_mm256_setzero_si256(), _mm256_set1_epi16(255));
+            let ld = |p: *const i16| _mm256_loadu_si256(p as *const __m256i);
+            let mut delta = |o: usize| {
+                let mut v = ld(src.as_ptr().add(o));
+                for a in &r[0][..NA1] {
+                    v = _mm256_add_epi16(v, ld(a.as_ptr().add(o)));
+                }
+                for s in &r[1][..NS1] {
+                    v = _mm256_sub_epi16(v, ld(s.as_ptr().add(o)));
+                }
+                _mm256_storeu_si256(mid.as_mut_ptr().add(o) as *mut __m256i, v);
+                for a in &r[2][..NA2] {
+                    v = _mm256_add_epi16(v, ld(a.as_ptr().add(o)));
+                }
+                for s in &r[3][..NS2] {
+                    v = _mm256_sub_epi16(v, ld(s.as_ptr().add(o)));
+                }
+                _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
+                _mm256_min_epi16(_mm256_max_epi16(v, lo), hi)
+            };
+            let mut sum = [_mm256_setzero_si256(); 2];
+            let mut bv = _mm_set1_epi16(base as i16);
+            for i in (0..HALF).step_by(32) {
+                let (a0, a1) = (delta(i), delta(i + 16));
+                let (b0, b1) = (delta(i + HALF), delta(i + HALF + 16));
+                if DOT {
+                    // As in `update_pw_avx2`.
+                    for (k, (c, o)) in [(a0, i), (a1, i + 16), (b0, i + HALF), (b1, i + HALF + 16)].into_iter().enumerate() {
+                        let cw = _mm256_mullo_epi16(c, ld(w.as_ptr().add(o)));
+                        sum[k & 1] = _mm256_add_epi32(sum[k & 1], _mm256_madd_epi16(cw, c));
+                    }
+                }
+                let x0 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(a0), b0);
+                let x1 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(a1), b1);
+                let v = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(x0, x1));
+                _mm256_storeu_si256(x.as_mut_ptr().add(i) as *mut __m256i, v);
+                n = push8z(nnz, n, bv, zero_mask(v));
+                bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
+            }
+            let total = if DOT {
+                let s = _mm256_add_epi64(
+                    _mm256_cvtepi32_epi64(_mm256_castsi256_si128(sum[0])),
+                    _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(sum[0])),
+                );
+                let t = _mm256_add_epi64(
+                    _mm256_cvtepi32_epi64(_mm256_castsi256_si128(sum[1])),
+                    _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(sum[1])),
+                );
+                let mut l = [0i64; 4];
+                _mm256_storeu_si256(l.as_mut_ptr() as *mut __m256i, _mm256_add_epi64(s, t));
+                l.iter().sum()
+            } else {
+                0
+            };
+            (total, n)
+        }
+    }
+
     /// For an 8-bit mask of ZERO chunks, the positions (0..8) of the
     /// nonzero ones packed first (as u8, so one `pmovzxbw` loads them), and
     /// how many there are. Indexing by the zero mask saves the inversion.
@@ -1293,6 +1426,40 @@ mod tests {
             let k = scalar::activate(&o1, &mut x3, 5, &mut n3, 2);
             assert_eq!((k, x3), (r1.1, x1));
             assert_eq!(r1.0, crate::nnue::scalar::screlu_dot(&o1, &w));
+        }
+    }
+
+    #[test]
+    fn two_ply_update_matches_two_steps() {
+        let mut r = rng(31);
+        let mut row = || -> Box<[i16; H]> {
+            let mut a = Box::new([0i16; H]);
+            for x in a.iter_mut() {
+                *x = (r() % 160) as i16 - 80;
+            }
+            a
+        };
+        let mut w = [0i16; H];
+        for (i, x) in w.iter_mut().enumerate() {
+            *x = ((i * 37) % 255) as i16 - 127;
+        }
+        let rows: Vec<Box<[i16; H]>> = (0..8).map(|_| row()).collect();
+        let rr: Vec<&[i16; H]> = rows.iter().map(|b| &**b).collect();
+        for t in 0..64 {
+            let mut src = [0i16; H];
+            for (i, x) in src.iter_mut().enumerate() {
+                *x = ((i * 7919 + t * 104729) % 700) as i16 - 250;
+            }
+            let c = [1 + t % 2, 1 + (t / 2) % 2, 1 + (t / 4) % 2, 1 + (t / 8) % 2];
+            let r4: Rows2 = [&rr[0..c[0]], &rr[2..2 + c[1]], &rr[4..4 + c[2]], &rr[6..6 + c[3]]];
+            let (mut m1, mut o1, mut m2, mut o2) = ([0i16; H], [0i16; H], [0i16; H], [0i16; H]);
+            let (mut x1, mut x2) = ([0u8; HALF], [0u8; HALF]);
+            let (mut n1, mut n2) = ([0u16; NNZ_BUF], [0u16; NNZ_BUF]);
+            scalar::update_pw::<true>(&mut m1, &src, r4[0], r4[1], &w, &mut x1, 0, &mut n1, 0);
+            let a = scalar::update_pw::<true>(&mut o1, &m1, r4[2], r4[3], &w, &mut x1, 3, &mut n1, 1);
+            let b = update_pw2::<true>(&mut m2, &mut o2, &src, r4, &w, &mut x2, 3, &mut n2, 1);
+            assert_eq!((m1, o1, x1), (m2, o2, x2), "case {t}");
+            assert_eq!((a.0, a.1, &n1[1..a.1]), (b.0, b.1, &n2[1..b.1]), "case {t}");
         }
     }
 

@@ -725,6 +725,25 @@ impl<L: Layout> NnueState<L> {
             // Bring all but the last pending ply up to date, then update
             // both perspectives for that ply and take their output sums in
             // the same pass over the lanes.
+            if HEAD && self.computed.get() + 2 == self.top {
+                // Exactly two pending plies: both in one pass.
+                let k = self.top - 2;
+                let b = bucket(pieces);
+                let mut stack = self.stack.borrow_mut();
+                let (lo, hi) = stack.split_at_mut(k + 1);
+                let (m, h) = hi.split_at_mut(1);
+                return head::with_scratch(|sc| {
+                    sc.n = 0;
+                    let sum = if head::SKIP {
+                        apply_delta2::<L, false>(net, &lo[k].acc, &mut m[0], &mut h[0], &self.cache, stm, b, sc)
+                    } else {
+                        apply_delta2::<L, true>(net, &lo[k].acc, &mut m[0], &mut h[0], &self.cache, stm, b, sc)
+                    };
+                    self.computed.set(self.top);
+                    let hv = net.head.as_ref().expect("HEAD net without head").forward_scratch(b, sc);
+                    head::finish(net.out_b[b], sum, hv, EVAL_LIMIT)
+                });
+            }
             self.materialise_to(self.top - 1);
             let k = self.top - 1;
             let b = bucket(pieces);
@@ -777,50 +796,127 @@ fn apply_delta_with<L: Layout, const EVAL: bool>(
     b: usize,
     mut act: Option<&mut head::Scratch>,
 ) -> i64 {
-    let d = dst.delta;
     let mut sum = 0i64;
     for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
-        let w = if EVAL { out_half(net, b, persp == stm) } else { &net.ft_b };
-        let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
-        let half = if persp == stm { 0 } else { 1 };
-        if L::REFRESH && dst.refresh[pi] {
-            let mut c = cache.borrow_mut();
-            let bb = dst.bb;
-            refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
-            if EVAL {
-                sum += simd::screlu_dot(&dst.acc.v[pi], w);
-            }
-            if let Some(a) = act.as_deref_mut() {
-                let hx = head::CHUNKS * 2;
-                a.n = head::kernels::activate(&dst.acc.v[pi], &mut a.x.0[half * hx..(half + 1) * hx], half * hx / 4, &mut a.nnz, a.n);
-            }
+        sum += persp_step::<L, EVAL>(net, &src.v[pi], dst, pi, persp, cache, stm, b, act.as_deref_mut());
+    }
+    sum
+}
+
+/// One perspective of `apply_delta_with`: `dst.acc.v[pi] = src + dst.delta`
+/// (or the finny-table refresh), with `EVAL` its output sum and with `act`
+/// its pairwise L1 input.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn persp_step<L: Layout, const EVAL: bool>(
+    net: &Network,
+    s: &[i16; H],
+    dst: &mut Slot,
+    pi: usize,
+    persp: Color,
+    cache: &RefCell<Vec<CacheEntry>>,
+    stm: Color,
+    b: usize,
+    mut act: Option<&mut head::Scratch>,
+) -> i64 {
+    let d = dst.delta;
+    let w = if EVAL { out_half(net, b, persp == stm) } else { &net.ft_b };
+    let k = if L::REFRESH { dst.ctx[pi] } else { KingCtx::ZERO };
+    let half = if persp == stm { 0 } else { 1 };
+    let mut sum = 0i64;
+    if L::REFRESH && dst.refresh[pi] {
+        let mut c = cache.borrow_mut();
+        let bb = dst.bb;
+        refresh_cached(net, &mut c[pi * 2 * L::KB + k.slot()], persp, k, &bb, &mut dst.acc.v[pi]);
+        if EVAL {
+            sum += simd::screlu_dot(&dst.acc.v[pi], w);
+        }
+        if let Some(a) = act.as_deref_mut() {
+            let hx = head::CHUNKS * 2;
+            a.n = head::kernels::activate(&dst.acc.v[pi], &mut a.x.0[half * hx..(half + 1) * hx], half * hx / 4, &mut a.nnz, a.n);
+        }
+        return sum;
+    }
+    let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
+    let a0 = f(d.add[0]);
+    let s0 = f(d.sub[0]);
+    let o = &mut dst.acc.v[pi];
+    let mut run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
+        if let Some(a) = act.as_deref_mut() {
+            let hx = head::CHUNKS * 2;
+            let (x, nnz) = (&mut a.x.0[half * hx..(half + 1) * hx], &mut a.nnz);
+            let (sum, n) = head::kernels::update_pw::<EVAL>(o, s, adds, subs, w, x, half * hx / 4, nnz, a.n);
+            a.n = n;
+            return sum;
+        }
+        if EVAL {
+            simd::update_dot(o, s, adds, subs, w)
+        } else {
+            update(o, s, adds, subs);
+            0
+        }
+    };
+    sum += match (d.n_add, d.n_sub) {
+        (1, 1) => run(o, &[a0], &[s0]),
+        (1, 2) => run(o, &[a0], &[s0, f(d.sub[1])]),
+        (2, 2) => run(o, &[a0, f(d.add[1])], &[s0, f(d.sub[1])]),
+        _ => unreachable!(),
+    };
+    sum
+}
+
+/// Two pending plies at once (`HEAD`): `mid.acc = src + mid.delta` and
+/// `dst.acc = mid.acc + dst.delta` in one pass over the lanes per
+/// perspective, with the output sum and the pairwise input of `dst` (as
+/// `apply_delta_with::<L, EVAL>` on `dst`). A perspective that either ply
+/// refreshes takes the two steps separately. Exact: the same wrapping i16
+/// sums lane by lane.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn apply_delta2<L: Layout, const EVAL: bool>(
+    net: &Network,
+    src: &Accumulator,
+    mid: &mut Slot,
+    dst: &mut Slot,
+    cache: &RefCell<Vec<CacheEntry>>,
+    stm: Color,
+    b: usize,
+    act: &mut head::Scratch,
+) -> i64 {
+    let mut sum = 0i64;
+    for (pi, persp) in [Color::White, Color::Black].into_iter().enumerate() {
+        if L::REFRESH && (mid.refresh[pi] || dst.refresh[pi]) {
+            persp_step::<L, false>(net, &src.v[pi], mid, pi, persp, cache, stm, b, None);
+            sum += persp_step::<L, EVAL>(net, &mid.acc.v[pi], dst, pi, persp, cache, stm, b, Some(&mut *act));
             continue;
         }
-        let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
-        let a0 = f(d.add[0]);
-        let s0 = f(d.sub[0]);
-        let (s, o) = (&src.v[pi], &mut dst.acc.v[pi]);
-        let mut run = |o: &mut [i16; H], adds: &[&[i16; H]], subs: &[&[i16; H]]| -> i64 {
-            if let Some(a) = act.as_deref_mut() {
-                let hx = head::CHUNKS * 2;
-                let (x, nnz) = (&mut a.x.0[half * hx..(half + 1) * hx], &mut a.nnz);
-                let (sum, n) = head::kernels::update_pw::<EVAL>(o, s, adds, subs, w, x, half * hx / 4, nnz, a.n);
-                a.n = n;
-                return sum;
-            }
-            if EVAL {
-                simd::update_dot(o, s, adds, subs, w)
-            } else {
-                update(o, s, adds, subs);
-                0
-            }
+        let w = if EVAL { out_half(net, b, persp == stm) } else { &net.ft_b };
+        let rows = |sl: &Slot| {
+            let k = if L::REFRESH { sl.ctx[pi] } else { KingCtx::ZERO };
+            let d = sl.delta;
+            let f = |e: (u8, Option<Piece>)| net.row(feature(persp, e.1.unwrap(), e.0, k));
+            let a = [f(d.add[0]), f(d.add[d.n_add - 1])];
+            let s = [f(d.sub[0]), f(d.sub[d.n_sub - 1])];
+            (a, d.n_add, s, d.n_sub)
         };
-        sum += match (d.n_add, d.n_sub) {
-            (1, 1) => run(o, &[a0], &[s0]),
-            (1, 2) => run(o, &[a0], &[s0, f(d.sub[1])]),
-            (2, 2) => run(o, &[a0, f(d.add[1])], &[s0, f(d.sub[1])]),
-            _ => unreachable!(),
-        };
+        let (a1, na1, s1, ns1) = rows(mid);
+        let (a2, na2, s2, ns2) = rows(dst);
+        let half = if persp == stm { 0 } else { 1 };
+        let hx = head::CHUNKS * 2;
+        let (x, nnz) = (&mut act.x.0[half * hx..(half + 1) * hx], &mut act.nnz);
+        let (sp, n) = head::update_pw2::<EVAL>(
+            &mut mid.acc.v[pi],
+            &mut dst.acc.v[pi],
+            &src.v[pi],
+            [&a1[..na1], &s1[..ns1], &a2[..na2], &s2[..ns2]],
+            w,
+            x,
+            half * hx / 4,
+            nnz,
+            act.n,
+        );
+        act.n = n;
+        sum += sp;
     }
     sum
 }
