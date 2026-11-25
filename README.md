@@ -9,12 +9,12 @@ now places on the CCRL Blitz list (single-CPU engines, best versions; numbers in
 |---|---|---|
 | Short term | 3400 | reached 2026-11-06 |
 | Mid term: top 100 | 3506 | reached 2026-11-13 (3562), now ~100 Elo clear |
-| Next | 3700 | ~90 Elo to go |
+| Next | 3700 | ~80 Elo to go |
 | Long term: top 10 | 3751 | #10 |
 
-rustfish measures **3613** (CCRL ladder 2026-11-22, CI 3599–3627, 440 games at
-120+1 against 11 CCRL-rated anchors from 3487 to 3773, main `e8a3495`: gen 11
-pairwise-head net plus the 21–22 Nov search merges). Ladders before
+rustfish measures **3618** (CCRL ladder 2026-11-25, CI 3602–3633, 440 games at
+120+1 against 11 CCRL-rated anchors from 3487 to 3773, main `eb3b4a4`: gen 11
+pairwise-head net plus the 21–25 Nov search merges and speedups). Ladders before
 2026-11-21 19:00 used an anchor set mostly below rustfish and read high (the
 3640 of 2026-11-21 is ~3600 on the bracketing set); compare only ladders on the
 current set. History in `tests/ladder-log.jsonl`.
@@ -28,7 +28,7 @@ Actions, so it never needs updating by hand; redeploy only when
 
 | | |
 |---|---|
-| Strength | **3613** CCRL Blitz (ladder 2026-11-22, CI 3599–3627); live on the dashboard |
+| Strength | **3618** CCRL Blitz (ladder 2026-11-25, CI 3602–3633); live on the dashboard |
 | Roadmap | [`plan.md`](plan.md) |
 | How changes are tested and merged | [`docs/development.md`](docs/development.md) |
 | Working on the code | [`AGENTS.md`](AGENTS.md), and [`docs/handoff.md`](docs/handoff.md) for a new agent |
