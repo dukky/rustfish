@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 pub(crate) const H: usize = 64;
 /// 0 = eager (every quiet scored when the picker is built),
 /// 1 = lazy (quiets scored only when the picker first reaches a quiet stage).
-pub(crate) const MODE: u8 = 0;
+pub(crate) const MODE: u8 = 1;
 /// Score only at nodes of at least this depth.
 pub(crate) const MIN_DEPTH: i32 = 1;
 
