@@ -30,6 +30,8 @@
 //!        13 = 12 right at pct% of nodes, inverted (best +1, bad -1) at the rest
 //!        14 / 15 = control: every LMR-reduced move +1 / -1 (no oracle)
 //!        16 = root only: the deep search's best move first at the root
+//!        17 / 18 = every LMR-reduced move +1 / +2, the oracle best -1
+//!        19 = control: every LMR-reduced move +2 (no oracle)
 //! A `v=<depth>` token verifies every distinct root move chosen (search of
 //! the child at that depth) and prints `VER <move> <score>` for value loss.
 //! Outside mode 16 the root itself is never touched (search_root orders it).
@@ -129,18 +131,28 @@ pub(crate) fn lmr_adjust(key: u64, child_key: u64, depth: i32, r: i32, po_mv: Op
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let mode = s.mode;
-        if !(10..=15).contains(&mode) {
+        if !(10..=19).contains(&mode) {
             return 0;
         }
         s.c.lmr[0] += 1;
-        if mode == 14 {
-            return 1;
-        }
-        if mode == 15 {
-            return -1;
+        match mode {
+            14 => return 1,
+            15 => return -1,
+            19 => return 2,
+            _ => {}
         }
         if depth < s.min_depth {
             return 0;
+        }
+        if mode == 17 || mode == 18 {
+            // Aggressive LMR made safe by a perfect policy: every reduced
+            // move +1 (17) / +2 (18), the oracle best one ply less than main.
+            let best = po_mv == Some(mv);
+            if best {
+                s.c.lmr[1] += 1;
+                return -1;
+            }
+            return if mode == 17 { 1 } else { 2 };
         }
         let is_best = po_mv == Some(mv);
         let mut is_bad = false;
