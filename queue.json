@@ -1,11 +1,5 @@
 {
-  "pending": [
-    {
-      "branch": "datagen-randplies",
-      "mode": "speedup",
-      "front": true
-    }
-  ],
+  "pending": [],
   "current": null,
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 1,
@@ -33,6 +27,7 @@
     "0c20b0d3dd67a927c625b4f98553d56e51123880",
     "525130c2ec3f9bf9faccc95fb958be86bbdbc853",
     "7db3ae6c60e0a322656ca0e3c2d23ec85fbcfafa",
-    "ed1e6cc31923ad62b21d9ef427f038e686284248"
+    "ed1e6cc31923ad62b21d9ef427f038e686284248",
+    "bf8fc7b322bdcb2a999f9e598c08b6c9fc18ac4e"
   ]
 }
