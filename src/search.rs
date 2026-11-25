@@ -2257,7 +2257,10 @@ fn negamax_body(
                         ttb,
                         po_mv.is_some() as i32,
                     ];
-                    crate::policy_oracle::dump_row(ply, po_mv == Some(mv), &f);
+                    match crate::policy_oracle::scorer_adjust(&f) {
+                        Some(d) => r += d,
+                        None => crate::policy_oracle::dump_row(ply, po_mv == Some(mv), &f),
+                    }
                 }
                 #[cfg(feature = "policy-oracle")]
                 {

@@ -34,6 +34,7 @@
 //!        19 = control: every LMR-reduced move +2 (no oracle)
 //!        (17/18: pct = recall, the share of nodes where the best is protected)
 //!        20 = control: 18 with a pseudo-random ~0.5% of moves protected
+//!        22 / 23 = LMR +2 with a real scorer protecting moves (see scorer_adjust)
 //!        21 = base tree, dumps every LMR-reduced quiet (`R` lines) at nodes
 //!             where the oracle best is among them, plus 5% of all nodes
 //! A `v=<depth>` token verifies every distinct root move chosen (search of
@@ -227,7 +228,63 @@ thread_local! {
 }
 
 pub(crate) fn dumping() -> bool {
-    ST.with(|s| s.borrow().mode == 21)
+    ST.with(|s| matches!(s.borrow().mode, 21 | 22 | 23))
+}
+
+thread_local! {
+    static LIN_W: Vec<f64> = std::env::var("POLICY_W")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.split_whitespace().filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_default();
+}
+
+/// recall.py's linear features of a dump row (f = the `R` fields after the label).
+fn lin_feats(f: &[i32]) -> Vec<f64> {
+    let clip = |x: i32, a: i32| x.clamp(-a, a) as f64;
+    let (depth, nt, idx, r, h, ch, k0, k1, cm, chk, see, kind, fa, ta, se, ce, imp, ttb) =
+        (f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17]);
+    let mut v = vec![
+        h as f64 / 4000.0, ch as f64 / 4000.0, k0 as f64, k1 as f64, cm as f64, chk as f64,
+        clip(see, 900) / 300.0, (see < 0) as i32 as f64, fa as f64, ta as f64,
+        clip(ce, 600) / 200.0, (ce > -25) as i32 as f64,
+        clip(if se > -90000 { se } else { -600 }, 600) / 200.0,
+        imp as f64, (1.0 + idx as f64).ln(), r as f64 / 3.0, depth as f64 / 10.0,
+    ];
+    for i in 0..6 {
+        v.push((kind == i) as i32 as f64);
+    }
+    for i in 0..3 {
+        v.push((nt == i) as i32 as f64);
+    }
+    for i in 0..4 {
+        v.push((ttb == i) as i32 as f64);
+    }
+    v
+}
+
+/// Modes 22 / 23: LMR +2 everywhere, but a move the scorer protects gets
+/// main's reduction - 1. 22 = recall.py's linear scorer (weights from the
+/// file in POLICY_W) above badcp/100; 23 = child eval - alpha above badcp.
+pub(crate) fn scorer_adjust(f: &[i32]) -> Option<i32> {
+    let (mode, t) = ST.with(|s| {
+        let s = s.borrow();
+        (s.mode, s.bad_cp)
+    });
+    let protect = match mode {
+        22 => {
+            let x = lin_feats(f);
+            let sc: f64 = LIN_W.with(|w| w.iter().zip(x.iter()).map(|(a, b)| a * b).sum());
+            sc > t as f64 / 100.0
+        }
+        23 => f[15] > t,
+        _ => return None,
+    };
+    ST.with(|s| s.borrow_mut().c.lmr[0] += 1);
+    if protect {
+        ST.with(|s| s.borrow_mut().c.lmr[1] += 1);
+    }
+    Some(if protect { -1 } else { 2 })
 }
 
 fn flush_ply(d: &mut (Vec<Vec<String>>, Vec<bool>, Vec<bool>, u64), ply: usize) {
