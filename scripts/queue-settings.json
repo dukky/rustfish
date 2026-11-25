@@ -23,9 +23,9 @@
       "hash": 16,
       "elo0": 0,
       "elo1": 5,
-      "shards": 18,
+      "shards": 12,
       "rounds_per_shard": 16,
-      "max_rounds_per_shard": 64,
+      "max_rounds_per_shard": 96,
       "max_waves": 10
     },
     "nonreg": {
@@ -33,9 +33,9 @@
       "hash": 16,
       "elo0": -5,
       "elo1": 0,
-      "shards": 18,
+      "shards": 12,
       "rounds_per_shard": 16,
-      "max_rounds_per_shard": 64,
+      "max_rounds_per_shard": 96,
       "max_waves": 10
     },
     "ltc-gainer": {
@@ -43,9 +43,9 @@
       "hash": 64,
       "elo0": 0,
       "elo1": 10,
-      "shards": 18,
+      "shards": 12,
       "rounds_per_shard": 6,
-      "max_rounds_per_shard": 24,
+      "max_rounds_per_shard": 36,
       "max_waves": 8
     },
     "ltc-check": {
@@ -53,9 +53,9 @@
       "hash": 64,
       "elo0": -5,
       "elo1": 0,
-      "shards": 18,
+      "shards": 12,
       "rounds_per_shard": 6,
-      "max_rounds_per_shard": 24,
+      "max_rounds_per_shard": 36,
       "max_waves": 8
     },
     "net-gate": {
@@ -63,15 +63,15 @@
       "hash": 16,
       "elo0": 0,
       "elo1": 10,
-      "shards": 18,
+      "shards": 12,
       "rounds_per_shard": 8,
-      "max_rounds_per_shard": 16,
+      "max_rounds_per_shard": 24,
       "max_waves": 4
     }
   },
   "lanes": {
-    "background_parallel": 1,
-    "background_shards": 1,
-    "note": "2026-11-21: long SPSA stopped at round 28 (base 605b560 stale after gen 11 + search merges); back to 18 test shards = 20 - 1 queue job - 1 idle background slot. Next SPSA on current main: drop to 12 again."
+    "background_parallel": 7,
+    "background_shards": 7,
+    "note": "2026-11-25: long SPSA restarted on current main (as on 2026-11-19) (spsa.yml, 6 shards, 40 rounds, sum combine) shares CI with the queue: foreground 12 = 20 - 1 queue job - 7 (6 SPSA + 1 slack); per-shard caps x1.5 so total game caps are unchanged. Restore 18 shards and 1/1 when SPSA ends."
   }
 }

@@ -1,5 +1,5 @@
 {
-  "comment": "SPSA state for scripts/spsa.py / .github/workflows/spsa.yml. value = current theta (starts at the SearchParams::default values in src/main.rs); min/max = tuning bounds (narrower than the UCI option limits); c_end = final perturbation (~5-10% of range); r_end = fishtest-style final step factor. iteration/total_iterations drive the gain schedules (A = A_ratio * total_iterations). 2026-11-19 long run: combine=sum (mean moved one chain's worth per round, which is why the 400-iteration runs moved nothing), 6 shards x 40 it x 40 rounds = 9600 iterations x 8 pairs; c_end floor 0.5 for the small-range integer knobs so +-c_k actually changes the engine.",
+  "comment": "SPSA state for scripts/spsa.py / .github/workflows/spsa.yml. value = current theta (starts at the SearchParams::default values in src/main.rs); min/max = tuning bounds (narrower than the UCI option limits); c_end = final perturbation (~5-10% of range); r_end = fishtest-style final step factor. iteration/total_iterations drive the gain schedules (A = A_ratio * total_iterations). 2026-11-19 long run: combine=sum (mean moved one chain's worth per round, which is why the 400-iteration runs moved nothing), 6 shards x 40 it x 40 rounds = 9600 iterations x 8 pairs; c_end floor 0.5 for the small-range integer knobs so +-c_k actually changes the engine. 2026-11-25: restarted from main's current defaults (r14 values + 21-25 Nov merges), same schedule.",
   "iteration": 0,
   "total_iterations": 9600,
   "alpha": 0.602,
@@ -7,56 +7,56 @@
   "A_ratio": 0.1,
   "params": {
     "FutilityMarginD1": {
-      "value": 120,
+      "value": 94,
       "min": 40,
       "max": 300,
       "c_end": 15,
       "r_end": 0.002
     },
     "FutilityMarginD2": {
-      "value": 220,
+      "value": 228,
       "min": 80,
       "max": 500,
       "c_end": 25,
       "r_end": 0.002
     },
     "ReverseFutilityMarginD1": {
-      "value": 90,
+      "value": 51,
       "min": 30,
       "max": 250,
       "c_end": 12,
       "r_end": 0.002
     },
     "ReverseFutilityMarginD2": {
-      "value": 180,
+      "value": 126,
       "min": 60,
       "max": 400,
       "c_end": 20,
       "r_end": 0.002
     },
     "ReverseFutilityMarginD3": {
-      "value": 300,
+      "value": 268,
       "min": 100,
       "max": 600,
       "c_end": 30,
       "r_end": 0.002
     },
     "NullReductionBase": {
-      "value": 2,
+      "value": 3,
       "min": 1,
       "max": 5,
       "c_end": 0.5,
       "r_end": 0.002
     },
     "ThreatEscapeBonus": {
-      "value": 8000,
+      "value": 7563,
       "min": 0,
       "max": 20000,
       "c_end": 1500,
       "r_end": 0.002
     },
     "NullReductionDepthDiv": {
-      "value": 4,
+      "value": 3,
       "min": 2,
       "max": 10,
       "c_end": 0.6,
@@ -133,7 +133,7 @@
       "r_end": 0.002
     },
     "LmrExtraMoveIndex": {
-      "value": 8,
+      "value": 7,
       "min": 3,
       "max": 20,
       "c_end": 1.2,
