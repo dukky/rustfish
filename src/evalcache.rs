@@ -9,16 +9,32 @@
 use crate::eval::{eval_for_side, eval_for_side_cached, PawnTable};
 use crate::Board;
 
-const EVAL_CACHE_BITS: u32 = 17;
+const EVAL_CACHE_BITS: u32 = 20;
 const EVAL_CACHE_SIZE: usize = 1 << EVAL_CACHE_BITS;
 const EVAL_CACHE_MASK: usize = EVAL_CACHE_SIZE - 1;
-/// Marks an empty slot; a key equal to it simply bypasses the cache.
-const EMPTY_KEY: u64 = 0;
 
+/// One slot in 8 bytes: bit 63 = occupied, then the key's high
+/// 64 - EVAL_CACHE_BITS bits (the low bits are the slot index, so index and
+/// tag together are the whole key: a hit is still a full 64-bit key match),
+/// then the eval as i16 in the low 16 bits. Evals outside i16 are not cached.
 #[derive(Clone, Copy)]
-struct Entry {
-    key: u64,
-    eval: i32,
+struct Entry(u64);
+
+const VALID: u64 = 1 << 63;
+const _: () = assert!(64 - EVAL_CACHE_BITS + 16 + 1 <= 64);
+
+impl Entry {
+    const EMPTY: Self = Entry(0);
+
+    #[inline(always)]
+    fn tag(key: u64) -> u64 {
+        VALID | ((key >> EVAL_CACHE_BITS) << 16)
+    }
+
+    #[inline(always)]
+    fn get(self, key: u64) -> Option<i32> {
+        (self.0 & !0xFFFF == Self::tag(key)).then_some(self.0 as u16 as i16 as i32)
+    }
 }
 
 #[derive(Clone)]
@@ -30,11 +46,11 @@ pub(crate) struct EvalCache {
 
 impl EvalCache {
     pub(crate) fn new() -> Self {
-        Self { entries: vec![Entry { key: EMPTY_KEY, eval: 0 }; EVAL_CACHE_SIZE], pawns: PawnTable::new() }
+        Self { entries: vec![Entry::EMPTY; EVAL_CACHE_SIZE], pawns: PawnTable::new() }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.entries.fill(Entry { key: EMPTY_KEY, eval: 0 });
+        self.entries.fill(Entry::EMPTY);
         self.pawns.clear();
     }
 
@@ -65,15 +81,17 @@ impl EvalCache {
         // whenever the evaluator changes). The search consumes side-to-move
         // evals: `eval_for_side` is that wrapper for both evaluators.
         let slot = &mut self.entries[key as usize & EVAL_CACHE_MASK];
-        if slot.key == key && key != EMPTY_KEY {
-            return slot.eval;
+        if let Some(eval) = slot.get(key) {
+            return eval;
         }
         let eval = if board.nnue.is_some() {
             eval_for_side(board)
         } else {
             eval_for_side_cached(board, &mut self.pawns)
         };
-        *slot = Entry { key, eval };
+        if let Ok(e) = i16::try_from(eval) {
+            *slot = Entry(Entry::tag(key) | e as u16 as u64);
+        }
         eval
     }
 }
