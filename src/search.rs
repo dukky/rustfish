@@ -1915,9 +1915,12 @@ fn negamax_body(
                 {
                     let singular_beta = tt_score - SE_MARGIN_PER_DEPTH * depth;
                     search.excluded[ply] = Some(mv);
+                    // `depth` already carries this node's check extension and
+                    // the verification search re-enters this node, which adds
+                    // it again: take it off here so it counts once.
                     let s = negamax(
                         board,
-                        (depth - 1) / 2,
+                        (depth - 1) / 2 - in_check as i32,
                         singular_beta - 1,
                         singular_beta,
                         ply,
