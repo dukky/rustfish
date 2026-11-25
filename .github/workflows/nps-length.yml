@@ -1,0 +1,108 @@
+name: NPS vs search length
+
+# rustfish NPS against movetime and Hash (scripts/nps-length.py), with main as
+# its own A/A control, plus perf profiles of short (100 ms) and long (3 s)
+# searches. Runs on pushes to speed-diag that touch scripts/nps-length.env.
+# Short testing use only.
+
+on:
+  push:
+    branches: [speed-diag]
+    paths: [scripts/nps-length.env]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.cfg.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          . scripts/nps-length.env
+          echo "hashes=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" $HASHES)" | tee -a "$GITHUB_OUTPUT"
+
+  length:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        hash: ${{ fromJSON(needs.setup.outputs.hashes) }}
+    name: hash ${{ matrix.hash }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Build
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          . scripts/nps-length.env
+          mkdir -p bins; args=()
+          for nr in $BINS; do
+            n=${nr%%=*}; ref=${nr#*=}
+            git rev-parse -q --verify "$ref^{commit}" >/dev/null || ref=origin/$ref
+            if [ ! -d "wt/$ref" ]; then git worktree add -q --detach "wt/$ref" "$ref" && (cd "wt/$ref" && cargo build --release -q); fi
+            cp "wt/$ref/target/release/rustfish" "bins/$n"
+            echo "--bin $n=bins/$n" >> args.txt
+          done
+      - name: Measure
+        run: |
+          . scripts/nps-length.env
+          lscpu | grep 'Model name' | tee out.txt
+          python3 scripts/nps-length.py $(cat args.txt) --hash ${{ matrix.hash }} --movetimes "$MOVETIMES" --fens "$FENS" | tee -a out.txt
+          { echo "### hash ${{ matrix.hash }}"; echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  profile:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: perf
+        run: |
+          sudo apt-get update -q >/dev/null
+          sudo apt-get install -y -q "linux-tools-$(uname -r)" linux-tools-common >/dev/null || sudo apt-get install -y -q linux-tools-azure linux-tools-common >/dev/null
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - name: Build with line info (non-PIE)
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3 -C relocation-model=static
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: |
+          . scripts/nps-length.env
+          r=$PROFILE; git rev-parse -q --verify "$r^{commit}" >/dev/null || r=origin/$PROFILE
+          git worktree add -q --detach wt "$r" && (cd wt && cargo build --release -q) && cp wt/target/release/rustfish prof-bin
+      - name: Profile short vs long
+        run: |
+          lscpu | grep 'Model name' > prof.txt
+          for mt in 100 3000; do
+            n=$([ $mt = 100 ] && echo 25 || echo 6)
+            python3 - "$mt" "$n" > in-$mt.txt <<'PY'
+          import sys
+          sys.path.insert(0, "scripts")
+          from peer_nps import FENS
+          mt, n = int(sys.argv[1]), int(sys.argv[2])
+          print("uci\nsetoption name Hash value 16\nisready")
+          for f in FENS[::2][:n]:
+              print(f"ucinewgame\nposition fen {f}\nisready\ngo movetime {mt}")
+          PY
+            echo "== movetime $mt" >> prof.txt
+            perf stat -e cycles,instructions,branch-misses,L1-dcache-load-misses -o stat-$mt.txt -- ./prof-bin < <(while read -r l; do echo "$l"; case $l in go*) sleep $(python3 -c "print($mt/1000+0.3)");; esac; done < in-$mt.txt; echo quit) | grep -E '^info depth' | tail -1 >> prof.txt
+            cat stat-$mt.txt >> prof.txt
+            perf record -q -F 4999 -o perf-$mt.data -- ./prof-bin < <(while read -r l; do echo "$l"; case $l in go*) sleep $(python3 -c "print($mt/1000+0.3)");; esac; done < in-$mt.txt; echo quit) > /dev/null
+            python3 scripts/speed-profile.py prof-bin perf-$mt.data --top 60 > map-$mt.txt
+          done
+          { echo "### profile"; echo '```'; cat prof.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: length-profile
+          path: |
+            prof.txt
+            map-*.txt
