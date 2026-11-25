@@ -32,6 +32,8 @@
 //!        16 = root only: the deep search's best move first at the root
 //!        17 / 18 = every LMR-reduced move +1 / +2, the oracle best -1
 //!        19 = control: every LMR-reduced move +2 (no oracle)
+//!        (17/18: pct = recall, the share of nodes where the best is protected)
+//!        20 = control: 18 with a pseudo-random ~0.5% of moves protected
 //! A `v=<depth>` token verifies every distinct root move chosen (search of
 //! the child at that depth) and prints `VER <move> <score>` for value loss.
 //! Outside mode 16 the root itself is never touched (search_root orders it).
@@ -131,10 +133,20 @@ pub(crate) fn lmr_adjust(key: u64, child_key: u64, depth: i32, r: i32, po_mv: Op
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let mode = s.mode;
-        if !(10..=19).contains(&mode) {
+        if !(10..=20).contains(&mode) {
             return 0;
         }
         s.c.lmr[0] += 1;
+        if mode == 20 {
+            // Contamination control for 18: +2 everywhere, but a pseudo-random
+            // reduced move (about 0.5%, the oracle best's rate) is protected.
+            let r = ((mv.from as u64) << 6 | mv.to as u64) ^ key;
+            if (r.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % 200 == 0 {
+                s.c.lmr[1] += 1;
+                return -1;
+            }
+            return 2;
+        }
         match mode {
             14 => return 1,
             15 => return -1,
@@ -147,7 +159,9 @@ pub(crate) fn lmr_adjust(key: u64, child_key: u64, depth: i32, r: i32, po_mv: Op
         if mode == 17 || mode == 18 {
             // Aggressive LMR made safe by a perfect policy: every reduced
             // move +1 (17) / +2 (18), the oracle best one ply less than main.
-            let best = po_mv == Some(mv);
+            // pct = recall: at the other nodes the policy misses the best move.
+            let h = key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+            let best = po_mv == Some(mv) && (h % 100) < s.pct;
             if best {
                 s.c.lmr[1] += 1;
                 return -1;
