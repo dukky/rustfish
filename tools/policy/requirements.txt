@@ -1,2 +1,0 @@
-python-chess>=1.11
-numpy>=1.26
