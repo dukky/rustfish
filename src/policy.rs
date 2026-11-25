@@ -19,6 +19,8 @@ pub(crate) const H: usize = 64;
 pub(crate) const MODE: u8 = 1;
 /// Score only at nodes of at least this depth.
 pub(crate) const MIN_DEPTH: i32 = 1;
+/// Cost split: skip the per-node context sum (bias only).
+const NO_CTX: bool = true;
 
 #[repr(C, align(64))]
 pub(crate) struct PolicyNet {
@@ -64,7 +66,12 @@ pub(crate) fn net() -> &'static PolicyNet {
 #[inline]
 pub(crate) fn context(board: &Board) -> Ctx {
     let n = net();
-    let mut v = n.bias;
+    let v = n.bias;
+    if NO_CTX {
+        let _ = board;
+        return Ctx { v };
+    }
+    let mut v = v;
     let flip = if board.side_to_move == Color::White { 0 } else { 56 };
     let us = color_index(board.side_to_move);
     for c in 0..2 {
