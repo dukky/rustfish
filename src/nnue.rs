@@ -709,6 +709,7 @@ impl<L: Layout> NnueState<L> {
         let mut stack = self.stack.borrow_mut();
         let net = &*self.net;
         while k < target {
+            diag_refresh::<L>(&stack, k + 1, &self.cache);
             let (lo, hi) = stack.split_at_mut(k + 1);
             apply_delta::<L>(net, &lo[k].acc, &mut hi[0], &self.cache);
             k += 1;
@@ -729,6 +730,7 @@ impl<L: Layout> NnueState<L> {
             let k = self.top - 1;
             let b = bucket(pieces);
             let mut stack = self.stack.borrow_mut();
+            diag_refresh::<L>(&stack, self.top, &self.cache);
             let (lo, hi) = stack.split_at_mut(self.top);
             if HEAD {
                 // The update also writes the head's L1 input (and, unless
@@ -752,6 +754,43 @@ impl<L: Layout> NnueState<L> {
         self.materialise();
         let stack = self.stack.borrow();
         evaluate_acc(net, &stack[self.top].acc, stm, pieces)
+    }
+}
+
+fn diag_refresh<L: Layout>(stack: &[Slot], t: usize, cache: &RefCell<Vec<CacheEntry>>) {
+    if !L::REFRESH { return; }
+    let c = cache.borrow();
+    for pi in 0..2 {
+        if !stack[t].refresh[pi] { continue; }
+        let k = stack[t].ctx[pi];
+        let bb = stack[t].bb;
+        let e = &c[pi * 2 * L::KB + k.slot()];
+        let mut ed = 0u64;
+        for a in 0..2 { for b in 0..6 { ed += (bb[a][b] ^ e.bb[a][b]).count_ones() as u64; } }
+        crate::stats::inc(8);
+        crate::stats::add(9, ed);
+        if ed <= 4 { crate::stats::inc(14); }
+        let mut best = ed;
+        let mut cur = bb;
+        let mut j = t;
+        while j > 0 {
+            let d = stack[j].delta;
+            for &(sq, p) in d.sub[..d.n_sub].iter().chain(d.add[..d.n_add].iter()) {
+                let p = p.unwrap();
+                cur[p.color as usize][p.kind as usize] ^= 1u64 << sq;
+            }
+            j -= 1;
+            if stack[j].ctx[pi] == k {
+                let mut ad = 0u64;
+                for a in 0..2 { for b in 0..6 { ad += (bb[a][b] ^ cur[a][b]).count_ones() as u64; } }
+                crate::stats::inc(10);
+                crate::stats::add(11, ad);
+                crate::stats::add(15, (t - j) as u64);
+                if ad < ed { crate::stats::inc(12); best = ad; }
+                break;
+            }
+        }
+        crate::stats::add(13, best);
     }
 }
 

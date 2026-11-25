@@ -73,6 +73,10 @@ impl EvalCache {
         let _ = ptr;
     }
 
+    pub(crate) fn peek(&self, key: u64) -> bool {
+        self.entries[key as usize & EVAL_CACHE_MASK].get(key).is_some()
+    }
+
     /// `key` must be the zobrist key of `board` (as maintained by search).
     #[inline]
     pub(crate) fn eval(&mut self, board: &Board, key: u64) -> i32 {
@@ -84,6 +88,8 @@ impl EvalCache {
         if let Some(eval) = slot.get(key) {
             return eval;
         }
+        crate::stats::inc(1);
+        crate::stats::inc(2 + crate::stats::SITE.load(std::sync::atomic::Ordering::Relaxed) as usize);
         let eval = if board.nnue.is_some() {
             eval_for_side(board)
         } else {

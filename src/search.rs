@@ -2118,8 +2118,13 @@ fn negamax_body(
                 // A move whose static result already reaches (nearly) alpha is
                 // where a reduction hides a fail high: reduce it one ply less.
                 // The child evaluates itself from the same cache entry anyway.
-                if !gives_check
-                    && -engine.eval_cache.eval(board, child_key) > alpha - LMR_CHILD_EVAL_SAFE_MARGIN
+                if !gives_check && {
+                    crate::stats::inc(5);
+                    if engine.eval_cache.peek(child_key) { crate::stats::inc(6); }
+                    else if engine.tt.probe(child_key).and_then(|e| e.static_eval()).is_some() { crate::stats::inc(7); }
+                    true
+                }
+                    && { crate::stats::SITE.store(2, std::sync::atomic::Ordering::Relaxed); let v = -engine.eval_cache.eval(board, child_key); crate::stats::SITE.store(0, std::sync::atomic::Ordering::Relaxed); v } > alpha - LMR_CHILD_EVAL_SAFE_MARGIN
                 {
                     r -= 1;
                 }
@@ -2293,6 +2298,7 @@ fn quiescence(
     prev_move: Option<Move>,
 ) -> i32 {
     search.nodes += 1;
+    crate::stats::inc(0);
     if search.should_stop() {
         return 0;
     }
@@ -2337,6 +2343,7 @@ fn quiescence(
 
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
     let mut best_move = None;
+    crate::stats::SITE.store(1, std::sync::atomic::Ordering::Relaxed);
     let raw_static_eval = if in_check {
         None
     } else {
@@ -2347,6 +2354,7 @@ fn quiescence(
         )
     };
     // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
+    crate::stats::SITE.store(0, std::sync::atomic::Ordering::Relaxed);
     let static_eval = raw_static_eval
         .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
