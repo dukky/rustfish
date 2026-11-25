@@ -2221,7 +2221,7 @@ fn negamax_body(
                 }
                 #[cfg(feature = "policy-oracle")]
                 {
-                    r += crate::policy_oracle::lmr_adjust(key, child_key, depth, po_mv, mv);
+                    r += crate::policy_oracle::lmr_adjust(key, child_key, depth, r, po_mv, mv);
                 }
                 r.clamp(0, depth - 2)
             } else {

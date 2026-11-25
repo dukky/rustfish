@@ -23,7 +23,9 @@
 //! Reductions / root modes (upper bounds for a policy used outside ordering):
 //!        10 = LMR: the oracle best move reduces one ply less
 //!        11 = LMR: oracle-bad moves (child's oracle upper bound at least
-//!             badcp below the node's oracle lower bound) reduce one ply more
+//!             badcp below the node's oracle lower bound; the child entry's
+//!             draft at least the reduced search's depth + margin) reduce
+//!             one ply more
 //!        12 = 10 + 11
 //!        13 = 12 right at pct% of nodes, inverted (best +1, bad -1) at the rest
 //!        14 / 15 = control: every LMR-reduced move +1 / -1 (no oracle)
@@ -123,7 +125,7 @@ fn usable(score: i32) -> bool {
 }
 
 /// Reduction delta for an LMR-reduced quiet (modes 10-15).
-pub(crate) fn lmr_adjust(key: u64, child_key: u64, depth: i32, po_mv: Option<Move>, mv: Move) -> i32 {
+pub(crate) fn lmr_adjust(key: u64, child_key: u64, depth: i32, r: i32, po_mv: Option<Move>, mv: Move) -> i32 {
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let mode = s.mode;
@@ -148,7 +150,7 @@ pub(crate) fn lmr_adjust(key: u64, child_key: u64, depth: i32, po_mv: Option<Mov
                     e.depth as i32 >= depth + s.margin && matches!(e.bound, Bound::Exact | Bound::Lower) && usable(e.score)
                 });
                 let child = o.probe(child_key).filter(|e| {
-                    e.depth as i32 >= depth - 1 + s.margin && matches!(e.bound, Bound::Exact | Bound::Lower) && usable(e.score)
+                    e.depth as i32 >= (depth - 1 - r).max(0) + s.margin && matches!(e.bound, Bound::Exact | Bound::Lower) && usable(e.score)
                 });
                 if let (Some(n), Some(c)) = (node, child) {
                     is_bad = -c.score <= n.score - s.bad_cp;
