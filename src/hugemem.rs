@@ -49,6 +49,16 @@ impl<T> HugeBuf<T> {
     }
 }
 
+impl<T: Copy> Clone for HugeBuf<T> {
+    fn clone(&self) -> Self {
+        // SAFETY: a HugeBuf<T> only exists through `zeroed`, whose caller
+        // vouched that all-zero is a valid T.
+        let mut b = unsafe { Self::zeroed(self.len) };
+        b.copy_from_slice(self);
+        b
+    }
+}
+
 impl<T> Drop for HugeBuf<T> {
     fn drop(&mut self) {
         // SAFETY: allocated in `zeroed` with this layout; elements are dropped
