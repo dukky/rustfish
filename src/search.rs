@@ -19,10 +19,12 @@ const SCORE_DROP_MARGIN: i32 = 40;
 // Node-fraction time management (single-threaded searches only): from this
 // depth on, the soft target is also scaled by (NodeTmBase - f) * NodeTmScale
 // percent, f = percent of all search nodes spent under the current best move.
-// Defaults are neutral at f ~ 41, the median measured in 120+1 self-play (the
-// root has no LMR, so alternatives are expensive and f runs low): f = 90 (an
-// obvious move) ends at ~0.64x, f = 10 (contested root) gets ~1.24x. The
-// average comes out near 0.95x, so this redistributes time, not adds it.
+// Defaults are neutral at f ~ 67. The base was 175 (neutral at f ~ 41, the
+// median in 120+1 self-play on 6 Nov), but search changes since then raised
+// the typical f: on 26 Nov the median f at the stop was 76 (37 positions), so
+// the scale averaged ~0.78x and cut time rather than redistributing it. With
+// base 200: f = 96 (an obvious move) ends at ~0.78x, f = 14 (contested root)
+// gets ~1.4x, and the average comes back near 0.97x.
 const NODE_TM_MIN_DEPTH: i32 = 8;
 // Internal iterative reduction: nodes this deep with no TT move search one ply less.
 const IIR_MIN_DEPTH: i32 = 4;
