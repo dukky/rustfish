@@ -19,6 +19,7 @@ const EVAL_CACHE_MASK: usize = EVAL_CACHE_SIZE - 1;
 /// then the eval as i16 in the low 16 bits. Evals outside i16 are not cached.
 #[derive(Clone, Copy)]
 struct Entry(u64);
+const _: () = assert!(Entry::EMPTY.0 == 0);
 
 const VALID: u64 = 1 << 63;
 const _: () = assert!(64 - EVAL_CACHE_BITS + 16 + 1 <= 64);
@@ -37,16 +38,18 @@ impl Entry {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct EvalCache {
-    entries: Vec<Entry>,
+    /// 8 MB, probed at random: on 2 MB pages where the OS allows it (see
+    /// `hugemem`), so a probe (and its prefetch) does not also miss the TLB.
+    entries: crate::hugemem::HugeBuf<Entry>,
     /// Pawn-structure memo consulted on eval-cache misses (exact; see eval.rs).
     pawns: PawnTable,
 }
 
 impl EvalCache {
     pub(crate) fn new() -> Self {
-        Self { entries: vec![Entry::EMPTY; EVAL_CACHE_SIZE], pawns: PawnTable::new() }
+        // SAFETY: the all-zero `Entry` is `Entry::EMPTY`.
+        Self { entries: unsafe { crate::hugemem::HugeBuf::zeroed(EVAL_CACHE_SIZE) }, pawns: PawnTable::new() }
     }
 
     pub(crate) fn clear(&mut self) {
