@@ -1,5 +1,6 @@
 mod bitboard;
 mod book;
+mod cycle;
 mod datagen;
 mod eval;
 mod evalcache;

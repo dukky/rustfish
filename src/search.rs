@@ -906,19 +906,13 @@ pub(crate) fn is_repetition(rep_stack: &[u64], key: u64, halfmove_clock: u32) ->
     false
 }
 
-/// Cuckoo upcoming-repetition test: the side to move can (ignoring legality)
-/// play a reversible move back into a position on the path or in the game
-/// history, which `is_repetition` would score as a draw. Searches use it to
-/// raise alpha to the draw score before doing any work.
+/// The side to move can play a reversible move back into a position that
+/// `is_repetition` would score as a draw (see `cycle.rs`). The scan stops at
+/// the last null move on the path.
 #[inline]
 fn upcoming_repetition(board: &Board, rep_stack: &[u64], key: u64, search: &Search) -> bool {
-    if board.halfmove_clock < 3 {
-        return false;
-    }
     let max_back = rep_stack.len() - 1 - search.null_idx;
-    crate::tt::Cuckoo::get()
-        .upcoming_repetition(board, rep_stack, key, max_back)
-        .is_some()
+    crate::cycle::upcoming_repetition(board, rep_stack, key, max_back)
 }
 
 pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) -> Option<String> {
@@ -3274,111 +3268,6 @@ mod tests {
         check("8/8/4kn2/8/8/3KB3/8/8 w - - 0 1", false); // KB vs KN
         check("8/8/4k3/8/8/3KNN2/4p3/8 w - - 0 1", false); // KNN vs KP
         check("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", false);
-    }
-
-    /// Brute force for the cuckoo test: a legal move of the side to move
-    /// whose child is on `stack` at an odd distance 3..=end behind `key`.
-    fn brute_upcoming_repetition(board: &mut Board, stack: &[u64], key: u64, zobrist: &Zobrist) -> bool {
-        let n = stack.len() - 1;
-        let end = (board.halfmove_clock as usize).min(n);
-        let mut moves = Vec::new();
-        board.generate_legal_moves(false, &mut moves);
-        for mv in moves {
-            let undo = board.make_move(mv);
-            let child = child_hash(key, board, mv, undo, zobrist);
-            board.undo_move(mv, undo);
-            let mut i = 3;
-            while i <= end {
-                if stack[n - i] == child {
-                    return true;
-                }
-                i += 2;
-            }
-        }
-        false
-    }
-
-    #[test]
-    fn cuckoo_upcoming_repetition_matches_brute_force() {
-        let zobrist = Zobrist::new();
-        let cuckoo = crate::tt::Cuckoo::get();
-        let fens = [
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            "r1bq1rk1/pp2bppp/2n1pn2/3p4/2PP4/2N1PN2/PP3PPP/R2QKB1R w KQ - 0 8",
-            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            "8/2k5/8/3r4/8/2N5/1K2Q3/8 w - - 0 1",
-            "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1",
-            "6k1/5ppp/8/8/8/8/5PPP/3RR1K1 b - - 0 1",
-            "2kr4/8/8/8/3q4/8/8/3QK3 w - - 0 1",
-        ];
-        let mut seed = 0x5eed_cafe_u64;
-        let (mut checks, mut positives, mut illegal_only) = (0, 0, 0);
-        for fen in fens {
-            for _game in 0..60 {
-                let mut board = Board::new();
-                board.set_fen(fen);
-                let mut key = board_hash(&board, &zobrist);
-                let mut stack = vec![key];
-                for _ply in 0..50 {
-                    let fast = cuckoo.upcoming_repetition(&board, &stack, key, usize::MAX);
-                    let brute = brute_upcoming_repetition(&mut board, &stack, key, &zobrist);
-                    checks += 1;
-                    if brute {
-                        positives += 1;
-                        assert!(fast.is_some(), "missed repetition from {} after {} plies", fen, stack.len() - 1);
-                    } else if let Some((from, to)) = fast {
-                        // Allowed only for a pseudo-legal reversible move that
-                        // leaves the mover's king in check.
-                        illegal_only += 1;
-                        let mover = board.side_to_move;
-                        let piece = board.squares[from as usize].expect("piece on from");
-                        assert_eq!(piece.color, mover);
-                        assert!(piece.kind != PieceType::Pawn);
-                        assert!(board.squares[to as usize].is_none());
-                        let mv = Move { from, to, promotion: None, is_en_passant: false, is_castle: false };
-                        let undo = board.make_move(mv);
-                        let child = child_hash(key, &board, mv, undo, &zobrist);
-                        let illegal = board.is_in_check(mover);
-                        board.undo_move(mv, undo);
-                        assert!(illegal, "cuckoo-only match is legal: {} -> {}", from, to);
-                        let n = stack.len() - 1;
-                        assert!((3..=n.min(board.halfmove_clock as usize))
-                            .step_by(2)
-                            .any(|i| stack[n - i] == child));
-                    }
-
-                    let mut moves = Vec::new();
-                    board.generate_legal_moves(false, &mut moves);
-                    if moves.is_empty() {
-                        break;
-                    }
-                    // Mostly quiet piece moves, so cycles actually occur.
-                    let quiet: Vec<Move> = moves
-                        .iter()
-                        .copied()
-                        .filter(|m| {
-                            board.squares[m.to as usize].is_none()
-                                && board.squares[m.from as usize].is_some_and(|p| p.kind != PieceType::Pawn)
-                        })
-                        .collect();
-                    let r = crate::tt::splitmix64(&mut seed);
-                    let pool = if !quiet.is_empty() && r % 10 != 0 { &quiet } else { &moves };
-                    let mv = pool[(r >> 8) as usize % pool.len()];
-                    let undo = board.make_move(mv);
-                    key = child_hash(key, &board, mv, undo, &zobrist);
-                    stack.push(key);
-                }
-            }
-        }
-        assert!(positives > 200, "too few repetitions exercised: {} of {}", positives, checks);
-        eprintln!("cuckoo: {} checks, {} repetitions, {} illegal-only", checks, positives, illegal_only);
-    }
-
-    #[test]
-    fn cuckoo_table_holds_every_reversible_move() {
-        // 3668 = Stockfish's count of non-pawn piece moves on an empty board,
-        // each (piece, s1 < s2) pair once.
-        assert_eq!(crate::tt::Cuckoo::get().len(), 3668);
     }
 
     fn see_of(fen: &str, uci: &str) -> i32 {

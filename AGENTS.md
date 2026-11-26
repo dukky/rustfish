@@ -42,6 +42,7 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 - `src/movegen.rs` — move generation, attack detection, UCI move parsing/helpers
 - `src/search.rs` — search, pruning, move ordering, SEE
 - `src/tt.rs` — zobrist hashing + transposition table
+- `src/cycle.rs` — upcoming-repetition (cycle) detection, clean-room implementation
 - `src/uci.rs` — UCI/perft/selftest handlers
 - `scripts/gauntlet.py` — gauntlet runner vs Stockfish or other UCI engines
 - `scripts/bench.py` — benchmark runner across fixed positions
