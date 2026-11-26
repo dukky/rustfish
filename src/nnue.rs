@@ -34,7 +34,12 @@ use std::sync::Arc;
 use crate::{Board, Color, Move, Piece, PieceType};
 
 pub(crate) const INPUTS: usize = 768;
-pub(crate) const H: usize = 1024;
+/// nnue-h1536-speed (speed test only): a 1536-wide feature transformer. The
+/// embedded net is still the H1024 gen-12 net; `widen` turns it into a
+/// synthetic H1536 net at load (docs/h1536-cost.md).
+pub(crate) const H: usize = 1536;
+/// Width of the embedded net that `widen` expands.
+const H_SRC: usize = 1024;
 pub(crate) const QA: i32 = 255;
 pub(crate) const QB: i32 = 64;
 pub(crate) const SCALE: i32 = 400;
@@ -176,6 +181,84 @@ pub(crate) const fn net_bytes(kb: usize) -> usize {
     (kb * INPUTS * H + H + BUCKETS * (2 * H + 1) + if HEAD { head::HEAD_WORDS } else { 0 }) * 2
 }
 
+/// Bytes of an H_SRC-wide pairwise net with `kb` king buckets.
+const fn src_net_bytes(kb: usize) -> usize {
+    let bucket = head::H1 * H_SRC + head::H1 + head::H2 * head::H1 + 2 * head::H2 + 1;
+    (kb * INPUTS * H_SRC + H_SRC + BUCKETS * (2 * H_SRC + 1) + bucket * BUCKETS) * 2
+}
+
+/// Speed-test net: an H_SRC pairwise net widened to H (synthetic, not for
+/// play). Pair `i` of the wide net (neurons `i`, `i + H/2`) copies pair
+/// `src_pair(i)` of the source (neurons `j`, `j + H_SRC/2`): the first
+/// H_SRC/2 pairs are the source's own, the extra ones copy every other
+/// 4-pair chunk of the source (so the chunk grouping and its sparsity
+/// carry over), with +-2 noise on their FT weights. Linear output and W1
+/// weights of a source pair used twice are halved, so the eval stays close
+/// to the source net's and search behaves like a real net's.
+pub(crate) fn widen(bytes: &[u8], kb: usize) -> Vec<u8> {
+    use head::{H1, H2};
+    let (hs, hn) = (H_SRC / 2, H / 2);
+    let src_pair = |i: usize| if i < hs { i } else { let k = i - hs; (k / 4) * 8 + k % 4 };
+    // Source column of wide neuron n, and whether that source pair is used twice.
+    let col = |n: usize| if n < hn { src_pair(n) } else { src_pair(n - hn) + hs };
+    let mut uses = vec![0u8; hs];
+    for i in 0..hn {
+        uses[src_pair(i)] += 1;
+    }
+    let dup = |n: usize| uses[col(n) % hs] > 1;
+    let w: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    let mut out: Vec<i16> = Vec::with_capacity(net_bytes(kb) / 2);
+    let mut rng = 0x2545_F491_4F6C_DD1Du64;
+    let mut noise = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng % 5) as i16 - 2
+    };
+    let half = |v: i16| ((v as i32 + if v >= 0 { 1 } else { -1 }) / 2) as i16;
+    let mut o = 0;
+    // FT rows (kb * 768) and the FT bias row.
+    for r in 0..kb * INPUTS + 1 {
+        let row = &w[o..o + H_SRC];
+        for n in 0..H {
+            let v = row[col(n)];
+            let extra = r < kb * INPUTS && (n % hn) >= hs;
+            out.push(if extra { v.saturating_add(noise()) } else { v });
+        }
+        o += H_SRC;
+    }
+    // Linear output: per bucket, stm half then other half.
+    for _ in 0..BUCKETS * 2 {
+        let row = &w[o..o + H_SRC];
+        out.extend((0..H).map(|n| if dup(n) { half(row[col(n)]) } else { row[col(n)] }));
+        o += H_SRC;
+    }
+    out.extend_from_slice(&w[o..o + BUCKETS]);
+    o += BUCKETS;
+    // Head, per bucket: W1 [16][H] over (stm pairs, other pairs), at W1q * 128.
+    for _ in 0..BUCKETS {
+        for _ in 0..H1 {
+            let row = &w[o..o + H_SRC];
+            for p in 0..2 {
+                for i in 0..hn {
+                    let j = src_pair(i);
+                    let v = row[p * hs + j] as i32;
+                    let q = (v + if v >= 0 { 64 } else { -64 }) / 128;
+                    let q = if uses[j] > 1 { (q + if q >= 0 { 1 } else { -1 }) / 2 } else { q };
+                    out.push((q * 128) as i16);
+                }
+            }
+            o += H_SRC;
+        }
+        let rest = H1 + H2 * H1 + 2 * H2 + 1;
+        out.extend_from_slice(&w[o..o + rest]);
+        o += rest;
+    }
+    assert_eq!(o, w.len());
+    assert_eq!(out.len() * 2, net_bytes(kb));
+    out.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
 /// Bytes in a net file for the active layout.
 #[allow(dead_code)]
 pub(crate) const NET_BYTES: usize = net_bytes(KB);
@@ -278,6 +361,9 @@ impl Network {
     }
 
     pub(crate) fn from_bytes_kb(bytes: &[u8], kb: usize) -> Result<Self, String> {
+        if H != H_SRC && HEAD && bytes.len() == src_net_bytes(kb) {
+            return Self::from_bytes_kb(&widen(bytes, kb), kb);
+        }
         if bytes.len() != net_bytes(kb) {
             return Err(format!(
                 "net is {} bytes, expected {} (H={H}, {kb} king bucket(s), {BUCKETS} output bucket(s))",

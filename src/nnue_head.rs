@@ -1387,6 +1387,7 @@ mod fixture {
     const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/net/head_fixture.txt");
 
     #[test]
+    #[ignore = "nnue-h1536-speed: the fixture is for the H1024 net (the widened net is synthetic)"]
     fn head_matches_trainer_fixture() {
         if !HEAD {
             return;
@@ -1596,6 +1597,47 @@ mod permute {
             std::fs::write(&o, &out).unwrap();
             eprintln!("wrote {o}");
         }
+    }
+
+    /// Pairwise-input sparsity of the embedded net (as loaded, so widened on
+    /// nnue-h1536-speed) on random walks from the bench positions:
+    /// `cargo test --release head_sparsity -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn head_sparsity() {
+        use super::{kernels, Scratch, CHUNKS};
+        let net = Network::from_bytes(crate::EMBEDDED_NET).unwrap();
+        let mut seed = 0x1234_5678_u64;
+        let mut moves = Vec::new();
+        let (mut evals, mut nz_bytes, mut nz_chunks) = (0usize, 0usize, 0usize);
+        let mut s = Box::new(Scratch::new());
+        for fen in crate::uci::BENCH_FENS {
+            for _ in 0..64 {
+                let mut board = Board::new();
+                board.set_fen(fen);
+                for _ in 0..12 {
+                    board.generate_legal_moves(false, &mut moves);
+                    if moves.is_empty() {
+                        break;
+                    }
+                    let mv = moves[(crate::tt::splitmix64(&mut seed) % moves.len() as u64) as usize];
+                    board.make_move(mv);
+                    let a = Accumulator::refresh(&net, &board);
+                    let n = kernels::activate(&a.v[0], &mut s.x.0[..HALF], 0, &mut s.nnz, 0);
+                    let n = kernels::activate(&a.v[1], &mut s.x.0[HALF..], HALF / 4, &mut s.nnz, n);
+                    evals += 1;
+                    nz_chunks += n;
+                    nz_bytes += s.x.0.iter().filter(|&&x| x != 0).count();
+                }
+            }
+        }
+        eprintln!(
+            "H={H}: {evals} evals, nonzero pairwise inputs {:.2}% ({:.1} of {N_IN}), nonzero chunks {:.2}% ({:.1} of {CHUNKS})",
+            100.0 * nz_bytes as f64 / (evals * N_IN) as f64,
+            nz_bytes as f64 / evals as f64,
+            100.0 * nz_chunks as f64 / (evals * CHUNKS) as f64,
+            nz_chunks as f64 / evals as f64
+        );
     }
 
     /// Microbench of the head's parts on real accumulators (ns per eval).
