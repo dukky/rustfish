@@ -10,6 +10,7 @@ mod movegen;
 mod nnue;
 mod psqt;
 mod search;
+mod syzygy;
 mod tt;
 mod tune;
 mod uci;
@@ -1045,6 +1046,10 @@ struct EngineState {
     /// Net loaded from `EvalFile`; `UseNNUE` selects whether search uses it.
     nnue_net: Option<std::sync::Arc<nnue::Network>>,
     use_nnue: bool,
+    /// Syzygy tables from `SyzygyPath` (None = off, the default).
+    syzygy: Option<std::sync::Arc<syzygy::Tablebases>>,
+    /// Largest piece count probed in search (`SyzygyProbeLimit`).
+    syzygy_probe_limit: u32,
 }
 
 /// Fourth net trained on 77M positions of net3 self-play (seed 5 at 8000
@@ -1085,6 +1090,8 @@ impl EngineState {
                 nnue::Network::from_bytes(EMBEDDED_NET).expect("embedded NNUE net"),
             )),
             use_nnue: true,
+            syzygy: None,
+            syzygy_probe_limit: 5,
         }
     }
 
@@ -1187,6 +1194,8 @@ impl EngineState {
             move_overhead: self.move_overhead,
             nnue_net: self.nnue_net.clone(),
             use_nnue: self.use_nnue,
+            syzygy: self.syzygy.clone(),
+            syzygy_probe_limit: self.syzygy_probe_limit,
         }
     }
 }
@@ -1217,6 +1226,8 @@ fn main() {
             println!("option name BookFile type string default");
             println!("option name EvalFile type string default");
             println!("option name UseNNUE type check default true");
+            println!("option name SyzygyPath type string default <empty>");
+            println!("option name SyzygyProbeLimit type spin default 5 min 0 max 7");
             println!("option name FutilityMarginD1 type spin default 114 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");
             println!("option name ReverseFutilityMarginD1 type spin default 43 min 0 max 500");
@@ -1300,6 +1311,10 @@ fn main() {
         }
         if cmd.starts_with("evalhash") {
             handle_evalhash(cmd, &mut board, engine.active_net());
+            continue;
+        }
+        if cmd == "tbprobe" {
+            syzygy::handle_tbprobe(&mut board, &engine);
             continue;
         }
         if cmd.starts_with("bench") {

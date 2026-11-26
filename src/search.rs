@@ -1012,6 +1012,11 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     if root_moves.is_empty() {
         return None;
     }
+    if let Some(tb) = engine.syzygy.clone() {
+        let h = board_hash(board, &engine.zobrist);
+        let repeated = engine.position_history.iter().filter(|&&x| x == h).count() >= 2;
+        syzygy::filter_root_moves(&tb, board, &mut root_moves, repeated);
+    }
     // A forced reply needs no thinking time: under clock management, search
     // one ply (so a score and PV are still reported) and play it. Fixed
     // depth, node, movetime and infinite searches (bench, datagen) are left
@@ -1607,6 +1612,36 @@ fn negamax(
 }
 
 /// negamax after the draw and repetition checks.
+/// Score a tablebase WDL result; wins/losses sit below mate scores.
+fn tb_score(wdl: i32, ply: usize) -> (i32, Bound) {
+    match wdl {
+        2 => (syzygy::TB_WIN - ply as i32, Bound::Lower),
+        -2 => (-syzygy::TB_WIN + ply as i32, Bound::Upper),
+        _ => (wdl.signum(), Bound::Exact),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn syzygy_cutoff(board: &mut Board, depth: i32, alpha: i32, beta: i32, ply: usize, engine: &mut EngineState, key: u64) -> Option<i32> {
+    if board.castling != 0 || syzygy::piece_count(board) > engine.syzygy_probe_limit {
+        return None;
+    }
+    let tb = engine.syzygy.clone()?;
+    let wdl = syzygy::probe_wdl(&tb, board)?;
+    let (score, bound) = tb_score(wdl, ply);
+    let cut = match bound {
+        Bound::Exact => true,
+        Bound::Lower => score >= beta,
+        Bound::Upper => score <= alpha,
+    };
+    if cut {
+        engine.tt.store(key, (depth + 6).min(MAX_PLY as i32), score_to_tt(score, ply), None, bound, None);
+        return Some(score);
+    }
+    None
+}
+
 fn negamax_body(
     board: &mut Board,
     mut depth: i32,
@@ -1665,6 +1700,15 @@ fn negamax_body(
                 Bound::Upper if tt_score <= alpha => return tt_score,
                 _ => {}
             }
+        }
+    }
+
+    // Syzygy WDL probe (off unless SyzygyPath is set): only right after a
+    // zeroing move, where the tables' 50-move semantics are exact, and not at
+    // the root (root moves are filtered with DTZ instead).
+    if engine.syzygy.is_some() && ply > 0 && board.halfmove_clock == 0 && excluded.is_none() {
+        if let Some(score) = syzygy_cutoff(board, depth, alpha, beta, ply, engine, key) {
+            return score;
         }
     }
 

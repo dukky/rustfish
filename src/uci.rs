@@ -79,6 +79,23 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         engine.tt.clear();
         return;
     }
+    if n == "syzygypath" {
+        let v = value.trim();
+        if v.is_empty() || v == "<empty>" {
+            engine.syzygy = None;
+        } else {
+            let tb = crate::syzygy::Tablebases::open(v);
+            println!("info string syzygy: {} tables found (up to {} pieces)", tb.num_files(), tb.max_pieces);
+            engine.syzygy = if tb.num_files() > 0 { Some(std::sync::Arc::new(tb)) } else { None };
+        }
+        return;
+    }
+    if n == "syzygyprobelimit" {
+        if let Ok(v) = value.trim().parse::<u32>() {
+            engine.syzygy_probe_limit = v.min(7);
+        }
+        return;
+    }
     if n == "move overhead" {
         if let Ok(ms) = value.trim().parse::<u64>() {
             engine.move_overhead = ms.min(5000);
