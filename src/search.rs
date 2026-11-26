@@ -9,7 +9,7 @@ const SE_MARGIN_PER_DEPTH: i32 = 2;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
-const DEFAULT_MOVES_TO_GO: u64 = 20;
+const DEFAULT_MOVES_TO_GO: u64 = 18;
 // The hard limit (checked mid-iteration) is this multiple of the soft target.
 const HARD_LIMIT_FACTOR: u64 = 3;
 // Soft-target scale in percent by how many iterations the best move has held.
