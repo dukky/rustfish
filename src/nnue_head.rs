@@ -235,30 +235,30 @@ impl HeadNet {
                 let c = _mm256_min_ps(_mm256_max_ps(z, zero), one);
                 *u = _mm256_mul_ps(c, c);
             }
-            // u[k] broadcast in registers (128-bit half duplicated, then an
-            // in-lane shuffle), not a store and 16 reloads: shorter latency
-            // from u to the first L2 product.
-            let d = [
-                _mm256_permute2f128_ps::<0x00>(u[0], u[0]),
-                _mm256_permute2f128_ps::<0x11>(u[0], u[0]),
-                _mm256_permute2f128_ps::<0x00>(u[1], u[1]),
-                _mm256_permute2f128_ps::<0x11>(u[1], u[1]),
-            ];
-            let mut uk = [zero; H1];
-            for (q, &h) in d.iter().enumerate() {
-                uk[4 * q] = _mm256_shuffle_ps::<0x00>(h, h);
-                uk[4 * q + 1] = _mm256_shuffle_ps::<0x55>(h, h);
-                uk[4 * q + 2] = _mm256_shuffle_ps::<0xAA>(h, h);
-                uk[4 * q + 3] = _mm256_shuffle_ps::<0xFF>(h, h);
+            // L2 over the active neurons only (u[k] != 0, ~10 of 16), in
+            // ascending k like the dense loop. Bit-identical: a skipped term
+            // adds w * 0 = +-0 to z2, which is never -0 (b2 and every sum
+            // of nonzero products are +0 or nonzero), so it changes nothing.
+            let mut ua = [0.0f32; H1];
+            _mm256_storeu_ps(ua.as_mut_ptr(), u[0]);
+            _mm256_storeu_ps(ua.as_mut_ptr().add(8), u[1]);
+            let nz = |v| _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_NEQ_OQ>(v, zero)) as u32;
+            let mut m = nz(u[0]) | nz(u[1]) << 8;
+            if KA < H1 {
+                m &= (1 << KA) - 1;
             }
             let w2 = &self.w2[b];
             let mut z2 = [zero; H2 / 8];
             for (r, z) in z2.iter_mut().enumerate() {
                 *z = _mm256_loadu_ps(self.b2[b].as_ptr().add(8 * r));
             }
-            for k in 0..KA {
+            while m != 0 {
+                let k = m.trailing_zeros() as usize;
+                m &= m - 1;
+                let uk = _mm256_broadcast_ss(ua.get_unchecked(k));
+                let wk = w2.get_unchecked(k);
                 for (r, z) in z2.iter_mut().enumerate() {
-                    *z = _mm256_add_ps(*z, _mm256_mul_ps(_mm256_loadu_ps(w2[k].as_ptr().add(8 * r)), uk[k]));
+                    *z = _mm256_add_ps(*z, _mm256_mul_ps(_mm256_loadu_ps(wk.as_ptr().add(8 * r)), uk));
                 }
             }
             let mut t = [zero; H2 / 8];
