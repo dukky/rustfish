@@ -8,3 +8,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[features]
+# Tree-gap diagnosis counters (branch diag-tree-gap only; docs/tree-gap-2026-11-26.md).
+treestats = []

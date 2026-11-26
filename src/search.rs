@@ -1,4 +1,5 @@
 use super::*;
+use crate::treediag::{self as td, k};
 use crate::movegen::{threat_maps, CheckInfo, ThreatMaps};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1008,6 +1009,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     engine.prepare_for_search();
 
     let start = Instant::now();
+    #[cfg(feature = "treestats")]
+    td::reset();
     let mut search = Search::new(deadline);
     // Node limits apply to the single-threaded search only.
     search.node_limit = node_limit.unwrap_or(u64::MAX);
@@ -1074,8 +1077,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         let mut alpha = -INF;
         let mut beta = INF;
         if d >= 4 {
-            alpha = best_score - ASPIRATION_WINDOW;
-            beta = best_score + ASPIRATION_WINDOW;
+            alpha = best_score - k(td::K_ASPW);
+            beta = best_score + k(td::K_ASPW);
         }
 
         let (score, mv, completed, depth_nodes) = loop {
@@ -1120,15 +1123,19 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     &mut rep_stack,
                 );
                 let nodes_after = search.nodes;
+                ts!(s => s.asp_iters += 1;);
                 if !result.2 || d < 4 {
                     break (result.0, result.1, result.2, nodes_after - nodes_before);
                 }
+                if result.0 <= alpha || result.0 >= beta {
+                    ts!(s => s.asp_fails += 1; s.sub[td::S_ASP_FAIL][td::db(d)] += nodes_after - nodes_before; s.sub_cnt[td::S_ASP_FAIL][td::db(d)] += 1;);
+                }
                 if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    alpha = (alpha - k(td::K_ASPW) * 2).max(-INF);
                     continue;
                 }
                 if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    beta = (beta + k(td::K_ASPW) * 2).min(INF);
                     continue;
                 }
                 break (result.0, result.1, result.2, nodes_after - nodes_before);
@@ -1160,6 +1167,8 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
         let elapsed = start.elapsed().as_millis() as u64;
         let nodes = search.nodes + total_threaded_nodes;
         if !QUIET_SEARCH.with(|q| q.get()) {
+            #[cfg(feature = "treestats")]
+            println!("info string iter {} seldepth {}", d, td::st().seldepth);
             print_info(d, best_score, nodes, elapsed, best_move);
         }
         if nodes >= SOFT_NODE_LIMIT.with(|s| s.get()) {
@@ -1199,6 +1208,10 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     }
 
     engine.last_search_nodes = search.nodes + total_threaded_nodes;
+    #[cfg(feature = "treestats")]
+    if !QUIET_SEARCH.with(|q| q.get()) {
+        td::print();
+    }
     LAST_SEARCH_SCORE.with(|s| s.set(best_score));
     LAST_SEARCH_DEPTH.with(|s| s.set(completed_depth));
     best_move.map(move_to_uci)
@@ -1561,6 +1574,7 @@ fn negamax(
     cut_node: bool,
 ) -> i32 {
     search.nodes += 1;
+    ts!(s => s.plies[ply.min(127)] += 1; if ply as u64 > s.seldepth { s.seldepth = ply as u64; });
     if search.should_stop() {
         return 0;
     }
@@ -1616,8 +1630,9 @@ fn negamax_body(
     cut_node: bool,
 ) -> i32 {
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
-    if in_check {
+    if in_check && k(td::K_CE) != 0 {
         depth += 1;
+        ts!(s => s.ext_check[td::db(depth)] += 1;);
     }
 
     let mate_low = -MATE_SCORE + ply as i32;
@@ -1633,30 +1648,44 @@ fn negamax_body(
     }
 
     if depth <= 0 {
+        ts!(s => s.qs_root += 1;);
         return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
     }
 
     let alpha_orig = alpha;
     let pv_node = beta - alpha > 1;
+    #[cfg(feature = "treestats")]
+    let nt = if pv_node { 0 } else if cut_node { 1 } else { 2 };
+    #[cfg(feature = "treestats")]
+    let d0 = td::db(depth);
+    ts!(s => s.nodes_nt_d[nt][d0] += 1;);
+    #[cfg(feature = "treestats")]
+    let nodes_at_entry = search.nodes;
+
     // Singular verification search: same node, minus this move. The TT entry
     // describes the full node, so it must not cut off or be overwritten here.
     let excluded = search.excluded[ply];
     let tt_entry = engine.tt.probe(key);
     let mut tt_move = None;
+    ts!(s => s.tt_probe[d0] += 1; if tt_entry.is_some() { s.tt_hit[d0] += 1; });
 
     if let Some(entry) = tt_entry {
         tt_move = entry.best;
         // A moveless entry means this node will take the IIR ply below, so
         // its search would be exactly as deep as an entry one ply shallower.
-        let iir = entry.best.is_none() && depth >= IIR_MIN_DEPTH;
+        let iir = entry.best.is_none() && depth >= k(td::K_IIRD);
         let needed = if iir { depth - 1 } else { depth };
         if excluded.is_none() && !pv_node && entry.depth as i32 >= needed {
+            ts!(s => s.tt_deep[d0] += 1;);
             let tt_score = score_from_tt(entry.score, ply);
-            match entry.bound {
-                Bound::Exact => return tt_score,
-                Bound::Lower if tt_score >= beta => return tt_score,
-                Bound::Upper if tt_score <= alpha => return tt_score,
-                _ => {}
+            let cut = match entry.bound {
+                Bound::Exact => true,
+                Bound::Lower => tt_score >= beta,
+                Bound::Upper => tt_score <= alpha,
+            };
+            if cut {
+                ts!(s => s.exit[nt][d0][td::X_TT] += 1;);
+                return tt_score;
             }
         }
     }
@@ -1695,13 +1724,14 @@ fn negamax_body(
                 params.futility_margin_d2
             };
             if se + margin <= alpha {
+                ts!(s => s.exit[nt][d0][td::X_RAZOR] += 1; s.qs_root += 1;);
                 return quiescence(board, alpha, beta, search, engine, rep_stack, key, ply, Some(in_check), prev_move);
             }
         }
 
         if excluded.is_none()
             && beta - alpha <= 1
-            && depth <= RFP_MAX_DEPTH
+            && depth <= k(td::K_RFPD)
             && beta.abs() < MATE_SCORE - 1000
         {
             let mut margin = match depth {
@@ -1713,6 +1743,7 @@ fn negamax_body(
                 margin -= margin / 4;
             }
             if se - margin >= beta {
+                ts!(s => s.exit[nt][d0][td::X_RFP] += 1;);
                 return se;
             }
         }
@@ -1723,7 +1754,7 @@ fn negamax_body(
     // after futility/RFP so those prunes are decided on the node's true depth
     // (and IIR_MIN_DEPTH > 3 keeps them from triggering on reduced depth here),
     // but before null move so its reduction and the main loop use the cheaper depth.
-    if tt_move.is_none() && depth >= IIR_MIN_DEPTH {
+    if tt_move.is_none() && depth >= k(td::K_IIRD) {
         depth -= 1;
     }
 
@@ -1750,7 +1781,13 @@ fn negamax_body(
             rep_stack.push(child_key);
             let null_idx_before = search.null_idx;
             search.null_idx = rep_stack.len() - 1;
-            let reduction = params.null_reduction_base + depth / params.null_reduction_depth_div;
+            let mut reduction = params.null_reduction_base + depth / params.null_reduction_depth_div + k(td::K_NMPR);
+            if k(td::K_NMPE) > 0 {
+                reduction += ((static_eval.unwrap() - beta) / k(td::K_NMPE)).clamp(0, 3);
+            }
+            ts!(s => s.nmp_tries[td::db(depth)] += 1;);
+            #[cfg(feature = "treestats")]
+            let nb = search.nodes;
             let score = -negamax(
                 board,
                 depth - 1 - reduction,
@@ -1768,6 +1805,7 @@ fn negamax_body(
             );
             rep_stack.pop();
             search.null_idx = null_idx_before;
+            ts!(s => s.sub[td::S_NMP][td::db(depth)] += search.nodes - nb; s.sub_cnt[td::S_NMP][td::db(depth)] += 1;);
 
             board.en_passant = old_ep;
             board.halfmove_clock = old_halfmove;
@@ -1778,6 +1816,7 @@ fn negamax_body(
                 return 0;
             }
             if score >= beta {
+                ts!(s => s.nmp_ok[td::db(depth)] += 1; s.exit[nt][d0][td::X_NMP] += 1;);
                 // A mate found after passing is not proven for the real
                 // position (and its distance counts the null ply): fail high
                 // with beta instead.
@@ -1803,6 +1842,8 @@ fn negamax_body(
                 e.depth as i32 >= depth - 3 && score_from_tt(e.score, ply) < probcut_beta
             })
             .unwrap_or(false);
+        #[cfg(feature = "treestats")]
+        let nb = search.nodes;
         if let (false, Some(se)) = (tt_says_no, static_eval) {
             let see_threshold = probcut_beta - se;
             let mut picker = MovePicker::new(
@@ -1860,6 +1901,7 @@ fn negamax_body(
                     return 0;
                 }
                 if score >= probcut_beta {
+                    ts!(s => s.exit[nt][d0][td::X_PROBCUT] += 1; s.sub[td::S_PROBCUT][td::db(depth)] += search.nodes - nb; s.sub_cnt[td::S_PROBCUT][td::db(depth)] += 1;);
                     engine.tt.store(
                         key,
                         depth - 3,
@@ -1872,6 +1914,7 @@ fn negamax_body(
                 }
             }
         }
+        ts!(s => s.sub[td::S_PROBCUT][td::db(depth)] += search.nodes - nb;);
     }
 
     let counter_move = counter_move_for(engine, board.side_to_move, prev_move);
@@ -1888,11 +1931,13 @@ fn negamax_body(
         &mut search.move_buf,
     );
     if picker.is_empty() {
+        ts!(s => s.exit[nt][d0][td::X_OTHER] += 1;);
         if in_check {
             return -MATE_SCORE + ply as i32;
         }
         return 0;
     }
+    ts!(s => s.loop_nodes[nt][td::db(depth)] += 1;);
 
     let threats = picker.threats;
     let mut best = -INF;
@@ -1915,7 +1960,7 @@ fn negamax_body(
         // Singular extension: if every alternative to the TT move fails low
         // against a margin below the TT score, the TT move is singular.
         let mut extension = 0;
-        if stage == Stage::Tt && excluded.is_none() && depth >= SE_MIN_DEPTH {
+        if stage == Stage::Tt && excluded.is_none() && depth >= k(td::K_SED) {
             if let Some(entry) = tt_entry {
                 let tt_score = score_from_tt(entry.score, ply);
                 if entry.best == Some(mv)
@@ -1925,12 +1970,15 @@ fn negamax_body(
                 {
                     let singular_beta = tt_score - SE_MARGIN_PER_DEPTH * depth;
                     search.excluded[ply] = Some(mv);
+                    ts!(s => s.se_tries[td::db(depth)] += 1;);
+                    #[cfg(feature = "treestats")]
+                    let nb = search.nodes;
                     // `depth` already carries this node's check extension and
                     // the verification search re-enters this node, which adds
                     // it again: take it off here so it counts once.
                     let s = negamax(
                         board,
-                        (depth - 1) / 2 - in_check as i32,
+                        (depth - 1) / 2 - (in_check && k(td::K_CE) != 0) as i32,
                         singular_beta - 1,
                         singular_beta,
                         ply,
@@ -1944,19 +1992,23 @@ fn negamax_body(
                         cut_node,
                     );
                     search.excluded[ply] = None;
+                    ts!(st => st.sub[td::S_SINGULAR][td::db(depth)] += search.nodes - nb; st.sub_cnt[td::S_SINGULAR][td::db(depth)] += 1;);
                     if search.stop {
                         return 0;
                     }
                     if s < singular_beta {
-                        extension = 1;
+                        extension = k(td::K_SEX);
+                        ts!(st => st.ext_se[td::db(depth)] += 1;);
                     } else if singular_beta >= beta && beta - alpha <= 1 {
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.
+                        ts!(st => st.exit[nt][d0][td::X_MULTICUT] += 1;);
                         return singular_beta;
                     } else if tt_score >= beta {
                         // Negative extension: not singular, and the TT score
                         // already beats beta, so an alternative likely cuts too.
                         extension = -params.se_negative_extension;
+                        ts!(st => st.ext_neg[td::db(depth)] += 1;);
                     }
                 }
             }
@@ -1987,11 +2039,12 @@ fn negamax_body(
         let prune_exempt = quiet
             && (Some(mv) == killers[0] || Some(mv) == killers[1] || Some(mv) == counter_move);
 
-        if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3 {
+        if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3.max(k(td::K_LMPD)) {
             let limit = match depth {
                 1 => params.lmp_limit_d1,
                 2 => params.lmp_limit_d2,
-                _ => params.lmp_limit_d3,
+                3 => params.lmp_limit_d3,
+                d => (4 + d * d) as usize,
             };
             if idx >= limit {
                 continue;
@@ -2004,7 +2057,7 @@ fn negamax_body(
             && !prune_exempt
             && !in_check
             && beta - alpha <= 1
-            && depth <= 8
+            && depth <= k(td::K_FUTD)
             && idx > 0
             && static_eval.is_some_and(|se| se + params.futility_margin_d1 * depth / 2 <= alpha)
         {
@@ -2012,6 +2065,18 @@ fn negamax_body(
             if !ci.gives_check(board, mv) {
                 continue;
             }
+        }
+
+        if k(td::K_HPD) > 0
+            && quiet
+            && !prune_exempt
+            && !in_check
+            && beta - alpha <= 1
+            && idx > 0
+            && depth <= k(td::K_HPD)
+            && quiet_history + quiet_continuation < -k(td::K_HPT) * depth
+        {
+            continue;
         }
 
         // Quiet SEE pruning: skip late, unremarkable quiets that hang material
@@ -2065,6 +2130,8 @@ fn negamax_body(
         }
         rep_stack.push(child_key);
         let gives_check = board.is_in_check(board.side_to_move);
+        #[cfg(feature = "treestats")]
+        let child_nb = search.nodes;
 
         let mut score;
         if idx == 0 {
@@ -2083,15 +2150,35 @@ fn negamax_body(
                 Some(gives_check),
                 !pv_node && !cut_node,
             );
+            ts!(s => s.sub[td::S_FIRST][td::db(depth)] += search.nodes - child_nb; s.sub_cnt[td::S_FIRST][td::db(depth)] += 1;);
         } else {
-            let reduction = if quiet
+            let lmr_cap = !quiet
+                && k(td::K_LMRCAP) > 0
+                && stage != Stage::Tt
+                && (k(td::K_LMRCAP) >= 2 || stage == Stage::BadCapture)
+                && !in_check
+                && !gives_check
+                && depth >= params.lmr_min_depth
+                && idx >= params.lmr_min_move_index;
+            let reduction = if lmr_cap {
+                let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
+                let m = idx.min(LMR_MAX_MOVES - 1);
+                let mut r = engine.lmr_table[d][m] * k(td::K_LMRS) / 100 - 1;
+                if cut_node {
+                    r += 1;
+                }
+                r.clamp(0, depth - 2)
+            } else if quiet
                 && !in_check
                 && depth >= params.lmr_min_depth
-                && idx >= params.lmr_min_move_index
+                && idx >= params.lmr_min_move_index + k(td::K_LMRMI) as usize
             {
                 let d = (depth as usize).min(LMR_MAX_DEPTH - 1);
                 let m = idx.min(LMR_MAX_MOVES - 1);
-                let mut r = engine.lmr_table[d][m];
+                let mut r = engine.lmr_table[d][m] * k(td::K_LMRS) / 100;
+                if !pv_node && !cut_node {
+                    r += k(td::K_PVR);
+                }
                 if depth >= params.lmr_extra_depth && idx >= params.lmr_extra_move_index {
                     r += 1;
                 }
@@ -2129,6 +2216,7 @@ fn negamax_body(
             };
             let reduced = reduction > 0;
             let reduced_depth = (depth - 1 - reduction).max(0);
+            ts!(s => if reduced { s.lmr_red[td::db(depth)] += 1; });
 
             score = -negamax(
                 board,
@@ -2145,8 +2233,12 @@ fn negamax_body(
                 Some(gives_check),
                 reduced || !cut_node,
             );
+            ts!(s => s.sub[if reduced { td::S_LATE_RED } else { td::S_LATE_FULL }][td::db(depth)] += search.nodes - child_nb; s.sub_cnt[if reduced { td::S_LATE_RED } else { td::S_LATE_FULL }][td::db(depth)] += 1;);
 
             if reduced && score > alpha {
+                ts!(s => s.lmr_re[td::db(depth)] += 1;);
+                #[cfg(feature = "treestats")]
+                let nb = search.nodes;
                 score = -negamax(
                     board,
                     depth - 1,
@@ -2162,9 +2254,13 @@ fn negamax_body(
                     Some(gives_check),
                     !cut_node,
                 );
+                ts!(s => s.sub[td::S_LMR_RE][td::db(depth)] += search.nodes - nb; if score > alpha { s.lmr_re_ok[td::db(depth)] += 1; });
             }
 
             if score > alpha && score < beta {
+                ts!(s => s.pvs_re[td::db(depth)] += 1;);
+                #[cfg(feature = "treestats")]
+                let nb = search.nodes;
                 score = -negamax(
                     board,
                     depth - 1,
@@ -2180,8 +2276,10 @@ fn negamax_body(
                     Some(gives_check),
                     false,
                 );
+                ts!(s => s.sub[td::S_PVS_RE][td::db(depth)] += search.nodes - nb;);
             }
         }
+        ts!(s => s.child_nodes_mi[nt][td::db(depth)][td::mi_bucket(idx)] += search.nodes - child_nb; if gives_check { s.sub[td::S_CHECKEXT][td::db(depth)] += search.nodes - child_nb; s.sub_cnt[td::S_CHECKEXT][td::db(depth)] += 1; });
 
         rep_stack.pop();
         board.undo_move(mv, undo);
@@ -2198,6 +2296,7 @@ fn negamax_body(
             alpha = score;
         }
         if alpha >= beta {
+            ts!(s => s.cut_mi[td::db(depth)][td::mi_bucket(idx)] += 1; s.exit[nt][d0][td::X_FAILHIGH] += 1; s.moves_searched[nt][td::db(depth)] += idx as u64 + 1;);
             let bonus = history_bonus(depth);
             if !quiet && is_capture_move(board, mv) {
                 apply_capture_history_delta(engine, side, board, mv, bonus);
@@ -2243,7 +2342,11 @@ fn negamax_body(
         idx += 1;
     }
 
+    ts!(s => s.moves_searched[nt][td::db(depth)] += idx as u64;);
+    #[cfg(feature = "treestats")]
+    let _ = nodes_at_entry;
     if excluded.is_some() {
+        ts!(s => s.exit[nt][d0][td::X_OTHER] += 1;);
         // Only the excluded move was legal: alternatives are "infinitely" bad.
         return if best == -INF { alpha } else { best };
     }
@@ -2261,6 +2364,7 @@ fn negamax_body(
     // fail-high moves (docs/search-diagnosis-2026-11-19.md). Store none, so
     // the slot keeps an older proven move or the next visit orders afresh.
     let tt_best = if bound == Bound::Upper { None } else { best_move };
+    ts!(s => s.exit[nt][d0][if bound == Bound::Upper { td::X_FAILLOW } else { td::X_EXACT }] += 1;);
     engine
         .tt
         .store(key, depth, score_to_tt(best, ply), raw_static_eval, bound, tt_best);
@@ -2293,6 +2397,7 @@ fn quiescence(
     prev_move: Option<Move>,
 ) -> i32 {
     search.nodes += 1;
+    ts!(s => s.qs_nodes += 1; s.plies[ply.min(127)] += 1; if ply as u64 > s.seldepth { s.seldepth = ply as u64; });
     if search.should_stop() {
         return 0;
     }
@@ -2355,6 +2460,7 @@ fn quiescence(
     let mut best = floor;
     if let Some(stand_pat) = static_eval {
         if stand_pat >= beta {
+            ts!(s => s.qs_standpat_cut += 1;);
             return stand_pat;
         }
         best = best.max(stand_pat);
@@ -2393,6 +2499,13 @@ fn quiescence(
             }
             if stage == Stage::Tt && !see_ge(board, mv, 0) {
                 continue;
+            }
+            if k(td::K_QSD) > 0 && mv.promotion.is_none() {
+                if let (Some(sp), Some(victim)) = (static_eval, board.squares[mv.to as usize]) {
+                    if sp + piece_value(victim.kind) + k(td::K_QSD) <= alpha {
+                        continue;
+                    }
+                }
             }
         }
 

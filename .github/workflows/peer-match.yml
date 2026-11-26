@@ -181,8 +181,48 @@ jobs:
           name: nps
           path: nps.json
 
+  # Tree-gap diagnosis (branch diag-tree-gap): limit=tree:<plan> runs
+  # scripts/diag/treegap/ci.sh <plan> <shard> <shards> instead of games.
+  tree:
+    needs: build
+    if: ${{ startsWith(inputs.limit, 'tree:') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.build.outputs.shards) }}
+    name: tree ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: engines
+          path: engines
+      - name: Build treestats binary
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          cargo build --release --features treestats --target-dir target-ts
+          cp target-ts/release/rustfish engines/rustfish-ts
+      - name: Run
+        env:
+          LIMIT: ${{ inputs.limit }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          chmod +x engines/*
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          bash scripts/diag/treegap/ci.sh "${LIMIT#tree:}" "$SHARD" "$SHARDS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tree-${{ matrix.shard }}
+          path: out/
+
   play:
     needs: build
+    if: ${{ !startsWith(inputs.limit, 'tree:') }}
     runs-on: ubuntu-latest
     timeout-minutes: 340
     strategy:
@@ -236,7 +276,7 @@ jobs:
 
   report:
     needs: [build, play]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !startsWith(inputs.limit, 'tree:') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

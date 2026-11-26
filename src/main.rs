@@ -10,6 +10,7 @@ mod nnue;
 mod psqt;
 mod search;
 mod tt;
+mod treediag;
 mod tune;
 mod uci;
 
@@ -1215,6 +1216,7 @@ fn main() {
             println!("option name BookStyle type combo default normal var normal var grinder var chaos");
             println!("option name BookFile type string default");
             println!("option name EvalFile type string default");
+            println!("option name DiagKnobs type string default");
             println!("option name UseNNUE type check default true");
             println!("option name FutilityMarginD1 type spin default 114 min 0 max 500");
             println!("option name FutilityMarginD2 type spin default 220 min 0 max 700");

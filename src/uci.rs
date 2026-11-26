@@ -75,6 +75,10 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
     }
 
     let n = name.to_ascii_lowercase();
+    if n == "diagknobs" {
+        crate::treediag::set_knobs(value.trim());
+        return;
+    }
     if n == "clear hash" {
         engine.tt.clear();
         return;

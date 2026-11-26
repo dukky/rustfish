@@ -10,3 +10,4 @@ __pycache__/
 .main-build/
 target-native/
 CLAUDE.local.md
+/target-ts
