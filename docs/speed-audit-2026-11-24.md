@@ -289,3 +289,10 @@ Bench-13 paired NPS, median of 6 runner medians [min, max]:
 A/A in the same runs: -0.30..+0.46 (default), -0.25..+0.20 (AVX2). arm:
 only `finish` changes NEON-side code; arm medians are within the arm A/A
 noise (+-1%). Runs: 45776044034, 45776965798, 45780090641, 45781018872.
+
+Final `speed-stack-r3` 2a008e1 (the vpdpwssd helpers split into
+`#[target_feature]` wrappers so a plain `cargo build` compiles; run
+45786789945): default **+1.77% [-1.55, +2.28]** (4 of 6 runners +1.7..+2.3,
+two EPYC 9V45 at -1.6 / -0.3; the A/A of the same run had a 9V45 at +1.6),
+AVX2 +1.26 [-0.16, +2.63], arm +0.04 (A/A +0.36). Over the three stack
+runs: +1.48, +1.39, +1.77 (default), +1.50, +1.44, +1.26 (AVX2).
