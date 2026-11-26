@@ -1372,7 +1372,20 @@ fn search_root(
     rep_stack: &mut Vec<u64>,
 ) -> (i32, Option<Move>, bool) {
     let alpha_orig = alpha;
-    let tt_move = engine.tt.probe(key).and_then(|e| e.best);
+    let root_entry = engine.tt.probe(key);
+    let tt_move = root_entry.and_then(|e| e.best);
+    // The root's static eval, computed as negamax computes a node's, so the
+    // ply-2 nodes' `improving` has something to compare with (it was always
+    // NO_EVAL here, so improving was false at every ply-2 node).
+    search.static_evals[0] = if board.is_in_check(board.side_to_move) {
+        NO_EVAL
+    } else {
+        let raw = root_entry
+            .and_then(|e| e.static_eval())
+            .unwrap_or_else(|| engine.eval_cache.eval(board, key));
+        let corr = engine.corr.apply(&CorrIdx::new(board, None), raw);
+        tt_refine_eval(root_entry, corr, 0)
+    };
     order_moves(
         board,
         engine,
