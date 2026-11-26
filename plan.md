@@ -542,7 +542,7 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 
 | # | Work | Resource | Cost | Why this rank | State |
 |---|---|---|---|---|---|
-| 1 | **Tree-gap follow-ups**: `tree-lmr-all-node`, `tree-se-margin-4` at LTC; then aspiration 20, SEE-losing-check extension; ALL-node reduction depth scaling | CI + agent | ~4 h each | diagnosis done: gap = SE x1.53 (pays) x ALL-node reduction/check ext x1.27 x counting x1.26; the ALL-node saving grows with depth | queued |
+| 1 | **Tree-gap follow-ups**: `tree-lmr-all-node`, `tree-se-margin-4` at LTC; then aspiration 20, SEE-losing-check extension; ALL-node reduction depth scaling | CI + agent | ~4 h each | diagnosis done: gap = SE x1.53 (pays) x ALL-node reduction/check ext x1.27 x counting x1.26; the ALL-node saving grows with depth | round 1 H0 at LTC (lmr-all-node -6.4, se-margin-4 -18.5); **round 2 agent started 26 Nov 22:15**: tree-check-ext-see, tree-asp-20, tree-allnode-deep (depth/history-gated); STC screen, then :ltc |
 | 2 | **Queue at LTC**: `small-fixes-stack-3` (+ future bug stacks) | CI | ~4 h each | stacks were the most reliable gains (+15.1, +9.4); LTC so gains reach the ladder | queued |
 | 3 | **Label quality** phase 0 (relabel tool + labelling speed) -> phase 1 (5k vs 20k/50k labels, same positions) | desktop CPU (datagen paused) + GPU + CI | 0.5 d + ~1-2 d | likely the biggest net lever (more 5k data now ~+3 per +17%); phase 0 decides compute/rental | running (`datagen-relabel`) |
 | 4 | **SPSA final theta** -> `:ltc` | CI (6 shards, running) | to Fri ~14:00 | interim already +5.7 STC; final tuned on the new terms | running, round ~21/40 |
