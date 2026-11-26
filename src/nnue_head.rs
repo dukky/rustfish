@@ -955,15 +955,6 @@ pub(crate) mod kernels {
         }
         t
     };
-    static ZPOP8: [u8; 256] = {
-        let mut t = [0u8; 256];
-        let mut m = 0;
-        while m < 256 {
-            t[m] = 8 - (m as u32).count_ones() as u8;
-            m += 1;
-        }
-        t
-    };
 
     /// The zero-chunk mask of 32 input bytes (bit j: chunk j all zero).
     #[inline(always)]
@@ -983,7 +974,8 @@ pub(crate) mod kernels {
         unsafe {
             let idx = _mm_cvtepu8_epi16(_mm_loadl_epi64(ZLUT8.get_unchecked(zmask).as_ptr() as *const __m128i));
             _mm_storeu_si128(nnz.as_mut_ptr().add(n) as *mut __m128i, _mm_add_epi16(idx, base));
-            n + *ZPOP8.get_unchecked(zmask) as usize
+            // popcnt (x86-64-v2+) instead of a table load: fewer load-port uops.
+            n + 8 - (zmask as u32).count_ones() as usize
         }
     }
 
