@@ -426,6 +426,24 @@ pub(crate) fn push8(nnz: &mut [u16; NNZ_BUF], n: usize, c0: usize, mask: u32) ->
 #[inline(always)]
 pub(crate) fn finish(lin_b: i16, sum: i64, head: f32, limit: i32) -> i32 {
     let lin = (sum / QA as i64 + lin_b as i64) as f64 / (QA as i64 * QB as i64) as f64;
+    let y = (lin + head as f64) * SCALE as f64;
+    // y.round() (half away from zero) as trunc(y + copysign(0.5 - 2^-54, y)),
+    // truncated by the conversion itself, then clamped in integers: the
+    // same integer as round + f64 clamp + convert (this is how x86 lowers
+    // `round` anyway; `finish_matches_reference` checks ties and near-ties),
+    // with a shorter dependency chain from the head output to the score.
+    let t = y + (0.5f64 - f64::EPSILON / 4.0).copysign(y);
+    debug_assert!(t.is_finite() && t.abs() < 1e15);
+    // SAFETY: y is finite and small (|lin| < 2^47, |head| is bounded by
+    // the L3 weights), so t is in i64 range.
+    let r = unsafe { t.to_int_unchecked::<i64>() };
+    r.clamp(-limit as i64, limit as i64) as i32
+}
+
+/// The original `finish` (tests).
+#[cfg(test)]
+fn finish_reference(lin_b: i16, sum: i64, head: f32, limit: i32) -> i32 {
+    let lin = (sum / QA as i64 + lin_b as i64) as f64 / (QA as i64 * QB as i64) as f64;
     let raw = ((lin + head as f64) * SCALE as f64).round();
     raw.clamp(-limit as f64, limit as f64) as i32
 }
@@ -1321,6 +1339,41 @@ mod tests {
         assert_eq!(finish(77, sum, 0.0, 20000) as i64, lin.round() as i64);
         assert_eq!(finish(0, 0, 1.0 / 800.0 + 1e-6, 20000), 1);
         assert_eq!(finish(0, 0, 100.0, 20000), 20000);
+    }
+
+    #[test]
+    fn finish_matches_reference() {
+        let mut r = rng(99);
+        let d = (QA as i64 * QB as i64) as f64;
+        let mut check = |lb: i16, sum: i64, h: f32| assert_eq!(finish(lb, sum, h, 20000), finish_reference(lb, sum, h, 20000), "{lb} {sum} {h}");
+        for _ in 0..2_000_000 {
+            let sum = (r() % 2_000_000_000) as i64 - 1_000_000_000;
+            let lb = (r() % 2001) as i16 - 1000;
+            let h = ((r() % 4_000_001) as f64 / 1_000_000.0 - 2.0) as f32;
+            check(lb, sum, h);
+            // Heads that put y on or next to a tie k + 0.5.
+            let lin = (sum / QA as i64 + lb as i64) as f64 / d;
+            let k = (r() % 4001) as f64 - 2000.0;
+            let h0 = ((k + 0.5) / SCALE as f64 - lin) as f32;
+            check(lb, sum, h0);
+            check(lb, sum, f32::from_bits(h0.to_bits() + 1));
+            check(lb, sum, f32::from_bits(h0.to_bits().wrapping_sub(1)));
+        }
+        for sum in -100_000i64..100_000 {
+            check(0, sum * QA as i64, 0.0);
+            check(3, sum, 0.0);
+        }
+        // Exact ties: h = (2i + 1) / 32 gives y = 12.5 (2i + 1).
+        for i in -200..200 {
+            let h = (2 * i + 1) as f32 / 32.0;
+            check(0, 0, h);
+            assert_eq!(finish(0, 0, h, 20000), finish_reference(0, 0, h, 20000));
+            assert_eq!(finish(0, 0, h, 20000) as f64, (12.5 * (2 * i + 1) as f64).round());
+        }
+        check(0, 0, 0.0);
+        check(0, 0, -0.0);
+        check(0, 0, 1e9);
+        check(0, 0, -1e9);
     }
 
     /// `cargo test --release head_throughput -- --ignored --nocapture`.
