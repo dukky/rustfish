@@ -534,6 +534,10 @@ merging (the queue does that).
   bucket: 31 tests pass, byte-identical nets, +24% H256 / ~1.8x H512 pos/s
   on M3; trainer-only owner merge decision. M3 only while datagen runs.
 
+## Provenance audit (26 Nov, external: two blind audits + one trajectory review, owner-supplied)
+
+Verdict: independent implementation, no verbatim copying (0 shared constants, comments or code n-grams vs 9-21 peers). Flagged as close adaptations of GPL code: **(1) cuckoo upcoming-repetition table** = translation of an older GPL engine's implementation (same table size, hash functions, insertion loop, entry-count assert): **clean-room rewrite started** (agent, branch `cleanroom-cycle`, spec from the published idea only, old code deleted after the new one passes a brute-force reference test); (2) TT replacement constants (age weight 8, 4-ply slack) match a GPL engine; (3) threat-indexed history layout + 16384 gravity divisor and the singular/multicut shape resemble another GPL engine. Also raised: no LICENSE/credits file, placeholder engine identity in the audited snapshot, quiet SEE prune margin 20*d^2 looks like a noisy-margin swap (A/B it). **Owner decisions pending:** licence (GPL-3 is the simple route), credits file, whether (2)/(3) get clean-room rewrites or are kept as published heuristics with credit.
+
 ## Priorities (owner, 26 Nov: work highest expected Elo per time/compute first; re-rank when a result lands)
 
 | # | Work | Resource | Cost | Why this rank | State |
