@@ -874,18 +874,66 @@ pub(crate) mod kernels {
         }
         // SAFETY: AVX2 is available.
         unsafe {
-            match (adds.len(), subs.len()) {
-                (1, 1) => update_pw_avx2::<DOT, 1, 1>(out, src, adds, subs, w, x, base, nnz, n),
-                (1, 2) => update_pw_avx2::<DOT, 1, 2>(out, src, adds, subs, w, x, base, nnz, n),
-                (2, 2) => update_pw_avx2::<DOT, 2, 2>(out, src, adds, subs, w, x, base, nnz, n),
-                _ => scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n),
+            macro_rules! go {
+                ($f:ident) => {
+                    match (adds.len(), subs.len()) {
+                        (1, 1) => $f::<DOT, 1, 1>(out, src, adds, subs, w, x, base, nnz, n),
+                        (1, 2) => $f::<DOT, 1, 2>(out, src, adds, subs, w, x, base, nnz, n),
+                        (2, 2) => $f::<DOT, 2, 2>(out, src, adds, subs, w, x, base, nnz, n),
+                        _ => scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n),
+                    }
+                };
+            }
+            // The output sum's multiply-accumulate is one vpdpwssd with VNNI.
+            match if DOT { vnni() } else { 0 } {
+                1 => go!(update_pw_v1),
+                2 => go!(update_pw_v2),
+                _ => go!(update_pw_avx2),
             }
         }
     }
 
+    macro_rules! update_pw_flavour {
+        ($name:ident, $feat:literal, $v:literal) => {
+            #[allow(clippy::too_many_arguments)]
+            #[target_feature(enable = $feat)]
+            unsafe fn $name<const DOT: bool, const NA: usize, const NS: usize>(
+                out: &mut [i16; H],
+                src: &[i16; H],
+                adds: &[&[i16; H]],
+                subs: &[&[i16; H]],
+                w: &[i16; H],
+                x: &mut [u8],
+                base: usize,
+                nnz: &mut [u16; NNZ_BUF],
+                n: usize,
+            ) -> (i64, usize) {
+                // SAFETY: the features of flavour $v are enabled.
+                unsafe { update_pw_body::<DOT, NA, NS, $v>(out, src, adds, subs, w, x, base, nnz, n) }
+            }
+        };
+    }
+    update_pw_flavour!(update_pw_avx2, "avx2", 0);
+    update_pw_flavour!(update_pw_v1, "avx2,avxvnni", 1);
+    update_pw_flavour!(update_pw_v2, "avx2,avx512f,avx512vnni,avx512vl", 2);
+
+    /// `sum += madd(a, b)` (exact i32 pair sums): AVX2, AVX-VNNI or AVX512-VNNI vpdpwssd.
+    #[inline(always)]
+    unsafe fn dpwssd<const V: u8>(mut acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: the update_pw flavour of V enables its features.
+        unsafe {
+            match V {
+                1 => std::arch::asm!("{{vex}} vpdpwssd {0}, {1}, {2}", inout(ymm_reg) acc, in(ymm_reg) a, in(ymm_reg) b, options(pure, nomem, nostack)),
+                2 => std::arch::asm!("{{evex}} vpdpwssd {0}, {1}, {2}", inout(ymm_reg) acc, in(ymm_reg) a, in(ymm_reg) b, options(pure, nomem, nostack)),
+                _ => acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a, b)),
+            }
+        }
+        acc
+    }
+
     #[allow(clippy::too_many_arguments)]
-    #[target_feature(enable = "avx2")]
-    unsafe fn update_pw_avx2<const DOT: bool, const NA: usize, const NS: usize>(
+    #[inline(always)]
+    unsafe fn update_pw_body<const DOT: bool, const NA: usize, const NS: usize, const V: u8>(
         out: &mut [i16; H],
         src: &[i16; H],
         adds: &[&[i16; H]],
@@ -912,7 +960,7 @@ pub(crate) mod kernels {
                 _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
                 _mm256_min_epi16(_mm256_max_epi16(v, lo), hi)
             };
-            let mut sum = [_mm256_setzero_si256(); 2];
+            let mut sum = [_mm256_setzero_si256(); 4];
             let mut bv = _mm_set1_epi16(base as i16);
             for i in (0..HALF).step_by(32) {
                 let (a0, a1) = (delta(i), delta(i + 16));
@@ -921,7 +969,8 @@ pub(crate) mod kernels {
                     // c in [0, 255], |w| <= 127: c * w fits i16, madd sums two exact i32 products.
                     for (k, (c, o)) in [(a0, i), (a1, i + 16), (b0, i + HALF), (b1, i + HALF + 16)].into_iter().enumerate() {
                         let cw = _mm256_mullo_epi16(c, ld(w.as_ptr().add(o)));
-                        sum[k & 1] = _mm256_add_epi32(sum[k & 1], _mm256_madd_epi16(cw, c));
+                        // Four sums: with VNNI each is a dependent vpdpwssd chain.
+                        sum[k] = dpwssd::<V>(sum[k], cw, c);
                     }
                 }
                 // mulhrs(a << 6, b) = (64ab + 2^14) >> 15 = (ab + 256) >> 9.
@@ -932,6 +981,7 @@ pub(crate) mod kernels {
                 n = push8z(nnz, n, bv, zero_mask(v));
                 bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
             }
+            let sum = [_mm256_add_epi32(sum[0], sum[2]), _mm256_add_epi32(sum[1], sum[3])];
             let total = if DOT {
                 // i32 lanes -> i64 (each lane sums at most 2 * H / 16 products of <= 255^2 * 127).
                 let s = _mm256_add_epi64(
