@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download and verify the Syzygy 3-4-5 tablebases (WDL + DTZ, 290 files, ~945 MB).
 
-  python3 scripts/fetch_syzygy.py <dir>
+  python3 -I scripts/fetch_syzygy.py <dir>   (-I: scripts/queue.py shadows stdlib queue)
 
 Files come from the lichess mirror and are checked against
 scripts/syzygy-345.md5 (made from a verified copy that matched the mirror's

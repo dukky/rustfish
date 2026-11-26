@@ -127,7 +127,7 @@ jobs:
           path: tb-src
       - name: Download Syzygy 3-4-5
         if: env.TB != 'none' && steps.tbcache.outputs.cache-hit != 'true'
-        run: python3 tb-src/scripts/fetch_syzygy.py syzygy
+        run: python3 -I tb-src/scripts/fetch_syzygy.py syzygy  # -I: scripts/queue.py would shadow the stdlib queue
       - uses: actions/cache/save@v4
         if: env.TB != 'none' && steps.tbcache.outputs.cache-hit != 'true'
         with:

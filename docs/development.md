@@ -278,6 +278,24 @@ monthly, whichever comes first:
 4. **Re-tune** eval weights after any large search change, since tuned values
    drift as search changes.
 
+## Syzygy tablebases in CI
+
+Both measurement workflows can play with Syzygy 3-4-5 (WDL+DTZ, 290 files,
+~945 MB). `scripts/fetch_syzygy.py` downloads them from the lichess mirror and
+verifies `scripts/syzygy-345.md5`; the runners keep them in one actions/cache
+entry (key `syzygy-345-v1`, shared by `sprt.yml` and `ccrl-ladder.yml`), so
+the download happens once. Off by default everywhere:
+
+- SPRT: `ci.py sprt <branch> --tb cand` (Syzygy for the candidate only, e.g.
+  `ci.py sprt main --ltc --gainer --tb cand` measures the TB gain of main) or
+  `--tb both`; settings field `"tb"`. Queue mode `ltc-gainer-tb` is
+  ltc-gainer with TBs for both engines. Play shards fail fast if a rustfish
+  binary does not load the tables (`tbprobe` check).
+- Ladder: `ci.py ladder --tb` (input `tb=true`): rustfish and every anchor
+  whose `uci` output lists `SyzygyPath` get the tables; an anchor without the
+  option plays without them and its job prints a warning.
+- No tablebase adjudication in fastchess: games are played out.
+
 ## Tuning search parameters (SPSA)
 
 The search margins and limits (`FutilityMarginD1`, `ReverseFutilityMarginD*`,
