@@ -1,5 +1,11 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "spsa-r14b-interim",
+      "mode": "stc",
+      "front": true
+    }
+  ],
   "current": {
     "branch": "lmr-protect-linear",
     "mode": "stc",
