@@ -78,3 +78,4 @@ kept here: each machine has a gitignored `CLAUDE.local.md` for those.
   prototype reached main that way and was reverted).
 - Usage: heavy agent fan-out only when the owner asks for it; prefer work that
   runs without tokens (the queue, datagen, training).
+- **Search changes are accepted at long TC (owner, 26 Nov):** queue search/eval-behaviour changes as `:ltc` (60+0.6, [0, 5]); `:stc` only as an optional quick screen before it. Reason: three ladders in a row showed STC self-play gains (+9.4, +5.7, ...) not reaching the 120+1 ladder. Bench-identical speedups stay `:speedup`; nets keep net-gate then LTC.

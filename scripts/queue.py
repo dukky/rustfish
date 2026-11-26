@@ -35,7 +35,7 @@ Each `advance`:
 State is saved after every merge and dispatch, not only at the end, so a run
 killed by the job timeout loses at most the step it was in.
 
-Item modes: the SPRT modes in queue-settings.json (stc, nonreg, ltc-gainer,
+Item modes: the SPRT modes in queue-settings.json (stc, ltc, nonreg, ltc-gainer,
 net-gate; ltc-check is queued automatically), speedup (no SPRT; bench and
 evalhash must be unchanged) and ladder (CCRL ladder on main).
 """
@@ -651,7 +651,7 @@ def parse_adds(spec, expect=None):
 # numbers. Gains are clipped to GAIN_CAP: a handful of +100 bug fixes would
 # otherwise dominate the mean.
 PRIOR_P, PRIOR_GAIN, PSEUDO, GAIN_CAP = 0.25, 5.0, 3, 30.0
-PRIOR_HOURS = {"stc": 1.0, "nonreg": 1.5, "ltc-gainer": 3.0, "net-gate": 0.3}
+PRIOR_HOURS = {"stc": 1.0, "ltc": 4.0, "nonreg": 1.5, "ltc-gainer": 3.0, "net-gate": 0.3}
 SCHEDULED = ("ladder", "ltc-check")  # measurement: never reordered
 BURST_MODE = "datagen-burst"
 MAX_PASSED_OVER = 3
