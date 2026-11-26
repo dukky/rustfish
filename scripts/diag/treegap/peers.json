@@ -1,0 +1,225 @@
+{
+ "_comment": "Tree-gap knob variants (diag-tree-gap): rustfish at default knobs vs the same build with one DiagKnobs change. peer-match reports the default build's view; the variant's Elo is the negative.",
+ "anchors": [
+  {
+   "name": "rf-ce_0",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=ce_0"
+   ]
+  },
+  {
+   "name": "rf-lmpd_6",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=lmpd_6"
+   ]
+  },
+  {
+   "name": "rf-lmpd_8",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=lmpd_8"
+   ]
+  },
+  {
+   "name": "rf-lmrcap_1",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=lmrcap_1"
+   ]
+  },
+  {
+   "name": "rf-lmrcap_2",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=lmrcap_2"
+   ]
+  },
+  {
+   "name": "rf-lmrs_120",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=lmrs_120"
+   ]
+  },
+  {
+   "name": "rf-lmrs_140",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=lmrs_140"
+   ]
+  },
+  {
+   "name": "rf-nmpe_150",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=nmpe_150"
+   ]
+  },
+  {
+   "name": "rf-nmpr_1",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=nmpr_1"
+   ]
+  },
+  {
+   "name": "rf-sed_99",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sed_99"
+   ]
+  },
+  {
+   "name": "rf-sex_0",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sex_0"
+   ]
+  },
+  {
+   "name": "rf-aspw_20",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=aspw_20"
+   ]
+  },
+  {
+   "name": "rf-rfpd_10",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=rfpd_10"
+   ]
+  },
+  {
+   "name": "rf-qsd_150",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=qsd_150"
+   ]
+  },
+  {
+   "name": "rf-futd_12",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=futd_12"
+   ]
+  },
+  {
+   "name": "rf-allr_1",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=allr_1"
+   ]
+  },
+  {
+   "name": "rf-base",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false"
+   ]
+  }
+ ]
+}
