@@ -1028,9 +1028,9 @@ struct EngineState {
     eval_cache: evalcache::EvalCache,
     history: HistoryTable,
     counter_moves: CounterMoveTable,
-    continuation_history: ContinuationHistoryTable,
+    continuation_history: hugemem::HugeBox<ContinuationHistoryTable>,
     capture_history: CaptureHistoryTable,
-    corr: Box<search::CorrectionHistory>,
+    corr: hugemem::HugeBox<search::CorrectionHistory>,
     search_params: SearchParams,
     lmr_table: [[i32; 64]; 64],
     searches_since_decay: u8,
@@ -1069,7 +1069,8 @@ impl EngineState {
             eval_cache: evalcache::EvalCache::new(),
             history: [[[[[0; 64]; 64]; 2]; 2]; 2],
             counter_moves: [[[None; 64]; 64]; 2],
-            continuation_history: [[[[0; 64]; 64]; 64]; 2],
+            // SAFETY: all-zero is an empty history.
+            continuation_history: unsafe { hugemem::HugeBox::zeroed() },
             capture_history: [[[[0; 6]; 64]; 6]; 2],
             corr: search::CorrectionHistory::new_boxed(),
             search_params: SearchParams::default(),
@@ -1118,7 +1119,7 @@ impl EngineState {
         self.eval_cache.clear();
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
-        self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
+        *self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
         self.capture_history = [[[[0; 6]; 64]; 6]; 2];
         self.corr.clear();
         self.searches_since_decay = 0;
@@ -1177,7 +1178,7 @@ impl EngineState {
             eval_cache: evalcache::EvalCache::new(),
             history: self.history,
             counter_moves: self.counter_moves,
-            continuation_history: self.continuation_history,
+            continuation_history: self.continuation_history.clone(),
             capture_history: self.capture_history,
             corr: self.corr.clone(),
             search_params: self.search_params,

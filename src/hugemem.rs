@@ -87,6 +87,50 @@ impl<T> std::ops::DerefMut for HugeBuf<T> {
     }
 }
 
+/// One zero-initialised `T` alone on its own 2 MB page(s) (the allocation
+/// is rounded up to whole 2 MB pages), for the randomly-indexed search
+/// tables below 2 MB (continuation and correction history): a plain Box
+/// or an inline array spreads them over 4 KB pages, each probe a likely
+/// TLB miss. Pure performance, like `HugeBuf`.
+pub(crate) struct HugeBox<T: Copy> {
+    buf: HugeBuf<T>,
+}
+
+impl<T: Copy> HugeBox<T> {
+    /// # Safety
+    /// The all-zero bit pattern must be a valid `T`.
+    pub(crate) unsafe fn zeroed() -> Self {
+        // Enough elements to cover whole 2 MB pages (so `HugeBuf` aligns
+        // and advises it).
+        let size = std::mem::size_of::<T>().max(1);
+        let n = (size.div_ceil(HUGE) * HUGE).div_ceil(size);
+        // SAFETY: forwarded to the caller. Only element 0 is used; the rest
+        // pads the allocation to whole huge pages.
+        Self { buf: unsafe { HugeBuf::zeroed(n) } }
+    }
+}
+
+impl<T: Copy> Clone for HugeBox<T> {
+    fn clone(&self) -> Self {
+        Self { buf: self.buf.clone() }
+    }
+}
+
+impl<T: Copy> std::ops::Deref for HugeBox<T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.buf[0]
+    }
+}
+
+impl<T: Copy> std::ops::DerefMut for HugeBox<T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.buf[0]
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn advise_huge(ptr: *mut u8, bytes: usize) {
     extern "C" {

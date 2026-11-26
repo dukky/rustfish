@@ -157,7 +157,7 @@ impl CorrIdx {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct CorrectionHistory {
     /// [side to move][CK_* slice][key slot]
     tables: [[[i16; CORR_SIZE]; CK_COUNT]; 2],
@@ -166,8 +166,9 @@ pub(crate) struct CorrectionHistory {
 }
 
 impl CorrectionHistory {
-    pub(crate) fn new_boxed() -> Box<Self> {
-        Box::new(Self { tables: [[[0; CORR_SIZE]; CK_COUNT]; 2], cont: [[0; 12 * 64]; 2] })
+    pub(crate) fn new_boxed() -> crate::hugemem::HugeBox<Self> {
+        // SAFETY: all-zero is an empty correction history.
+        unsafe { crate::hugemem::HugeBox::zeroed() }
     }
 
     pub(crate) fn clear(&mut self) {
