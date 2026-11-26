@@ -22,7 +22,7 @@ on:
         description: "Base ref; main is the champion"
         default: "main"
       settings:
-        description: "JSON: tc, hash, elo0, elo1, shards, rounds_per_shard, max_waves"
+        description: "JSON: tc, hash, elo0, elo1, shards, rounds_per_shard, max_waves; optional tb (none|cand|both: Syzygy 3-4-5 for the candidate only or both engines; default none)"
         default: '{"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 5, "shards": 16, "rounds_per_shard": 64, "max_waves": 10}'
       wave:
         default: "1"
@@ -37,6 +37,11 @@ permissions:
 env:
   FASTCHESS_VERSION: v1.8.2-alpha
   BOOK: UHO_Lichess_4852_v1.epd
+  # Syzygy 3-4-5 (settings "tb"): "none" (default) leaves every step below
+  # that mentions TB skipped and the fastchess command unchanged. The files
+  # live in one actions/cache entry shared with ccrl-ladder.yml (same key).
+  TB: ${{ fromJSON(inputs.settings).tb || 'none' }}
+  SYZYGY_KEY: syzygy-345-v1
 
 jobs:
   plan:
@@ -106,6 +111,28 @@ jobs:
           name: engines
           path: engines
           retention-days: 3
+      # Tablebases: make sure the shared cache entry exists (download once,
+      # md5-verified) so the play shards only restore it.
+      - id: tbcache
+        if: env.TB != 'none'
+        uses: actions/cache/restore@v4
+        with:
+          path: syzygy
+          key: ${{ env.SYZYGY_KEY }}
+          lookup-only: true
+      - uses: actions/checkout@v4
+        if: env.TB != 'none' && steps.tbcache.outputs.cache-hit != 'true'
+        with:
+          clean: false
+          path: tb-src
+      - name: Download Syzygy 3-4-5
+        if: env.TB != 'none' && steps.tbcache.outputs.cache-hit != 'true'
+        run: python3 tb-src/scripts/fetch_syzygy.py syzygy
+      - uses: actions/cache/save@v4
+        if: env.TB != 'none' && steps.tbcache.outputs.cache-hit != 'true'
+        with:
+          path: syzygy
+          key: ${{ env.SYZYGY_KEY }}
 
   play:
     needs: [plan, build]
@@ -125,6 +152,23 @@ jobs:
         run: |
           chmod +x engines/cand engines/base engines/fastchess
           mv "engines/$BOOK" .
+      - uses: actions/cache/restore@v4
+        if: env.TB != 'none'
+        with:
+          path: syzygy
+          key: ${{ env.SYZYGY_KEY }}
+          fail-on-cache-miss: true
+      - name: Check tablebases load
+        if: env.TB != 'none'
+        run: |
+          case "$TB" in cand) sides="cand" ;; both) sides="cand base" ;; *) echo "unknown tb mode $TB"; exit 1 ;; esac
+          for side in $sides; do
+            # KRvK, white to move: a TB win; tbprobe prints the WDL/DTZ probe.
+            out=$(printf 'setoption name SyzygyPath value %s\nposition fen 8/8/8/4k3/8/8/8/R3K3 w - - 0 1\ntbprobe\nquit\n' "$PWD/syzygy" | "engines/$side")
+            echo "$side: $out"
+            grep -q 'tables found' <<<"$out" && ! grep -q ': 0 tables found' <<<"$out" \
+              || { echo "$side did not load the tablebases"; exit 1; }
+          done
 
       - name: Play
         env:
@@ -137,9 +181,17 @@ jobs:
           # A tc of the form "nodes=N" (ci.py sprt --nodes, diagnostic only)
           # plays fixed nodes per move with no clock.
           case "$TC" in nodes=*) LIMIT="$TC" ;; *) LIMIT="tc=$TC" ;; esac
+          # Syzygy per engine (settings "tb"); both arrays stay empty for "none".
+          cand_tb=(); base_tb=()
+          case "$TB" in
+            none) ;;
+            cand) cand_tb=("option.SyzygyPath=$PWD/syzygy") ;;
+            both) cand_tb=("option.SyzygyPath=$PWD/syzygy"); base_tb=("option.SyzygyPath=$PWD/syzygy") ;;
+            *) echo "unknown tb mode $TB"; exit 1 ;;
+          esac
           engines/fastchess \
-            -engine cmd=engines/cand name=candidate \
-            -engine cmd=engines/base name=base \
+            -engine cmd=engines/cand name=candidate "${cand_tb[@]}" \
+            -engine cmd=engines/base name=base "${base_tb[@]}" \
             -each proto=uci "$LIMIT" option.Hash="$HASH" option.OwnBook=false \
             -rounds "$ROUNDS" -repeat \
             -concurrency "$(nproc)" \
@@ -208,6 +260,8 @@ jobs:
           res.update(test_id=i["test_id"], candidate=cfg["candidate_name"], base=cfg["base_name"],
                      candidate_sha=os.environ["CAND"], base_sha=os.environ["BASE"],
                      tc=cfg["tc"], wave=wave, final=final, shard_logs=len(logs))
+          if cfg.get("tb", "none") != "none":
+              res["tb"] = cfg["tb"]
           json.dump(res, open("sprt-result.json", "w"), indent=2)
 
           verdict = {"H1": "PASSED", "H0": "FAILED", "inconclusive": "INCONCLUSIVE",
@@ -215,7 +269,8 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
               fh.write(f"## SPRT {i['test_id']}: {verdict} (wave {wave}/{max_waves})\n\n"
                        f"`{res['candidate']}` ({os.environ['CAND'][:7]}) vs `{res['base']}` "
-                       f"({os.environ['BASE'][:7]}), tc {cfg['tc']}, bounds [{cfg['elo0']}, {cfg['elo1']}]\n\n"
+                       f"({os.environ['BASE'][:7]}), tc {cfg['tc']}, bounds [{cfg['elo0']}, {cfg['elo1']}]"
+                       + (f", Syzygy 3-4-5: {res['tb']}" if res.get("tb") else "") + "\n\n"
                        f"- LLR **{res['llr']:+.2f}** (bounds {res['llr_bounds']})\n"
                        f"- Elo **{res['elo']:+.1f}** (95% CI {res['elo_ci95'][0]:+.1f} .. {res['elo_ci95'][1]:+.1f})\n"
                        f"- {res['games']} games, pentanomial {res['ptnml']}\n")

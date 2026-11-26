@@ -58,6 +58,17 @@
       "max_rounds_per_shard": 36,
       "max_waves": 8
     },
+    "ltc-gainer-tb": {
+      "tc": "60+0.6",
+      "hash": 64,
+      "elo0": 0,
+      "elo1": 10,
+      "shards": 12,
+      "rounds_per_shard": 6,
+      "max_rounds_per_shard": 36,
+      "max_waves": 8,
+      "tb": "both"
+    },
     "ltc-check": {
       "tc": "60+0.6",
       "hash": 64,

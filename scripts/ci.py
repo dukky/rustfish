@@ -15,10 +15,15 @@ Examples:
   python3 scripts/ci.py sprt my-branch --no-wait            # dispatch and exit
   python3 scripts/ci.py sprt --resume <test_id>             # re-attach to a test
   python3 scripts/ci.py sprt my-net --nodes 200000          # DIAGNOSTIC: fixed nodes per move
+  python3 scripts/ci.py sprt main --ltc --gainer --tb cand  # TB gain: main+Syzygy vs main
+  python3 scripts/ci.py ladder --tb                         # ladder, Syzygy 3-4-5 for all engines
 
 --nodes N plays both engines at N nodes per move (no clock): it separates eval
 quality from speed. It is a diagnostic only, never an acceptance test: the run
 and log entry are labelled fixed-nodes, and the queue never uses it.
+
+--tb cand|both gives Syzygy 3-4-5 (cached on the runners, scripts/fetch_syzygy.py)
+to the candidate only or to both engines; the default (none) plays without.
 """
 import argparse
 import datetime
@@ -160,6 +165,10 @@ def cmd_sprt(args):
                 sys.exit("--nodes and --ltc are exclusive")
             settings["tc"] = f"nodes={args.nodes}"
             profile = f"DIAG-nodes{args.nodes}"
+        if args.tb != "none":
+            # Only set when used, so default settings stay byte-identical.
+            settings["tb"] = args.tb
+            profile += f"-tb{args.tb}"
         # Pin both refs to SHAs now: a test may sit queued for hours, and main
         # (or the candidate branch) moving meanwhile must not change what it tests.
         cand_sha = remote.split()[0]
@@ -197,6 +206,7 @@ def cmd_ladder(args):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     gh("workflow", "run", "ccrl-ladder.yml", "--ref", args.ref,
        "-f", f"games_per_anchor={args.games}", "-f", f"tc={args.tc}",
+       *(["-f", "tb=true"] if args.tb else []),
        "-f", f"max_parallel={FOREGROUND}",
        # the queue's anchor set (elite anchors); the anchors.json default is the
        # old weak set, which we now score ~100% against
@@ -211,6 +221,8 @@ def cmd_ladder(args):
     if res is None:
         sys.exit(f"\nladder finished without results: {run['url']}")
     res.update(url=run["url"], sha=run["headSha"], tc=args.tc, logged_at=stamp)
+    if args.tb:
+        res["tb"] = "syzygy-345"
     append_log("ladder-log.jsonl", res)
     print(f"\nCCRL Blitz-scale {res['rating']:.0f} (95% CI {res['ci'][0]:.0f} .. {res['ci'][1]:.0f}), "
           f"{res['games']} games; logged to tests/ladder-log.jsonl")
@@ -243,6 +255,8 @@ def main():
     sp.add_argument("--max-waves", type=int, default=10)
     sp.add_argument("--nodes", type=int, metavar="N",
                     help="DIAGNOSTIC ONLY: fixed N nodes per move instead of a clock; never an acceptance test")
+    sp.add_argument("--tb", choices=("none", "cand", "both"), default="none",
+                    help="Syzygy 3-4-5 for the candidate only or both engines (default none)")
     sp.add_argument("--no-wait", action="store_true")
     sp.add_argument("--resume", metavar="TEST_ID")
     sp.set_defaults(func=cmd_sprt)
@@ -252,6 +266,7 @@ def main():
     lp.add_argument("--games", type=int, default=int(LADDER_ANCHORS["games_per_anchor"]),
                     help="games per anchor (default: the queue's)")
     lp.add_argument("--tc", default="120+1")
+    lp.add_argument("--tb", action="store_true", help="Syzygy 3-4-5 for rustfish and every anchor")
     lp.set_defaults(func=cmd_ladder)
 
     st = sub.add_parser("status")

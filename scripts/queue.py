@@ -36,7 +36,8 @@ State is saved after every merge and dispatch, not only at the end, so a run
 killed by the job timeout loses at most the step it was in.
 
 Item modes: the SPRT modes in queue-settings.json (stc, ltc, nonreg, ltc-gainer,
-net-gate; ltc-check is queued automatically), speedup (no SPRT; bench and
+net-gate, ltc-gainer-tb = ltc-gainer with Syzygy 3-4-5 for both engines;
+ltc-check is queued automatically), speedup (no SPRT; bench and
 evalhash must be unchanged) and ladder (CCRL ladder on main).
 """
 import datetime
