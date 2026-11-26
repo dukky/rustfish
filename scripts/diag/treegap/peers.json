@@ -220,6 +220,84 @@
    "options": [
     "option.OwnBook=false"
    ]
+  },
+  {
+   "name": "rf-sxm_30",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sxm_30"
+   ]
+  },
+  {
+   "name": "rf-sem_4",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sem_4"
+   ]
+  },
+  {
+   "name": "rf-sem_6",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sem_6"
+   ]
+  },
+  {
+   "name": "rf-sxm_60",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sxm_60"
+   ]
+  },
+  {
+   "name": "rf-sex_0-ce_0",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sex_0:ce_0"
+   ]
+  },
+  {
+   "name": "rf-sem_3",
+   "ccrl": 0,
+   "repo": "dukky/rustfish",
+   "ref": "diag-tree-gap",
+   "kind": "cargo",
+   "pkg": "rustfish",
+   "bin": "rustfish",
+   "options": [
+    "option.OwnBook=false",
+    "option.DiagKnobs=sem_3"
+   ]
   }
  ]
 }
