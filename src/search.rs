@@ -2000,6 +2000,11 @@ fn negamax_body(
                     if search.stop {
                         return 0;
                     }
+                    ts!(st => {
+                        let gap = singular_beta - s;
+                        let b = if gap <= 0 { 0 } else if gap == 1 { 1 } else if gap <= 10 { 2 } else if gap <= 30 { 3 } else if gap <= 100 { 4 } else { 5 };
+                        st.se_gap[b] += 1;
+                    });
                     if s < singular_beta {
                         let room = k(td::K_EXL) == 0 || (ply as i32) * 10 < k(td::K_EXL) * search.root_depth;
                         let clear = s < singular_beta - k(td::K_SXM);

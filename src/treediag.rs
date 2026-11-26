@@ -133,6 +133,7 @@ pub(crate) struct Stats {
     pub ext_neg: [u64; DB],
     pub se_tries: [u64; DB],
     pub se_tries_t: [u64; NT],
+    pub se_gap: [u64; 6], // singular beta - verify score: <=0, 1, 2-10, 11-30, 31-100, >100
     pub ext_se_t: [u64; NT],
     pub nmp_tries: [u64; DB],
     pub nmp_ok: [u64; DB],
@@ -210,6 +211,7 @@ pub(crate) fn print() {
     flat(&mut out, "ext_neg", &s.ext_neg);
     flat(&mut out, "se_tries", &s.se_tries);
     flat(&mut out, "se_tries_t", &s.se_tries_t);
+    flat(&mut out, "se_gap", &s.se_gap);
     flat(&mut out, "ext_se_t", &s.ext_se_t);
     flat(&mut out, "nmp_tries", &s.nmp_tries);
     flat(&mut out, "nmp_ok", &s.nmp_ok);
