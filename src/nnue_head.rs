@@ -890,6 +890,27 @@ pub(crate) mod kernels {
         if !avx2() {
             return scalar::update_pw::<DOT>(out, src, adds, subs, w, x, base, nnz, n);
         }
+        match pw512() {
+            // SAFETY: pw512() checked AVX-512F/BW (and VNNI for flavour 2).
+            1 | 2 if HALF % 64 == 0 => unsafe {
+                macro_rules! go512 {
+                    ($f:ident) => {
+                        match (adds.len(), subs.len()) {
+                            (1, 1) => return $f::<DOT, 1, 1>(out, src, adds, subs, w, x, base, nnz, n),
+                            (1, 2) => return $f::<DOT, 1, 2>(out, src, adds, subs, w, x, base, nnz, n),
+                            (2, 2) => return $f::<DOT, 2, 2>(out, src, adds, subs, w, x, base, nnz, n),
+                            _ => {}
+                        }
+                    };
+                }
+                if pw512() == 2 {
+                    go512!(update_pw512_vnni)
+                } else {
+                    go512!(update_pw512)
+                }
+            },
+            _ => {}
+        }
         // SAFETY: AVX2 is available.
         unsafe {
             macro_rules! go {
@@ -934,6 +955,53 @@ pub(crate) mod kernels {
     update_pw_flavour!(update_pw_avx2, "avx2", 0);
     update_pw_flavour!(update_pw_v1, "avx2,avxvnni", 1);
     update_pw_flavour!(update_pw_v2, "avx2,avx512f,avx512vnni,avx512vl", 2);
+
+    /// Which 512-bit fused update to use: 0 = none (the 256-bit kernels),
+    /// 1 = AVX-512BW, 2 = AVX-512BW + VNNI. On only where 512-bit vectors
+    /// are full width and measured faster: AMD Zen 5 and later (family
+    /// >= 0x1A; Zen 4 splits them in two and measured -2.9%). Intel is
+    /// left on the 256-bit kernels (+0.4% on Granite Rapids, and older
+    /// AVX-512 Xeons lower the clock for 512-bit work).
+    /// `RUSTFISH_PW512=0` / `=1` overrides the CPU choice (A/B tests);
+    /// `RUSTFISH_NO_AVX512` turns it off with the other AVX-512 kernels.
+    #[inline(always)]
+    pub(crate) fn pw512() -> u8 {
+        static HAVE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *HAVE.get_or_init(|| {
+            if !crate::nnue::avx512::enabled() {
+                return 0;
+            }
+            let on = match std::env::var("RUSTFISH_PW512").ok().as_deref() {
+                Some("0") => false,
+                Some("1") => true,
+                _ => amd_family() >= 0x1A,
+            };
+            if !on {
+                0
+            } else if is_x86_feature_detected!("avx512vnni") && std::env::var("RUSTFISH_NO_VNNI").is_err() {
+                2
+            } else {
+                1
+            }
+        })
+    }
+
+    /// The CPU family on AMD (0x19 = Zen 3/4, 0x1A = Zen 5), else 0.
+    fn amd_family() -> u32 {
+        // SAFETY: cpuid is available on every x86-64 CPU.
+        let (v, f) = unsafe { (__cpuid(0), __cpuid(1)) };
+        let amd = (v.ebx, v.edx, v.ecx) == (0x6874_7541, 0x6974_6e65, 0x444d_4163); // "AuthenticAMD"
+        let base = (f.eax >> 8) & 0xF;
+        let fam = if base == 0xF { base + ((f.eax >> 20) & 0xFF) } else { base };
+        if amd {
+            fam
+        } else {
+            0
+        }
+    }
+
+    update_pw512_flavour!(update_pw512, "avx2,avx512f,avx512bw", false);
+    update_pw512_flavour!(update_pw512_vnni, "avx2,avx512f,avx512bw,avx512vnni", true);
 
     /// `sum += madd(a, b)` (exact i32 pair sums): AVX2, AVX-VNNI or AVX512-VNNI vpdpwssd.
     #[inline(always)]
@@ -1033,6 +1101,99 @@ pub(crate) mod kernels {
             };
             (total, n)
         }
+    }
+
+    /// `update_pw_body` with 512-bit vectors: the same integer operations
+    /// lane for lane (wrapping i16 update, exact i32 products, the `mulhrs`
+    /// pairwise rounding), 64 lanes and 16 chunks per step, stored in the
+    /// same `slot` order, so the output, the nonzero-chunk list (same
+    /// order) and the sum are identical to the 256-bit kernels.
+    macro_rules! update_pw512_flavour {
+        ($name:ident, $feat:literal, $vnni:literal) => {
+            #[allow(clippy::too_many_arguments)]
+            #[target_feature(enable = $feat)]
+            unsafe fn $name<const DOT: bool, const NA: usize, const NS: usize>(
+                out: &mut [i16; H],
+                src: &[i16; H],
+                adds: &[&[i16; H]],
+                subs: &[&[i16; H]],
+                w: &[i16; H],
+                x: &mut [u8],
+                base: usize,
+                nnz: &mut [u16; NNZ_BUF],
+                mut n: usize,
+            ) -> (i64, usize) {
+                assert!(x.len() == HALF && HALF % 64 == 0 && adds.len() == NA && subs.len() == NS);
+                // SAFETY: the flavour's features are enabled; offsets are
+                // <= H - 32 (lanes) / HALF - 64 (bytes).
+                unsafe {
+                    let (lo, hi) = (_mm512_setzero_si512(), _mm512_set1_epi16(255));
+                    let ld = |p: *const i16| _mm512_loadu_si512(p as *const __m512i);
+                    let mut delta = |o: usize| {
+                        let mut v = ld(src.as_ptr().add(o));
+                        for a in &adds[..NA] {
+                            v = _mm512_add_epi16(v, ld(a.as_ptr().add(o)));
+                        }
+                        for s in &subs[..NS] {
+                            v = _mm512_sub_epi16(v, ld(s.as_ptr().add(o)));
+                        }
+                        _mm512_storeu_si512(out.as_mut_ptr().add(o) as *mut __m512i, v);
+                        _mm512_min_epi16(_mm512_max_epi16(v, lo), hi)
+                    };
+                    // packus interleaves its two sources per 128-bit lane (8
+                    // bytes each): qwords x0.0 x1.0 x0.1 x1.1 ... This order
+                    // gives x0's 32 bytes, then x1's, each in the 256-bit
+                    // kernels' `slot` order (qwords 0, 2, 1, 3 of a source).
+                    let order = _mm512_set_epi64(7, 3, 5, 1, 6, 2, 4, 0);
+                    let mut sum = [_mm512_setzero_si512(); 4];
+                    let mut bv = _mm_set1_epi16(base as i16);
+                    for i in (0..HALF).step_by(64) {
+                        let (a0, a1) = (delta(i), delta(i + 32));
+                        let (b0, b1) = (delta(i + HALF), delta(i + HALF + 32));
+                        if DOT {
+                            // c in [0, 255], |w| <= 127: c * w fits i16, madd
+                            // sums two exact i32 products; each i32 lane sums
+                            // at most 2 * HALF / 64 products of <= 255^2 * 127.
+                            for (k, (c, o)) in [(a0, i), (a1, i + 32), (b0, i + HALF), (b1, i + HALF + 32)].into_iter().enumerate() {
+                                let cw = _mm512_mullo_epi16(c, ld(w.as_ptr().add(o)));
+                                sum[k] = if $vnni {
+                                    _mm512_dpwssd_epi32(sum[k], cw, c)
+                                } else {
+                                    _mm512_add_epi32(sum[k], _mm512_madd_epi16(cw, c))
+                                };
+                            }
+                        }
+                        // mulhrs(a << 6, b) = (64ab + 2^14) >> 15 = (ab + 256) >> 9.
+                        let x0 = _mm512_mulhrs_epi16(_mm512_slli_epi16::<6>(a0), b0);
+                        let x1 = _mm512_mulhrs_epi16(_mm512_slli_epi16::<6>(a1), b1);
+                        let v = _mm512_permutexvar_epi64(order, _mm512_packus_epi16(x0, x1));
+                        _mm512_storeu_si512(x.as_mut_ptr().add(i) as *mut __m512i, v);
+                        // Bit j: chunk j of these 16 is all zero.
+                        let z = _mm512_cmpeq_epi32_mask(v, lo) as usize;
+                        n = push8z(nnz, n, bv, z & 0xFF);
+                        bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
+                        n = push8z(nnz, n, bv, z >> 8);
+                        bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
+                    }
+                    let total = if DOT {
+                        let wide = |v: __m512i| {
+                            _mm512_add_epi64(
+                                _mm512_cvtepi32_epi64(_mm512_castsi512_si256(v)),
+                                _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64::<1>(v)),
+                            )
+                        };
+                        let s = _mm512_add_epi64(
+                            _mm512_add_epi64(wide(sum[0]), wide(sum[1])),
+                            _mm512_add_epi64(wide(sum[2]), wide(sum[3])),
+                        );
+                        _mm512_reduce_add_epi64(s)
+                    } else {
+                        0
+                    };
+                    (total, n)
+                }
+            }
+        };
     }
 
     /// For an 8-bit mask of ZERO chunks, the positions (0..8) of the
@@ -1177,6 +1338,57 @@ pub(crate) mod kernels {
             }
             [_mm256_add_epi32(a[0], a[2]), _mm256_add_epi32(a[1], a[3])]
         }
+    }
+
+    /// Every fused-update flavour this machine can run, as
+    /// (out, x, sum, nonzero list) (tests).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn update_pw_all<const DOT: bool>(
+        src: &[i16; H],
+        adds: &[&[i16; H]],
+        subs: &[&[i16; H]],
+        w: &[i16; H],
+        base: usize,
+        n0: usize,
+    ) -> Vec<(&'static str, Vec<i16>, Vec<u8>, i64, Vec<u16>)> {
+        type K = unsafe fn(&mut [i16; H], &[i16; H], &[&[i16; H]], &[&[i16; H]], &[i16; H], &mut [u8], usize, &mut [u16; NNZ_BUF], usize) -> (i64, usize);
+        macro_rules! pick {
+            ($f:ident) => {
+                match (adds.len(), subs.len()) {
+                    (1, 1) => $f::<DOT, 1, 1> as K,
+                    (1, 2) => $f::<DOT, 1, 2> as K,
+                    _ => $f::<DOT, 2, 2> as K,
+                }
+            };
+        }
+        let mut ks: Vec<(&'static str, K)> = Vec::new();
+        if avx2() {
+            ks.push(("avx2", pick!(update_pw_avx2)));
+        }
+        if is_x86_feature_detected!("avxvnni") {
+            ks.push(("avxvnni", pick!(update_pw_v1)));
+        }
+        let f = |s: &str| is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") && (s != "vnni" || is_x86_feature_detected!("avx512vnni"));
+        if f("vnni") && is_x86_feature_detected!("avx512vl") {
+            ks.push(("avx512vnni-256", pick!(update_pw_v2)));
+        }
+        if f("") {
+            ks.push(("avx512bw-512", pick!(update_pw512)));
+        }
+        if f("vnni") {
+            ks.push(("avx512vnni-512", pick!(update_pw512_vnni)));
+        }
+        ks.into_iter()
+            .map(|(name, k)| {
+                let mut o = [0i16; H];
+                let mut x = [0u8; HALF];
+                let mut nz = [0u16; NNZ_BUF];
+                // SAFETY: each kernel's features were detected above.
+                let (sum, n) = unsafe { k(&mut o, src, adds, subs, w, &mut x, base, &mut nz, n0) };
+                (name, o.to_vec(), x.to_vec(), sum, nz[n0..n].to_vec())
+            })
+            .collect()
     }
 
     /// The L1 kernel flavours on this machine (tests).
@@ -1376,6 +1588,14 @@ mod tests {
             assert_eq!(o1, o2);
             assert_eq!(x1, x2);
             assert_eq!((r1.0, r1.1, &n1[2..r1.1]), (r2.0, r2.1, &n2[2..r2.1]), "case {t}");
+            #[cfg(target_arch = "x86_64")]
+            for (name, o, x, sum, nz) in kernels::update_pw_all::<true>(&src, &adds, &subs, &w, 5, 2) {
+                assert_eq!((&o[..], &x[..], sum, &nz[..]), (&o1[..], &x1[..], r1.0, &n1[2..r1.1]), "{name} case {t}");
+            }
+            #[cfg(target_arch = "x86_64")]
+            for (name, o, x, sum, nz) in kernels::update_pw_all::<false>(&src, &adds, &subs, &w, 5, 2) {
+                assert_eq!((&o[..], &x[..], sum, &nz[..]), (&o1[..], &x1[..], 0, &n1[2..r1.1]), "{name} nodot case {t}");
+            }
             let r3 = kernels::update_pw::<false>(&mut o2, &src, &adds, &subs, &w, &mut x2, 5, &mut n2, 2);
             assert_eq!((r3.0, r3.1), (0, r1.1));
             // The scalar twin is update + screlu_dot + activate.
