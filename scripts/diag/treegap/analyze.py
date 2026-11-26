@@ -291,7 +291,7 @@ def kn(d):
     sets = defaultdict(dict)
     for p in files:
         name = os.path.basename(p)[:-6]
-        depth, ks = name.split("-", 2)[1], name.split("-", 2)[2]
+        depth, ks = name.split("-", 2)[1], name.split("-", 2)[2].replace("+", ":")
         for r in load(p):
             sets[(depth, ks)][r["pos"]] = r
     for depth in sorted({k[0] for k in sets}):

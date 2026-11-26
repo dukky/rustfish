@@ -30,7 +30,7 @@ case "$kind" in
     IFS=/ read -ra arr <<<"$sets"
     for ks in "${arr[@]}"; do
       k=$ks; [ "$k" = base ] && k=""
-      $R --engine engines/rustfish-ts --depth "$d" --jobs "$J" --knobs "${k//_/=}" --out "out/kn-d$d-$ks.jsonl"
+      $R --engine engines/rustfish-ts --depth "$d" --jobs "$J" --knobs "${k//_/=}" --out "out/kn-d$d-${ks//:/+}.jsonl"
     done
     ;;
   cnt)
