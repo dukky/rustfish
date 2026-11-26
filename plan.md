@@ -534,6 +534,21 @@ merging (the queue does that).
   bucket: 31 tests pass, byte-identical nets, +24% H256 / ~1.8x H512 pos/s
   on M3; trainer-only owner merge decision. M3 only while datagen runs.
 
+## Priorities (owner, 26 Nov: work highest expected Elo per time/compute first; re-rank when a result lands)
+
+| # | Work | Resource | Cost | Why this rank | State |
+|---|---|---|---|---|---|
+| 1 | **Tree-gap diagnosis** (why 2.1x Clover's nodes to depth 12) -> one-variable LTC branches | agent + CI/desktop 2 threads | ~5 h | largest measured gap (-166 at 10+0.1 at NPS parity); cheap to diagnose; every later search change aims at the cause instead of guessing | running (`diag-tree-gap`) |
+| 2 | **Queue at LTC**: `small-fixes-stack-3` (+ future bug stacks) | CI | ~4 h each | stacks were the most reliable gains (+15.1, +9.4); LTC so gains reach the ladder | queued |
+| 3 | **Label quality** phase 0 (relabel tool + labelling speed) -> phase 1 (5k vs 20k/50k labels, same positions) | desktop CPU (datagen paused) + GPU + CI | 0.5 d + ~1-2 d | likely the biggest net lever (more 5k data now ~+3 per +17%); phase 0 decides compute/rental | running (`datagen-relabel`) |
+| 4 | **SPSA final theta** -> `:ltc` | CI (6 shards, running) | to Fri ~14:00 | interim already +5.7 STC; final tuned on the new terms | running, round ~21/40 |
+| 5 | **H1536 inference cost** (gate for a bigger net) | agent + CI | ~3 h | decides whether a 1536 net can pay at blitz before any training spend | running (`nnue-h1536-speed`) |
+| 6 | **Recipe ablations** batch 2 games, batch 3 (final-stage epochs, pool8 out, lr x2) | GPU + CI fixed-node | ~10 h | cheap (GPU otherwise idle); expect a few Elo, feeds gen 13 | running |
+| 7 | **Opening variety D1** (randplies 4 vs 8) | laptop 4 threads | ~2.5 days data + 1 GPU arm | free compute; unknown sign | running (R3001-R3005) |
+| 8 | **Gen 13** = winners of 3/6/7 (+ H1536 if 5 says yes) | GPU ~11 h+ | after 3, 6, 7 | combines the net wins | waiting |
+| 9 | `lmr-protect-linear-r2` LTC | CI | ~4 h | last check of a lever whose STC was -2.2; lowest EV, runs only when CI is free | chained |
+| - | Rented compute | money | ~$35-100 | only if phase 0/1 says higher-node labels pay (owner decision) | waiting on 3 |
+
 ## Deferred actions (each has a trigger; re-check this list whenever a job finishes)
 
 - **Gen 12 MERGED 26 Nov 00:00 (main 5ac58f2, bench 207737): LTC H1 +2.87 [-1.9, +7.64]** (5328 games, LLR 4.54; wave 4 report rerun after a transient dispatch error). +17% data bought ~+3 at LTC: data scaling still positive but small, so more of the same data is weak value; recipe ablations first, rented datagen only for new kinds of data (D1/D2). Was: net-gate capped at **+9.65 [0.21, 19.11]** (1728 games, 13:34): LTC SPRT `ci.py sprt nnue-g12h1024kb8mpw --ltc --elo0 0 --elo1 5` started 13:40 (same settings as gen 11's passing LTC). H1 -> merge by hand (rebase, bench, ff, as gen 11) and data scaling holds (then: rented compute for datagen is worth it); H0 -> keep gen 11.
