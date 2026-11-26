@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const MIN_PARALLEL_DEPTH: i32 = 6;
 // Singular extensions: minimum depth, and singular-beta margin per ply of depth.
 const SE_MIN_DEPTH: i32 = 8;
-const SE_MARGIN_PER_DEPTH: i32 = 2;
+const SE_MARGIN_PER_DEPTH: i32 = 4;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
