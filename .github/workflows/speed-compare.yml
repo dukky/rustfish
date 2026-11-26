@@ -104,7 +104,7 @@ jobs:
             --depth ${{ needs.setup.outputs.depth }} ${{ needs.setup.outputs.flags }} --label default --json res-default.json | tee cmp.txt || rc=1
           if grep -q 'AVX-512: yes' cpu.txt; then
             python3 scripts/speed-compare.py --base "$b=bins/$b" "${args[@]}" --rounds ${{ needs.setup.outputs.rounds }} \
-              --depth ${{ needs.setup.outputs.depth }} --env RUSTFISH_NO_AVX512=1 --label avx2 --json res-avx2.json | tee -a cmp.txt || rc=1
+              --depth ${{ needs.setup.outputs.depth }} ${{ needs.setup.outputs.flags }} --env RUSTFISH_NO_AVX512=1 --label avx2 --json res-avx2.json | tee -a cmp.txt || rc=1
           fi
           { echo "### runner ${{ matrix.runner }}"; echo '```'; cat cpu.txt refs.txt; grep -E 'vs|MISMATCH|bench' cmp.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           for f in res-*.json; do python3 - "$f" <<'EOF'
