@@ -5,16 +5,7 @@
       "mode": "ltc"
     }
   ],
-  "current": {
-    "branch": "tree-lmr-all-node",
-    "mode": "ltc",
-    "test_id": "q-tree-lmr-all-node-1126-1247",
-    "sha": "650111d677780c1f276e8d1b32b4ae49c7e66306",
-    "base_sha": "78449bc0b372b95eb7cfca24cb8daa9b4f589ddc",
-    "started": "2026-11-26T12:47:58Z",
-    "bench": 170305,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
