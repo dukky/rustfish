@@ -1000,9 +1000,6 @@ pub(crate) mod kernels {
         }
     }
 
-    update_pw512_flavour!(update_pw512, "avx2,avx512f,avx512bw", false);
-    update_pw512_flavour!(update_pw512_vnni, "avx2,avx512f,avx512bw,avx512vnni", true);
-
     /// `sum += madd(a, b)` (exact i32 pair sums): AVX2, AVX-VNNI or AVX512-VNNI vpdpwssd.
     #[inline(always)]
     unsafe fn dpwssd<const V: u8>(acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
@@ -1195,6 +1192,9 @@ pub(crate) mod kernels {
             }
         };
     }
+
+    update_pw512_flavour!(update_pw512, "avx2,avx512f,avx512bw", false);
+    update_pw512_flavour!(update_pw512_vnni, "avx2,avx512f,avx512bw,avx512vnni", true);
 
     /// For an 8-bit mask of ZERO chunks, the positions (0..8) of the
     /// nonzero ones packed first (as u8, so one `pmovzxbw` loads them), and
