@@ -8,6 +8,7 @@ mod hugemem;
 mod movegen;
 mod nnue;
 mod psqt;
+mod relabel;
 mod search;
 mod tt;
 mod tune;
@@ -1287,6 +1288,10 @@ fn main() {
         }
         if cmd.starts_with("datagen ") {
             datagen::handle_datagen(cmd);
+            continue;
+        }
+        if cmd.starts_with("relabel ") {
+            relabel::handle_relabel(cmd);
             continue;
         }
         if cmd.starts_with("extract ") {

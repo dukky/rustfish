@@ -39,6 +39,7 @@ local gauntlet commands below are for quick sanity checks only, not acceptance.
 - `src/eval.rs` — hand-crafted evaluation (fallback; `UseNNUE=false`)
 - `src/nnue.rs` — NNUE inference (embedded net `net/nnue.bin`, shape constants, king layout)
 - `src/datagen.rs` — self-play training-data generation
+- `src/relabel.rs` — `relabel`: new search scores for existing training positions (text or 32-byte records)
 - `src/movegen.rs` — move generation, attack detection, UCI move parsing/helpers
 - `src/search.rs` — search, pruning, move ordering, SEE
 - `src/tt.rs` — zobrist hashing + transposition table
