@@ -189,6 +189,10 @@ jobs:
             both) cand_tb=("option.SyzygyPath=$PWD/syzygy"); base_tb=("option.SyzygyPath=$PWD/syzygy") ;;
             *) echo "unknown tb mode $TB"; exit 1 ;;
           esac
+          # With tb, log engine I/O to prove the option reached the engines in
+          # play (summarised by the next step, not uploaded).
+          tb_log=()
+          if [ "$TB" != none ]; then tb_log=(-log file=engine-io.log level=info engine=true); fi
           engines/fastchess \
             -engine cmd=engines/cand name=candidate "${cand_tb[@]}" \
             -engine cmd=engines/base name=base "${base_tb[@]}" \
@@ -202,8 +206,17 @@ jobs:
             -recover \
             -ratinginterval 0 \
             -pgnout file="games-$SHARD.pgn" \
+            "${tb_log[@]}" \
             | tee "fastchess-$SHARD.log"
           grep 'Ptnml(0-2)' "fastchess-$SHARD.log" | tail -1
+
+      - name: Tablebase use in play
+        if: env.TB != 'none'
+        run: |
+          ls -la engine-io.log* || true
+          echo "setoption SyzygyPath sent: $(grep -c 'setoption name SyzygyPath' engine-io.log || true)"
+          echo "'tables found' replies: $(grep -c 'tables found' engine-io.log || true)"
+          grep -m4 'SyzygyPath\|tables found' engine-io.log || true
 
       - uses: actions/upload-artifact@v4
         if: always()

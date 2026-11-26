@@ -198,7 +198,7 @@ jobs:
           TB: ${{ inputs.tb }}
         run: |
           # Syzygy (input tb): both arrays stay empty when it is off.
-          rf_tb=(); anchor_tb=()
+          rf_tb=(); anchor_tb=(); tb_log=()
           if [ "$TB" = true ]; then
             out=$(printf 'setoption name SyzygyPath value %s\nposition fen 8/8/8/4k3/8/8/8/R3K3 w - - 0 1\ntbprobe\nquit\n' "$PWD/syzygy" | engines/rustfish)
             echo "rustfish: $out"
@@ -212,6 +212,8 @@ jobs:
             else
               echo "::warning::$NAME has no SyzygyPath option; it plays without tablebases"
             fi
+            # Engine I/O log, summarised after the match (not uploaded).
+            tb_log=(-log file=engine-io.log level=info engine=true)
           fi
           # OPTIONS is intentionally unquoted: it holds space-separated option.X=Y words.
           engines/fastchess \
@@ -226,7 +228,13 @@ jobs:
             -resign movecount=3 score=600 \
             -recover \
             -pgnout file="games-$NAME-${{ matrix.shard }}.pgn" \
-            -ratinginterval 10
+            -ratinginterval 10 \
+            "${tb_log[@]}"
+          if [ "$TB" = true ]; then
+            ls -la engine-io.log* || true
+            echo "setoption SyzygyPath sent: $(grep -c 'setoption name SyzygyPath' engine-io.log || true)"
+            grep -m6 'SyzygyPath\|tables found\|[Tt]ablebase' engine-io.log || true
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
