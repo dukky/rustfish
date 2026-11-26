@@ -1202,6 +1202,7 @@ impl EngineState {
 }
 
 fn main() {
+    bitboard::slider_to_huge_pages();
     let input = spawn_input_reader();
     let mut board = Board::new();
     board.set_startpos();

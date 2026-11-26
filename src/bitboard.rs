@@ -302,10 +302,33 @@ const fn build_slider_table() -> [u64; SLIDER_TABLE_SIZE] {
 #[allow(long_running_const_eval)]
 static SLIDER_ATTACKS: [u64; SLIDER_TABLE_SIZE] = build_slider_table();
 
+/// Where lookups read the slider table: `SLIDER_ATTACKS` itself until
+/// `slider_to_huge_pages` swaps in a copy on a 2 MB page (the static lives
+/// in 4 KB-paged read-only data, ~210 pages probed at random). Both hold
+/// the same values, so a lookup is right whichever it reads.
+static SLIDER_PTR: std::sync::atomic::AtomicPtr<u64> =
+    std::sync::atomic::AtomicPtr::new(SLIDER_ATTACKS.as_ptr() as *mut u64);
+
+/// Copy the slider table onto a transparent huge page (where the OS allows
+/// it; see `hugemem`) and point lookups at it. Call once at startup.
+pub(crate) fn slider_to_huge_pages() {
+    // SAFETY: all-zero u64s are valid.
+    let mut buf = unsafe { crate::hugemem::HugeBuf::<u64>::zeroed(SLIDER_TABLE_SIZE) };
+    buf.copy_from_slice(&SLIDER_ATTACKS);
+    let p = buf.as_ptr() as *mut u64;
+    // Lives for the rest of the process.
+    std::mem::forget(buf);
+    SLIDER_PTR.store(p, std::sync::atomic::Ordering::Release);
+}
+
 #[inline(always)]
 fn magic_lookup(m: &Magic, occ: u64) -> u64 {
     let idx = m.offset as usize + ((occ & m.mask).wrapping_mul(m.magic) >> m.shift) as usize;
-    SLIDER_ATTACKS[idx]
+    debug_assert!(idx < SLIDER_TABLE_SIZE);
+    // SAFETY: idx < SLIDER_TABLE_SIZE for every magic (the table was built
+    // from them), and both possible targets hold SLIDER_TABLE_SIZE values
+    // that are never written after publication.
+    unsafe { *SLIDER_PTR.load(std::sync::atomic::Ordering::Relaxed).add(idx) }
 }
 
 /// Sliding attacks from `sq` over occupancy `occ` along diagonal rays.
