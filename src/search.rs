@@ -14,7 +14,7 @@ const DEFAULT_MOVES_TO_GO: u64 = 20;
 const HARD_LIMIT_FACTOR: u64 = 3;
 // Soft-target scale in percent by how many iterations the best move has held.
 const STABILITY_SCALE: [u64; 5] = [150, 120, 100, 85, 70];
-// A score drop of at least this many cp since the last iteration buys more time.
+// A score drop of at least this many cp since the last iteration buys 1.5x time.
 const SCORE_DROP_MARGIN: i32 = 40;
 // Node-fraction time management (single-threaded searches only): from this
 // depth on, the soft target is also scaled by (NodeTmBase - f) * NodeTmScale
@@ -1159,7 +1159,7 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                 let scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
                 let mut target = soft * scale / 100;
                 if d >= 4 && best_score < prev_score - SCORE_DROP_MARGIN {
-                    target = target * 5 / 4;
+                    target = target * 3 / 2;
                 }
                 // Node fractions are the main thread's own: it searches the
                 // whole tree whatever the helpers do.
