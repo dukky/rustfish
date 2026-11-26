@@ -487,6 +487,8 @@ const HISTORY_BONUS_MAX: i32 = 1_536;
 /// likely when the move's static result is within 25 cp of alpha or above
 /// (0.7-2.0%) than when it is 100+ cp below (0.005-0.1%).
 const LMR_CHILD_EVAL_SAFE_MARGIN: i32 = 25;
+// Minimum depth for the extra LMR ply at expected ALL nodes.
+const LMR_ALL_NODE_MIN_DEPTH: i32 = 8;
 
 /// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
 /// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
@@ -2178,6 +2180,12 @@ fn negamax_body(
                 }
                 if pv_node {
                     r -= params.lmr_pv_node;
+                }
+                // Expected ALL nodes far from the horizon reduce one ply more
+                // (docs/tree-gap-2026-11-26.md: the ALL-node part of the
+                // tree gap grows with depth; a uniform extra ply lost at LTC).
+                if !pv_node && !cut_node && depth >= LMR_ALL_NODE_MIN_DEPTH {
+                    r += 1;
                 }
                 // Reduce more when our static eval is not improving.
                 if !improving {
