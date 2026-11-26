@@ -1993,7 +1993,10 @@ fn negamax_body(
                 2 => params.lmp_limit_d2,
                 _ => params.lmp_limit_d3,
             };
-            if idx >= limit {
+            // `max(1)`: LmpLimit* = 0 (allowed by the UCI option) would also
+            // prune the first move, and a node with every move pruned returns
+            // -INF to its parent.
+            if idx >= limit.max(1) {
                 continue;
             }
         }
@@ -2123,7 +2126,9 @@ fn negamax_body(
                 {
                     r -= 1;
                 }
-                r.clamp(0, depth - 2)
+                // `max(0)`: with LmrMinDepth = 1 (inside the UCI and SPSA
+                // ranges) a depth-1 node gives clamp(0, -1), which panics.
+                r.clamp(0, (depth - 2).max(0))
             } else {
                 0
             };
