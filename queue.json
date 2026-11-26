@@ -6,16 +6,7 @@
       "front": true
     }
   ],
-  "current": {
-    "branch": "lmr-protect-linear",
-    "mode": "stc",
-    "test_id": "q-lmr-protect-linear-1125-2337",
-    "sha": "02693bba6284179d6ce5ade90e853d294d375fc6",
-    "base_sha": "bf8fc7b322bdcb2a999f9e598c08b6c9fc18ac4e",
-    "started": "2026-11-25T23:38:00Z",
-    "bench": 179274,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
