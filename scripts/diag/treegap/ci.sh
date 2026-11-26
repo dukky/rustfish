@@ -33,6 +33,17 @@ case "$kind" in
       $R --engine engines/rustfish-ts --depth "$d" --jobs "$J" --knobs "${k//_/=}" --out "out/kn-d$d-$ks.jsonl"
     done
     ;;
+  cnt)
+    # node-counting convention, black box: tiny searches, all info lines
+    for e in rustfish peer; do
+      while read -r pos; do
+        for d in 1 2 3; do
+          echo "== $e $pos depth $d"
+          (printf 'uci\nsetoption name Hash value 16\nisready\nucinewgame\nposition %s\ngo depth %s\n' "${pos/#fen/fen}" "$d"; sleep 1; printf 'quit\n') | engines/$e | grep -E '^info|^bestmove' | tee -a out/cnt.txt
+        done
+      done < "$here/count.txt"
+    done
+    ;;
   *) echo "unknown plan $plan"; exit 1 ;;
 esac
 ls -la out

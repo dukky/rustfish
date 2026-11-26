@@ -2441,6 +2441,7 @@ fn quiescence(
     }
 
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
+    ts!(s => if in_check { s.qs_incheck += 1; });
     let mut best_move = None;
     let raw_static_eval = if in_check {
         None
