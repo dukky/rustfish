@@ -903,15 +903,30 @@ pub(crate) mod kernels {
 
     /// `sum += madd(a, b)` (exact i32 pair sums): AVX2, AVX-VNNI or AVX512-VNNI vpdpwssd.
     #[inline(always)]
-    unsafe fn dpwssd<const V: u8>(mut acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+    unsafe fn dpwssd<const V: u8>(acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: the update_pw flavour of V enables its features.
         unsafe {
             match V {
-                1 => std::arch::asm!("{{vex}} vpdpwssd {0}, {1}, {2}", inout(ymm_reg) acc, in(ymm_reg) a, in(ymm_reg) b, options(pure, nomem, nostack)),
-                2 => std::arch::asm!("{{evex}} vpdpwssd {0}, {1}, {2}", inout(ymm_reg) acc, in(ymm_reg) a, in(ymm_reg) b, options(pure, nomem, nostack)),
-                _ => acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a, b)),
+                1 => dw1(acc, a, b),
+                2 => dw2(acc, a, b),
+                _ => _mm256_add_epi32(acc, _mm256_madd_epi16(a, b)),
             }
         }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,avxvnni")]
+    unsafe fn dw1(mut acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: register-only instruction; AVX-VNNI is enabled.
+        unsafe { std::arch::asm!("{{vex}} vpdpwssd {0}, {1}, {2}", inout(ymm_reg) acc, in(ymm_reg) a, in(ymm_reg) b, options(pure, nomem, nostack)) };
+        acc
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,avx512f,avx512vnni,avx512vl")]
+    unsafe fn dw2(mut acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: register-only instruction; AVX512-VNNI + VL are enabled.
+        unsafe { std::arch::asm!("{{evex}} vpdpwssd {0}, {1}, {2}", inout(ymm_reg) acc, in(ymm_reg) a, in(ymm_reg) b, options(pure, nomem, nostack)) };
         acc
     }
 
