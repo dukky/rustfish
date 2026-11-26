@@ -1072,6 +1072,9 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
         let mut alpha = -INF;
         let mut beta = INF;
+        // Aspiration: each fail widens the failing side by a step that
+        // doubles, so a large score swing needs few re-searches.
+        let mut asp_step = ASPIRATION_WINDOW;
         if d >= 4 {
             alpha = best_score - ASPIRATION_WINDOW;
             beta = best_score + ASPIRATION_WINDOW;
@@ -1097,11 +1100,13 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     break (result.0, result.1, result.2, result.3);
                 }
                 if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    alpha = (alpha - asp_step * 2).max(-INF);
+                    asp_step = (asp_step * 2).min(INF);
                     continue;
                 }
                 if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    beta = (beta + asp_step * 2).min(INF);
+                    asp_step = (asp_step * 2).min(INF);
                     continue;
                 }
                 break (result.0, result.1, result.2, result.3);
@@ -1123,11 +1128,13 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
                     break (result.0, result.1, result.2, nodes_after - nodes_before);
                 }
                 if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+                    alpha = (alpha - asp_step * 2).max(-INF);
+                    asp_step = (asp_step * 2).min(INF);
                     continue;
                 }
                 if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+                    beta = (beta + asp_step * 2).min(INF);
+                    asp_step = (asp_step * 2).min(INF);
                     continue;
                 }
                 break (result.0, result.1, result.2, nodes_after - nodes_before);
