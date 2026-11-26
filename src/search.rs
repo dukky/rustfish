@@ -2124,6 +2124,14 @@ fn negamax_body(
             captures_tried.push(mv);
         }
 
+        // A check that loses material by SEE is rarely the forcing line the
+        // check extension is for: search it one ply shallower, which cancels
+        // the ply the child adds for being in check.
+        let losing_check = {
+            let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
+            ci.gives_check(board, mv) && !see_ge(board, mv, 0)
+        } as i32;
+
         let undo = board.make_move(mv);
         let child_key = child_hash(key, board, mv, undo, &engine.zobrist);
         engine.tt.prefetch(child_key);
@@ -2138,7 +2146,7 @@ fn negamax_body(
         if idx == 0 {
             score = -negamax(
                 board,
-                depth - 1 + extension,
+                depth - 1 + extension - losing_check,
                 -beta,
                 -alpha,
                 ply + 1,
@@ -2198,7 +2206,7 @@ fn negamax_body(
                 0
             };
             let reduced = reduction > 0;
-            let reduced_depth = (depth - 1 - reduction).max(0);
+            let reduced_depth = (depth - 1 - reduction).max(0) - losing_check;
 
             score = -negamax(
                 board,
@@ -2219,7 +2227,7 @@ fn negamax_body(
             if reduced && score > alpha {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    depth - 1 - losing_check,
                     -alpha - 1,
                     -alpha,
                     ply + 1,
@@ -2237,7 +2245,7 @@ fn negamax_body(
             if score > alpha && score < beta {
                 score = -negamax(
                     board,
-                    depth - 1,
+                    depth - 1 - losing_check,
                     -beta,
                     -alpha,
                     ply + 1,
