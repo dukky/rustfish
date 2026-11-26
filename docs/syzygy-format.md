@@ -220,7 +220,8 @@ position without that right). Stalemates and mates are stored normally.
   you can normally afford to lose a ply"); the generator uses plies where
   the 100-ply limit needs it.
 - Don't-cares: draws; positions whose best move is a winning zeroing move
-  (capture or pawn move): DTZ there is 1 (101 for a cursed win).
+  (capture or pawn move): DTZ there is 1 (101 for a cursed win). A
+  checkmating move also counts as DTZ 1.
 - The side not stored: one ply of search (DTZ = 1 + best child distance,
   zeroing moves count 1).
 - 50-move rule: a win with clock c is a real win when `c + |DTZ| <= 100`.
@@ -237,10 +238,34 @@ position without that right). Stalemates and mates are stored normally.
 
 ## 9. Validation (Rust prober vs the lichess tablebase API)
 
-See the branch report / plan.md row for the final numbers. Method: random
-legal positions per material class (all 145 3-5 piece classes), en passant
-positions, and positions re-queried with the halfmove clock set around
-`100 - |DTZ|`; each API answer also labels every child position.
+Oracle: 3768 API queries (1 request/s, cached): 18 random legal positions
+for each of the 145 3-5 piece material classes (both sides to move, pawns
+included), 27 en passant positions, and 900 boundary queries (known
+wins/losses re-queried with the halfmove clock at 99, 100 and 101 minus
+|DTZ|). Every answer also labels each child position (with the child's
+clock), giving 52592 labelled positions (4999 at clock 0, 153 with an en
+passant right, 6115 cursed wins / blessed losses).
+
+- **WDL at clock 0: 4999/4999 agree.** With the clock applied (win if
+  `clock + |DTZ| <= 100`): 51942/52592; all 650 differences are the same
+  case: a table storing full moves gives a DTZ one ply short of the exact
+  value and the exact total is 101 (the root filter ranks a total of 100 as
+  "uncertain", below a sure win).
+- **DTZ: 44764 exact, 7828 one ply off (moves granularity), 0 other.**
+- Conventions where the oracle differs: a mated position is DTZ -1 there
+  (0 here); in an earlier sample a loss with DTZ exactly -100 at clock 0 was
+  called a blessed loss there (the tables and the 50-move rule count it as a
+  loss).
+- Self-consistency (WDL = best child over all legal moves): prototype 12495
+  pawnless + 4865 pawn positions, 0 mismatches; `cargo test` repeats it on
+  12 random positions per class, and checks 4986 recorded oracle answers
+  (`tests/data/syzygy_oracle.txt`). Tests skip when the files are absent
+  (`RUSTFISH_SYZYGY_TEST_PATH`, default `~/rustfish-data/syzygy`).
+- Probe cost (M3, tables in memory): raw lookup ~0.55 us, full WDL probe
+  with capture resolution ~0.9 us, DTZ probe ~10-14 us.
+- Play-outs (engine with tables vs itself, 40-60 ms/move): KBNvK mates in 41
+  plies; with clock 41 (41 + DTZ 59 = 100) it mates at ply 59; with clock
+  42 (cursed) the game is drawn by the 50-move rule, as the tables say.
 
 ## 10. Source log
 

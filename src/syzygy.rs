@@ -194,7 +194,7 @@ fn parse_pairs(d: &[u8], mut pos: usize) -> Result<(Pairs, usize), String> {
     t.nblocks = rd32(d, pos + 4);
     let max_len = d[pos + 8];
     t.min_len = d[pos + 9];
-    if max_len < t.min_len || max_len > 56 || t.block_log > 12 || t.idx_bits == 0 || t.idx_bits > 40 {
+    if max_len < t.min_len || max_len > 32 || t.block_log > 12 || t.idx_bits == 0 || t.idx_bits > 40 {
         return Err("bad table header".into());
     }
     pos += 10;
@@ -288,18 +288,23 @@ impl Pairs {
         // Huffman-decode the block until the symbol covering `off`.
         let bsize = 1usize << self.block_log;
         let start = self.data_off + (block as usize) * bsize;
-        let mut buf = [0u8; 1024 + 16];
-        buf[..bsize].copy_from_slice(&d[start..start + bsize]);
-        let mut bitpos = 0usize;
+        // Reads may run up to 8 bytes past the block: still inside the file
+        // (the 16-byte checksum follows the last block).
+        let buf = &d[start..];
         let mut remaining = off as u64;
         let min_len = self.min_len as usize;
+        let be32 = |p: usize| u32::from_be_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]]) as u64;
+        // MSB-aligned bit window; at least 32 valid bits before each code
+        // (code lengths are at most 32, checked at load).
+        let mut w = (be32(0) << 32) | be32(4);
+        let mut next = 8usize;
+        let mut avail = 64u32;
         let sym = loop {
-            let byte = bitpos >> 3;
-            let mut w = 0u64;
-            for i in 0..8 {
-                w = (w << 8) | buf[byte + i] as u64;
+            if avail <= 32 {
+                w |= be32(next) << (32 - avail);
+                next += 4;
+                avail += 32;
             }
-            w = (w << (bitpos & 7)) | ((buf[byte + 8] as u64) >> (8 - (bitpos & 7)));
             let mut l = min_len;
             let mut code = w >> (64 - l);
             while code < self.base[l - min_len] {
@@ -307,7 +312,8 @@ impl Pairs {
                 code = w >> (64 - l);
             }
             let s = self.offs[l - min_len] as usize + (code - self.base[l - min_len]) as usize;
-            bitpos += l;
+            w <<= l;
+            avail -= l as u32;
             let n = self.symlen[s] as u64 + 1;
             if remaining < n {
                 break s;
@@ -748,10 +754,11 @@ pub(crate) struct Tablebases {
 }
 
 impl Tablebases {
-    /// Scan `paths` (separated by ':' or ';') for table files.
+    /// Scan `paths` (separated by ':', or ';' on Windows) for table files.
     pub(crate) fn open(paths: &str) -> Tablebases {
         let mut names: HashMap<String, (Option<PathBuf>, Option<PathBuf>)> = HashMap::new();
-        for dir in paths.split(|c| c == ':' || c == ';').filter(|s| !s.is_empty()) {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for dir in paths.split(sep).filter(|s| !s.is_empty()) {
             let Ok(rd) = std::fs::read_dir(dir) else { continue };
             for e in rd.flatten() {
                 let p = e.path();
@@ -1010,10 +1017,16 @@ fn dtz_inner(tb: &Tablebases, board: &mut Board, w: i32) -> Option<i32> {
     if w > 0 {
         for mv in moves.iter() {
             let zeroing = is_capture(board, mv) || board.squares[mv.from as usize].map(|p| p.kind) == Some(PieceType::Pawn);
+            let undo = board.make_move(*mv);
+            // Checkmate ends the game: it counts like a zeroing move (DTZ 1).
             if !zeroing {
+                let mate = w == 2 && gives_mate(board);
+                board.undo_move(*mv, undo);
+                if mate {
+                    return Some(1);
+                }
                 continue;
             }
-            let undo = board.make_move(*mv);
             let v = wdl_inner(tb, board).map(|x| -x);
             board.undo_move(*mv, undo);
             if v? == w {
@@ -1078,10 +1091,16 @@ fn probe_dtz_inner_child(tb: &Tablebases, board: &mut Board, w: i32) -> Option<i
             board.generate_legal_moves(false, &mut moves);
             for mv in moves.iter() {
                 let zeroing = is_capture(board, mv) || board.squares[mv.from as usize].map(|p| p.kind) == Some(PieceType::Pawn);
+                let undo = board.make_move(*mv);
+                // Checkmate ends the game: it counts like a zeroing move (DTZ 1).
                 if !zeroing {
+                    let mate = w == 2 && gives_mate(board);
+                    board.undo_move(*mv, undo);
+                    if mate {
+                        return Some(1);
+                    }
                     continue;
                 }
-                let undo = board.make_move(*mv);
                 let v = wdl_inner(tb, board).map(|x| -x);
                 board.undo_move(*mv, undo);
                 if v? == w {
@@ -1094,6 +1113,16 @@ fn probe_dtz_inner_child(tb: &Tablebases, board: &mut Board, w: i32) -> Option<i
         }
     }
     dtz_inner(tb, board, w)
+}
+
+/// Whether the side to move (after a move) is checkmated.
+fn gives_mate(board: &mut Board) -> bool {
+    if !board.is_in_check(board.side_to_move) {
+        return false;
+    }
+    let mut moves = Vec::with_capacity(32);
+    board.generate_legal_moves(false, &mut moves);
+    moves.is_empty()
 }
 
 /// DTZ of a position whose best move is zeroing: 1 ply, plus 100 when the
@@ -1160,24 +1189,19 @@ pub(crate) fn filter_root_moves(tb: &Tablebases, board: &mut Board, moves: &mut 
             let w = -probe_wdl(tb, board)?;
             let d = probe_dtz(tb, board)?.abs();
             let after = if zeroing { 0 } else { clock + 1 };
+            // A win needs the zeroing move by ply 100 of the clock. DTZ
+            // stored in full moves can be one ply off, so an exact 100 ranks
+            // just below a sure win (and just above a sure loss).
+            let total = after + d;
             let rank = match w {
-                2 => {
-                    if after + d <= 100 {
-                        1000
-                    } else {
-                        500
-                    }
-                }
-                1 => 500,
+                2 if zeroing || total < 100 => 1000,
+                2 if total == 100 => 999,
+                2 | 1 => 500,
                 0 => 0,
                 -1 => -500,
-                _ => {
-                    if after + d <= 100 {
-                        -1000
-                    } else {
-                        -500
-                    }
-                }
+                _ if total > 100 => -500,
+                _ if total == 100 => -999,
+                _ => -1000,
             };
             Some((rank, d))
         })();
@@ -1187,7 +1211,7 @@ pub(crate) fn filter_root_moves(tb: &Tablebases, board: &mut Board, moves: &mut 
     }
     let best = ranked.iter().map(|r| r.0).max().unwrap_or(0);
     let mut keep: Vec<(i32, i32, Move)> = ranked.into_iter().filter(|r| r.0 == best).collect();
-    if repeated && best >= 1000 {
+    if repeated && best >= 999 {
         let dmin = keep.iter().map(|r| r.1).min().unwrap_or(0);
         keep.retain(|r| r.1 == dmin);
     }
@@ -1399,6 +1423,43 @@ mod tests {
         }
         let dtz_us = t.elapsed().as_micros() as f64 / 400.0;
         println!("raw table lookup {:.0} ns, full WDL probe {:.0} ns, DTZ probe {:.1} us", raw_ns, wdl_ns, dtz_us);
+    }
+
+    /// Agreement with answers recorded from the public lichess tablebase API
+    /// (tests/data/syzygy_oracle.txt: fen;wdl;dtz with the clock at 0):
+    /// WDL exact, DTZ within one ply (tables storing full moves).
+    #[test]
+    fn matches_recorded_oracle() {
+        let Some(path) = test_tb_path() else {
+            eprintln!("syzygy files not found; skipping");
+            return;
+        };
+        let tb = Tablebases::open(&path);
+        let data = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/syzygy_oracle.txt")).unwrap();
+        let (mut n, mut exact) = (0, 0);
+        for line in data.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+            let f: Vec<&str> = line.split(';').collect();
+            let (fen, wdl, dtz): (&str, i32, i32) = (f[0], f[1].parse().unwrap(), f[2].parse().unwrap());
+            let mut board = Board::new();
+            board.set_fen(fen);
+            let w = probe_wdl(&tb, &mut board).expect(fen);
+            // The oracle calls a loss/win with |DTZ| exactly 100 blessed/cursed;
+            // the tables (and the 50-move rule) count it as decisive.
+            let expect = if dtz.abs() == 100 && wdl.abs() == 1 { 2 * wdl } else { wdl };
+            assert_eq!(w, expect, "wdl {}", fen);
+            let mut legal = Vec::new();
+            board.generate_legal_moves(false, &mut legal);
+            if legal.is_empty() {
+                // Mated/stalemated: the oracle reports -1/0, we report 0.
+                continue;
+            }
+            let d = probe_dtz(&tb, &mut board).expect(fen);
+            assert!((d - dtz).abs() <= 1 && d.signum() == dtz.signum(), "dtz {} ours {} oracle {}", fen, d, dtz);
+            exact += (d == dtz) as usize;
+            n += 1;
+        }
+        assert!(n > 1000);
+        eprintln!("oracle positions {} dtz exact {}", n, exact);
     }
 }
 
