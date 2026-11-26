@@ -255,8 +255,8 @@ fn stop_requested() -> bool {
     let active = ACTIVE_GO.load(Ordering::Relaxed);
     active != 0 && STOP_UPTO.load(Ordering::Relaxed) >= active
 }
-// Quiet SEE pruning: at depth <= this, a non-priority quiet in a non-PV node
-// is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
+// Quiet SEE pruning: at depth <= this, a quiet other than a killer or the
+// counter-move in a non-PV node is skipped when SEE < -SEE_QUIET_MARGIN * depth^2.
 const SEE_QUIET_MAX_DEPTH: i32 = 8;
 const SEE_QUIET_MARGIN: i32 = 20;
 // Non-PV nodes up to this depth skip losing captures with SEE below -margin * depth.
@@ -2000,7 +2000,16 @@ fn negamax_body(
         let prune_exempt = quiet
             && (Some(mv) == killers[0] || Some(mv) == killers[1] || Some(mv) == counter_move);
 
-        if quiet && !prune_exempt && !in_check && beta - alpha <= 1 && depth <= 3 {
+        // Not while every move searched so far is mated (as for the SEE
+        // prunes below): the fail-soft upper bound would then be a mate
+        // score that the pruned moves never had a chance to refute.
+        if quiet
+            && !prune_exempt
+            && !in_check
+            && beta - alpha <= 1
+            && depth <= 3
+            && best > -(MATE_SCORE - 1000)
+        {
             let limit = match depth {
                 1 => params.lmp_limit_d1,
                 2 => params.lmp_limit_d2,
@@ -2016,17 +2025,22 @@ fn negamax_body(
 
         // Per-move futility: a late quiet that cannot raise static eval to
         // alpha, and does not give check, is uninteresting at a zero window.
+        // Fail-soft: the pruned move is assumed to score up to the futility
+        // value, so the node's upper bound (`best`) must not claim less.
         if quiet
             && !prune_exempt
             && !in_check
             && beta - alpha <= 1
             && depth <= 8
             && idx > 0
-            && static_eval.is_some_and(|se| se + params.futility_margin_d1 * depth / 2 <= alpha)
         {
-            let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
-            if !ci.gives_check(board, mv) {
-                continue;
+            let futility_value = static_eval.map_or(i32::MAX, |se| se + params.futility_margin_d1 * depth / 2);
+            if futility_value <= alpha {
+                let ci = check_info.get_or_insert_with(|| CheckInfo::new(board));
+                if !ci.gives_check(board, mv) {
+                    best = best.max(futility_value);
+                    continue;
+                }
             }
         }
 
