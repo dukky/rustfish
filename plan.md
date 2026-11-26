@@ -551,7 +551,7 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 | 7 | **Opening variety D1** (randplies 4 vs 8) | laptop 4 threads | ~2.5 days data + 1 GPU arm | free compute; unknown sign | running (R3001-R3005) |
 | 8 | **Gen 13** = winners of 3/6/7 (+ H1536 if 5 says yes) | GPU ~11 h+ | after 3, 6, 7 | combines the net wins | waiting |
 | 9 | `lmr-protect-linear-r2` LTC | CI | ~4 h | last check of a lever whose STC was -2.2; lowest EV, runs only when CI is free | chained |
-| 10 | **Syzygy 3-4-5 probing, strict clean room from prose** (owner, 26 Nov; agent, `syzygy-cleanroom`: format spec doc from prose + reverse-engineering, WDL validated vs the lichess tablebase API, root DTZ, `SyzygyPath` off by default) | agent + laptop | ~2 days | external review: +3..15 at CCRL (CCRL plays with TBs); needs TB files in the CI ladder/SPRT workflows to measure | running |
+| 10 | **Syzygy 3-4-5 probing, strict clean room from prose** (owner, 26 Nov; agent, `syzygy-cleanroom`: format spec doc from prose + reverse-engineering, WDL validated vs the lichess tablebase API, root DTZ, `SyzygyPath` off by default) | agent + laptop | ~2 days | external review: +3..15 at CCRL (CCRL plays with TBs); needs TB files in the CI ladder/SPRT workflows to measure. **Fallback (owner, 26 Nov): if the prose route stalls, use Fathom (MIT) as the format reference** — own Rust code, credit in CREDITS, keep Fathom's MIT notice beside anything close to a translation; never Stockfish's tbprobe (GPL) | running |
 | - | Rented compute | money | ~$35-100 | only if phase 0/1 says higher-node labels pay (owner decision) | waiting on 3 |
 
 ## Deferred actions (each has a trigger; re-check this list whenever a job finishes)
