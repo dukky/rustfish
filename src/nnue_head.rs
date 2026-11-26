@@ -1064,27 +1064,38 @@ pub(crate) mod kernels {
         // A chunk's 4 input bytes repeat in every i32 lane; its 64 weight
         // bytes are neurons 0..8 (first vector) and 8..16 (second).
         unsafe {
-            let mut a = [_mm256_setzero_si256(); 4];
+            // Four chunks in flight (8 accumulators): with VNNI each
+            // accumulator is a dependent vpdpbusd chain, so fewer, longer
+            // chains were latency-bound. Integer sums: order is irrelevant.
+            let mut a = [_mm256_setzero_si256(); 8];
             let xp = x.as_ptr() as *const i32;
             let wp = w.as_ptr() as *const __m256i;
+            let n = nnz.len();
+            let np = nnz.as_ptr();
             let mut i = 0;
-            while i + 1 < nnz.len() {
-                let (c0, c1) = (nnz[i] as usize, nnz[i + 1] as usize);
-                let x0 = _mm256_set1_epi32(xp.add(c0).read_unaligned());
-                let x1 = _mm256_set1_epi32(xp.add(c1).read_unaligned());
-                a[0] = dpbusd::<V>(a[0], x0, _mm256_load_si256(wp.add(2 * c0)));
-                a[1] = dpbusd::<V>(a[1], x0, _mm256_load_si256(wp.add(2 * c0 + 1)));
-                a[2] = dpbusd::<V>(a[2], x1, _mm256_load_si256(wp.add(2 * c1)));
-                a[3] = dpbusd::<V>(a[3], x1, _mm256_load_si256(wp.add(2 * c1 + 1)));
-                i += 2;
+            while i + 3 < n {
+                for s in 0..4 {
+                    let c = *np.add(i + s) as usize;
+                    let xv = _mm256_set1_epi32(xp.add(c).read_unaligned());
+                    a[2 * s] = dpbusd::<V>(a[2 * s], xv, _mm256_load_si256(wp.add(2 * c)));
+                    a[2 * s + 1] = dpbusd::<V>(a[2 * s + 1], xv, _mm256_load_si256(wp.add(2 * c + 1)));
+                }
+                i += 4;
             }
-            if i < nnz.len() {
-                let c0 = nnz[i] as usize;
-                let x0 = _mm256_set1_epi32(xp.add(c0).read_unaligned());
-                a[0] = dpbusd::<V>(a[0], x0, _mm256_load_si256(wp.add(2 * c0)));
-                a[1] = dpbusd::<V>(a[1], x0, _mm256_load_si256(wp.add(2 * c0 + 1)));
+            // The 0-3 left, each into its own slot (constant indices keep
+            // the accumulators in registers).
+            for s in 0..3 {
+                if i + s < n {
+                    let c = *np.add(i + s) as usize;
+                    let xv = _mm256_set1_epi32(xp.add(c).read_unaligned());
+                    a[2 * s] = dpbusd::<V>(a[2 * s], xv, _mm256_load_si256(wp.add(2 * c)));
+                    a[2 * s + 1] = dpbusd::<V>(a[2 * s + 1], xv, _mm256_load_si256(wp.add(2 * c + 1)));
+                }
             }
-            [_mm256_add_epi32(a[0], a[2]), _mm256_add_epi32(a[1], a[3])]
+            [
+                _mm256_add_epi32(_mm256_add_epi32(a[0], a[2]), _mm256_add_epi32(a[4], a[6])),
+                _mm256_add_epi32(_mm256_add_epi32(a[1], a[3]), _mm256_add_epi32(a[5], a[7])),
+            ]
         }
     }
 
