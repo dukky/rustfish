@@ -228,15 +228,18 @@ struct Line([i16; 32]);
 /// one. A plain `Vec<i16>` of this size is mmapped by glibc 16 bytes past a
 /// page boundary, which made half of the 256-bit row loads on Linux x86
 /// straddle two lines (macOS happens to page-align it).
+/// Big ones (the feature weights) go on 2 MB pages where the OS allows it
+/// (`hugemem`): the update reads 4-8 rows per eval at random.
 #[derive(Clone)]
 struct AlignedI16 {
-    lines: Vec<Line>,
+    lines: crate::hugemem::HugeBuf<Line>,
     len: usize,
 }
 
 impl AlignedI16 {
     fn new(v: &[i16]) -> Self {
-        let mut lines = vec![Line([0; 32]); v.len().div_ceil(32)];
+        // SAFETY: all-zero is a valid `Line`.
+        let mut lines = unsafe { crate::hugemem::HugeBuf::<Line>::zeroed(v.len().div_ceil(32)) };
         for (l, c) in lines.iter_mut().zip(v.chunks(32)) {
             l.0[..c.len()].copy_from_slice(c);
         }
