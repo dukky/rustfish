@@ -359,6 +359,8 @@ pub(crate) struct Search {
     /// the current path (0 when there is none); repetition lookahead must
     /// not reach behind it.
     null_idx: usize,
+    /// Depth of the current root iteration (tree-gap knob `exl`).
+    pub(crate) root_depth: i32,
 }
 
 impl Search {
@@ -374,6 +376,7 @@ impl Search {
             move_buf: Vec::with_capacity(256),
             root_nodes: Vec::new(),
             null_idx: 0,
+            root_depth: 0,
         }
     }
 
@@ -1384,6 +1387,7 @@ fn search_root(
     root_moves: &mut Vec<Move>,
     rep_stack: &mut Vec<u64>,
 ) -> (i32, Option<Move>, bool) {
+    search.root_depth = depth;
     let alpha_orig = alpha;
     let tt_move = engine.tt.probe(key).and_then(|e| e.best);
     order_moves(
@@ -1630,7 +1634,7 @@ fn negamax_body(
     cut_node: bool,
 ) -> i32 {
     let in_check = known_in_check.unwrap_or_else(|| board.is_in_check(board.side_to_move));
-    if in_check && k(td::K_CE) != 0 {
+    if in_check && k(td::K_CE) != 0 && (k(td::K_EXL) == 0 || k(td::K_EXLC) == 0 || (ply as i32) * 10 < k(td::K_EXL) * search.root_depth) {
         depth += 1;
         ts!(s => s.ext_check[td::db(depth)] += 1;);
     }
@@ -1968,9 +1972,9 @@ fn negamax_body(
                     && entry.depth as i32 >= depth - 3
                     && tt_score.abs() < MATE_SCORE - MAX_PLY as i32
                 {
-                    let singular_beta = tt_score - SE_MARGIN_PER_DEPTH * depth;
+                    let singular_beta = tt_score - k(td::K_SEM) * depth;
                     search.excluded[ply] = Some(mv);
-                    ts!(s => s.se_tries[td::db(depth)] += 1;);
+                    ts!(s => s.se_tries[td::db(depth)] += 1; s.se_tries_t[nt] += 1;);
                     #[cfg(feature = "treestats")]
                     let nb = search.nodes;
                     // `depth` already carries this node's check extension and
@@ -1997,8 +2001,11 @@ fn negamax_body(
                         return 0;
                     }
                     if s < singular_beta {
-                        extension = k(td::K_SEX);
-                        ts!(st => st.ext_se[td::db(depth)] += 1;);
+                        let room = k(td::K_EXL) == 0 || (ply as i32) * 10 < k(td::K_EXL) * search.root_depth;
+                        let clear = s < singular_beta - k(td::K_SXM);
+                        let typ_ok = k(td::K_SENT) == 0 || pv_node || cut_node;
+                        extension = if room && clear && typ_ok { k(td::K_SEX) } else { 0 };
+                        ts!(st => st.ext_se[td::db(depth)] += 1; st.ext_se_t[nt] += 1;);
                     } else if singular_beta >= beta && beta - alpha <= 1 {
                         // Multi-cut: the TT move and at least one alternative
                         // both beat beta.

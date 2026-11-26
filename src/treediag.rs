@@ -27,13 +27,18 @@ pub(crate) const K_LMRMI: usize = 16; // add to LMR min move index (0)
 pub(crate) const K_PVR: usize = 17; // LMR: extra reduction at all nodes (non-PV, non-cut) (0)
 pub(crate) const K_TTPV: usize = 18; // 1: allow TT cutoffs at PV nodes when depth >= needed+TTPV-1
 pub(crate) const K_LMRD: usize = 19; // re-search after LMR fail-high: 1 = skip if reduced score < alpha+K
-const NK: usize = 24;
+pub(crate) const K_SEM: usize = 20; // singular margin per depth (2)
+pub(crate) const K_EXL: usize = 21; // extensions only while ply*10 < EXL*root depth (0 off)
+pub(crate) const K_SXM: usize = 22; // singular extension only if verify < singular beta - SXM (0)
+pub(crate) const K_SENT: usize = 23; // 1: no positive singular extension at expected ALL nodes
+pub(crate) const K_EXLC: usize = 24; // 1: EXL also limits the check extension
+const NK: usize = 32;
 
-const NAMES: [&str; 20] = [
+const NAMES: [&str; 25] = [
     "ce", "lmpd", "lmrcap", "lmrs", "nmpe", "nmpr", "sed", "aspw", "rfpd", "qsd", "iird", "futd",
-    "hpd", "hpt", "sex", "cex", "lmrmi", "allr", "ttpv", "lmrd",
+    "hpd", "hpt", "sex", "cex", "lmrmi", "allr", "ttpv", "lmrd", "sem", "exl", "sxm", "sent", "exlc",
 ];
-const DEFAULTS: [i32; 20] = [1, 3, 0, 100, 0, 0, 8, 35, 7, 0, 4, 8, 0, 4000, 1, 0, 0, 0, 0, 0];
+const DEFAULTS: [i32; 25] = [1, 3, 0, 100, 0, 0, 8, 35, 7, 0, 4, 8, 0, 4000, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
 
 static KNOBS: [AtomicI32; NK] = [const { AtomicI32::new(0) }; NK];
 static KNOBS_INIT: std::sync::Once = std::sync::Once::new();
@@ -127,6 +132,8 @@ pub(crate) struct Stats {
     pub ext_se: [u64; DB],
     pub ext_neg: [u64; DB],
     pub se_tries: [u64; DB],
+    pub se_tries_t: [u64; NT],
+    pub ext_se_t: [u64; NT],
     pub nmp_tries: [u64; DB],
     pub nmp_ok: [u64; DB],
     pub lmr_red: [u64; DB],
@@ -202,6 +209,8 @@ pub(crate) fn print() {
     flat(&mut out, "ext_se", &s.ext_se);
     flat(&mut out, "ext_neg", &s.ext_neg);
     flat(&mut out, "se_tries", &s.se_tries);
+    flat(&mut out, "se_tries_t", &s.se_tries_t);
+    flat(&mut out, "ext_se_t", &s.ext_se_t);
     flat(&mut out, "nmp_tries", &s.nmp_tries);
     flat(&mut out, "nmp_ok", &s.nmp_ok);
     flat(&mut out, "lmr_red", &s.lmr_red);
