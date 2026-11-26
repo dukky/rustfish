@@ -263,3 +263,29 @@ accumulators) is already near what the counters allow. Remaining NPS levers
 are elsewhere: move ordering (~18%), the FT update's memory traffic, and
 search changes that skip work (`speed-tt-first`, `qs-delta`) through the
 SPRT. Nothing from round 4 is for the queue.
+
+## Round 5 (26 Nov, main 90b9223 / 2b679d9, gen 12, bench 216602): pairwise head path
+
+Profile of main (run 45775246188; Xeon 6975P-C AVX-VNNI / EPYC 7763
+AVX2): fused FT update + activation 18.5% incl., head L1 + L2/L3
+(`l1_rest_v1`) 6.5% incl. (L2 loop 1.6%, VNNI L1 chain 1.2%),
+`head::finish` 1.2%, chunk list (`zero_mask` + `push8z`) 2.3-2.6%.
+
+All branches bench 216602 and evalhash identical (desktop: default,
+`RUSTFISH_NO_AVX512=1`, `RUSTFISH_NO_VNNI=1`, both; `cargo test --release`
+x86-64-v3; CI compare refuses mismatches on every runner; arm job tests).
+Bench-13 paired NPS, median of 6 runner medians [min, max]:
+
+| branch | change | default kernels | AVX2 kernels | verdict |
+|---|---|---|---|---|
+| `speed3-nopermute` | x86 L1 input left in `packus` chunk order (no `permute4x64`); W1 laid out to match (`head::slot`) | +0.60 [+0.12, +1.26]; +0.68 [+0.10, +0.99] | +0.80; +0.83 | keep |
+| `speed3-dotvnni` | output-sum `madd`+`add` -> one `vpdpwssd` (AVX-VNNI / AVX512-VNNI), 4 accumulators | +0.57 [+0.05, +1.28]; +0.42 [+0.10, +1.19] | +0.31; +0.63 | keep |
+| `speed3-finish` | `finish`: round by `trunc(y + copysign(0.5 - 2^-54, y))` in the conversion, clamp in integers (test vs the old one incl. exact ties) | +0.42 [-1.05, +0.89] | +0.37 | keep (stack) |
+| `speed3-popcnt` | chunk count by `popcnt`, not a table load | +0.45 [-0.19, +0.57] | +0.30 | keep (stack) |
+| **`speed-stack-r3`** | the four above | **+1.48 [+0.99, +1.83]; +1.39 [+0.18, +1.74]** | +1.50 [+1.06, +2.53]; +1.44 [+0.40, +2.33] | **speedup** |
+| `speed3-l1x4` | L1 with 4 chunks in flight (8 accumulators) | -0.22 [-0.35, +2.41]; on the stack +-0 | +0.07 | drop (not latency-bound) |
+| `speed3-l2sparse` | L2 over the active L1 neurons only (bit-identical: skipped terms add +-0) | -0.60 [-2.36, +0.72] | -0.80 | drop (data-dependent loop) |
+
+A/A in the same runs: -0.30..+0.46 (default), -0.25..+0.20 (AVX2). arm:
+only `finish` changes NEON-side code; arm medians are within the arm A/A
+noise (+-1%). Runs: 45776044034, 45776965798, 45780090641, 45781018872.
