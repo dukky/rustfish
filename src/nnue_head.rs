@@ -60,6 +60,22 @@ const Z1_DIV: f32 = 65025.0 / 512.0 * 64.0;
 /// L1 neurons that feed L2.
 const KA: usize = if SKIP { H1 - 1 } else { H1 };
 
+/// Storage position of L1 input byte `i` (and of its W1 column). On x86
+/// the AVX2 kernels store `packus` output without the lane-fixing
+/// permute, so within every 32 bytes the 4-byte chunks sit in the order
+/// 0, 1, 4, 5, 2, 3, 6, 7 (an involution); W1 is laid out to match and the
+/// scalar twins use the same layout. The L1 sums are integer, so the order
+/// of the chunks changes nothing. Identity elsewhere.
+#[inline(always)]
+pub(crate) const fn slot(i: usize) -> usize {
+    if cfg!(target_arch = "x86_64") {
+        const P: [usize; 8] = [0, 1, 4, 5, 2, 3, 6, 7];
+        i / 32 * 32 + P[i / 4 % 8] * 4 + i % 4
+    } else {
+        i
+    }
+}
+
 /// W1 of one bucket, chunk-major: `.0[c*64 + k*4 + j]` = W1q[k][4c + j],
 /// so a chunk's weights are one 64-byte line.
 #[repr(C, align(64))]
@@ -121,7 +137,8 @@ impl HeadNet {
                     // round anyway, so a non-QAT net still loads.
                     let v = it.next().unwrap() as i32;
                     let w = ((v + if v >= 0 { 64 } else { -64 }) / 128).clamp(-127, 127);
-                    h.w1[b].0[(i / 4) * H1 * 4 + k * 4 + i % 4] = w as i8;
+                    let p = slot(i);
+                    h.w1[b].0[(p / 4) * H1 * 4 + k * 4 + p % 4] = w as i8;
                 }
             }
             for k in 0..H1 {
@@ -443,7 +460,7 @@ pub(crate) mod scalar {
         for i in 0..HALF {
             let a = (acc[i] as i32).clamp(0, 255);
             let b = (acc[i + HALF] as i32).clamp(0, 255);
-            out[i] = ((a * b + 256) >> 9) as u8;
+            out[slot(i)] = ((a * b + 256) >> 9) as u8;
         }
         for c in 0..HALF / 4 {
             if out[4 * c..4 * c + 4] != [0; 4] {
@@ -829,8 +846,7 @@ pub(crate) mod kernels {
                 // mulhrs(a << 6, b) = (64ab + 2^14) >> 15 = (ab + 256) >> 9.
                 let x0 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(c(i)), c(i + HALF));
                 let x1 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(c(i + 16)), c(i + 16 + HALF));
-                // packus interleaves 128-bit lanes; restore the order.
-                let v = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(x0, x1));
+                let v = _mm256_packus_epi16(x0, x1); // chunks in `slot` order
                 _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, v);
                 n = push8z(nnz, n, bv, zero_mask(v));
                 bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
@@ -911,7 +927,7 @@ pub(crate) mod kernels {
                 // mulhrs(a << 6, b) = (64ab + 2^14) >> 15 = (ab + 256) >> 9.
                 let x0 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(a0), b0);
                 let x1 = _mm256_mulhrs_epi16(_mm256_slli_epi16::<6>(a1), b1);
-                let v = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_packus_epi16(x0, x1));
+                let v = _mm256_packus_epi16(x0, x1); // chunks in `slot` order
                 _mm256_storeu_si256(x.as_mut_ptr().add(i) as *mut __m256i, v);
                 n = push8z(nnz, n, bv, zero_mask(v));
                 bv = _mm_add_epi16(bv, _mm_set1_epi16(8));
