@@ -1,12 +1,16 @@
 {
-  "pending": [
-    {
-      "branch": "spsa-r14b-interim",
-      "mode": "stc",
-      "front": true
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "spsa-r14b-interim",
+    "mode": "stc",
+    "front": true,
+    "test_id": "q-spsa-r14b-interim-1126-0052",
+    "sha": "2362036ee31b09bf04cef08a6340314f4db4ef64",
+    "base_sha": "94946f6b3b5bd7b87058a1eccf5f3d25ff1fa857",
+    "started": "2026-11-26T00:52:16Z",
+    "bench": 216602,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 1,
   "merges_since_ladder": 1,
