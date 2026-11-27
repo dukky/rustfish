@@ -556,6 +556,7 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 | B3 | **Quiet SEE prune margin 20*d^2 A/B** | provenance audit 26 Nov | never queued | CI (small branch) | with the clean-room work |
 | B4 | `lmr-protect-linear-r2` LTC | 25 Nov; chain script exited early | never ran | CI ~4 h | when CI is idle |
 | B5 | `perf-head-fuse-screlu` (2841118, ~2% M3, bench-identical) | parked "behind the shape gate" 17 Nov | never merged | agent rebase + `:speedup` | next speed pass |
+| A- | **Endgame eval scaling (27 Nov agent)** | anchor-game conversion leak | measurement: the leak is shuffling (draw share of +1.5 positions 15% at clock 0-9 -> 89% at clock 40-59), not pawn count | `eval-scale-rule50` cf811d6 (eval x (180 - clock)/180, UCI `Rule50Div`) **STC H1 +8.8 [+2.1, +15.5]**, queued `:ltc` 27 Nov ~15:00; `eval-scale-material` H0 -2.2, dropped. **Before the next datagen binary: decide Rule50Div for datagen (2000 = off keeps labels clock-free; the net cannot see the clock).** Later: add Rule50Div to SPSA | ltc queued |
 | A0 | **Lazy SMP rewrite** (release blocker) | parked 20 Nov; trigger 'within ~50 of target or release' met 27 Nov | current Threads>1 = root splitting with a private TT clone per worker (no sharing, copy cost per move) | agent started 27 Nov ~14:30: shared lock-free TT, full helper searches, 1T bench-identical; CI `--threads` option; 4T new vs old + 4T vs 1T | running |
 | C1 | Gen 12 passed only a non-regression LTC (bounds bug) | 27 Nov | ci.py bug, fixed 778a9e8 | none | covered by the next ladder |
 
