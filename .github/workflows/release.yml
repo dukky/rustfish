@@ -1,10 +1,19 @@
 name: Release
 
-# Builds downloadable rustfish binaries (Windows / Linux x86-64 in two CPU
-# variants, macOS arm64), smoke-tests each one, and records its bench node
-# count. Pushing a tag `v*` publishes a GitHub release with every binary
-# attached. A manual dispatch builds and uploads workflow artifacts only; it
-# never creates a release or a tag. See docs/ccrl-submission.md.
+# Builds the downloadable engine binaries, smoke-tests each one where the
+# runner can execute it (uci, perfttest, bench node count equal to the newest
+# `Bench:` trailer), and uploads them as workflow artifacts.
+#
+# - Tag `v*` push: also drafts a GitHub release with every binary and a
+#   SHA256SUMS file attached. The release stays a DRAFT; the owner reviews and
+#   publishes it by hand.
+# - Manual dispatch: artifacts only; never creates a release or a tag.
+#   `measure_tiers` adds a job that times an x86-64-v4 build against v3 on
+#   AVX-512 runners (the v4 tier ships only if it measures faster).
+#
+# The engine name comes from Cargo.toml's `[package] name`, so a rename is a
+# one-line change there. Files are named <name>-<version>-<os>-<tier>[.exe].
+# See README.md ("Download and run") and docs/ccrl-submission.md.
 
 on:
   push:
@@ -12,37 +21,64 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Name used in the binary file names (no release is created)"
-        default: "vtest"
+      version:
+        description: "Version used in file names (default: Cargo.toml version + short sha). No release is created."
+        default: ""
+      measure_tiers:
+        description: "Also time an x86-64-v4 build against v3 on AVX-512 runners"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-
-env:
-  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  contents: read
 
 jobs:
   build:
-    name: ${{ matrix.platform }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.os }}-${{ matrix.tier }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   platform: windows-x86-64, variant: v2, cpu: x86-64-v2, ext: .exe }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   platform: windows-x86-64, variant: v3, cpu: x86-64-v3, ext: .exe }
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, platform: linux-x86-64,   variant: v2, cpu: x86-64-v2, ext: "" }
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, platform: linux-x86-64,   variant: v3, cpu: x86-64-v3, ext: "" }
-          - { os: macos-latest,   target: aarch64-apple-darwin,     platform: macos-arm64,    variant: "", cpu: "",        ext: "" }
+          # x86-64 tiers. v3 (AVX2/BMI2) is the main build; AVX-512 and VNNI
+          # kernels are picked at runtime, so v3 already uses them where present.
+          - { runner: windows-latest,   target: x86_64-pc-windows-msvc,    os: windows, tier: x86-64-v2, cpu: x86-64-v2, ext: .exe }
+          - { runner: windows-latest,   target: x86_64-pc-windows-msvc,    os: windows, tier: x86-64-v3, cpu: x86-64-v3, ext: .exe }
+          - { runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  os: linux,   tier: x86-64-v2, cpu: x86-64-v2, ext: "" }
+          - { runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  os: linux,   tier: x86-64-v3, cpu: x86-64-v3, ext: "" }
+          # ARM: NEON (and dotprod where the CPU reports it) need no tiers.
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, os: linux,   tier: aarch64,   cpu: "",        ext: "" }
+          - { runner: macos-latest,     target: aarch64-apple-darwin,      os: macos,   tier: arm64,     cpu: "",        ext: "" }
+          # Intel Macs: every Mac that runs a supported macOS has AVX2.
+          - { runner: macos-15-intel,   target: x86_64-apple-darwin,       os: macos,   tier: x86-64,    cpu: x86-64-v3, ext: "" }
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # check_bench.py reads the newest Bench: trailer
 
       - name: Install target
         run: rustup target add ${{ matrix.target }}
+
+      - name: Name and version
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          cargo_ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="$cargo_ver-dev-${GITHUB_SHA::7}"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "$name $version"
 
       - name: Build
         env:
@@ -51,59 +87,133 @@ jobs:
         run: |
           flags=""
           if [ -n "$CPU" ]; then flags="-C target-cpu=$CPU"; fi
-          # The search runs on the main thread; MSVC's default 1 MB main-thread
-          # stack is far below the 8 MB Linux/macOS give it, so raise it.
+          # The engine runs its UCI loop on an 8 MB thread; the larger MSVC
+          # main-thread stack (default 1 MB) is a belt-and-braces extra.
           if [[ "$TARGET" == *windows-msvc ]]; then flags="$flags -C link-arg=/STACK:8388608"; fi
           echo "RUSTFLAGS=$flags"
           RUSTFLAGS="$flags" cargo build --release --target "$TARGET"
 
       - name: Name binary
-        id: name
+        id: bin
         env:
-          PLATFORM: ${{ matrix.platform }}
-          VARIANT: ${{ matrix.variant }}
+          NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          OS: ${{ matrix.os }}
+          TIER: ${{ matrix.tier }}
           EXT: ${{ matrix.ext }}
           TARGET: ${{ matrix.target }}
         run: |
-          name="rustfish-$TAG-$PLATFORM${VARIANT:+-$VARIANT}$EXT"
+          base="$NAME-$VERSION-$OS-$TIER$EXT"
           mkdir -p dist
-          cp "target/$TARGET/release/rustfish$EXT" "dist/$name"
-          echo "file=dist/$name" >> "$GITHUB_OUTPUT"
-          echo "base=$name" >> "$GITHUB_OUTPUT"
+          cp "target/$TARGET/release/$NAME$EXT" "dist/$base"
+          echo "file=dist/$base" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: CPU
+        run: |
+          case "$RUNNER_OS" in
+            Linux) lscpu | grep 'Model name'; grep -o -w -E 'avx2|avx512bw|avx512_vnni|avx_vnni|asimddp' /proc/cpuinfo | sort -u | tr '\n' ' '; echo ;;
+            macOS) sysctl -n machdep.cpu.brand_string ;;
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" ;;
+          esac
 
       - name: UCI smoke
         env:
-          BIN: ${{ steps.name.outputs.file }}
+          BIN: ${{ steps.bin.outputs.file }}
         run: |
-          out=$(printf 'uci\nisready\nposition startpos\ngo depth 6\nquit\n' | "./$BIN")
+          out=$(printf 'uci\r\nisready\r\nposition startpos\r\ngo depth 8\r\nquit\r\n' | "./$BIN" | tr -d '\r')
           echo "$out" | grep -E '^id |uciok|readyok|bestmove'
           grep -q '^uciok' <<<"$out"
           grep -q '^readyok' <<<"$out"
           grep -qE '^bestmove [a-h][1-8][a-h][1-8]' <<<"$out"
 
-      - name: Bench
+      - name: Perft
         env:
-          BIN: ${{ steps.name.outputs.file }}
-          BASE: ${{ steps.name.outputs.base }}
+          BIN: ${{ steps.bin.outputs.file }}
         run: |
-          out=$(printf 'bench\nquit\n' | "./$BIN")
-          echo "$out"
-          nodes=$(sed -n 's/^Nodes searched *: *//p' <<<"$out" | tr -d '\r')
-          nps=$(sed -n 's/^Nodes\/second *: *//p' <<<"$out" | tr -d '\r')
-          [ -n "$nodes" ] || { echo "bench printed no node count"; exit 1; }
-          echo "| \`$BASE\` | $nodes | $nps |" > "dist/$BASE.bench.md"
-          echo "### $BASE: bench $nodes nodes, $nps nps" >> "$GITHUB_STEP_SUMMARY"
+          out=$(printf 'perfttest\nquit\n' | "./$BIN" | tr -d '\r')
+          echo "$out" | tail -3
+          grep -qE 'perfttest summary ([0-9]+)/\1 passed' <<<"$out"
+
+      - name: Bench (must equal the Bench trailer)
+        env:
+          BIN: ${{ steps.bin.outputs.file }}
+          BASE: ${{ steps.bin.outputs.base }}
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" scripts/check_bench.py --engine "./$BIN"
+          out=$(printf 'bench\nquit\n' | "./$BIN" | tr -d '\r')
+          nodes=$(sed -n 's/^Nodes searched *: *//p' <<<"$out")
+          nps=$(sed -n 's/^Nodes\/second *: *//p' <<<"$out")
+          simd=$(sed -n 's/^NNUE SIMD *: *//p' <<<"$out")
+          echo "| \`$BASE\` | $nodes | $nps | $simd |" > "dist/$BASE.bench.md"
+          echo "### $BASE: bench $nodes nodes, $nps nps, SIMD $simd" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.name.outputs.base }}
+          name: ${{ steps.bin.outputs.base }}
           path: dist/
           if-no-files-found: error
+
+  # Should an x86-64-v4 (AVX-512 at compile time) build ship next to v3? Both
+  # are built on one AVX-512 runner, checked for identical bench nodes, and
+  # timed interleaved with an A/A copy of v3. Several shards because the
+  # runner CPU model varies; shards without AVX-512 report and skip.
+  tiers:
+    if: github.event_name == 'workflow_dispatch' && inputs.measure_tiers
+    name: tiers-${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build v3 and v4, time them
+        run: |
+          model=$(lscpu | sed -n 's/^Model name: *//p')
+          echo "CPU: $model"
+          if ! grep -qw avx512bw /proc/cpuinfo; then
+            echo "### shard ${{ matrix.shard }}: $model has no AVX-512, skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --target-dir t3
+          RUSTFLAGS="-C target-cpu=x86-64-v4" cargo build --release --target-dir t4
+          cp "t3/release/$name" v3; cp "t3/release/$name" v3copy; cp "t4/release/$name" v4
+          python3 - "$model" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, statistics, subprocess, sys
+          bins, rounds = ["v3", "v4", "v3copy"], 10
+          def bench(b):
+              out = subprocess.run(["taskset", "-c", "1", "./" + b], input="bench 15\nquit\n",
+                                   capture_output=True, text=True, check=True).stdout
+              n = int(re.search(r"Nodes searched\s*:\s*(\d+)", out).group(1))
+              s = re.search(r"NNUE SIMD\s*:\s*(\S+)", out).group(1)
+              return n, int(re.search(r"Nodes/second\s*:\s*(\d+)", out).group(1)), s
+          nps = {b: [] for b in bins}
+          nodes, simd = {}, {}
+          for r in range(rounds):
+              order = bins[r % 3:] + bins[:r % 3]
+              for b in order:
+                  n, v, s = bench(b)
+                  nodes.setdefault(b, n); simd[b] = s
+                  assert nodes[b] == n
+                  nps[b].append(v)
+          assert len(set(nodes.values())) == 1, nodes
+          print(f"### {sys.argv[1]}: bench 15 = {nodes['v3']} nodes, {rounds} interleaved rounds")
+          print("| binary | SIMD | median nps | median ratio to v3 | min..max |")
+          print("|---|---|---|---|---|")
+          for b in bins:
+              ratios = [100 * (x / y - 1) for x, y in zip(nps[b], nps["v3"])]
+              print(f"| {b} | {simd[b]} | {statistics.median(nps[b]):.0f} | {statistics.median(ratios):+.2f}% | {min(ratios):+.1f}..{max(ratios):+.1f} |")
+          EOF
 
   release:
     needs: build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -112,22 +222,29 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
+      - name: Draft release (not published)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
+          name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
           {
-            echo "rustfish $TAG ($GITHUB_SHA)"
+            echo "$name $TAG ($GITHUB_SHA)"
             echo
-            echo "UCI engine, single thread by default (\`Threads\`), \`Hash\` default 64 MB."
-            echo "x86-64 binaries: \`v3\` needs AVX2/BMI2 (Haswell / Zen 1 or newer); \`v2\` needs only POPCNT/SSE4.2 and runs on older CPUs."
+            echo "UCI chess engine. Pick a binary (details in the README, \"Download and run\"):"
             echo
-            echo "Bench (\`bench\` UCI command; the node count is the build signature and should match across binaries):"
+            echo "- \`x86-64-v3\`: AVX2/BMI2 (Intel Haswell 2013+, AMD Zen 1+). The one to use on most PCs."
+            echo "  AVX-512 and VNNI are used automatically on CPUs that have them."
+            echo "- \`x86-64-v2\`: older x86-64 CPUs without AVX2 (needs SSE4.2/POPCNT)."
+            echo "- \`aarch64\` (Linux ARM64), \`macos-arm64\` (Apple Silicon), \`macos-x86-64\` (Intel Macs)."
             echo
-            echo "| Binary | Nodes | NPS (CI runner) |"
-            echo "|---|---|---|"
+            echo "Bench (\`bench\` UCI command; the node count is the build signature and must match across binaries):"
+            echo
+            echo "| Binary | Nodes | NPS (CI runner) | SIMD |"
+            echo "|---|---|---|---|"
             cat artifacts/*.bench.md | sort
           } > notes.md
           cat notes.md
           rm artifacts/*.bench.md
-          gh release create "$TAG" artifacts/* --title "rustfish $TAG" --notes-file notes.md --verify-tag
+          (cd artifacts && sha256sum * > SHA256SUMS)
+          gh release create "$TAG" artifacts/* --draft --title "$name $TAG" --notes-file notes.md --verify-tag
