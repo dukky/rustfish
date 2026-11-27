@@ -239,11 +239,41 @@ impl TransTable {
         let _ = ptr;
     }
 
+}
+
+// Replacement policy (clean-room design, docs/cleanroom-tt-history-se.md).
+//
+// Same position already stored: the new result wins, unless the stored entry
+// is from this search, deeper by more than TT_SAME_KEY_SLACK plies, and the new
+// result is only a bound. A store without a move keeps the stored move.
+// New position: fill an empty slot, else evict the slot with the lowest keep
+// value: any entry from an earlier search ranks below every entry from this
+// one, then shallower below deeper, then bounds below exact scores.
+
+/// Plies by which a same-search entry must be deeper than a new non-exact
+/// result for the same position to be kept instead of overwritten.
+const TT_SAME_KEY_SLACK: i32 = 2;
+
+/// Eviction rank of an occupied slot (higher = keep longer; empty slots rank 0).
+#[inline]
+fn keep_value(data: u64, age: u8) -> u32 {
+    let current = (data_age(data) == age) as u32;
+    let depth1 = ((data >> 49) & 0xff) as u32;
+    let exact = (bits_to_bound((data >> 57) & 0x3) == Bound::Exact) as u32;
+    1 + ((current << 10) | (depth1 << 1) | exact)
+}
+
+#[inline]
+fn write_slot(slot: &TTSlot, key: u64, data: u64) {
+    slot.data.store(data, Ordering::Relaxed);
+    slot.key.store(key ^ data, Ordering::Relaxed);
+}
+
+impl TransTable {
     pub(crate) fn probe(&self, key: u64) -> Option<TTEntry> {
         for slot in self.bucket(key).slots.iter() {
             let data = slot.data.load(Ordering::Relaxed);
-            let check = slot.key.load(Ordering::Relaxed);
-            if check ^ data == key && data_depth(data) >= 0 {
+            if data_depth(data) >= 0 && slot.key.load(Ordering::Relaxed) ^ data == key {
                 return Some(unpack_data(data));
             }
         }
@@ -259,58 +289,31 @@ impl TransTable {
         bound: Bound,
         best: Option<Move>,
     ) {
-        let current_age = self.inner.current_age.load(Ordering::Relaxed);
+        let age = self.inner.current_age.load(Ordering::Relaxed) & AGE_MASK;
+        let depth = depth.clamp(0, 254);
         let bucket = self.bucket(key);
-
-        // Pick the slot: the one already holding this key, else an empty one,
-        // else the least valuable (shallowest, discounted 8 plies per search
-        // of age) so entries from old searches are evicted first.
         let mut victim = 0usize;
-        let mut victim_data = 0u64;
-        let mut victim_value = i32::MAX;
-        let mut same_key = false;
+        let mut victim_value = u32::MAX;
         for (i, slot) in bucket.slots.iter().enumerate() {
             let data = slot.data.load(Ordering::Relaxed);
-            let depth_i = data_depth(data);
-            if depth_i < 0 {
-                if victim_value > i32::MIN {
-                    victim = i;
-                    victim_data = data;
-                    victim_value = i32::MIN;
+            let occupied = data_depth(data) >= 0;
+            if occupied && slot.key.load(Ordering::Relaxed) ^ data == key {
+                let keep_old = data_age(data) == age
+                    && bound != Bound::Exact
+                    && data_depth(data) > depth + TT_SAME_KEY_SLACK;
+                if !keep_old {
+                    let best = best.or_else(|| unpack_move(data));
+                    write_slot(slot, key, pack_data(depth, score, static_eval, bound, best, age));
                 }
-                continue;
+                return;
             }
-            if slot.key.load(Ordering::Relaxed) ^ data == key {
-                victim = i;
-                victim_data = data;
-                same_key = true;
-                break;
-            }
-            let rel_age = (current_age.wrapping_sub(data_age(data)) & AGE_MASK) as i32;
-            let value = depth_i - 8 * rel_age;
+            let value = if occupied { keep_value(data, age) } else { 0 };
             if value < victim_value {
                 victim = i;
-                victim_data = data;
                 victim_value = value;
             }
         }
-
-        // Same position: overwrite unless the stored entry is from this search
-        // and clearly deeper (Stockfish-style slack of 4 plies), so fresh
-        // bounds and moves from later iterations are kept. Exact always wins.
-        let replace = !same_key
-            || bound == Bound::Exact
-            || data_age(victim_data) != current_age
-            || depth.clamp(0, 254) + 4 > data_depth(victim_data);
-
-        if replace {
-            // Keep the old best move when the new search found none.
-            let best = if same_key && best.is_none() { unpack_move(victim_data) } else { best };
-            let data = pack_data(depth, score, static_eval, bound, best, current_age);
-            let slot = &bucket.slots[victim];
-            slot.data.store(data, Ordering::Relaxed);
-            slot.key.store(key ^ data, Ordering::Relaxed);
-        }
+        write_slot(&bucket.slots[victim], key, pack_data(depth, score, static_eval, bound, best, age));
     }
 }
 
@@ -538,52 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn same_key_deeper_store_replaces_and_keeps_move() {
-        let tt = TransTable::new(1);
-        let key = 0x0123_4567_89ab_cdefu64;
-        let m = Some(mv(12, 28, None, false, false));
-        tt.store(key, 5, 40, None, Bound::Lower, m);
-        // A deeper (next-iteration) result for the same position must win.
-        tt.store(key, 6, -20, None, Bound::Upper, None);
-        let e = tt.probe(key).unwrap();
-        assert_eq!(e.depth, 6);
-        assert_eq!(e.score, -20);
-        assert!(e.best == m, "old move kept when new store has none");
-        // A much shallower non-exact store from the same search is ignored.
-        tt.store(key, 1, 999, None, Bound::Lower, None);
-        assert_eq!(tt.probe(key).unwrap().depth, 6);
-    }
-
-    #[test]
-    fn bucket_keeps_deep_entries_and_evicts_old_searches() {
-        let mut tt = TransTable::new(1);
-        let buckets = tt.inner.mask as u64 + 1;
-        // Five keys mapping to the same bucket.
-        let keys: Vec<u64> = (1..=5u64).map(|i| 7 + i * buckets).collect();
-        for (i, k) in keys[..4].iter().enumerate() {
-            tt.store(*k, 10 + i as i32, 0, None, Bound::Exact, None);
-        }
-        for k in &keys[..4] {
-            assert!(tt.probe(*k).is_some());
-        }
-        // A fifth key evicts the shallowest entry (depth 10), keeping the rest.
-        tt.store(keys[4], 1, 0, None, Bound::Exact, None);
-        assert!(tt.probe(keys[0]).is_none());
-        for k in &keys[1..] {
-            assert!(tt.probe(*k).is_some());
-        }
-        // After new searches, an old deep entry loses to a fresh shallow one.
-        tt.new_search();
-        tt.new_search();
-        tt.store(keys[0], 1, 0, None, Bound::Exact, None); // evicts keys[4]
-        let sixth = 7 + 6 * buckets;
-        tt.store(sixth, 1, 0, None, Bound::Exact, None);
-        assert!(tt.probe(keys[0]).is_some(), "fresh shallow entry kept");
-        assert!(tt.probe(sixth).is_some());
-        assert!(tt.probe(keys[1]).is_none(), "old depth-11 entry evicted");
-    }
-
-    #[test]
     fn mismatched_key_and_data_is_rejected() {
         let tt = TransTable::new(1);
         let key = 0xdead_beef_0000_0001u64;
@@ -594,5 +551,74 @@ mod tests {
         let other = pack_data(9, -500, None, Bound::Lower, None, 0);
         slot.data.store(other, Ordering::Relaxed);
         assert!(tt.probe(key).is_none());
+    }
+
+    /// Keys that share one bucket in a 1 MB table (bucket = key & mask).
+    fn same_bucket_keys(tt: &TransTable, n: usize) -> Vec<u64> {
+        let stride = tt.inner.mask as u64 + 1;
+        (0..n as u64).map(|i| 0x1234_5678_9abc_0005 & tt.inner.mask as u64 | (i + 1) * stride * 0x9e37).collect()
+    }
+
+    fn quiet(from: u8, to: u8) -> Option<Move> {
+        Some(mv(from, to, None, false, false))
+    }
+
+    #[test]
+    fn same_key_new_result_wins_and_moveless_store_keeps_move() {
+        let tt = TransTable::new(1);
+        let k = same_bucket_keys(&tt, 1)[0];
+        tt.store(k, 6, 40, Some(10), Bound::Lower, quiet(12, 28));
+        tt.store(k, 5, -20, Some(10), Bound::Upper, None);
+        let e = tt.probe(k).unwrap();
+        assert_eq!((e.depth, e.score), (5, -20));
+        assert!(e.bound == Bound::Upper);
+        assert_eq!(e.best, quiet(12, 28));
+    }
+
+    #[test]
+    fn same_key_keeps_much_deeper_bound_from_this_search() {
+        let mut tt = TransTable::new(1);
+        let k = same_bucket_keys(&tt, 1)[0];
+        tt.store(k, 12, 40, None, Bound::Lower, quiet(1, 18));
+        // Within the slack: overwritten.
+        tt.store(k, 10, 30, None, Bound::Lower, quiet(6, 21));
+        assert_eq!(tt.probe(k).unwrap().depth, 10);
+        tt.store(k, 12, 40, None, Bound::Lower, quiet(1, 18));
+        // Deeper by more than the slack: kept, unless the new result is exact.
+        tt.store(k, 9, 30, None, Bound::Upper, None);
+        assert_eq!(tt.probe(k).unwrap().depth, 12);
+        tt.store(k, 3, 25, None, Bound::Exact, None);
+        assert_eq!(tt.probe(k).unwrap().depth, 3);
+        // From an earlier search: always overwritten.
+        tt.store(k, 12, 40, None, Bound::Lower, quiet(1, 18));
+        tt.new_search();
+        tt.store(k, 1, 5, None, Bound::Upper, None);
+        let e = tt.probe(k).unwrap();
+        assert_eq!(e.depth, 1);
+        assert_eq!(e.best, quiet(1, 18));
+    }
+
+    #[test]
+    fn eviction_prefers_stale_then_shallow_then_bounds() {
+        let mut tt = TransTable::new(1);
+        let k = same_bucket_keys(&tt, 7);
+        // Old search: one very deep entry.
+        tt.store(k[0], 30, 1, None, Bound::Exact, None);
+        tt.new_search();
+        tt.store(k[1], 2, 1, None, Bound::Lower, None);
+        tt.store(k[2], 8, 1, None, Bound::Lower, None);
+        tt.store(k[3], 2, 1, None, Bound::Exact, None);
+        // Bucket full: the stale entry goes first despite its depth.
+        tt.store(k[4], 5, 1, None, Bound::Lower, None);
+        assert!(tt.probe(k[0]).is_none());
+        // Then the shallowest, a bound before an exact score at equal depth.
+        tt.store(k[5], 5, 1, None, Bound::Lower, None);
+        assert!(tt.probe(k[1]).is_none());
+        assert!(tt.probe(k[3]).is_some());
+        tt.store(k[6], 5, 1, None, Bound::Lower, None);
+        assert!(tt.probe(k[3]).is_none());
+        for &kk in &[k[2], k[4], k[5], k[6]] {
+            assert!(tt.probe(kk).is_some());
+        }
     }
 }
