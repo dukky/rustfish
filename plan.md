@@ -542,6 +542,13 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 
 ## Priorities (owner, 26 Nov: work highest expected Elo per time/compute first; re-rank when a result lands)
 
+**Evening 27 Nov checklist (owner: low usage, machines + queue only, no new agents):**
+- Watchers: H1536 SPRTs (abl4-h15 nodes + stc), SPSA final LTC (queue log), gen 12b LTC continuation ([0,5] wave 6+), clean-room TT + SE STCs, kb16 arm (ablate7; its output also shows ablate6/h15b), D2051 end (node-count test data), laptop stop at 19:00.
+- On verdicts: merges via queue (`eval-scale-rule50:ltc`, `lazy-smp:speedup`, `spsa-r40-final:ltc` queued); gen 12b by hand if H1 at [0,5] (rebase, bench, ff); `tm-mtg-18` is the TM agent's (it reports).
+- To do as slots free: `cleanroom-history` v2 STC (`ci.py sprt cleanroom-history --nonreg`); embed h15b (ablate6) and kb16/l1w (scratchpad `embed-cap.sh`) and run 200k-node SPRTs vs `abl4-ctlA`; README Threads note + AGENTS.md after lazy-smp merges; agents' SPRT results into tests/sprt-log.jsonl.
+- After tonight's merges: CCRL ladder (TB on) + README update; then decide gen 13 (H1536 if its STC recovers; final stage 12 epochs; + kb16/l1w if they win) and datagen Rule50Div.
+
+
 **Owner target (27 Nov): 3700 within a week if possible; no rented compute for now.** Own-hardware sprint: (1) tonight's merges (speed stack merged, TB ladder on, gen 12b + SPSA final + TM at LTC) +10-15; (2) **drawish-endgame / 50-move eval scaling** (agent started 27 Nov ~10:45, from the anchor-games conversion leak) +5-15; (3) datagen on main at max throughput (2.5k-node test decides Sat); (4) gen 13 = warm start from gen 12b on the grown pool with the recipe winners (+ H1536 if its test passes) Sat-Tue; (5) CI kept full (next SPSA on the new main, bug stacks). Realistic in a week: ~3650-3680.
 
 **Dropped-item audit (27 Nov, owner: "bake them into the plan, and pick them up this time").** Things we planned and never did, ranked by expected Elo per compute; each has a trigger. Check this list at every milestone.
