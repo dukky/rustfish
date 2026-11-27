@@ -163,8 +163,12 @@ interfaces, not from any other engine:
   table saturating at 15000 keeps a strongly proven history move between
   "one killer step" and "two killer steps", and below the i16 limit with
   room for the update's overshoot.
-- The factorised quiet history uses half of that per table
-  (`7500`), so `B + C` spans the same ±15000 as one table.
+- The factorised quiet history splits that cap: `B` (move-specific) is
+  bounded at 12000 and `C` (coarse danger context) at 3000, so `B + C` spans
+  the same ±15000 as one table. (v1 split it evenly, 7500 + 7500, and lost
+  15.1 +- 6.9 Elo at STC, 2688 games: with half the cap, the specific
+  from-to evidence weighed too little against the generalising piece-to
+  table, the continuation history and the escape bonus.)
 - `bonus(depth) = min(20 * depth * depth + 40 * depth, 1800)`: grows with
   the size of the refuted subtree (quadratic is a mild proxy for an
   exponential tree), saturates by depth ~9 so the deepest nodes do not

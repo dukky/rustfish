@@ -519,8 +519,12 @@ const CAPTURE_HISTORY_SEE_DIV: i32 = 64;
 /// Bound of every one-entry-per-move gravity table (continuation, capture):
 /// between one and two killer-bonus steps (10000) in the move picker.
 const GRAVITY_CAP: i32 = 15_000;
-/// Bound of each of the two quiet-history tables; their sum spans +-GRAVITY_CAP.
-const QUIET_HALF_CAP: i32 = GRAVITY_CAP / 2;
+/// Bounds of the two quiet-history tables; their sum spans +-GRAVITY_CAP. The
+/// move-specific from-to table carries most of the weight, the coarse
+/// piece-to danger table is a small correction (v1 split them evenly and
+/// lost 15 Elo at STC).
+const FROM_TO_CAP: i32 = 12_000;
+const DANGER_CAP: i32 = GRAVITY_CAP - FROM_TO_CAP;
 /// Largest single history bonus: 12% of the cap.
 const BONUS_LIMIT: i32 = 1_800;
 // The tables store i16: gravity never leaves +-cap, and one update can
@@ -580,8 +584,8 @@ fn update_quiet_history(engine: &mut EngineState, board: &Board, maps: &ThreatMa
     let s = color_index(board.side_to_move);
     let (kind, ctx) = quiet_slot(board, maps, mv);
     let h = &mut engine.history;
-    gravity_toward(&mut h.from_to[s][mv.from as usize][mv.to as usize], delta, QUIET_HALF_CAP);
-    gravity_toward(&mut h.piece_to[s][ctx][kind][mv.to as usize], delta, QUIET_HALF_CAP);
+    gravity_toward(&mut h.from_to[s][mv.from as usize][mv.to as usize], delta, FROM_TO_CAP);
+    gravity_toward(&mut h.piece_to[s][ctx][kind][mv.to as usize], delta, DANGER_CAP);
 }
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
@@ -3706,10 +3710,10 @@ mod tests {
     fn gravity_stays_within_cap_and_converges() {
         let mut h = 0i16;
         for _ in 0..200 {
-            gravity_toward(&mut h, quiet_bonus(30), QUIET_HALF_CAP);
-            assert!((h as i32) <= QUIET_HALF_CAP);
+            gravity_toward(&mut h, quiet_bonus(30), FROM_TO_CAP);
+            assert!((h as i32) <= FROM_TO_CAP);
         }
-        assert!(h as i32 > QUIET_HALF_CAP * 9 / 10, "{h}");
+        assert!(h as i32 > FROM_TO_CAP * 9 / 10, "{h}");
         for _ in 0..200 {
             gravity_update(&mut h, -quiet_bonus(30));
             assert!((h as i32) >= -GRAVITY_CAP);
