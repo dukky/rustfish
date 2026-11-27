@@ -544,6 +544,7 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 
 **Evening 27 Nov checklist (owner: low usage, machines + queue only, no new agents):**
 - Watchers: H1536 SPRTs (abl4-h15 nodes + stc), SPSA final LTC (queue log), gen 12b LTC continuation ([0,5] wave 6+), clean-room TT + SE STCs, kb16 arm (ablate7; its output also shows ablate6/h15b), D2051 end (node-count test data), laptop stop at 19:00.
+- **27 Nov 19:15: gen 12b MERGED by hand** (cbe686c, bench 217138): LTC [0, 5] H1 **+7.08, LLR 3.56, 4464 games**. **H1536 STC 10+0.1 vs abl4-ctlA: H0** (+1.2, LLR -3.06, 2688 g): the fixed-node gain does not survive its 0.85x NPS, so gen 13 = H1024 (warm start) unless h15b/speed work changes that. Lazy SMP merged 17:39. Clean-room TT nonreg -4.1 after 4992 (LLR -1.23, running). Laptop datagen stopped 19:00 (R3003 packed, 12.3M).
 - On verdicts: merges via queue (`eval-scale-rule50:ltc`, `lazy-smp:speedup`, `spsa-r40-final:ltc` queued); gen 12b by hand if H1 at [0,5] (rebase, bench, ff); `tm-mtg-18` is the TM agent's (it reports).
 - To do as slots free: `cleanroom-history` v2 STC (`ci.py sprt cleanroom-history --nonreg`); embed h15b (ablate6) and kb16/l1w (scratchpad `embed-cap.sh`) and run 200k-node SPRTs vs `abl4-ctlA`; README Threads note + AGENTS.md after lazy-smp merges; agents' SPRT results into tests/sprt-log.jsonl.
 - After tonight's merges: CCRL ladder (TB on) + README update; then decide gen 13 (H1536 if its STC recovers; final stage 12 epochs; + kb16/l1w if they win) and datagen Rule50Div.
