@@ -155,8 +155,12 @@ def cmd_sprt(args):
         settings = dict(PROFILES[profile])
         # An LTC run confirms an STC pass, so it defaults to non-regression:
         # a real gain clears [-5, 0] in far fewer games than [0, 5].
-        nonreg = args.nonreg or (args.ltc and not args.gainer)
-        elo0, elo1 = (-5, 0) if nonreg else (args.elo0, args.elo1)
+        # --ltc alone means non-regression, but explicit --elo0/--elo1 always win
+        # (gen 12 and main+TB LTCs were silently run at [-5, 0] despite --elo0 0 --elo1 5).
+        explicit = args.elo0 is not None or args.elo1 is not None
+        nonreg = args.nonreg or (args.ltc and not args.gainer and not explicit)
+        elo0, elo1 = (-5, 0) if nonreg else (args.elo0 if args.elo0 is not None else 0,
+                                             args.elo1 if args.elo1 is not None else 10)
         settings.update(elo0=elo0, elo1=elo1, max_waves=args.max_waves)
         if args.nodes:
             # Diagnostic: fixed nodes per move instead of a clock. The workflow
@@ -247,11 +251,11 @@ def main():
     sp.add_argument("--ltc", action="store_true", help="60+0.6 instead of 10+0.1")
     sp.add_argument("--nonreg", action="store_true", help="non-regression bounds [-5, 0]")
     sp.add_argument("--gainer", action="store_true", help="with --ltc: gainer bounds instead of non-regression")
-    sp.add_argument("--elo0", type=float, default=0)
+    sp.add_argument("--elo0", type=float, default=None)
     # [0, 10] while the big gains are being harvested: same 5% false-accept
     # rate, ~4x faster on borderline patches, but real +2..5 gains often fail.
     # Return to --elo1 5 once typical patches get small.
-    sp.add_argument("--elo1", type=float, default=10)
+    sp.add_argument("--elo1", type=float, default=None)
     sp.add_argument("--max-waves", type=int, default=10)
     sp.add_argument("--nodes", type=int, metavar="N",
                     help="DIAGNOSTIC ONLY: fixed N nodes per move instead of a clock; never an acceptance test")
