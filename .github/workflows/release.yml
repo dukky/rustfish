@@ -247,8 +247,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-latest, ubuntu-latest]
-        shard: [1, 2]
+        runner: [windows-latest]
+        shard: [1, 2, 3]
     defaults:
       run:
         shell: bash
@@ -262,11 +262,11 @@ jobs:
             Linux) lscpu | grep 'Model name' | tee -a "$GITHUB_STEP_SUMMARY" ;;
             Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" | tee -a "$GITHUB_STEP_SUMMARY" ;;
           esac
-          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          ext=""; stack=""; [ "$RUNNER_OS" = Windows ] && ext=.exe && stack="-C link-arg=/STACK:8388608"
           for ref in abl4-ctlA abl4-h15; do
             git worktree add -q "../w-$ref" "origin/$ref"
             name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "../w-$ref/Cargo.toml" | head -1)
-            (cd "../w-$ref" && RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release 2>&1 | tail -1)
+            (cd "../w-$ref" && RUSTFLAGS="-C target-cpu=x86-64-v3 $stack" cargo build --release 2>&1 | tail -1)
             cp "../w-$ref/target/release/$name$ext" "$ref$ext"
           done
           cp "abl4-ctlA$ext" "abl4-ctlA-copy$ext"
