@@ -12,18 +12,21 @@ binaries; few build from source. A submission should point them at one page:
 - **Binaries** attached to every release (built by
   `.github/workflows/release.yml`):
 
-  | File | Platform | CPU requirement |
+  | File (`<name>-<version>-...`) | Platform | CPU requirement |
   |---|---|---|
-  | `rustfish-<tag>-windows-x86-64-v3.exe` | Windows | AVX2/BMI2 (Haswell, Zen 1 or newer) |
-  | `rustfish-<tag>-windows-x86-64-v2.exe` | Windows | POPCNT/SSE4.2 (most CPUs since 2009) |
-  | `rustfish-<tag>-linux-x86-64-v3` | Linux | AVX2/BMI2 |
-  | `rustfish-<tag>-linux-x86-64-v2` | Linux | POPCNT/SSE4.2 |
-  | `rustfish-<tag>-macos-arm64` | macOS, Apple Silicon | none |
+  | `windows-x86-64-v3.exe` | Windows | AVX2/BMI2 (Haswell, Zen 1 or newer) |
+  | `windows-x86-64-v2.exe` | Windows | POPCNT/SSE4.2 (most CPUs since 2009) |
+  | `linux-x86-64-v3` | Linux | AVX2/BMI2 |
+  | `linux-x86-64-v2` | Linux | POPCNT/SSE4.2 |
+  | `linux-aarch64` | Linux ARM64 | none |
+  | `macos-arm64` | macOS, Apple Silicon | none |
+  | `macos-x86-64` | macOS, Intel | AVX2 (every Mac on a supported macOS) |
 
-  Testers should prefer `v3`, falling back to `v2` if it will not start.
-  The Windows builds are linked with an 8 MB main-thread stack
-  (`/STACK:8388608`), because the search runs on the main thread and the MSVC
-  default is 1 MB.
+  `<name>` is Cargo.toml's package name. Testers should prefer `v3`, falling
+  back to `v2` if it will not start. AVX-512/VNNI kernels are chosen at
+  runtime, so there is no separate AVX-512 binary. The UCI loop runs on an
+  8 MB-stack thread (Windows gives the main thread only 1 MB); the Windows
+  builds are also linked with `/STACK:8388608`.
 - **Bench signature:** the release notes list the `bench` node count of each
   binary. All binaries should report the same count; a tester can type
   `bench` in a console to check that a download is the right build.
@@ -64,17 +67,20 @@ binaries; few build from source. A submission should point them at one page:
    git tag v1.0
    git push origin v1.0
    ```
-3. The `Release` workflow builds the five binaries, runs a UCI smoke
-   (`uci`, `isready`, `position startpos`, `go depth 6`, `quit`) and `bench`
-   on each, then creates the GitHub release `v1.0` with the binaries attached
-   and the bench node counts in the notes. If any build or smoke test fails,
-   no release is created. Fix it, delete the tag
+3. The `Release` workflow builds the seven binaries and smoke-tests each:
+   `uci` (CRLF input), `go depth 8`, `perfttest`, and `scripts/check_bench.py`
+   (the `bench` count must equal the newest `Bench:` trailer). It then
+   **drafts** the GitHub release `v1.0` with the binaries, `SHA256SUMS` and
+   the bench counts in the notes. Nothing is published: review the draft on
+   the releases page and press "Publish". If any build or smoke test fails,
+   no draft is created. Fix it, delete the tag
    (`git push --delete origin v1.0 && git tag -d v1.0`) and tag again.
 
-To test the workflow without publishing anything, run it by hand from the
-Actions tab (or `gh workflow run release.yml -f tag=vtest`). In that mode it
-uploads the binaries as workflow artifacts only. It creates no release and no
-tag.
+To test the workflow without a release, run it by hand from the Actions tab
+(or `gh workflow run release.yml --ref <branch>`; `-f version=...` sets the
+file names, `-f measure_tiers=true` also times an x86-64-v4 build against v3
+on AVX-512 runners). In that mode it uploads the binaries as workflow
+artifacts only. It creates no release and no tag.
 
 ## Open items for the owner
 1. **Licence.** The repo has no `LICENSE` file. CCRL and most testers expect
