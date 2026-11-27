@@ -22,7 +22,7 @@ on:
         description: "Base ref; main is the champion"
         default: "main"
       settings:
-        description: "JSON: tc, hash, elo0, elo1, shards, rounds_per_shard, max_waves; optional tb (none|cand|both: Syzygy 3-4-5 for the candidate only or both engines; default none)"
+        description: "JSON: tc, hash, elo0, elo1, shards, rounds_per_shard, max_waves; optional tb (none|cand|both: Syzygy 3-4-5 for the candidate only or both engines; default none); optional threads / base_threads (option.Threads for the candidate / base; default 1, base_threads defaults to threads)"
         default: '{"tc": "10+0.1", "hash": 16, "elo0": 0, "elo1": 5, "shards": 16, "rounds_per_shard": 64, "max_waves": 10}'
       wave:
         default: "1"
@@ -41,6 +41,11 @@ env:
   # that mentions TB skipped and the fastchess command unchanged. The files
   # live in one actions/cache entry shared with ccrl-ladder.yml (same key).
   TB: ${{ fromJSON(inputs.settings).tb || 'none' }}
+  # Lazy SMP tests (settings "threads", "base_threads"): option.Threads per
+  # engine. Unset = 1 thread each and no Threads option sent, so the
+  # fastchess command and concurrency stay as before.
+  THREADS: ${{ fromJSON(inputs.settings).threads || 1 }}
+  BASE_THREADS: ${{ fromJSON(inputs.settings).base_threads || fromJSON(inputs.settings).threads || 1 }}
   SYZYGY_KEY: syzygy-345-v1
 
 jobs:
@@ -193,12 +198,23 @@ jobs:
           # play (summarised by the next step, not uploaded).
           tb_log=()
           if [ "$TB" != none ]; then tb_log=(-log file=engine-io.log level=info engine=true); fi
+          # Threads: only one engine of a game thinks at a time, so a game
+          # needs max(threads, base_threads) cores; play nproc / that many
+          # games at once so nothing is oversubscribed.
+          cand_thr=(); base_thr=()
+          conc="$(nproc)"
+          if [ "$THREADS" != 1 ] || [ "$BASE_THREADS" != 1 ]; then
+            cand_thr=("option.Threads=$THREADS"); base_thr=("option.Threads=$BASE_THREADS")
+            maxt=$(( THREADS > BASE_THREADS ? THREADS : BASE_THREADS ))
+            conc=$(( $(nproc) / maxt )); [ "$conc" -ge 1 ] || conc=1
+          fi
+          echo "nproc $(nproc), threads cand $THREADS base $BASE_THREADS, concurrency $conc"
           engines/fastchess \
-            -engine cmd=engines/cand name=candidate "${cand_tb[@]}" \
-            -engine cmd=engines/base name=base "${base_tb[@]}" \
+            -engine cmd=engines/cand name=candidate "${cand_tb[@]}" "${cand_thr[@]}" \
+            -engine cmd=engines/base name=base "${base_tb[@]}" "${base_thr[@]}" \
             -each proto=uci "$LIMIT" option.Hash="$HASH" option.OwnBook=false \
             -rounds "$ROUNDS" -repeat \
-            -concurrency "$(nproc)" \
+            -concurrency "$conc" \
             -openings file="$BOOK" format=epd order=random \
             -srand "$SEED" \
             -draw movenumber=40 movecount=8 score=10 \
@@ -275,6 +291,9 @@ jobs:
                      tc=cfg["tc"], wave=wave, final=final, shard_logs=len(logs))
           if cfg.get("tb", "none") != "none":
               res["tb"] = cfg["tb"]
+          if int(cfg.get("threads", 1)) != 1 or int(cfg.get("base_threads", cfg.get("threads", 1))) != 1:
+              res["threads"] = int(cfg.get("threads", 1))
+              res["base_threads"] = int(cfg.get("base_threads", cfg.get("threads", 1)))
           json.dump(res, open("sprt-result.json", "w"), indent=2)
 
           verdict = {"H1": "PASSED", "H0": "FAILED", "inconclusive": "INCONCLUSIVE",
@@ -283,7 +302,8 @@ jobs:
               fh.write(f"## SPRT {i['test_id']}: {verdict} (wave {wave}/{max_waves})\n\n"
                        f"`{res['candidate']}` ({os.environ['CAND'][:7]}) vs `{res['base']}` "
                        f"({os.environ['BASE'][:7]}), tc {cfg['tc']}, bounds [{cfg['elo0']}, {cfg['elo1']}]"
-                       + (f", Syzygy 3-4-5: {res['tb']}" if res.get("tb") else "") + "\n\n"
+                       + (f", Syzygy 3-4-5: {res['tb']}" if res.get("tb") else "")
+                       + (f", threads {res['threads']} vs {res['base_threads']}" if res.get("threads") else "") + "\n\n"
                        f"- LLR **{res['llr']:+.2f}** (bounds {res['llr_bounds']})\n"
                        f"- Elo **{res['elo']:+.1f}** (95% CI {res['elo_ci95'][0]:+.1f} .. {res['elo_ci95'][1]:+.1f})\n"
                        f"- {res['games']} games, pentanomial {res['ptnml']}\n")

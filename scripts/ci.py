@@ -17,6 +17,8 @@ Examples:
   python3 scripts/ci.py sprt my-net --nodes 200000          # DIAGNOSTIC: fixed nodes per move
   python3 scripts/ci.py sprt main --ltc --gainer --tb cand  # TB gain: main+Syzygy vs main
   python3 scripts/ci.py ladder --tb                         # ladder, Syzygy 3-4-5 for all engines
+  python3 scripts/ci.py sprt lazy-smp --threads 4           # SMP: both engines at Threads=4
+  python3 scripts/ci.py sprt lazy-smp --base lazy-smp --threads 4 --base-threads 1  # scaling
 
 --nodes N plays both engines at N nodes per move (no clock): it separates eval
 quality from speed. It is a diagnostic only, never an acceptance test: the run
@@ -24,6 +26,11 @@ and log entry are labelled fixed-nodes, and the queue never uses it.
 
 --tb cand|both gives Syzygy 3-4-5 (cached on the runners, scripts/fetch_syzygy.py)
 to the candidate only or to both engines; the default (none) plays without.
+
+--threads N sets option.Threads=N for both engines (--base-threads M overrides
+the base's); the workflow then plays nproc / max(N, M) games per runner at once
+so the runners' 4 vCPUs are not oversubscribed. Default 1: settings unchanged.
+SMP games cost about N times the runner time of 1-thread games.
 """
 import argparse
 import datetime
@@ -173,6 +180,13 @@ def cmd_sprt(args):
             # Only set when used, so default settings stay byte-identical.
             settings["tb"] = args.tb
             profile += f"-tb{args.tb}"
+        base_threads = args.base_threads if args.base_threads is not None else args.threads
+        if args.threads != 1 or base_threads != 1:
+            # Only set when used, so default settings stay byte-identical.
+            settings["threads"] = args.threads
+            if base_threads != args.threads:
+                settings["base_threads"] = base_threads
+            profile += f"-t{args.threads}" + (f"v{base_threads}" if base_threads != args.threads else "")
         # Pin both refs to SHAs now: a test may sit queued for hours, and main
         # (or the candidate branch) moving meanwhile must not change what it tests.
         cand_sha = remote.split()[0]
@@ -181,7 +195,7 @@ def cmd_sprt(args):
         settings.update(candidate_name=branch, base_name=args.base)
         stamp = datetime.datetime.now().strftime("%m%d-%H%M")
         test_id = f"{re.sub(r'[^A-Za-z0-9._-]', '-', branch)}-{profile}-{stamp}"
-        gh("workflow", "run", "sprt.yml", "--ref", "main",
+        gh("workflow", "run", "sprt.yml", "--ref", args.workflow_ref,
            "-f", f"test_id={test_id}", "-f", f"candidate={cand_sha}", "-f", f"base={base_sha}",
            "-f", f"settings={json.dumps(settings)}", capture=False)
         print(f"dispatched {test_id}: {branch} ({cand_sha[:7]}) vs {args.base} ({base_sha[:7]}), "
@@ -261,6 +275,12 @@ def main():
                     help="DIAGNOSTIC ONLY: fixed N nodes per move instead of a clock; never an acceptance test")
     sp.add_argument("--tb", choices=("none", "cand", "both"), default="none",
                     help="Syzygy 3-4-5 for the candidate only or both engines (default none)")
+    sp.add_argument("--threads", type=int, default=1, metavar="N",
+                    help="option.Threads for both engines (SMP tests; default 1)")
+    sp.add_argument("--base-threads", type=int, default=None, metavar="M",
+                    help="option.Threads for the base only (scaling tests; default --threads)")
+    sp.add_argument("--workflow-ref", default="main",
+                    help="branch whose sprt.yml runs (to try a workflow change before it lands)")
     sp.add_argument("--no-wait", action="store_true")
     sp.add_argument("--resume", metavar="TEST_ID")
     sp.set_defaults(func=cmd_sprt)
