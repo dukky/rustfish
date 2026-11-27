@@ -161,6 +161,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
         }
         // Cached static evals belong to the previous evaluator.
         engine.eval_cache.clear();
+        engine.helpers.clear();
         engine.tt.clear();
         return;
     }
@@ -172,6 +173,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             flush_stdout();
         }
         engine.eval_cache.clear();
+        engine.helpers.clear();
         engine.tt.clear();
         return;
     }

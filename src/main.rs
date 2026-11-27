@@ -1050,6 +1050,10 @@ struct EngineState {
     syzygy: Option<std::sync::Arc<syzygy::Tablebases>>,
     /// Largest piece count probed in search (`SyzygyProbeLimit`).
     syzygy_probe_limit: u32,
+    /// Lazy SMP helper threads' state (Threads - 1 of them, created by the
+    /// first multi-threaded `go`). Each keeps its own history, killers, eval
+    /// cache and correction history across searches; only `tt` is shared.
+    helpers: Vec<EngineState>,
 }
 
 /// Fourth net trained on 77M positions of net3 self-play (seed 5 at 8000
@@ -1092,6 +1096,7 @@ impl EngineState {
             use_nnue: true,
             syzygy: None,
             syzygy_probe_limit: 5,
+            helpers: Vec::new(),
         }
     }
 
@@ -1104,17 +1109,32 @@ impl EngineState {
         }
     }
 
+    /// `Hash` is the total for all threads: helpers share this one table.
     fn set_hash(&mut self, mb: usize) {
         self.hash_mb = mb.clamp(1, 2048);
+        // Release every handle on the old table before allocating the new
+        // one, so the two never coexist (helpers hold handles too).
+        self.helpers.clear();
+        self.tt = TransTable::new(1);
         self.tt = TransTable::new(self.hash_mb);
     }
 
     fn set_threads(&mut self, threads: usize) {
         self.threads = threads.clamp(1, 32);
+        self.helpers.truncate(self.threads - 1);
     }
 
     fn clear_for_new_game(&mut self) {
         self.tt.clear();
+        self.clear_thread_tables();
+        for h in self.helpers.iter_mut() {
+            h.clear_thread_tables();
+        }
+        self.position_history.clear();
+    }
+
+    /// The per-thread search state (everything but the shared TT).
+    fn clear_thread_tables(&mut self) {
         self.eval_cache.clear();
         self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.counter_moves = [[[None; 64]; 64]; 2];
@@ -1122,7 +1142,6 @@ impl EngineState {
         self.capture_history = [[[[0; 6]; 64]; 6]; 2];
         self.corr.clear();
         self.searches_since_decay = 0;
-        self.position_history.clear();
     }
 
     fn set_book_style(&mut self, style: BookStyle) {
@@ -1163,6 +1182,10 @@ impl EngineState {
 
     fn prepare_for_search(&mut self) {
         self.tt.new_search();
+        self.tick_history_decay();
+    }
+
+    fn tick_history_decay(&mut self) {
         self.searches_since_decay = self.searches_since_decay.saturating_add(1);
         if self.searches_since_decay >= 4 {
             self.decay_history();
@@ -1170,7 +1193,9 @@ impl EngineState {
         }
     }
 
-    fn worker_clone(&self) -> Self {
+    /// A new Lazy SMP helper: shares the TT, starts from this thread's
+    /// history and correction tables, and has its own (empty) eval cache.
+    fn helper_clone(&self) -> Self {
         Self {
             zobrist: self.zobrist.clone(),
             tt: self.tt.clone(),
@@ -1185,7 +1210,7 @@ impl EngineState {
             searches_since_decay: 0,
             threads: 1,
             hash_mb: self.hash_mb,
-            opening_book: self.opening_book.clone(),
+            opening_book: Vec::new(),
             own_book: false,
             book_style: self.book_style,
             book_file: self.book_file.clone(),
@@ -1196,7 +1221,24 @@ impl EngineState {
             use_nnue: self.use_nnue,
             syzygy: self.syzygy.clone(),
             syzygy_probe_limit: self.syzygy_probe_limit,
+            helpers: Vec::new(),
         }
+    }
+
+    /// Bring a helper up to date with options changed since it was made.
+    /// Options that invalidate cached evals (EvalFile, UseNNUE) drop the
+    /// helpers instead, and Hash replaces the table (and drops them too).
+    fn sync_helper(&self, h: &mut Self) {
+        h.tt = self.tt.clone();
+        h.search_params = self.search_params;
+        h.lmr_table = self.lmr_table;
+        h.hash_mb = self.hash_mb;
+        h.position_history.clone_from(&self.position_history);
+        h.move_overhead = self.move_overhead;
+        h.nnue_net = self.nnue_net.clone();
+        h.use_nnue = self.use_nnue;
+        h.syzygy = self.syzygy.clone();
+        h.syzygy_probe_limit = self.syzygy_probe_limit;
     }
 }
 

@@ -1,8 +1,8 @@
 use super::*;
 use crate::movegen::{threat_maps, CheckInfo, ThreatMaps};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::Arc;
 
-const MIN_PARALLEL_DEPTH: i32 = 6;
 // Singular extensions: minimum depth, and singular-beta margin per ply of depth.
 const SE_MIN_DEPTH: i32 = 8;
 const SE_MARGIN_PER_DEPTH: i32 = 2;
@@ -358,6 +358,29 @@ pub(crate) struct Search {
     /// the current path (0 when there is none); repetition lookahead must
     /// not reach behind it.
     null_idx: usize,
+    /// Lazy SMP state shared with the other threads of this `go` (None when
+    /// searching alone), and how many of `nodes` were already added to it.
+    smp: Option<Arc<SmpShared>>,
+    flushed_nodes: u64,
+}
+
+/// What the threads of one multi-threaded `go` share besides the TT.
+pub(crate) struct SmpShared {
+    /// Set by the main thread when its search ends; helpers then unwind.
+    stop: AtomicBool,
+    /// Nodes of all threads, each adding its count every 2048 nodes (and at
+    /// the end), so `info nodes` and `go nodes` count the whole search.
+    nodes: AtomicU64,
+    /// `go nodes N` applied to the total; u64::MAX = no limit.
+    node_limit: u64,
+    /// The main thread's last completed depth; helpers start above it.
+    main_depth: AtomicI32,
+}
+
+impl SmpShared {
+    fn new(node_limit: u64) -> Self {
+        Self { stop: AtomicBool::new(false), nodes: AtomicU64::new(0), node_limit, main_depth: AtomicI32::new(0) }
+    }
 }
 
 impl Search {
@@ -373,7 +396,39 @@ impl Search {
             move_buf: Vec::with_capacity(256),
             root_nodes: Vec::new(),
             null_idx: 0,
+            smp: None,
+            flushed_nodes: 0,
         }
+    }
+
+    /// Add the nodes searched since the last flush to the shared total.
+    /// Returns the new total (or this thread's count when searching alone).
+    fn flush_nodes(&mut self) -> u64 {
+        match &self.smp {
+            None => self.nodes,
+            Some(smp) => {
+                let delta = self.nodes - self.flushed_nodes;
+                self.flushed_nodes = self.nodes;
+                smp.nodes.fetch_add(delta, Ordering::Relaxed) + delta
+            }
+        }
+    }
+
+    /// Nodes of the whole search so far: every thread's flushed count plus
+    /// this thread's unflushed ones (exact once the helpers have finished).
+    pub(crate) fn total_nodes(&self) -> u64 {
+        match &self.smp {
+            None => self.nodes,
+            Some(smp) => smp.nodes.load(Ordering::Relaxed) + (self.nodes - self.flushed_nodes),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn smp_should_stop(&mut self) -> bool {
+        let total = self.flush_nodes();
+        let smp = self.smp.as_ref().unwrap();
+        smp.stop.load(Ordering::Relaxed) || total >= smp.node_limit
     }
 
     pub(crate) fn should_stop(&mut self) -> bool {
@@ -385,7 +440,7 @@ impl Search {
             return true;
         }
         if self.nodes & 2047 == 0 {
-            if stop_requested() {
+            if stop_requested() || (self.smp.is_some() && self.smp_should_stop()) {
                 self.stop = true;
                 return true;
             }
@@ -576,14 +631,6 @@ fn tt_refine_eval(tt_entry: Option<crate::tt::TTEntry>, mut se: i32, ply: usize)
         }
     }
     se
-}
-
-struct RootWorkerResult {
-    best_score: i32,
-    best_move: Option<Move>,
-    nodes: u64,
-    completed: bool,
-    ordered_root_moves: Vec<Move>,
 }
 
 #[derive(Default)]
@@ -1003,7 +1050,6 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
 
     let start = Instant::now();
     let mut search = Search::new(deadline);
-    // Node limits apply to the single-threaded search only.
     search.node_limit = node_limit.unwrap_or(u64::MAX);
     let mut best_score = -INF;
 
@@ -1055,162 +1101,219 @@ pub(crate) fn handle_go(cmd: &str, board: &mut Board, engine: &mut EngineState) 
     let mut best_move = Some(root_moves[0]);
     let mut stable_iterations = 0usize;
     let mut completed_depth = 0i32;
-    let worker_count = engine.threads.min(root_moves.len()).max(1);
-    let threaded = worker_count > 1;
-    let mut total_threaded_nodes = 0u64;
-    let mut worker_engines: Option<Vec<EngineState>> = None;
 
-    let parallel_allowed = movetime
-        .map(|ms| ms >= 100)
-        .unwrap_or_else(|| depth >= MIN_PARALLEL_DEPTH);
+    // Lazy SMP: with Threads > 1, helper threads run their own iterative
+    // deepening from the root on the shared TT until this (main) thread's
+    // search ends. The main thread alone manages time and picks the move.
+    let threaded = engine.threads > 1;
+    let mut helpers = Vec::new();
+    let mut helper_inputs = Vec::new();
+    if threaded {
+        // `go nodes` limits the total over all threads.
+        search.smp = Some(Arc::new(SmpShared::new(search.node_limit)));
+        helpers = take_helpers(engine);
+        helper_inputs = helpers.iter().map(|_| (board.clone(), rep_stack.clone(), root_moves.clone())).collect();
+    }
+    let smp = search.smp.clone();
 
-    for d in 1..=depth.max(1) {
-        let use_threads = threaded && parallel_allowed && d >= MIN_PARALLEL_DEPTH;
-        if !use_threads && search.should_stop() {
-            break;
-        }
-
-        let mut alpha = -INF;
-        let mut beta = INF;
-        if d >= 4 {
-            alpha = best_score - ASPIRATION_WINDOW;
-            beta = best_score + ASPIRATION_WINDOW;
-        }
-
-        let (score, mv, completed, depth_nodes) = loop {
-            if use_threads {
-                if worker_engines.is_none() {
-                    worker_engines = Some(make_worker_engines(engine, worker_count));
-                }
-                let result = search_root_parallel(
-                    board,
-                    d,
-                    alpha,
-                    beta,
-                    hash,
-                    deadline,
-                    worker_engines.as_mut().unwrap(),
-                    &mut root_moves,
-                    &rep_stack,
-                );
-                if !result.2 || d < 4 {
-                    break (result.0, result.1, result.2, result.3);
-                }
-                if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
-                    continue;
-                }
-                if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
-                    continue;
-                }
-                break (result.0, result.1, result.2, result.3);
-            } else {
-                let nodes_before = search.nodes;
-                let result = search_root(
-                    board,
-                    d,
-                    alpha,
-                    beta,
-                    hash,
-                    &mut search,
-                    engine,
-                    &mut root_moves,
-                    &mut rep_stack,
-                );
-                let nodes_after = search.nodes;
-                if !result.2 || d < 4 {
-                    break (result.0, result.1, result.2, nodes_after - nodes_before);
-                }
-                if result.0 <= alpha {
-                    alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
-                    continue;
-                }
-                if result.0 >= beta {
-                    beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
-                    continue;
-                }
-                break (result.0, result.1, result.2, nodes_after - nodes_before);
-            }
-        };
-
-        if !completed {
-            break;
-        }
-
-        if use_threads {
-            total_threaded_nodes += depth_nodes;
-        }
-        let prev_score = best_score;
-        best_score = score;
-        if mv.is_some() && mv != best_move {
-            stable_iterations = 0;
-        } else {
-            stable_iterations += 1;
-        }
-        if let Some(m) = mv {
-            best_move = Some(m);
-            if let Some(pos) = root_moves.iter().position(|x| *x == m) {
-                root_moves.swap(0, pos);
-            }
-        }
-
-        completed_depth = d;
-        let elapsed = start.elapsed().as_millis() as u64;
-        let nodes = search.nodes + total_threaded_nodes;
-        if !QUIET_SEARCH.with(|q| q.get()) {
-            print_info(d, best_score, nodes, elapsed, best_move);
-        }
-        if nodes >= SOFT_NODE_LIMIT.with(|s| s.get()) {
-            break;
-        }
-
-        if let Some(soft) = soft_ms {
-            let scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
-            let mut target = soft * scale / 100;
-            if d >= 4 && best_score < prev_score - SCORE_DROP_MARGIN {
-                target = target * 5 / 4;
-            }
-            if !threaded && d >= NODE_TM_MIN_DEPTH && search.nodes > 0 {
-                if let Some(m) = best_move {
-                    let params = &engine.search_params;
-                    let frac = search.root_nodes[root_node_index(m)] * 100 / search.nodes;
-                    let pct = params.node_tm_base.saturating_sub(frac) * params.node_tm_scale / 100;
-                    target = target * pct / 100;
-                }
-            }
-            if elapsed >= target {
+    let mut run_main = || {
+        for d in 1..=depth.max(1) {
+            if search.should_stop() {
                 break;
             }
+
+            let (score, mv, completed) =
+                aspiration_search(board, d, best_score, hash, &mut search, engine, &mut root_moves, &mut rep_stack);
+            if !completed {
+                break;
+            }
+
+            let prev_score = best_score;
+            best_score = score;
+            if mv.is_some() && mv != best_move {
+                stable_iterations = 0;
+            } else {
+                stable_iterations += 1;
+            }
+            if let Some(m) = mv {
+                best_move = Some(m);
+                if let Some(pos) = root_moves.iter().position(|x| *x == m) {
+                    root_moves.swap(0, pos);
+                }
+            }
+
+            completed_depth = d;
+            if let Some(smp) = &search.smp {
+                smp.main_depth.store(d, Ordering::Relaxed);
+            }
+            let elapsed = start.elapsed().as_millis() as u64;
+            let nodes = search.total_nodes();
+            if !QUIET_SEARCH.with(|q| q.get()) {
+                print_info(d, best_score, nodes, elapsed, best_move);
+            }
+            if nodes >= SOFT_NODE_LIMIT.with(|s| s.get()) {
+                break;
+            }
+
+            if let Some(soft) = soft_ms {
+                let scale = STABILITY_SCALE[stable_iterations.min(STABILITY_SCALE.len() - 1)];
+                let mut target = soft * scale / 100;
+                if d >= 4 && best_score < prev_score - SCORE_DROP_MARGIN {
+                    target = target * 5 / 4;
+                }
+                // Node fractions are the main thread's own: it searches the
+                // whole tree whatever the helpers do.
+                if d >= NODE_TM_MIN_DEPTH && search.nodes > 0 {
+                    if let Some(m) = best_move {
+                        let params = &engine.search_params;
+                        let frac = search.root_nodes[root_node_index(m)] * 100 / search.nodes;
+                        let pct = params.node_tm_base.saturating_sub(frac) * params.node_tm_scale / 100;
+                        target = target * pct / 100;
+                    }
+                }
+                if elapsed >= target {
+                    break;
+                }
+            }
         }
+
+        // UCI: an infinite search reports its move only after `stop`, even when
+        // it ran out of depth first (a forced mate reaches MAX_SEARCH_DEPTH in
+        // milliseconds). Searches not driven by stdin (ACTIVE_GO == 0) never wait.
+        if infinite {
+            while ACTIVE_GO.load(Ordering::Relaxed) != 0
+                && !stop_requested()
+                && !QUIT_SEEN.load(Ordering::Relaxed)
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+
+    if let Some(smp) = &smp {
+        thread::scope(|scope| {
+            for (i, (h, (b, rs, rm))) in helpers.iter_mut().zip(helper_inputs).enumerate() {
+                let smp = smp.clone();
+                thread::Builder::new()
+                    .name(format!("helper{}", i + 1))
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn_scoped(scope, move || helper_search(b, h, rs, rm, depth, hash, smp, i + 1))
+                    .expect("spawn a search thread");
+            }
+            run_main();
+            // The scope then joins the helpers; each sees this within 2048
+            // of its own nodes.
+            smp.stop.store(true, Ordering::Relaxed);
+        });
+        engine.helpers = helpers;
+    } else {
+        run_main();
     }
 
-    // UCI: an infinite search reports its move only after `stop`, even when
-    // it ran out of depth first (a forced mate reaches MAX_SEARCH_DEPTH in
-    // milliseconds). Searches not driven by stdin (ACTIVE_GO == 0) never wait.
-    if infinite {
-        while ACTIVE_GO.load(Ordering::Relaxed) != 0
-            && !stop_requested()
-            && !QUIT_SEEN.load(Ordering::Relaxed)
-        {
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    engine.last_search_nodes = search.nodes + total_threaded_nodes;
+    // Exact: every helper has added its last nodes before the join returned.
+    engine.last_search_nodes = search.total_nodes();
     LAST_SEARCH_SCORE.with(|s| s.set(best_score));
     LAST_SEARCH_DEPTH.with(|s| s.set(completed_depth));
     best_move.map(move_to_uci)
 }
 
-/// Helper threads' engines for a parallel search. Kept out of line: each
-/// clone passes a multi-MB `EngineState` through the stack, and inlined into
-/// `handle_go` that made every search (single-threaded ones included) probe a
-/// 4 MB stack frame on entry.
+/// One iteration at depth `d` with an aspiration window around the previous
+/// iteration's score, widened and re-searched on a fail high or low.
+fn aspiration_search(
+    board: &mut Board,
+    d: i32,
+    prev_score: i32,
+    hash: u64,
+    search: &mut Search,
+    engine: &mut EngineState,
+    root_moves: &mut Vec<Move>,
+    rep_stack: &mut Vec<u64>,
+) -> (i32, Option<Move>, bool) {
+    let mut alpha = -INF;
+    let mut beta = INF;
+    if d >= 4 {
+        alpha = prev_score - ASPIRATION_WINDOW;
+        beta = prev_score + ASPIRATION_WINDOW;
+    }
+    loop {
+        let result = search_root(board, d, alpha, beta, hash, search, engine, root_moves, rep_stack);
+        if !result.2 || d < 4 {
+            return result;
+        }
+        if result.0 <= alpha {
+            alpha = (alpha - ASPIRATION_WINDOW * 2).max(-INF);
+            continue;
+        }
+        if result.0 >= beta {
+            beta = (beta + ASPIRATION_WINDOW * 2).min(INF);
+            continue;
+        }
+        return result;
+    }
+}
+
+/// The helpers for a multi-threaded search, made on first use and kept
+/// across searches (their history carries over like the main thread's).
+/// Kept out of line: a new helper passes a multi-MB `EngineState` through
+/// the stack, and inlined into `handle_go` that made every search
+/// (single-threaded ones included) probe a large stack frame on entry.
 #[inline(never)]
 #[cold]
-fn make_worker_engines(engine: &EngineState, count: usize) -> Vec<EngineState> {
-    (0..count).map(|_| engine.worker_clone()).collect()
+fn take_helpers(engine: &mut EngineState) -> Vec<EngineState> {
+    let mut helpers = std::mem::take(&mut engine.helpers);
+    let want = engine.threads - 1;
+    helpers.truncate(want);
+    while helpers.len() < want {
+        helpers.push(engine.helper_clone());
+    }
+    for h in helpers.iter_mut() {
+        engine.sync_helper(h);
+    }
+    helpers
+}
+
+/// A Lazy SMP helper: iterative deepening from the root on the shared TT,
+/// with its own history, killers and eval cache, until the main thread
+/// stops it. Its results reach the main thread only through the TT.
+/// Helpers keep level with the main thread: each iteration starts above
+/// the main thread's last completed depth, odd-numbered helpers one ply
+/// further ahead, so the threads spread over two depths instead of all
+/// repeating the same one.
+fn helper_search(
+    mut board: Board,
+    engine: &mut EngineState,
+    mut rep_stack: Vec<u64>,
+    mut root_moves: Vec<Move>,
+    max_depth: i32,
+    hash: u64,
+    smp: Arc<SmpShared>,
+    idx: usize,
+) {
+    engine.tick_history_decay();
+    let mut search = Search::new(None);
+    search.smp = Some(smp.clone());
+    let mut best_score = -INF;
+    let mut last_depth = 0i32;
+    loop {
+        let main_depth = smp.main_depth.load(Ordering::Relaxed);
+        let d = (last_depth + 1).max(main_depth + 1 + (idx & 1) as i32);
+        if d > max_depth.max(1) || search.should_stop() {
+            break;
+        }
+        let (score, mv, completed) =
+            aspiration_search(&mut board, d, best_score, hash, &mut search, engine, &mut root_moves, &mut rep_stack);
+        if !completed {
+            break;
+        }
+        best_score = score;
+        last_depth = d;
+        if let Some(m) = mv {
+            if let Some(pos) = root_moves.iter().position(|x| *x == m) {
+                root_moves.swap(0, pos);
+            }
+        }
+    }
+    search.flush_nodes();
 }
 
 fn root_node_index(mv: Move) -> usize {
@@ -1227,136 +1330,6 @@ fn clock_limits(time_left: u64, inc: u64, movestogo: Option<u64>, overhead: u64)
     let soft = (usable / mtg + inc).min(cap).max(1);
     let hard = (soft * HARD_LIMIT_FACTOR).min(usable * 4 / 5).max(soft);
     (soft, hard)
-}
-
-fn search_root_parallel(
-    board: &Board,
-    depth: i32,
-    alpha: i32,
-    beta: i32,
-    hash: u64,
-    deadline: Option<Instant>,
-    worker_engines: &mut [EngineState],
-    root_moves: &mut [Move],
-    rep_stack: &[u64],
-) -> (i32, Option<Move>, bool, u64) {
-    if root_moves.is_empty() {
-        return (-INF, None, true, 0);
-    }
-
-    let active_workers = worker_engines.len().max(1);
-    let mut results = Vec::new();
-    thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for (worker_idx, worker) in worker_engines[..active_workers].iter_mut().enumerate() {
-            let board_clone = board.clone();
-            let rep_stack_vec = rep_stack.to_vec();
-            let root_moves_vec = root_moves.to_vec();
-            let builder = thread::Builder::new().stack_size(8 * 1024 * 1024);
-            handles.push(
-                builder
-                    .spawn_scoped(scope, move || {
-                        search_root_lazy_worker(
-                            board_clone,
-                            depth,
-                            alpha,
-                            beta,
-                            hash,
-                            deadline,
-                            worker,
-                            root_moves_vec,
-                            rep_stack_vec,
-                            worker_idx,
-                        )
-                    })
-                    .unwrap(),
-            );
-        }
-        for handle in handles {
-            results.push(handle.join().unwrap());
-        }
-    });
-
-    let mut best_score = -INF;
-    let mut best_move = None;
-    let mut completed = true;
-    let mut total_nodes = 0u64;
-    let mut best_root_order = None;
-
-    for result in results {
-        total_nodes += result.nodes;
-        completed &= result.completed;
-        if let Some(mv) = result.best_move {
-            if result.best_score > best_score {
-                best_score = result.best_score;
-                best_move = Some(mv);
-                best_root_order = Some(result.ordered_root_moves);
-            }
-        }
-    }
-
-    let alpha_orig = alpha;
-    let bound = if best_score <= alpha_orig {
-        Bound::Upper
-    } else if best_score >= beta {
-        Bound::Lower
-    } else {
-        Bound::Exact
-    };
-    if let Some(mv) = best_move {
-        worker_engines[0]
-            .tt
-            .store(hash, depth, score_to_tt(best_score, 0), None, bound, Some(mv));
-        if let Some(ordered) = best_root_order {
-            root_moves.clone_from_slice(&ordered);
-        }
-    }
-
-    (best_score, best_move, completed, total_nodes)
-}
-
-fn diversify_root_moves(root_moves: &mut [Move], worker_idx: usize) {
-    if worker_idx == 0 || root_moves.len() < 2 {
-        return;
-    }
-
-    let top = root_moves.len().min(4 + worker_idx);
-    let swap_idx = worker_idx.min(top - 1);
-    root_moves.swap(0, swap_idx);
-}
-
-fn search_root_lazy_worker(
-    mut board: Board,
-    depth: i32,
-    alpha: i32,
-    beta: i32,
-    hash: u64,
-    deadline: Option<Instant>,
-    engine: &mut EngineState,
-    mut root_moves: Vec<Move>,
-    mut rep_stack: Vec<u64>,
-    worker_idx: usize,
-) -> RootWorkerResult {
-    let mut search = Search::new(deadline);
-    diversify_root_moves(&mut root_moves, worker_idx);
-    let (best_score, best_move, completed) = search_root(
-        &mut board,
-        depth,
-        alpha,
-        beta,
-        hash,
-        &mut search,
-        engine,
-        &mut root_moves,
-        &mut rep_stack,
-    );
-    RootWorkerResult {
-        best_score,
-        best_move,
-        nodes: search.nodes,
-        completed,
-        ordered_root_moves: root_moves,
-    }
 }
 
 fn search_root(
