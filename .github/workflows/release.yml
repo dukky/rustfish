@@ -208,6 +208,29 @@ jobs:
               print(f"| {b} | {simd[b]} | {statistics.median(nps[b]):.0f} | {statistics.median(ratios):+.2f}% | {min(ratios):+.1f}..{max(ratios):+.1f} |")
           EOF
 
+  diag-v2:
+    if: github.event_name == 'workflow_dispatch' && inputs.measure_tiers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Profile v2 vs v3
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq linux-tools-common linux-tools-$(uname -r) >/dev/null || sudo apt-get install -y -qq linux-tools-generic >/dev/null
+          sudo sysctl -w kernel.perf_event_paranoid=-1
+          lscpu | grep 'Model name'
+          for c in x86-64-v2 x86-64-v3; do
+            CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-C target-cpu=$c" cargo build --release --target-dir t-$c 2>&1 | tail -1
+            printf 'bench\nquit\n' | ./t-$c/release/rustfish | grep -E 'Nodes|SIMD'
+          done
+          P=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1); P=${P:-perf}
+          for c in x86-64-v2 x86-64-v3; do
+            echo "=== $c"
+            printf 'bench\nquit\n' > in.txt
+            $P record -q -g -o p-$c.data ./t-$c/release/rustfish < in.txt > /dev/null
+            $P report -i p-$c.data --no-children --sort sym --stdio 2>/dev/null | grep -v '^#' | grep -v '^$' | grep '%' | head -25
+            $P report -i p-$c.data --no-children --sort srcline --stdio 2>/dev/null | grep '%' | grep -v '^#' | head -40
+          done
+
   release:
     needs: build
     if: github.event_name == 'push'
