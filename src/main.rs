@@ -1200,7 +1200,19 @@ impl EngineState {
     }
 }
 
+/// Single-threaded search runs on the thread that reads commands, so give it
+/// the same 8 MB stack the Lazy SMP workers get. Linux and macOS give the
+/// main thread 8 MB, but Windows gives it only 1 MB, which deep searches
+/// overflow; running the loop on our own thread makes every build (including
+/// a plain `cargo build` on Windows) behave the same.
 fn main() {
+    let uci = thread::Builder::new().name("uci".into()).stack_size(8 * 1024 * 1024).spawn(uci_main).expect("spawn the UCI thread");
+    if uci.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn uci_main() {
     let input = spawn_input_reader();
     let mut board = Board::new();
     board.set_startpos();

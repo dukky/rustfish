@@ -61,14 +61,11 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
                 }
             }
             "value" => {
-                i += 1;
-                while i < tokens.len() {
-                    if !value.is_empty() {
-                        value.push(' ');
-                    }
-                    value.push_str(tokens[i]);
-                    i += 1;
-                }
+                // Take the rest of the line verbatim, so a path such as
+                // `C:\Chess  Tables\syzygy` keeps its exact spacing.
+                let start = tokens[i].as_ptr() as usize - cmd.as_ptr() as usize + "value".len();
+                value = cmd[start..].trim().to_string();
+                break;
             }
             _ => i += 1,
         }
@@ -143,8 +140,12 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
 
     if n == "evalfile" {
         let path = value.trim();
-        if path.is_empty() || path.eq_ignore_ascii_case("none") || path == "-" {
+        let embedded = || Some(std::sync::Arc::new(crate::nnue::Network::from_bytes(crate::EMBEDDED_NET).expect("embedded NNUE net")));
+        if path.eq_ignore_ascii_case("none") || path == "-" {
             engine.nnue_net = None;
+        } else if path.is_empty() || path == "<empty>" {
+            // GUIs send the (empty) default back; that means the embedded net.
+            engine.nnue_net = embedded();
         } else {
             match crate::nnue::Network::load(path) {
                 Ok(net) => {
@@ -152,8 +153,8 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
                     println!("info string loaded NNUE {path}");
                 }
                 Err(e) => {
-                    engine.nnue_net = None;
-                    println!("info string EvalFile error: {e}");
+                    engine.nnue_net = embedded();
+                    println!("info string EvalFile error: {e}; using the embedded net");
                 }
             }
             flush_stdout();
@@ -672,6 +673,26 @@ pub(crate) fn handle_evalhash(cmd: &str, board: &mut Board, net: Option<std::syn
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn setoption_paths_and_gui_defaults() {
+        thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(setoption_paths_body).unwrap().join().unwrap();
+    }
+
+    fn setoption_paths_body() {
+        let mut engine = EngineState::new();
+        handle_setoption("setoption name BookFile value C:\\Chess  Books\\my book.txt ", &mut engine);
+        assert_eq!(engine.book_file.as_deref(), Some("C:\\Chess  Books\\my book.txt"));
+        // A GUI echoing the empty EvalFile default, or a bad path, keeps a net.
+        handle_setoption("setoption name EvalFile value", &mut engine);
+        assert!(engine.nnue_net.is_some());
+        handle_setoption("setoption name EvalFile value <empty>", &mut engine);
+        assert!(engine.nnue_net.is_some());
+        handle_setoption("setoption name EvalFile value no/such/net.bin", &mut engine);
+        assert!(engine.nnue_net.is_some());
+        handle_setoption("setoption name EvalFile value none", &mut engine);
+        assert!(engine.nnue_net.is_none());
+    }
 
     #[test]
     fn position_moves_preserve_repetition_history() {
