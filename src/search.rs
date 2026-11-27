@@ -213,6 +213,19 @@ impl CorrectionHistory {
     }
 }
 
+/// Drawishness scaling of the static eval, applied to the raw net output
+/// before correction history (the TT and eval cache keep the unscaled value:
+/// the halfmove clock is not part of their key). Positions fade towards 0 as
+/// the 50-move clock runs: eval * (Rule50Div - clock) / Rule50Div. Measured on
+/// the 25/26 Nov ladder games: at our eval >= +1.5 the share of positions in
+/// games that were drawn rises from 15% (clock 0-9) to 59% (20-39) and 89%
+/// (40-59). Search results (mates, TB scores) are never scaled.
+#[inline]
+fn scale_static_eval(board: &Board, raw: i32, p: &SearchParams) -> i32 {
+    let clock = (board.halfmove_clock as i32).min(100);
+    raw * (p.rule50_div - clock) / p.rule50_div
+}
+
 /// Folds a finished negamax node into the correction history, when its
 /// result says something about the static eval's error (see above).
 #[allow(clippy::too_many_arguments)]
@@ -1355,7 +1368,7 @@ fn search_root(
         let raw = root_entry
             .and_then(|e| e.static_eval())
             .unwrap_or_else(|| engine.eval_cache.eval(board, key));
-        let corr = engine.corr.apply(&CorrIdx::new(board, None), raw);
+        let corr = engine.corr.apply(&CorrIdx::new(board, None), scale_static_eval(board, raw, &engine.search_params));
         tt_refine_eval(root_entry, corr, 0)
     };
     order_moves(
@@ -1698,7 +1711,9 @@ fn negamax_body(
         )
     };
     let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
-    let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
+    let corr_eval = raw_static_eval
+        .zip(corr_idx)
+        .map(|(raw, ci)| engine.corr.apply(&ci, scale_static_eval(board, raw, &engine.search_params)));
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
     // Improving: our static eval beats the one from our previous move (two plies up).
@@ -2391,6 +2406,7 @@ fn quiescence(
     };
     // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
     let static_eval = raw_static_eval
+        .map(|raw| scale_static_eval(board, raw, &engine.search_params))
         .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
     // Fail-soft: `best` is the highest score seen (stand pat included) and is

@@ -991,6 +991,8 @@ struct SearchParams {
     // Node-fraction time management, see NODE_TM_MIN_DEPTH in search.rs.
     node_tm_base: u64,
     node_tm_scale: u64,
+    // Static eval * (rule50_div - halfmove clock) / rule50_div (search.rs scale_static_eval).
+    rule50_div: i32,
 }
 
 impl Default for SearchParams {
@@ -1018,6 +1020,7 @@ impl Default for SearchParams {
             lmr_extra_move_index: 7,
             node_tm_base: 175,
             node_tm_scale: 75,
+            rule50_div: 180,
         }
     }
 }
@@ -1304,6 +1307,7 @@ fn uci_main() {
             println!("option name LmrExtraMoveIndex type spin default 7 min 1 max 32");
             println!("option name NodeTmBase type spin default 175 min 110 max 300");
             println!("option name NodeTmScale type spin default 75 min 50 max 300");
+            println!("option name Rule50Div type spin default 180 min 101 max 2000");
             println!("uciok");
             flush_stdout();
             continue;

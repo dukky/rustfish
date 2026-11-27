@@ -206,6 +206,7 @@ pub(crate) fn handle_setoption(cmd: &str, engine: &mut EngineState) {
             "lmrnotimproving" => engine.search_params.lmr_not_improving = v.clamp(0, 3),
             "lmrmindepth" => engine.search_params.lmr_min_depth = v.clamp(1, 12),
             "lmrextradepth" => engine.search_params.lmr_extra_depth = v.clamp(1, 16),
+            "rule50div" => engine.search_params.rule50_div = v.clamp(101, 2000),
             _ => {}
         }
     }
