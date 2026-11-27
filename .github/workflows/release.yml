@@ -224,7 +224,8 @@ jobs:
           lscpu | grep 'Model name'
           for c in x86-64-v2 x86-64-v3; do
             CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-C target-cpu=$c" cargo build --release --target-dir t-$c 2>&1 | tail -1
-            printf 'bench\nquit\n' | ./t-$c/release/rustfish | grep -E 'Nodes|SIMD'
+            for r in 1 2 3; do printf 'bench\nquit\n' | ./t-$c/release/rustfish | grep -E 'Nodes|SIMD'; done
+            printf 'evalhash\nquit\n' | ./t-$c/release/rustfish | grep -i hash
           done
           P=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1); P=${P:-perf}
           for c in x86-64-v2 x86-64-v3; do
