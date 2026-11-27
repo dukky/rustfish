@@ -728,3 +728,4 @@
 {"branch": "release-id-name", "logged_at": "2026-11-27T12:39:06Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "e99d8cee854c053fb779e91fa832afd11366db46"}
 {"base_sha": "39ad6d8f63942ac9cbd26b36717b16f1d7bbdb40", "branch": "spsa-r40-final", "logged_at": "2026-11-27T13:35:37Z", "mode": "ltc", "outcome": "dispatched", "priority": {"rule": "front"}, "sha": "88da3d442dfdb01b97deadbc83d94bef721fc35f", "test_id": "q-spsa-r40-final-1127-1335"}
 {"branch": "portability", "logged_at": "2026-11-27T13:45:11Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "c8cfe4d1acced8df00872b26358e128b3e6b22d9"}
+{"branch": "lazy-smp", "logged_at": "2026-11-27T17:39:28Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "7353aee0c2ecc3c67c7b452e60e2e3dbfaaa0289"}
