@@ -42,6 +42,10 @@ jobs:
         include:
           # x86-64 tiers. v3 (AVX2/BMI2) is the main build; AVX-512 and VNNI
           # kernels are picked at runtime, so v3 already uses them where present.
+          # No v4 tier: on 4 AVX-512 runners (2x EPYC 9V74 Zen 4, 2x 9V45 Zen 5,
+          # 27 Nov 2026, bench 15, 10 interleaved rounds) v4 was +0.4..+1.7% over
+          # v3 against an A/A of -0.6..+0.6%, i.e. ~+0.75%: not worth a binary
+          # that crashes on CPUs without AVX-512.
           - { runner: windows-latest,   target: x86_64-pc-windows-msvc,    os: windows, tier: x86-64-v2, cpu: x86-64-v2, ext: .exe }
           - { runner: windows-latest,   target: x86_64-pc-windows-msvc,    os: windows, tier: x86-64-v3, cpu: x86-64-v3, ext: .exe }
           - { runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  os: linux,   tier: x86-64-v2, cpu: x86-64-v2, ext: "" }
