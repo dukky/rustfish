@@ -38,7 +38,7 @@ engine:
     gaviota:
       enabled: false
   uci_options:                   # only options rustfish actually exposes
-    Hash: 128                    # 3 concurrent games = 384 MB of hash
+    Hash: 256                    # one game at a time (container limit 768 MB)
     Threads: 1
     OwnBook: true                # built-in book keeps openings varied
   silence_stderr: false
@@ -46,7 +46,7 @@ engine:
 abort_time: 30
 fake_think_time: false
 rate_limiting_delay: 0
-move_overhead: 1000              # server-to-lichess latency allowance (ms)
+move_overhead: 400               # server-to-lichess latency allowance (ms); 1000 wasted bullet clock
 max_takebacks_accepted: 0
 quit_after_all_games_finish: false
 
@@ -57,7 +57,7 @@ correspondence:
   ponder: false
 
 challenge:
-  concurrency: 3                 # allow three simultaneous games; 2-core host
+  concurrency: 1                 # one game: the container has 1 CPU (3 games ran at ~1/3 speed)
   games_reserved_for_humans: 0
   sort_by: "best"
   preference: "none"
@@ -77,7 +77,7 @@ challenge:
     - casual
     - rated
   bullet_requires_increment: false
-  max_simultaneous_games_per_user: 3
+  max_simultaneous_games_per_user: 1
 
 greeting:
   hello: "Hi! I'm {me}, a from-scratch Rust engine. Good luck!"
