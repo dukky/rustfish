@@ -213,6 +213,46 @@ impl CorrectionHistory {
     }
 }
 
+/// Drawishness scaling of the static eval by material, applied to the raw net
+/// output before correction history (the TT and eval cache keep the unscaled
+/// value). The side the eval favours is "strong". Unless it is a rook or more
+/// ahead in pieces (N/B 3, R 5, Q 9), the eval is scaled to
+/// min(100, MatScaleBase + MatScalePawn * strong pawns) percent; with
+/// opposite-coloured bishops and no other pieces, further by OcbScale percent.
+/// Measured on the 25/26 Nov ladder games at our eval >= +1.5: drawn-game
+/// share 14-20% with 4+ strong pawns, 28% (3), 34-38% (0-2); 84% in pure
+/// opposite-bishop endings, where our eval ran ~4x the opponents' (2.2x overall).
+/// Search results (mates, TB scores) are never scaled.
+#[inline]
+fn scale_static_eval(board: &Board, raw: i32, p: &SearchParams) -> i32 {
+    const DARK: u64 = 0xAA55_AA55_AA55_AA55;
+    let pc = &board.bb.pieces;
+    let stm = color_index(board.side_to_move);
+    let strong = if raw >= 0 { stm } else { stm ^ 1 };
+    let npm = |c: usize| {
+        3 * (pc[c][1] | pc[c][2]).count_ones() as i32
+            + 5 * pc[c][3].count_ones() as i32
+            + 9 * pc[c][4].count_ones() as i32
+    };
+    let mut pct = 100;
+    if npm(strong) - npm(strong ^ 1) < 5 {
+        pct = (p.mat_scale_base + p.mat_scale_pawn * pc[strong][0].count_ones() as i32).min(100);
+    }
+    let (wb, bb) = (pc[0][2], pc[1][2]);
+    if wb.count_ones() == 1
+        && bb.count_ones() == 1
+        && ((wb & DARK) == 0) != ((bb & DARK) == 0)
+        && (pc[0][1] | pc[0][3] | pc[0][4] | pc[1][1] | pc[1][3] | pc[1][4]) == 0
+    {
+        pct = pct * p.ocb_scale / 100;
+    }
+    if pct >= 100 {
+        raw
+    } else {
+        raw * pct / 100
+    }
+}
+
 /// Folds a finished negamax node into the correction history, when its
 /// result says something about the static eval's error (see above).
 #[allow(clippy::too_many_arguments)]
@@ -1382,7 +1422,7 @@ fn search_root(
         let raw = root_entry
             .and_then(|e| e.static_eval())
             .unwrap_or_else(|| engine.eval_cache.eval(board, key));
-        let corr = engine.corr.apply(&CorrIdx::new(board, None), raw);
+        let corr = engine.corr.apply(&CorrIdx::new(board, None), scale_static_eval(board, raw, &engine.search_params));
         tt_refine_eval(root_entry, corr, 0)
     };
     order_moves(
@@ -1725,7 +1765,9 @@ fn negamax_body(
         )
     };
     let corr_idx = raw_static_eval.map(|_| CorrIdx::new(board, prev_move));
-    let corr_eval = raw_static_eval.zip(corr_idx).map(|(raw, ci)| engine.corr.apply(&ci, raw));
+    let corr_eval = raw_static_eval
+        .zip(corr_idx)
+        .map(|(raw, ci)| engine.corr.apply(&ci, scale_static_eval(board, raw, &engine.search_params)));
     let static_eval = corr_eval.map(|ce| tt_refine_eval(tt_entry, ce, ply));
     search.static_evals[ply] = static_eval.unwrap_or(NO_EVAL);
     // Improving: our static eval beats the one from our previous move (two plies up).
@@ -2418,6 +2460,7 @@ fn quiescence(
     };
     // Stand pat on the corrected eval; the TT keeps the raw one (see negamax).
     let static_eval = raw_static_eval
+        .map(|raw| scale_static_eval(board, raw, &engine.search_params))
         .map(|raw| tt_refine_eval(tt_entry, engine.corr.apply(&CorrIdx::new(board, prev_move), raw), ply));
 
     // Fail-soft: `best` is the highest score seen (stand pat included) and is

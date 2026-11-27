@@ -991,6 +991,10 @@ struct SearchParams {
     // Node-fraction time management, see NODE_TM_MIN_DEPTH in search.rs.
     node_tm_base: u64,
     node_tm_scale: u64,
+    // Material drawishness scaling of the static eval (search.rs scale_static_eval), percent.
+    mat_scale_base: i32,
+    mat_scale_pawn: i32,
+    ocb_scale: i32,
 }
 
 impl Default for SearchParams {
@@ -1018,6 +1022,9 @@ impl Default for SearchParams {
             lmr_extra_move_index: 7,
             node_tm_base: 175,
             node_tm_scale: 75,
+            mat_scale_base: 50,
+            mat_scale_pawn: 15,
+            ocb_scale: 50,
         }
     }
 }
@@ -1250,6 +1257,9 @@ fn main() {
             println!("option name LmrExtraMoveIndex type spin default 7 min 1 max 32");
             println!("option name NodeTmBase type spin default 175 min 110 max 300");
             println!("option name NodeTmScale type spin default 75 min 50 max 300");
+            println!("option name MatScaleBase type spin default 50 min 0 max 100");
+            println!("option name MatScalePawn type spin default 15 min 0 max 50");
+            println!("option name OcbScale type spin default 50 min 0 max 100");
             println!("uciok");
             flush_stdout();
             continue;
