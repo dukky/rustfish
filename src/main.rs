@@ -1216,7 +1216,7 @@ fn main() {
 
         if cmd == "uci" {
             println!("id name Rustfish ZeroDep");
-            println!("id author pi+chatgpt");
+            println!("id author dukky");
             println!("option name Hash type spin default 64 min 1 max 2048");
             println!("option name Threads type spin default 1 min 1 max 32");
             println!("option name Clear Hash type button");
