@@ -52,10 +52,65 @@ Claude models in Claude Code, as the `Co-Authored-By` trailers in the git histor
 change is accepted or rejected by statistical game testing (SPRT) on GitHub Actions, not by review alone,
 and the engine's strength numbers come from games against independently rated engines.
 
-## Build and run
+## Download and run
+
+Binaries are on the [releases page](https://github.com/dukky/rustfish/releases), named
+`<name>-<version>-<os>-<tier>`. The engine speaks UCI: add it to a GUI (Cute Chess, Arena, Banksia,
+En Croissant, ...) as a UCI engine. It has no window of its own.
+
+| Your machine | File |
+|---|---|
+| Windows / Linux PC with AVX2 (Intel 2013+ Core, AMD Ryzen; most PCs) | `windows-x86-64-v3.exe` / `linux-x86-64-v3` |
+| Older x86-64 PC without AVX2 (or v3 will not start) | `windows-x86-64-v2.exe` / `linux-x86-64-v2` |
+| Mac with Apple Silicon (M1 and later) | `macos-arm64` |
+| Intel Mac | `macos-x86-64` |
+| Linux on ARM64, 64-bit OS (Raspberry Pi 4/5, Graviton, Ampere) | `linux-aarch64` |
+
+There is no separate AVX-512 build: the `v3` binary detects AVX-512 and VNNI (including the 256-bit
+AVX-VNNI of Intel 12th gen and later) at startup and uses them when the CPU has them, for example Intel
+Ice/Tiger/Rocket Lake and Xeon Scalable, AMD Zen 4/5.
+`bench` prints the kernel in use (`NNUE SIMD`).
+
+How to tell what your CPU has:
+- **Windows:** find the model in Settings > System > About (or PowerShell
+  `(Get-CimInstance Win32_Processor).Name`). Core i3/i5/i7/i9 4th generation (Haswell) or newer and
+  every AMD Ryzen have AVX2; some Pentium/Celeron/Atom chips do not. For certainty, Sysinternals
+  `coreinfo -f` lists `AVX2` and `AVX-512` with a `*` when present.
+- **Linux:** `grep -o -w -E 'avx2|avx512bw|avx512_vnni' /proc/cpuinfo | sort -u`.
+- **macOS:** `uname -m` prints `arm64` (Apple Silicon) or `x86_64` (Intel).
+
+First start: on Linux and macOS `chmod +x` the file. The binaries are not code-signed, so macOS may
+refuse to open a download until you run `xattr -d com.apple.quarantine <file>`, and Windows SmartScreen
+may ask you to confirm ("More info", "Run anyway").
+
+Main UCI options:
+
+| Option | Default | Notes |
+|---|---|---|
+| `Hash` | 64 | transposition table in MB (1-2048); 256 or more for long games |
+| `Threads` | 1 | search threads (Lazy SMP); rating lists usually test with 1 |
+| `SyzygyPath` | empty | Syzygy tablebase folder(s), separated by `;` on Windows and `:` elsewhere |
+| `Move Overhead` | 10 | ms kept back per move; raise to 50-100 if it loses on time (slow GUI, online play) |
+| `EvalFile` | empty | load another net; empty means the net built into the binary |
+
+Recommended GUI settings: protocol UCI; set `Hash` and `Threads` to taste and leave the other options
+(including the search tuning ones) at their defaults; use the GUI's opening book (`OwnBook` is off by
+default); pondering is not supported. To check a download, type `bench` in a console: the node count
+must match the release notes.
+
+On Linux, the engine asks for transparent huge pages for its big tables, which is worth several percent
+of speed. It only gets them if `/sys/kernel/mm/transparent_hugepage/enabled` shows `[madvise]` (the
+usual default) or `[always]`.
+
+### Build from source
+
+Needs only a Rust toolchain (no other dependencies):
 
 ```bash
-cargo build --release
-./target/release/rustfish    # UCI engine
+RUSTFLAGS="-C target-cpu=native" cargo build --release   # tuned for this CPU
+./target/release/rustfish                                # UCI engine
 printf 'bench\nquit\n' | ./target/release/rustfish
 ```
+
+`target-cpu=native` matters on x86-64: without it the default target lacks POPCNT and AVX2. On Apple
+Silicon a plain `cargo build --release` is just as fast.
