@@ -9,6 +9,10 @@ build = "build.rs"
 name = "nnue-trainer-cuda"
 path = "src/main.rs"
 
+[features]
+# H1 = 32 heads (nnue-trainer's `h1-32`; the kernels get -DH1=32).
+h1-32 = ["nnue-trainer/h1-32"]
+
 [dependencies]
 nnue-trainer = { path = "../nnue-trainer" }
 

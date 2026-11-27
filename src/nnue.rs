@@ -135,6 +135,25 @@ pub(crate) const LAYOUT_KB8M: KingLayout = KingLayout {
     mirror: true,
 };
 
+/// Sixteen buckets with mirroring (`kb16m`): kb8m refined where kings
+/// spend their time: back and second rank one bucket per file, ranks 3, 4
+/// and 5 split into edge (a-b) and centre (c-d), rank 6, ranks 7-8.
+#[allow(dead_code)]
+#[rustfmt::skip]
+pub(crate) const LAYOUT_KB16M: KingLayout = KingLayout {
+    buckets: mirrored([
+         0,  1,  2,  3,
+         4,  5,  6,  7,
+         8,  8,  9,  9,
+        10, 10, 11, 11,
+        12, 12, 13, 13,
+        14, 14, 14, 14,
+        15, 15, 15, 15,
+        15, 15, 15, 15,
+    ]),
+    mirror: true,
+};
+
 /// The layout the engine runs. Switching it changes the net format (KB
 /// blocks of 768 feature rows): embed a net trained with the same layout.
 pub(crate) const KING_LAYOUT: KingLayout = LAYOUT_KB8M;
@@ -1876,13 +1895,14 @@ mod tests {
     layout!(Kb4, LAYOUT_KB4);
     layout!(Kb4m, LAYOUT_KB4M);
     layout!(Kb8m, LAYOUT_KB8M);
+    layout!(Kb16m, LAYOUT_KB16M);
 
     #[test]
     fn layouts_are_well_formed() {
         assert_eq!((None1::KB, None1::REFRESH), (1, false));
         assert_eq!((M1::KB, M1::REFRESH), (1, true));
-        assert_eq!((Kb4::KB, Kb4m::KB, Kb8m::KB), (4, 4, 8));
-        for l in [LAYOUT_NONE, LAYOUT_M1, LAYOUT_KB4, LAYOUT_KB4M, LAYOUT_KB8M] {
+        assert_eq!((Kb4::KB, Kb4m::KB, Kb8m::KB, Kb16m::KB), (4, 4, 8, 16));
+        for l in [LAYOUT_NONE, LAYOUT_M1, LAYOUT_KB4, LAYOUT_KB4M, LAYOUT_KB8M, LAYOUT_KB16M] {
             let kb = layout_buckets(&l);
             for b in 0..kb as u8 {
                 assert!(l.buckets.contains(&b), "bucket {b} unused");
@@ -1950,6 +1970,13 @@ mod tests {
         assert_eq!(king_ctx::<Kb4>(Color::Black, 60), KingCtx { base: 768, flip: 0 });
         // Black king on d7 (51): oriented d2 (11) -> bucket 2.
         assert_eq!(king_ctx::<Kb4>(Color::Black, 51), KingCtx { base: 2 * 768, flip: 0 });
+        // kb16m: White king g2 (14) mirrors to b2, bucket 5; Black king d6
+        // (43): oriented d3 (19), centre of rank 3, bucket 9, no flip;
+        // Black king on h1 (7): oriented h8 (63) -> a8, bucket 15.
+        assert_eq!(king_ctx::<Kb16m>(Color::White, 14), KingCtx { base: 5 * 768, flip: 7 });
+        assert_eq!(king_ctx::<Kb16m>(Color::Black, 43), KingCtx { base: 9 * 768, flip: 0 });
+        assert_eq!(king_ctx::<Kb16m>(Color::Black, 7), KingCtx { base: 15 * 768, flip: 7 });
+        assert_eq!(feature(Color::White, wp, 8, king_ctx::<Kb16m>(Color::White, 14)), 5 * 768 + 15);
         // m1: one bucket, only the flip.
         assert_eq!(king_ctx::<M1>(Color::White, 3), KingCtx::ZERO);
         assert_eq!(king_ctx::<M1>(Color::White, 4), KingCtx { base: 0, flip: 7 });
@@ -2042,6 +2069,7 @@ mod tests {
         incremental_matches_refresh_for::<Kb4>(6);
         incremental_matches_refresh_for::<Kb4m>(7);
         incremental_matches_refresh_for::<Kb8m>(8);
+        incremental_matches_refresh_for::<Kb16m>(9);
     }
 
     #[test]
@@ -2053,6 +2081,11 @@ mod tests {
         assert_eq!(bytes.len(), (8 * 768 * H + H + BUCKETS * (2 * H + 1) + head_words) * 2);
         assert!(Network::from_bytes_kb(&bytes, 8).is_ok());
         assert!(Network::from_bytes_kb(&bytes, 1).is_err());
+        let net16 = Network::random_kb(12, 64, 100, 16);
+        let bytes16 = net16.to_bytes();
+        assert_eq!(bytes16.len(), net_bytes(16));
+        assert!(Network::from_bytes_kb(&bytes16, 16).is_ok());
+        assert!(Network::from_bytes_kb(&bytes16, 8).is_err());
     }
 
     #[test]

@@ -735,7 +735,7 @@ impl Backend for GpuTrainer {
             launch(k.backward_head_w1, (sh.head_in().div_ceil(256) as u32, ch * bu), 256, st, &[P(self.hin.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
             mark(8);
             let small = sh.head_len() - H1 * sh.head_in();
-            launch(k.backward_head_small, (bu, ch), small.div_ceil(32) as u32 * 32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
+            launch(k.backward_head_small, (bu, ch), (small.div_ceil(32) * 32).min(1024) as u32, st, &[P(self.gout.ptr), P(self.hsc.ptr), P(self.phead.ptr), P(sl.bidx.ptr), P(sl.bcnt.ptr), I(hi), I(bi), I(ch as i32), I(hd)]);
             mark(9);
             let nh = sh.buckets * sh.head_len();
             launch(k.reduce_head, (nh.div_ceil(256) as u32, 1), 256, st, &[P(self.phead.ptr), P(self.gr.ptr), I(hi), I(bi), I(chunks as i32), I(hd)]);

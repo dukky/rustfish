@@ -15,13 +15,18 @@
 // sample scratch hs[HS] = z1 (H1) | z2 (H2) | dz1 (H1) | dz2 (H2), the CPU
 // trainer's layout (nnue_trainer::HS). UNTESTED ON CUDA (written without a
 // GPU; see README "Head: validating on the GPU").
+// H1 = 16, or 32 with the `h1-32` feature (build.rs passes -DH1=32).
+#ifndef H1
 #define H1 16
+#endif
 #define H2 32
-#define HS 96
+#define HS (2 * (H1 + H2))
 #define HSMALL (H1 + H2 * H1 + H2 + H2 + 1)
+// backward_head_small's parameters per thread (blocks of <= 1024 threads).
+#define HSP ((HSMALL + 1023) / 1024)
 // hd: 1 = dense head (2H SCReLU inputs), 2 = pairwise (H inputs, see
 // nnue_trainer::pw_in; linear SCReLU output kept), 3 = pairwise-skip (no
-// linear output; L1 neuron 15 is added to the output, 0..15 feed L2).
+// linear output; L1 neuron H1 - 1 is added to the output, the rest feed L2).
 // Pairwise heads run the fake-quantised forward: W1 as q_w1, inputs as
 // pw_in (the CPU trainer's functions).
 #define PW_QX (65025.0f / 512.0f)
@@ -619,8 +624,9 @@ extern "C" __global__ void __launch_bounds__(256) backward_head_w1(const float *
     for (int q = 0; q < H1; q++) out[(size_t)q * nin + cc] = g[q];
 }
 
-// b1, W2, b2, W3, b3 (HSMALL params per bucket, thread = param), grid
-// (buckets, chunks); the same per-bucket sample list as backward_head_w1.
+// b1, W2, b2, W3, b3 (HSMALL params per bucket; thread t: params t,
+// t + blockDim, ... (one with H1 = 16)), grid (buckets, chunks); the same
+// per-bucket sample list as backward_head_w1.
 #define HST 32
 extern "C" __global__ void backward_head_small(const float *gout, const float *hs, float *ph, const uint32_t *bidx,
                                                 const uint32_t *bcnt, int H, int buckets, int chunks, int hd) {
@@ -631,34 +637,44 @@ extern "C" __global__ void backward_head_small(const float *gout, const float *h
     // The list's hs rows and gout staged HST samples at a time (each thread
     // still sums its parameter's terms in list order).
     __shared__ float rows[HST][HS], gs[HST];
-    float sm = 0.0f;
+    float sm[HSP];
+#pragma unroll
+    for (int i = 0; i < HSP; i++) sm[i] = 0.0f;
     for (int u0 = 0; u0 < nj; u0 += HST) {
         int nu = min(HST, nj - u0);
         __syncthreads();
         for (int k = t; k < nu * HS; k += blockDim.x) rows[k / HS][k % HS] = hs[(size_t)js[u0 + k / HS] * HS + k % HS];
         if (t < nu) gs[t] = gout[js[u0 + t]];
         __syncthreads();
-        if (t >= HSMALL) continue;
-        for (int u = 0; u < nu; u++) {
-            const float *z = rows[u];
-            const float *z1 = z, *z2 = z + H1, *dz1 = z + H1 + H2, *dz2 = z + 2 * H1 + H2;
-            float g = gs[u];
-            if (t < H1) {
-                sm += dz1[t];
-            } else if (t < H1 + H2 * H1) {
-                int m = (t - H1) / H1, k = (t - H1) % H1;
-                // Pairwise-skip: the skip neuron does not feed L2.
-                if (!(hd == 3 && k == H1 - 1)) sm += dz2[m] * sq01(z1[k]);
-            } else if (t < H1 + H2 * H1 + H2) {
-                sm += dz2[t - H1 - H2 * H1];
-            } else if (t < H1 + H2 * H1 + 2 * H2) {
-                sm += g * sq01(z2[t - H1 - H2 * H1 - H2]);
-            } else {
-                sm += g;
+#pragma unroll
+        for (int i = 0; i < HSP; i++) {
+            int q = t + i * blockDim.x;
+            if (q >= HSMALL) break;
+            for (int u = 0; u < nu; u++) {
+                const float *z = rows[u];
+                const float *z1 = z, *z2 = z + H1, *dz1 = z + H1 + H2, *dz2 = z + 2 * H1 + H2;
+                float g = gs[u];
+                if (q < H1) {
+                    sm[i] += dz1[q];
+                } else if (q < H1 + H2 * H1) {
+                    int m = (q - H1) / H1, k = (q - H1) % H1;
+                    // Pairwise-skip: the skip neuron does not feed L2.
+                    if (!(hd == 3 && k == H1 - 1)) sm[i] += dz2[m] * sq01(z1[k]);
+                } else if (q < H1 + H2 * H1 + H2) {
+                    sm[i] += dz2[q - H1 - H2 * H1];
+                } else if (q < H1 + H2 * H1 + 2 * H2) {
+                    sm[i] += g * sq01(z2[q - H1 - H2 * H1 - H2]);
+                } else {
+                    sm[i] += g;
+                }
             }
         }
     }
-    if (t < HSMALL) ph[((size_t)chunk * buckets + b) * head_len(H, hd) + H1 * head_in(H, hd) + t] = sm;
+#pragma unroll
+    for (int i = 0; i < HSP; i++) {
+        int q = t + i * blockDim.x;
+        if (q < HSMALL) ph[((size_t)chunk * buckets + b) * head_len(H, hd) + H1 * head_in(H, hd) + q] = sm[i];
+    }
 }
 
 // Head gradient = the chunk partials summed in chunk order.

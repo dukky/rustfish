@@ -44,14 +44,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 KING_LAYOUTS = {"none": ("LAYOUT_NONE", 1), "m1": ("LAYOUT_M1", 1), "kb4": ("LAYOUT_KB4", 4),
-                "kb4m": ("LAYOUT_KB4M", 4), "kb8m": ("LAYOUT_KB8M", 8)}
+                "kb4m": ("LAYOUT_KB4M", 4), "kb8m": ("LAYOUT_KB8M", 8),
+                "kb16m": ("LAYOUT_KB16M", 16)}
 REC = 32
 
 
-def head_net_bytes(h, buckets, kb):
-    """A pairwise head: W1 is 16 x H per output bucket."""
+def head_net_bytes(h, buckets, kb, h1=16):
+    """A pairwise head: W1 is H1 x H per output bucket."""
     plain = kb * 768 * h + h + buckets * (2 * h + 1)
-    head = buckets * (16 * h + 16 + 32 * 16 + 32 + 32 + 1)
+    head = buckets * (h1 * h + h1 + 32 * h1 + 32 + 32 + 1)
     return 2 * (plain + head)
 
 
@@ -104,6 +105,8 @@ def main():
                     help="HEAD = false and a plain net of the same H (a speed baseline); implies --no-check")
     ap.add_argument("--skip-head", action="store_true",
                     help="a --head pairwise-skip net (no linear output): sets head::SKIP")
+    ap.add_argument("--h1", type=int, default=16, choices=(16, 32),
+                    help="head L1 width (32: nets from an `--features h1-32` trainer; pass that trainer)")
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--write-fixture", action="store_true",
                     help="after a passing check, write the trainer evals to net/head_fixture.txt (the gate fixture)")
@@ -112,7 +115,7 @@ def main():
     net = Path(args.net).expanduser().resolve()
     layout, kb = KING_LAYOUTS[args.king_buckets]
     args.no_check |= args.plain
-    want = head_net_bytes(args.hidden, args.buckets, kb)
+    want = head_net_bytes(args.hidden, args.buckets, kb, args.h1)
     if args.plain:
         want = 2 * (kb * 768 * args.hidden + args.hidden + args.buckets * (2 * args.hidden + 1))
     if net.stat().st_size != want:
@@ -136,6 +139,7 @@ def main():
     head_rs = wd / "src/nnue_head.rs"
     hsrc = head_rs.read_text()
     hsrc = set_const(hsrc, "SKIP", "bool", "true" if args.skip_head else "false")
+    hsrc = set_const(hsrc, "H1", "usize", args.h1)
     head_rs.write_text(hsrc)
     shutil.copyfile(net, wd / "net/nnue.bin")
     env = dict(os.environ, CARGO_TARGET_DIR=str(wd / "target"))

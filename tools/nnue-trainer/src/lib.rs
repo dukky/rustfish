@@ -99,7 +99,7 @@ const fn mirrored(half: [u8; 32]) -> [u8; 64] {
 
 /// Index = layout id stored in checkpoints (0 = `none`, the original net).
 #[rustfmt::skip]
-const LAYOUTS: [KingLayout; 5] = [
+const LAYOUTS: [KingLayout; 6] = [
     KingLayout { name: "none", buckets: [0; 64], mirror: false },
     KingLayout { name: "m1", buckets: [0; 64], mirror: true },
     KingLayout {
@@ -141,6 +141,27 @@ const LAYOUTS: [KingLayout; 5] = [
             7, 7, 7, 7,
             7, 7, 7, 7,
             7, 7, 7, 7,
+        ]),
+        mirror: true,
+    },
+    // Sixteen buckets with mirroring (`kb16m`): kb8m refined where kings
+    // spend their time. Back rank and second rank one bucket per file
+    // (castled / uncastled / walked-up kings), ranks 3, 4 and 5 split into
+    // edge (files a-b) and centre (c-d), rank 6 one, ranks 7-8 one. Shares
+    // of king squares (both perspectives, val-g12): rank 1 49%, rank 2 23%,
+    // rank 3 12%, rank 4 7%, rank 5 4%, ranks 6-8 5%; positions with <= 12
+    // pieces put 38% of kings on ranks 3-4.
+    KingLayout {
+        name: "kb16m",
+        buckets: mirrored([
+             0,  1,  2,  3,
+             4,  5,  6,  7,
+             8,  8,  9,  9,
+            10, 10, 11, 11,
+            12, 12, 13, 13,
+            14, 14, 14, 14,
+            15, 15, 15, 15,
+            15, 15, 15, 15,
         ]),
         mirror: true,
     },
@@ -481,8 +502,10 @@ pub fn pw_dacc(x: f32, lin: f32, dp: f32, cp: f32) -> f32 {
     }
 }
 
-/// Head layer sizes.
-pub const H1: usize = 16;
+/// Head layer sizes. H1 = 16 (the format of every net so far); the cargo
+/// feature `h1-32` builds a trainer for H1 = 32 heads (a different net
+/// file size: an H1 = 32 binary neither reads nor writes H1 = 16 nets).
+pub const H1: usize = if cfg!(feature = "h1-32") { 32 } else { 16 };
 pub const H2: usize = 32;
 /// Export scale of head params (fine, not engine-shaped: for loss checks).
 const HEAD_Q: f32 = 8192.0;
@@ -546,14 +569,14 @@ impl Shape {
         if s.file_bytes() == bytes {
             return Some(s);
         }
-        // Head: per bucket 16*2H + (16 + 16*32 + 32 + 32 + 1) more words.
+        // Head: per bucket H1*2H + (H1 + H1*32 + 32 + 32 + 1) more words.
         let fixed = buckets * (1 + H1 + H2 * H1 + 2 * H2 + 1);
         let h = words.checked_sub(fixed)? / (kb * INPUTS + 1 + 2 * buckets + buckets * 2 * H1);
         let s = Shape { h, buckets, kb, hd: 1 };
         if s.file_bytes() == bytes {
             return Some(s);
         }
-        // Pairwise: W1 is 16 x H per bucket.
+        // Pairwise: W1 is H1 x H per bucket.
         let h = words.checked_sub(fixed)? / (kb * INPUTS + 1 + 2 * buckets + buckets * H1);
         let hd = if HEAD_SKIP.load(std::sync::atomic::Ordering::Relaxed) { 3 } else { 2 };
         let s = Shape { h, buckets, kb, hd };
@@ -2691,7 +2714,13 @@ mod tests {
         }
         // The engine's tables, parsed from its source, must be identical.
         let src = include_str!("../../../src/nnue.rs");
-        for (engine, name) in [("LAYOUT_KB4", "kb4"), ("LAYOUT_KB4M", "kb4m"), ("LAYOUT_KB8M", "kb8m")] {
+        let kb16m = KingLayout::by_name("kb16m");
+        assert_eq!(kb16m.kb(), 16);
+        assert_eq!(&kb16m.buckets[..24], &[0, 1, 2, 3, 3, 2, 1, 0, 4, 5, 6, 7, 7, 6, 5, 4, 8, 8, 9, 9, 9, 9, 8, 8]);
+        assert!((0..16).all(|b| kb16m.buckets.contains(&b)));
+        // Checkpoint ids of the older layouts are unchanged.
+        assert_eq!(["none", "m1", "kb4", "kb4m", "kb8m", "kb16m"].map(|n| KingLayout::by_name(n).id()), [0, 1, 2, 3, 4, 5]);
+        for (engine, name) in [("LAYOUT_KB4", "kb4"), ("LAYOUT_KB4M", "kb4m"), ("LAYOUT_KB8M", "kb8m"), ("LAYOUT_KB16M", "kb16m")] {
             let start = src.find(&format!("const {engine}: KingLayout")).unwrap();
             let body = &src[start..start + src[start..].find("};").unwrap()];
             let nums: Vec<u8> = body

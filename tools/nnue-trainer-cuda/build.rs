@@ -23,8 +23,10 @@ fn main() {
         std::fs::write(&out, "").unwrap();
         return;
     }
+    // The `h1-32` feature (H1 = 32 heads, as nnue-trainer's).
+    let h1 = if std::env::var("CARGO_FEATURE_H1_32").is_ok() { "-DH1=32" } else { "-DH1=16" };
     let st = Command::new(&nvcc)
-        .args(["-ptx", "-O3", &format!("-arch={arch}"), "-Wno-deprecated-gpu-targets", "src/kernels.cu", "-o"])
+        .args(["-ptx", "-O3", &format!("-arch={arch}"), "-Wno-deprecated-gpu-targets", h1, "src/kernels.cu", "-o"])
         .arg(&out)
         .status()
         .unwrap_or_else(|e| panic!("cannot run {nvcc}: {e} (set NVCC)"));

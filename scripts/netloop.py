@@ -96,7 +96,8 @@ def parse_seeds(s):
 
 # King (input) bucket layouts: --king-buckets name -> (src/nnue.rs constant, KB).
 KING_LAYOUTS = {"none": ("LAYOUT_NONE", 1), "m1": ("LAYOUT_M1", 1), "kb4": ("LAYOUT_KB4", 4),
-                "kb4m": ("LAYOUT_KB4M", 4), "kb8m": ("LAYOUT_KB8M", 8)}
+                "kb4m": ("LAYOUT_KB4M", 4), "kb8m": ("LAYOUT_KB8M", 8),
+                "kb16m": ("LAYOUT_KB16M", 16)}
 KING_LAYOUT_RE = r"^(pub\(crate\) const KING_LAYOUT: KingLayout = )(LAYOUT_\w+);"
 
 

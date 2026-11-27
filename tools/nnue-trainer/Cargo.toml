@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+# H1 = 32 head (L1 width) instead of 16: a separate binary, another net format.
+h1-32 = []
+
 [[bin]]
 name = "nnue-trainer"
 path = "src/main.rs"
