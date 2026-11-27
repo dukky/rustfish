@@ -1046,27 +1046,39 @@ pub(crate) mod kernels {
         // SAFETY: AVX2 per caller; offsets are < H - 16 (lanes) / HALF - 32 (bytes).
         unsafe {
             let (lo, hi) = (_mm256_setzero_si256(), _mm256_set1_epi16(255));
-            let ld = |p: *const i16| _mm256_loadu_si256(p as *const __m256i);
-            let mut delta = |o: usize| {
-                let mut v = ld(src.as_ptr().add(o));
-                for a in &adds[..NA] {
-                    v = _mm256_add_epi16(v, ld(a.as_ptr().add(o)));
-                }
-                for s in &subs[..NS] {
-                    v = _mm256_sub_epi16(v, ld(s.as_ptr().add(o)));
-                }
-                _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
-                _mm256_min_epi16(_mm256_max_epi16(v, lo), hi)
-            };
+            // Macros, not closures: this body is inlined into #[target_feature]
+            // wrappers, but a closure here is compiled without AVX2, so in
+            // builds without compile-time AVX2 (x86-64-v2, plain cargo build)
+            // it and every intrinsic in it became out-of-line calls (~7x
+            // slower NPS on a Zen 4 runner).
+            macro_rules! ld {
+                ($p:expr) => {
+                    _mm256_loadu_si256($p as *const __m256i)
+                };
+            }
+            macro_rules! delta {
+                ($o:expr) => {{
+                    let o: usize = $o;
+                    let mut v = ld!(src.as_ptr().add(o));
+                    for a in &adds[..NA] {
+                        v = _mm256_add_epi16(v, ld!(a.as_ptr().add(o)));
+                    }
+                    for s in &subs[..NS] {
+                        v = _mm256_sub_epi16(v, ld!(s.as_ptr().add(o)));
+                    }
+                    _mm256_storeu_si256(out.as_mut_ptr().add(o) as *mut __m256i, v);
+                    _mm256_min_epi16(_mm256_max_epi16(v, lo), hi)
+                }};
+            }
             let mut sum = [_mm256_setzero_si256(); 4];
             let mut bv = _mm_set1_epi16(base as i16);
             for i in (0..HALF).step_by(32) {
-                let (a0, a1) = (delta(i), delta(i + 16));
-                let (b0, b1) = (delta(i + HALF), delta(i + HALF + 16));
+                let (a0, a1) = (delta!(i), delta!(i + 16));
+                let (b0, b1) = (delta!(i + HALF), delta!(i + HALF + 16));
                 if DOT {
                     // c in [0, 255], |w| <= 127: c * w fits i16, madd sums two exact i32 products.
                     for (k, (c, o)) in [(a0, i), (a1, i + 16), (b0, i + HALF), (b1, i + HALF + 16)].into_iter().enumerate() {
-                        let cw = _mm256_mullo_epi16(c, ld(w.as_ptr().add(o)));
+                        let cw = _mm256_mullo_epi16(c, ld!(w.as_ptr().add(o)));
                         // Four sums: with VNNI each is a dependent vpdpwssd chain.
                         sum[k] = dpwssd::<V>(sum[k], cw, c);
                     }
