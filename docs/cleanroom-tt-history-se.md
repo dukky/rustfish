@@ -204,9 +204,10 @@ increasing slowly with depth keeps the extension rate roughly level.
 
 Outcome with `v` the verification score:
 1. `v < sbeta`: singular, `extension = 1`.
-2. else if `sbeta >= beta`: at least one other move beats beta at reduced
-   depth while the TT move is expected to as well: return `sbeta`
-   (multi-cut; not on mate-range scores, guaranteed by eligibility).
+2. else if `sbeta >= beta` and the node is not a PV node: at least one
+   other move beats beta at reduced depth while the TT move is expected to
+   as well: return `sbeta` (multi-cut; not on mate-range scores, guaranteed
+   by eligibility; never at PV nodes, which need an exact score).
 3. else if `tt_score >= beta`: `extension = -SeNegativeExtension`
    (the TT move is not alone and already expected to fail high).
 4. else 0.
@@ -217,7 +218,14 @@ inside it): of first-move visits at depth >= 6 (79.4k), 7.3% got +1, 3.0%
 got -1, 4.9% returned early, none got +-2. The new design should land in the
 same broad band (several percent each), not necessarily the same numbers;
 then an STC non-regression SPRT (fixed-node CI screens first if it lags),
-then LTC non-regression (coordinator). Expect to iterate on the margin: this
+then LTC non-regression (coordinator).
+
+Measured on the first implementation (bench 16, same counters): of 79.3k
+first-move visits at depth >= 6, 17.0% got +1, 5.8% got -1, 13.9% returned
+early. A margin sweep (base:step_x2 8:3, 16:4, 24:4, 16:6, 30:6) moved the
++1 rate only between 13% and 17% (the -1 rate rose to 13% at the widest), so
+the rate is set mostly by eligibility, not by the margin; the games decide.
+The first SPRT uses the spec constants (8:3). Expect to iterate on the margin: this
 component is worth ~47 Elo.
 
 ## Credits

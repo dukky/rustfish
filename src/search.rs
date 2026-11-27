@@ -3,9 +3,6 @@ use crate::movegen::{threat_maps, CheckInfo, ThreatMaps};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MIN_PARALLEL_DEPTH: i32 = 6;
-// Singular extensions: minimum depth, and singular-beta margin per ply of depth.
-const SE_MIN_DEPTH: i32 = 8;
-const SE_MARGIN_PER_DEPTH: i32 = 2;
 // Iteration cap for timed searches; leaves MAX_PLY headroom for extensions and qsearch.
 const MAX_SEARCH_DEPTH: i32 = 64;
 // Sudden-death clocks are budgeted as if this many moves remain.
@@ -1963,53 +1960,15 @@ fn negamax_body(
         let early = approx_child_hash(key, board, mv, &engine.zobrist);
         engine.tt.prefetch(early);
         engine.eval_cache.prefetch(early);
-        // Singular extension: if every alternative to the TT move fails low
-        // against a margin below the TT score, the TT move is singular.
+        // Singular extension / multi-cut for the TT move (see singular_test).
         let mut extension = 0;
-        if stage == Stage::Tt && excluded.is_none() && depth >= SE_MIN_DEPTH {
-            if let Some(entry) = tt_entry {
-                let tt_score = score_from_tt(entry.score, ply);
-                if entry.best == Some(mv)
-                    && matches!(entry.bound, Bound::Lower | Bound::Exact)
-                    && entry.depth as i32 >= depth - 3
-                    && tt_score.abs() < MATE_SCORE - MAX_PLY as i32
-                {
-                    let singular_beta = tt_score - SE_MARGIN_PER_DEPTH * depth;
-                    search.excluded[ply] = Some(mv);
-                    // `depth` already carries this node's check extension and
-                    // the verification search re-enters this node, which adds
-                    // it again: take it off here so it counts once.
-                    let s = negamax(
-                        board,
-                        (depth - 1) / 2 - in_check as i32,
-                        singular_beta - 1,
-                        singular_beta,
-                        ply,
-                        search,
-                        engine,
-                        rep_stack,
-                        key,
-                        prev_move,
-                        false,
-                        Some(in_check),
-                        cut_node,
-                    );
-                    search.excluded[ply] = None;
-                    if search.stop {
-                        return 0;
-                    }
-                    if s < singular_beta {
-                        extension = 1;
-                    } else if singular_beta >= beta && beta - alpha <= 1 {
-                        // Multi-cut: the TT move and at least one alternative
-                        // both beat beta.
-                        return singular_beta;
-                    } else if tt_score >= beta {
-                        // Negative extension: not singular, and the TT score
-                        // already beats beta, so an alternative likely cuts too.
-                        extension = -params.se_negative_extension;
-                    }
-                }
+        if stage == Stage::Tt {
+            match singular_test(
+                board, depth, beta, ply, search, engine, rep_stack, key, prev_move, in_check, pv_node,
+                cut_node, mv, tt_entry,
+            ) {
+                Singular::Extend(e) => extension = e,
+                Singular::Cut(score) => return score,
             }
         }
         let quiet = match stage {
@@ -2337,6 +2296,91 @@ fn negamax_body(
 
     best
 }
+// Singular extension and multi-cut (clean-room design,
+// docs/cleanroom-tt-history-se.md). Ideas: singular extensions (Anantharaman,
+// Campbell and Hsu), multi-cut (Bjornsson and Marsland), negative extensions;
+// the shape and constants below are our own.
+
+/// Shallowest node that runs a singular verification (it searches ~half depth).
+const SE_DEPTH: i32 = 6;
+/// The TT entry may be at most this many plies shallower than the node.
+const SE_TT_DEPTH_SLACK: i32 = 3;
+/// Verification margin below the TT score: base + depth * step_x2 / 2 (cp).
+const SE_MARGIN_BASE: i32 = 8;
+const SE_MARGIN_STEP_X2: i32 = 3;
+
+enum Singular {
+    /// Plies to add to the TT move's search depth (negative = reduce).
+    Extend(i32),
+    /// The node fails high (or the search was stopped): return this score.
+    Cut(i32),
+}
+
+/// Decide the TT move's extension by searching the node without it.
+#[allow(clippy::too_many_arguments)]
+fn singular_test(
+    board: &mut Board,
+    depth: i32,
+    beta: i32,
+    ply: usize,
+    search: &mut Search,
+    engine: &mut EngineState,
+    rep_stack: &mut Vec<u64>,
+    key: u64,
+    prev_move: Option<Move>,
+    in_check: bool,
+    pv_node: bool,
+    cut_node: bool,
+    mv: Move,
+    tt_entry: Option<crate::tt::TTEntry>,
+) -> Singular {
+    let Some(entry) = tt_entry else {
+        return Singular::Extend(0);
+    };
+    if ply == 0
+        || depth < SE_DEPTH
+        || search.excluded[ply].is_some()
+        || entry.bound == Bound::Upper
+        || (entry.depth as i32) < depth - SE_TT_DEPTH_SLACK
+    {
+        return Singular::Extend(0);
+    }
+    let tt_score = score_from_tt(entry.score, ply);
+    if tt_score.abs() >= syzygy::TB_WIN - MAX_PLY as i32 {
+        return Singular::Extend(0);
+    }
+    let sbeta = tt_score - (SE_MARGIN_BASE + depth * SE_MARGIN_STEP_X2 / 2);
+    search.excluded[ply] = Some(mv);
+    let v = negamax_body(
+        board,
+        (depth - 1) / 2,
+        sbeta - 1,
+        sbeta,
+        ply,
+        search,
+        engine,
+        rep_stack,
+        key,
+        prev_move,
+        false,
+        Some(in_check),
+        cut_node,
+    );
+    search.excluded[ply] = None;
+    if search.stop {
+        return Singular::Cut(0);
+    }
+    if v < sbeta {
+        Singular::Extend(1)
+    } else if sbeta >= beta && !pv_node {
+        Singular::Cut(sbeta)
+    } else if tt_score >= beta {
+        Singular::Extend(-engine.search_params.se_negative_extension)
+    } else {
+        Singular::Extend(0)
+    }
+}
+
 
 /// |quiescence - static eval| for the side to move; 0 means the position is quiet.
 /// Used by the tuner's position extractor.
