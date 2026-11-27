@@ -24,6 +24,10 @@ on:
       version:
         description: "Version used in file names (default: Cargo.toml version + short sha). No release is created."
         default: ""
+      nps_ab:
+        description: "TEMP: Windows vs Linux NPS A/B of abl4-ctlA vs abl4-h15"
+        type: boolean
+        default: false
       measure_tiers:
         description: "Also time an x86-64-v4 build against v3 on AVX-512 runners"
         type: boolean
@@ -235,6 +239,42 @@ jobs:
             $P report -i p-$c.data --no-children --sort sym --stdio 2>/dev/null | grep -v '^#' | grep -v '^$' | grep '%' | head -25
             $P report -i p-$c.data --no-children --sort srcline --stdio 2>/dev/null | grep '%' | grep -v '^#' | head -40
           done
+
+  nps-ab:
+    if: github.event_name == 'workflow_dispatch' && inputs.nps_ab
+    name: nps-ab-${{ matrix.runner }}-${{ matrix.shard }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, ubuntu-latest]
+        shard: [1, 2]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build both refs (x86-64-v3)
+        run: |
+          case "$RUNNER_OS" in
+            Linux) lscpu | grep 'Model name' | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" | tee -a "$GITHUB_STEP_SUMMARY" ;;
+          esac
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          for ref in abl4-ctlA abl4-h15; do
+            git worktree add -q "../w-$ref" "origin/$ref"
+            name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "../w-$ref/Cargo.toml" | head -1)
+            (cd "../w-$ref" && RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release 2>&1 | tail -1)
+            cp "../w-$ref/target/release/$name$ext" "$ref$ext"
+          done
+          cp "abl4-ctlA$ext" "abl4-ctlA-copy$ext"
+          echo "EXT=$ext" >> "$GITHUB_ENV"
+      - name: Interleaved A/B
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" scripts/nps_ab.py "h1024:./abl4-ctlA$EXT" "h1024-copy:./abl4-ctlA-copy$EXT" "h1536:./abl4-h15$EXT" | tee -a "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: build
