@@ -544,6 +544,21 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 
 **Owner target (27 Nov): 3700 within a week if possible; no rented compute for now.** Own-hardware sprint: (1) tonight's merges (speed stack merged, TB ladder on, gen 12b + SPSA final + TM at LTC) +10-15; (2) **drawish-endgame / 50-move eval scaling** (agent started 27 Nov ~10:45, from the anchor-games conversion leak) +5-15; (3) datagen on main at max throughput (2.5k-node test decides Sat); (4) gen 13 = warm start from gen 12b on the grown pool with the recipe winners (+ H1536 if its test passes) Sat-Tue; (5) CI kept full (next SPSA on the new main, bug stacks). Realistic in a week: ~3650-3680.
 
+**Dropped-item audit (27 Nov, owner: "bake them into the plan, and pick them up this time").** Things we planned and never did, ranked by expected Elo per compute; each has a trigger. Check this list at every milestone.
+
+| Rank | Item | Origin | Why it slipped | Resource | Trigger / state |
+|---|---|---|---|---|---|
+| A1 | **More king buckets (kb16 mirrored)** reduced-scale arm vs ctlA | listed 26 Nov as a cheap capacity alternative to H1536 | never set up | agent (new layout in trainer + CUDA + engine) then GPU ~3 h | start the "net capacity" agent when the first current agent reports; arm runs before gen 13 if ready, else gen 14 |
+| A2 | **Wider head L1 (16 -> 32)** reduced-scale arm | same | never set up | same agent (H1 is a compile-time const in trainer/CUDA/engine) + GPU ~3 h | with A1 |
+| A3 | **Threat inputs, trained from the start + incremental + i8 threat rows** | owner 12 Nov: "fix and experiment during gen 9, bake into gen 10"; eval +58 at fixed depth, LTC -7 [-19, +5] after the speed pass (-20% NPS) | gen 10-12 went to king buckets, the pairwise head and data; never re-scheduled | agent (~1-2 days: rebase threat-inputs-v2 + cuda-threats onto the current recipe, incremental attack maps, i8 rows) then a reduced-scale arm | **gen 14 architecture candidate**; agent starts once usage allows after A1/A2 |
+| B1 | **Clover per-node gauge** (owner cadence 21 Nov: after every net merge and every ~3 search merges) | last on main 21 Nov (-178.2) | not re-run after gen 12 and ~10 search merges | CI only | **dispatched 27 Nov** on main |
+| B2 | `history-bonus-linear` next step **224*d** | 20 Nov: "next value 224*d if it passes"; 160*d merged +5.9 | never queued | CI (small branch) | next free CI lane |
+| B3 | **Quiet SEE prune margin 20*d^2 A/B** | provenance audit 26 Nov | never queued | CI (small branch) | with the clean-room work |
+| B4 | `lmr-protect-linear-r2` LTC | 25 Nov; chain script exited early | never ran | CI ~4 h | when CI is idle |
+| B5 | `perf-head-fuse-screlu` (2841118, ~2% M3, bench-identical) | parked "behind the shape gate" 17 Nov | never merged | agent rebase + `:speedup` | next speed pass |
+| C1 | Gen 12 passed only a non-regression LTC (bounds bug) | 27 Nov | ci.py bug, fixed 778a9e8 | none | covered by the next ladder |
+
+
 
 | # | Work | Resource | Cost | Why this rank | State |
 |---|---|---|---|---|---|
