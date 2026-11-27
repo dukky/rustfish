@@ -400,18 +400,6 @@ impl Search {
     }
 }
 
-/// Threat bits of a move for history indexing: whether `threats` (the
-/// opponent's attacks, or 0 with ThreatHistory off) covers its from/to squares.
-#[inline(always)]
-fn threat_slot(threats: u64, mv: Move) -> (usize, usize) {
-    (((threats >> mv.from) & 1) as usize, ((threats >> mv.to) & 1) as usize)
-}
-
-fn history_score(history: &HistoryTable, side: Color, threats: u64, mv: Move) -> i32 {
-    let (tf, tt) = threat_slot(threats, mv);
-    history[color_index(side)][tf][tt][mv.from as usize][mv.to as usize] as i32
-}
-
 /// Opponent threat maps at a node that orders quiets; all-zero (and free)
 /// when both threat features are off, which reproduces the threat-blind search.
 fn node_threat_maps(board: &Board, params: &SearchParams) -> ThreatMaps {
@@ -419,16 +407,6 @@ fn node_threat_maps(board: &Board, params: &SearchParams) -> ThreatMaps {
         threat_maps(board, board.side_to_move.opposite())
     } else {
         ThreatMaps::default()
-    }
-}
-
-/// The opponent attack mask history is indexed by (0 = threat-blind).
-#[inline(always)]
-fn history_threats(maps: &ThreatMaps, params: &SearchParams) -> u64 {
-    if params.threat_history {
-        maps.all
-    } else {
-        0
     }
 }
 
@@ -474,42 +452,12 @@ fn continuation_history_score(
         .unwrap_or(0)
 }
 
-/// Bound on |history| and |continuation history| under the gravity update.
-const HISTORY_MAX: i32 = 16_384;
-// The tables store i16 (see `HistoryTable`).
-const _: () = assert!(HISTORY_MAX <= i16::MAX as i32);
-/// Cap on a single history bonus/malus (reached at depth 10), so one deep
-/// cutoff moves an entry at most ~9% of the way to the bound.
-const HISTORY_BONUS_MAX: i32 = 1_536;
 /// LMR reduces a quiet one ply less when its child's static eval (our view)
 /// is above alpha - this margin. Measured with a what-if sampler (ext-diag): a
 /// reduced quiet that fails low but beats alpha at full depth is 6-10x more
 /// likely when the move's static result is within 25 cp of alpha or above
 /// (0.7-2.0%) than when it is 100+ cp below (0.005-0.1%).
 const LMR_CHILD_EVAL_SAFE_MARGIN: i32 = 25;
-
-/// Linear in depth: 82% of fail highs happen at depth 1-3, where 16 * d^2
-/// gave 16..144 and barely trained the tables (search-diagnosis-2026-11-19).
-fn history_bonus(depth: i32) -> i32 {
-    (160 * depth).min(HISTORY_BONUS_MAX)
-}
-
-/// "Gravity" update: h += delta - h * |delta| / HISTORY_MAX. Large values
-/// move less in their own direction and more against it, so entries
-/// self-limit to [-HISTORY_MAX, HISTORY_MAX] without a hard clamp.
-fn apply_gravity(h: &mut i16, delta: i32) {
-    let delta = delta.clamp(-HISTORY_MAX, HISTORY_MAX);
-    let v = *h as i32;
-    // |v| <= HISTORY_MAX and |delta| <= HISTORY_MAX keep the result within
-    // +-HISTORY_MAX, so the i16 store is exact.
-    *h = (v + delta - v * delta.abs() / HISTORY_MAX) as i16;
-}
-
-fn apply_history_delta(engine: &mut EngineState, side: Color, threats: u64, mv: Move, delta: i32) {
-    let (tf, tt) = threat_slot(threats, mv);
-    let h = &mut engine.history[color_index(side)][tf][tt][mv.from as usize][mv.to as usize];
-    apply_gravity(h, delta);
-}
 
 fn apply_continuation_history_delta(
     engine: &mut EngineState,
@@ -523,7 +471,7 @@ fn apply_continuation_history_delta(
     };
     let h = &mut engine.continuation_history[color_index(side)][prev.to as usize][mv.from as usize]
         [mv.to as usize];
-    apply_gravity(h, delta);
+    gravity_update(h, delta);
 }
 
 /// Capture-history slot of a capture: (moving kind, to, victim kind).
@@ -549,7 +497,7 @@ fn capture_history_score(engine: &EngineState, side: Color, board: &Board, mv: M
 
 fn apply_capture_history_delta(engine: &mut EngineState, side: Color, board: &Board, mv: Move, delta: i32) {
     let (m, t, v) = capture_slot(board, mv);
-    apply_gravity(&mut engine.capture_history[color_index(side)][m][t][v], delta);
+    gravity_update(&mut engine.capture_history[color_index(side)][m][t][v], delta);
 }
 
 /// Capture history counts this much less than one SEE unit in capture ordering
@@ -559,6 +507,82 @@ const CAPTURE_HISTORY_DIV: i32 = 8;
 /// losing capture that has often cut is kept to a deeper SEE loss, one that
 /// keeps failing is pruned sooner (the bound 16384 is worth 256 cp).
 const CAPTURE_HISTORY_SEE_DIV: i32 = 64;
+
+// Quiet-move history (clean-room design, docs/cleanroom-tt-history-se.md).
+// A move's history is the sum of two tables updated with the same bonus: a
+// context-free from-to table, and a piece-to table split by the move's danger
+// context (moving piece attacked by a cheaper enemy piece; destination
+// attacked by any enemy piece). Ideas: the history heuristic (Schaeffer) and
+// the self-limiting "gravity" update, both published; layout and constants
+// are our own.
+
+/// Bound of every one-entry-per-move gravity table (continuation, capture):
+/// between one and two killer-bonus steps (10000) in the move picker.
+const GRAVITY_CAP: i32 = 15_000;
+/// Bound of each of the two quiet-history tables; their sum spans +-GRAVITY_CAP.
+const QUIET_HALF_CAP: i32 = GRAVITY_CAP / 2;
+/// Largest single history bonus: 12% of the cap.
+const BONUS_LIMIT: i32 = 1_800;
+// The tables store i16: gravity never leaves +-cap, and one update can
+// overshoot the cap by at most a rounding step.
+const _: () = assert!(GRAVITY_CAP + BONUS_LIMIT < i16::MAX as i32);
+
+/// Bonus for a beta cutoff at `depth` (and malus for the quiets tried before it).
+#[inline]
+fn quiet_bonus(depth: i32) -> i32 {
+    let d = depth.max(0);
+    (20 * d * d + 40 * d).min(BONUS_LIMIT)
+}
+
+/// Self-limiting update towards +-cap: h += delta - h * |delta| / cap.
+#[inline]
+fn gravity_toward(h: &mut i16, delta: i32, cap: i32) {
+    let delta = delta.clamp(-BONUS_LIMIT, BONUS_LIMIT);
+    let cur = *h as i32;
+    let next = cur + delta - cur * delta.abs() / cap;
+    *h = next.clamp(-cap, cap) as i16;
+}
+
+#[inline]
+fn gravity_update(h: &mut i16, delta: i32) {
+    gravity_toward(h, delta, GRAVITY_CAP);
+}
+
+/// Opponent attack maps the quiet history is indexed with: the node's maps,
+/// or all-zero (context 0 everywhere) with ThreatHistory off.
+#[inline(always)]
+fn quiet_ctx_maps(maps: &ThreatMaps, params: &SearchParams) -> ThreatMaps {
+    if params.threat_history {
+        *maps
+    } else {
+        ThreatMaps::default()
+    }
+}
+
+/// (piece kind index, danger context 0..4) of a quiet move.
+#[inline(always)]
+fn quiet_slot(board: &Board, maps: &ThreatMaps, mv: Move) -> (usize, usize) {
+    let kind = board.squares[mv.from as usize].map(|p| p.kind).unwrap_or(PieceType::Pawn);
+    let threatened = (maps.by_lesser(kind) >> mv.from) & 1;
+    let contested = (maps.all >> mv.to) & 1;
+    (crate::bitboard::kind_index(kind), (threatened | (contested << 1)) as usize)
+}
+
+#[inline(always)]
+fn quiet_history(history: &HistoryTable, board: &Board, maps: &ThreatMaps, mv: Move) -> i32 {
+    let s = color_index(board.side_to_move);
+    let (kind, ctx) = quiet_slot(board, maps, mv);
+    history.from_to[s][mv.from as usize][mv.to as usize] as i32
+        + history.piece_to[s][ctx][kind][mv.to as usize] as i32
+}
+
+fn update_quiet_history(engine: &mut EngineState, board: &Board, maps: &ThreatMaps, mv: Move, delta: i32) {
+    let s = color_index(board.side_to_move);
+    let (kind, ctx) = quiet_slot(board, maps, mv);
+    let h = &mut engine.history;
+    gravity_toward(&mut h.from_to[s][mv.from as usize][mv.to as usize], delta, QUIET_HALF_CAP);
+    gravity_toward(&mut h.piece_to[s][ctx][kind][mv.to as usize], delta, QUIET_HALF_CAP);
+}
 
 fn counter_move_for(engine: &EngineState, side: Color, prev_move: Option<Move>) -> Option<Move> {
     prev_move.and_then(|mv| engine.counter_moves[color_index(side)][mv.from as usize][mv.to as usize])
@@ -680,8 +704,8 @@ struct MovePicker {
     tt_yielded: bool,
     bufs: PickerBufs,
     total: usize,
-    /// Opponent attack mask the quiet history was read with (see `history_threats`).
-    threats: u64,
+    /// Opponent attack maps the quiet history was read with (see `quiet_ctx_maps`).
+    hist_maps: ThreatMaps,
 }
 
 impl Drop for MovePicker {
@@ -715,7 +739,7 @@ impl MovePicker {
                 tt_yielded: true,
                 bufs,
                 total: 0,
-                threats: 0,
+                hist_maps: ThreatMaps::default(),
             };
         }
 
@@ -727,7 +751,7 @@ impl MovePicker {
         } else {
             node_threat_maps(board, params)
         };
-        let threats = history_threats(&maps, params);
+        let hist_maps = quiet_ctx_maps(&maps, params);
         let escape = params.threat_escape_bonus;
         let threatened = threatened_pieces(board, &maps, escape);
         let mut picker = Self {
@@ -735,11 +759,10 @@ impl MovePicker {
             tt_yielded: false,
             bufs,
             total: 0,
-            threats,
+            hist_maps,
         };
         // The quiet scores below are `quiet_stage_score` / `is_priority_quiet`
         // with each history table read once per move.
-        let side_hist = &history[color_index(side)];
         let cont_row = prev_move
             .map(|prev| &engine.continuation_history[color_index(side)][prev.to as usize]);
 
@@ -762,8 +785,7 @@ impl MovePicker {
                 continue;
             }
 
-            let (tf, tt) = threat_slot(threats, mv);
-            let h = side_hist[tf][tt][mv.from as usize][mv.to as usize] as i32;
+            let h = quiet_history(history, board, &hist_maps, mv);
             let ch = cont_row.map(|row| row[mv.from as usize][mv.to as usize] as i32).unwrap_or(0);
             let is_k0 = Some(mv) == killers[0];
             let is_k1 = Some(mv) == killers[1];
@@ -1945,7 +1967,7 @@ fn negamax_body(
         return 0;
     }
 
-    let threats = picker.threats;
+    let threats = picker.hist_maps;
     let mut best = -INF;
     let mut best_move = None;
     let side = board.side_to_move;
@@ -2018,7 +2040,7 @@ fn negamax_body(
             Stage::PriorityQuiet | Stage::Quiet => true,
         };
         let quiet_history = if quiet {
-            history_score(&engine.history, side, threats, mv)
+            quiet_history(&engine.history, board, &threats, mv)
         } else {
             0
         };
@@ -2268,7 +2290,7 @@ fn negamax_body(
             alpha = score;
         }
         if alpha >= beta {
-            let bonus = history_bonus(depth);
+            let bonus = quiet_bonus(depth);
             if !quiet && is_capture_move(board, mv) {
                 apply_capture_history_delta(engine, side, board, mv, bonus);
             }
@@ -2286,11 +2308,11 @@ fn negamax_body(
                     search.killers[ply][1] = search.killers[ply][0];
                     search.killers[ply][0] = Some(mv);
                 }
-                apply_history_delta(engine, side, threats, mv, bonus);
+                update_quiet_history(engine, board, &threats, mv, bonus);
                 apply_continuation_history_delta(engine, side, prev_move, mv, bonus);
                 for tried in quiets_tried.iter().copied() {
                     if tried != mv {
-                        apply_history_delta(engine, side, threats, tried, -bonus);
+                        update_quiet_history(engine, board, &threats, tried, -bonus);
                         apply_continuation_history_delta(engine, side, prev_move, tried, -bonus);
                     }
                 }
@@ -3146,10 +3168,10 @@ fn move_order_score(
     let castle = if mv.is_castle { 10 } else { 0 };
     let continuation = continuation_history_score(engine, board.side_to_move, prev_move, mv);
     let params = &engine.search_params;
-    let threats = history_threats(maps, params);
+    let threats = quiet_ctx_maps(maps, params);
     let bonus = params.threat_escape_bonus;
     let escape = threat_escape_bonus(board, maps, threatened_pieces(board, maps, bonus), mv, bonus);
-    history_score(history, board.side_to_move, threats, mv) + continuation / 2 + promo + castle + escape
+    quiet_history(history, board, &threats, mv) + continuation / 2 + promo + castle + escape
 }
 
 pub(crate) fn piece_value(kind: PieceType) -> i32 {
@@ -3678,5 +3700,41 @@ mod tests {
         let (rook_see, rook_score) = capture_see_and_score(fen, 0, 32);
         assert_eq!((knight_see, rook_see), (-220, -400));
         assert!(knight_score > rook_score, "{knight_score} vs {rook_score}");
+    }
+
+    #[test]
+    fn gravity_stays_within_cap_and_converges() {
+        let mut h = 0i16;
+        for _ in 0..200 {
+            gravity_toward(&mut h, quiet_bonus(30), QUIET_HALF_CAP);
+            assert!((h as i32) <= QUIET_HALF_CAP);
+        }
+        assert!(h as i32 > QUIET_HALF_CAP * 9 / 10, "{h}");
+        for _ in 0..200 {
+            gravity_update(&mut h, -quiet_bonus(30));
+            assert!((h as i32) >= -GRAVITY_CAP);
+        }
+        assert!((h as i32) < -GRAVITY_CAP * 9 / 10, "{h}");
+        assert_eq!(quiet_bonus(0), 0);
+        assert!(quiet_bonus(3) < quiet_bonus(6) && quiet_bonus(40) == BONUS_LIMIT);
+    }
+
+    #[test]
+    fn quiet_context_bits() {
+        let ctx = |fen: &str, uci: &str| {
+            let mut board = Board::new();
+            board.set_fen(fen);
+            let maps = threat_maps(&board, board.side_to_move.opposite());
+            let mv = crate::movegen::parse_uci_move(&mut board.clone(), uci).unwrap();
+            quiet_slot(&board, &maps, mv).1
+        };
+        // Knight on e4 attacked by the d5 pawn (a cheaper piece): threatened.
+        let fen = "4k3/8/8/3p4/4N3/8/8/R3K3 w - - 0 1";
+        assert_eq!(ctx(fen, "e4f6"), 1);
+        assert_eq!(ctx(fen, "a1d1"), 0);
+        // Rook to c4, which the d5 pawn attacks: contested.
+        assert_eq!(ctx("4k3/8/8/3p4/8/8/8/2R1K3 w - - 0 1", "c1c4"), 2);
+        // Both: knight attacked by a pawn moves to a pawn-attacked square.
+        assert_eq!(ctx("4k3/8/8/3p4/4N2p/8/8/4K3 w - - 0 1", "e4g3"), 3);
     }
 }

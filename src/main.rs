@@ -949,12 +949,18 @@ impl Board {
     }
 }
 
-/// Butterfly history, [side][from attacked][to attacked][from][to]: the two
-/// threat bits say whether the opponent attacks the from/to square.
-/// The history tables store i16: gravity (`search::apply_gravity`) bounds
-/// every entry to +-HISTORY_MAX = 16384, so i16 holds them exactly and the
-/// tables take half the cache (the continuation table is 1 MB, not 2).
-type HistoryTable = [[[[[i16; 64]; 64]; 2]; 2]; 2];
+/// Quiet history (search::quiet_history): a [side][from][to] table plus a
+/// [side][danger context][piece][to] table, summed. Like the continuation and
+/// capture tables it stores i16, bounded by gravity in search.rs.
+#[derive(Clone, Copy)]
+struct HistoryTable {
+    from_to: [[[i16; 64]; 64]; 2],
+    piece_to: [[[[i16; 64]; 6]; 4]; 2],
+}
+
+impl HistoryTable {
+    const ZERO: Self = Self { from_to: [[[0; 64]; 64]; 2], piece_to: [[[[0; 64]; 6]; 4]; 2] };
+}
 type CounterMoveTable = [[[Option<Move>; 64]; 64]; 2];
 type ContinuationHistoryTable = [[[[i16; 64]; 64]; 64]; 2];
 /// Capture history, [side][moving piece kind][to][victim kind].
@@ -1067,7 +1073,7 @@ impl EngineState {
             zobrist,
             tt: TransTable::new(hash_mb),
             eval_cache: evalcache::EvalCache::new(),
-            history: [[[[[0; 64]; 64]; 2]; 2]; 2],
+            history: HistoryTable::ZERO,
             counter_moves: [[[None; 64]; 64]; 2],
             continuation_history: [[[[0; 64]; 64]; 64]; 2],
             capture_history: [[[[0; 6]; 64]; 6]; 2],
@@ -1116,7 +1122,7 @@ impl EngineState {
     fn clear_for_new_game(&mut self) {
         self.tt.clear();
         self.eval_cache.clear();
-        self.history = [[[[[0; 64]; 64]; 2]; 2]; 2];
+        self.history = HistoryTable::ZERO;
         self.counter_moves = [[[None; 64]; 64]; 2];
         self.continuation_history = [[[[0; 64]; 64]; 64]; 2];
         self.capture_history = [[[[0; 6]; 64]; 6]; 2];
@@ -1148,9 +1154,10 @@ impl EngineState {
     // Halves every entry once; walked in memory order (the 2 MB
     // continuation table used to be strided, ~4% of a 5000-node search).
     fn decay_history(&mut self) {
-        let history = self.history.as_flattened_mut().as_flattened_mut().as_flattened_mut().as_flattened_mut();
+        let from_to = self.history.from_to.as_flattened_mut().as_flattened_mut();
+        let piece_to = self.history.piece_to.as_flattened_mut().as_flattened_mut().as_flattened_mut();
         let cont = self.continuation_history.as_flattened_mut().as_flattened_mut().as_flattened_mut();
-        for e in history.iter_mut() {
+        for e in from_to.iter_mut().chain(piece_to.iter_mut()) {
             *e /= 2;
         }
         for e in cont.iter_mut() {
