@@ -725,3 +725,4 @@
 {"branch": "speed-nnue-stack", "logged_at": "2026-11-27T07:54:30Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "9e6f6ab1bb5266ec22d87f77a0481c09014a93d5"}
 {"branch": "nnue-g12bh1024kb8mpw", "elo": 9.85, "elo_ci95": [0.71, 19.01], "games": 1728, "llr": 2.23, "logged_at": "2026-11-27T09:12:21Z", "mode": "net-gate", "outcome": "rejected", "sha": "c1941f74da5c6e8fc8bb73798bb390cee5836621", "test_id": "q-nnue-g12bh1024kb8mpw-1127-0743", "verdict": "inconclusive"}
 {"branch": "release-id-author", "logged_at": "2026-11-27T12:20:10Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "396d80acaac0facdcc790e455ab3e92cc3d8055d"}
+{"branch": "release-id-name", "logged_at": "2026-11-27T12:39:06Z", "mode": "speedup", "outcome": "merged", "reason": "speedup, bench identical", "sha": "e99d8cee854c053fb779e91fa832afd11366db46"}
