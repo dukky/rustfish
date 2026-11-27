@@ -1,5 +1,10 @@
 {
-  "pending": [],
+  "pending": [
+    {
+      "branch": "eval-scale-rule50",
+      "mode": "ltc"
+    }
+  ],
   "current": {
     "branch": "spsa-r40-final",
     "mode": "ltc",
