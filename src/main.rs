@@ -1215,7 +1215,7 @@ fn main() {
         }
 
         if cmd == "uci" {
-            println!("id name Rustfish ZeroDep");
+            println!("id name Rustduck {}", env!("CARGO_PKG_VERSION"));
             println!("id author dukky");
             println!("option name Hash type spin default 64 min 1 max 2048");
             println!("option name Threads type spin default 1 min 1 max 32");
