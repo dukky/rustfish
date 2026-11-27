@@ -540,6 +540,9 @@ Verdict: independent implementation, no verbatim copying (0 shared constants, co
 
 ## Priorities (owner, 26 Nov: work highest expected Elo per time/compute first; re-rank when a result lands)
 
+**Owner target (27 Nov): 3700 within a week if possible; no rented compute for now.** Own-hardware sprint: (1) tonight's merges (speed stack merged, TB ladder on, gen 12b + SPSA final + TM at LTC) +10-15; (2) **drawish-endgame / 50-move eval scaling** (agent started 27 Nov ~10:45, from the anchor-games conversion leak) +5-15; (3) datagen on main at max throughput (2.5k-node test decides Sat); (4) gen 13 = warm start from gen 12b on the grown pool with the recipe winners (+ H1536 if its test passes) Sat-Tue; (5) CI kept full (next SPSA on the new main, bug stacks). Realistic in a week: ~3650-3680.
+
+
 | # | Work | Resource | Cost | Why this rank | State |
 |---|---|---|---|---|---|
 | 1 | **Tree-gap follow-ups**: `tree-lmr-all-node`, `tree-se-margin-4` at LTC; then aspiration 20, SEE-losing-check extension; ALL-node reduction depth scaling | CI + agent | ~4 h each | diagnosis done: gap = SE x1.53 (pays) x ALL-node reduction/check ext x1.27 x counting x1.26; the ALL-node saving grows with depth | round 1 H0 at LTC (lmr-all-node -6.4, se-margin-4 -18.5); **round 2 (26 Nov 23:00, nodes to d16 vs main on the 350 treegap positions):** `tree-check-ext-see` cb1594d (x0.96; STC run 45907418855), `tree-allnode-deep` 7a2ef20 (extra LMR ply at ALL nodes only at depth >= 8; x1.00 d8, x0.89 d16; STC run 45908874273; most likely to show at LTC), `tree-asp-20` f76b2fb (x0.98, aspiration is no tree lever on current main; low priority). **STC results 27 Nov:** `tree-allnode-deep` **H0 -7.2 [-14.3, -0.2]** (2688 games) dropped; `tree-check-ext-see` H0 +1.2 [-5.5, +7.8] at [0, 10] (2688), held (low prior; LTC only as filler when CI idles); `tree-asp-20` not tested. ALL-node reduction now failed 3 ways: closed. |
