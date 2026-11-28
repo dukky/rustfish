@@ -207,8 +207,16 @@ jobs:
             rf_tb=("option.SyzygyPath=$PWD/syzygy")
             uci=$( (printf 'uci\n'; sleep 2; printf 'quit\n') | "engines/$NAME" 2>&1 ) || true
             if grep -qi '^option name SyzygyPath ' <<<"$uci"; then
-              anchor_tb=("option.SyzygyPath=$PWD/syzygy")
-              echo "$NAME: $(grep -i '^option name Syzygy' <<<"$uci" | tr '\n' ';')"
+              # Smoke test with the path set: some anchors (Koivisto 6/8/9, 28 Nov) stop responding
+              # once SyzygyPath is set and forfeit every game. Such an anchor plays without tablebases.
+              smoke=$( (printf 'uci\nsetoption name SyzygyPath value %s\nisready\nposition fen 8/8/8/4k3/8/8/8/R3K3 w - - 0 1\ngo depth 6\n' "$PWD/syzygy"; sleep 15; printf 'quit\n') \
+                       | timeout 30 "engines/$NAME" 2>&1 ) || true
+              if grep -q '^readyok' <<<"$smoke" && grep -q '^bestmove' <<<"$smoke"; then
+                anchor_tb=("option.SyzygyPath=$PWD/syzygy")
+                echo "$NAME: $(grep -i '^option name Syzygy' <<<"$uci" | tr '\n' ';') smoke ok"
+              else
+                echo "::warning::$NAME failed the SyzygyPath smoke test (no readyok/bestmove); it plays without tablebases"
+              fi
             else
               echo "::warning::$NAME has no SyzygyPath option; it plays without tablebases"
             fi

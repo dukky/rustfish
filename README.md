@@ -18,7 +18,12 @@ pairwise-head net, the 25 Nov small-fixes stack and the SPSA round-14 values;
 the previous ladder, 3618 on 2026-11-25, is inside this CI). Ladders before
 2026-11-21 19:00 used an anchor set mostly below rustfish and read high (the
 3640 of 2026-11-21 is ~3600 on the bracketing set); compare only ladders on the
-current set. History in `tests/ladder-log.jsonl`.
+current set. History in `tests/ladder-log.jsonl`. The 2026-11-28 ladder (main
+`6921f0b`: gen 12b net, speed stack, Syzygy 3-4-5 on) is **invalid as a whole**:
+the three Koivisto anchors stopped responding with tablebases set and forfeited
+every game. On the other eight anchors it measured **+21 over 2026-11-26**
+(3634 vs 3613 on the same eight), i.e. **about 3641** on the full set; the
+Koivisto games are being replayed.
 
 **Live progress dashboard: https://rustfish-dash.dev.duk.im**: current strength,
 the test in flight, the merge queue, recent results, strength over time and the
