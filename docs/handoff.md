@@ -4,7 +4,12 @@ For an agent (any model) continuing this project. It narrows the job to work
 that the pipeline checks automatically, so mistakes cost CI time, not
 strength. Read this, then `plan.md`, then `docs/development.md`.
 
-## State at 2026-11-25 ~10:00 (read this first after a pause)
+## State at 2026-11-28 ~10:30: read plan.md "Handoff 2026-11-28" first
+
+It supersedes the 25 Nov state below (kept for history): strength 3641, gen 13 (H1 32 + kb16m) training on the desktop GPU
+to ~Sun 09:00 with gen 13b (12-epoch final) chained after it, datagen on the desktop CPU, the queue on CI; the laptop is free.
+
+## State at 2026-11-25 ~10:00 (historical)
 
 The owner may hit the weekly usage limit (resets Wed 25 Nov 19:00 UK). Everything
 below keeps running without a Claude session except the items marked *laptop*.
