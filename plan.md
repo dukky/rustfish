@@ -453,6 +453,18 @@ on the desktop; the shuffle doesn't fit on the 246 GB WSL volume
 (~262 GB peak), so it goes to /mnt/d or /mnt/f (owner's choice) or waits
 for packed-data.
 
+**2026-11-28**
+- **Hetzner CCX63 datagen trial** (48 vCPU = 24 physical EPYC-Milan at
+  2.2 GHz, 5k softnodes): **10,924 pos/s**, 116.5 games/s, 55.1M positions
+  in 84 min, packed **174 MB** at **3.297 B/position**. One CCX63 is only
+  **2.2-2.8x the 9600X**, i.e. 3.4-3.9h of one desktop for that run, not a
+  10x box; ~EUR 31-36/1B vs ~GBP 4-6 amortised desktop. A 30B pool is
+  ~EUR 640 and 3-6 days on 4-7 CCX63s for an expected +5-12 LTC on the
+  1024/8 net — not worth it; treat it as a background reservoir and
+  prioritise labels/DFRC/capacity. See
+  `docs/research-2026-11-28-hetzner-ccx63-datagen.md`.
+
+
 
 ## CI efficiency
 
