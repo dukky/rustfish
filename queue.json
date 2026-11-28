@@ -1,11 +1,15 @@
 {
-  "pending": [
-    {
-      "branch": "eval-scale-rule50",
-      "mode": "ltc"
-    }
-  ],
-  "current": null,
+  "pending": [],
+  "current": {
+    "branch": "eval-scale-rule50",
+    "mode": "ltc",
+    "test_id": "q-eval-scale-rule50-1128-0307",
+    "sha": "d2a68e258ac856cc8e2b780f1699c28e16b840f9",
+    "base_sha": "4cacec8fef7ad7b27c9338cec6cb273461d99f10",
+    "started": "2026-11-28T03:08:02Z",
+    "bench": 221494,
+    "evalhash": "248c85c4a1cc6558"
+  },
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
