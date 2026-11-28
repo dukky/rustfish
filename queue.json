@@ -5,17 +5,7 @@
       "mode": "ltc"
     }
   ],
-  "current": {
-    "branch": "spsa-r40-final",
-    "mode": "ltc",
-    "front": true,
-    "test_id": "q-spsa-r40-final-1127-1335",
-    "sha": "88da3d442dfdb01b97deadbc83d94bef721fc35f",
-    "base_sha": "39ad6d8f63942ac9cbd26b36717b16f1d7bbdb40",
-    "started": "2026-11-27T13:35:37Z",
-    "bench": 176508,
-    "evalhash": "248c85c4a1cc6558"
-  },
+  "current": null,
   "check_base": "2d131527e6cabde98523bbb6f50c63755ec5cb2d",
   "merges_since_check": 3,
   "merges_since_ladder": 3,
