@@ -9,21 +9,18 @@ now places on the CCRL Blitz list (single-CPU engines, best versions; numbers in
 |---|---|---|
 | Short term | 3400 | reached 2026-11-06 |
 | Mid term: top 100 | 3506 | reached 2026-11-13 (3562), now ~100 Elo clear |
-| Next | 3700 | ~80 Elo to go |
+| Next | 3700 | ~60 Elo to go |
 | Long term: top 10 | 3751 | #10 |
 
-rustfish measures **3620** (CCRL ladder 2026-11-26, CI 3605–3635, 440 games at
-120+1 against 11 CCRL-rated anchors from 3487 to 3773, main `f7a45bc`: gen 12
-pairwise-head net, the 25 Nov small-fixes stack and the SPSA round-14 values;
-the previous ladder, 3618 on 2026-11-25, is inside this CI). Ladders before
+rustfish measures **3641** (CCRL ladder 2026-11-28, CI 3625–3657, 440 games at
+120+1 against 11 CCRL-rated anchors from 3487 to 3773, main `6921f0b`: gen 12b
+net, the NNUE speed stack, Syzygy 3-4-5; +20 over 3620 on 2026-11-26, main `f7a45bc`). Ladders before
 2026-11-21 19:00 used an anchor set mostly below rustfish and read high (the
 3640 of 2026-11-21 is ~3600 on the bracketing set); compare only ladders on the
-current set. History in `tests/ladder-log.jsonl`. The 2026-11-28 ladder (main
-`6921f0b`: gen 12b net, speed stack, Syzygy 3-4-5 on) is **invalid as a whole**:
-the three Koivisto anchors stopped responding with tablebases set and forfeited
-every game. On the other eight anchors it measured **+21 over 2026-11-26**
-(3634 vs 3613 on the same eight), i.e. **about 3641** on the full set; the
-Koivisto games are being replayed.
+current set. History in `tests/ladder-log.jsonl`. In the first run of the
+2026-11-28 ladder the three Koivisto anchors stopped responding with tablebases
+set and forfeited every game (it read 3720); they were replayed without
+tablebases, and 3641 combines that replay with the other eight anchors.
 
 **Live progress dashboard: https://rustfish-dash.dev.duk.im**: current strength,
 the test in flight, the merge queue, recent results, strength over time and the
@@ -34,7 +31,7 @@ Actions, so it never needs updating by hand; redeploy only when
 
 | | |
 |---|---|
-| Strength | **3620** CCRL Blitz (ladder 2026-11-26, CI 3605–3635); live on the dashboard |
+| Strength | **3641** CCRL Blitz (ladder 2026-11-28, CI 3625–3657); live on the dashboard |
 | Roadmap | [`plan.md`](plan.md) |
 | How changes are tested and merged | [`docs/development.md`](docs/development.md) |
 | Working on the code | [`AGENTS.md`](AGENTS.md), and [`docs/handoff.md`](docs/handoff.md) for a new agent |
