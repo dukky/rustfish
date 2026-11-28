@@ -500,6 +500,13 @@ def build_status():
     # Strength over time.
     points = []
     for r in ladder:
+        # A run later corrected in the log (e.g. 28 Nov: anchors forfeited with tablebases set,
+        # completed by a replay) carries rating_completed / ci_completed: plot those. A row marked
+        # invalid without a correction is dropped.
+        if r.get("rating_completed") is not None:
+            r = dict(r, rating=r["rating_completed"], ci=r.get("ci_completed") or r.get("ci"))
+        elif r.get("invalid"):
+            continue
         if r.get("rating") is None:
             continue
         # A cancelled or partial run: far fewer games than its anchors x
@@ -637,7 +644,9 @@ def build_status():
         if inflight and g["branch"] == inflight.get("branch"):
             g.update(games_est=inflight.get("games_est"), run_url=inflight.get("run_url"))
 
-    latest = points[-1] if points else None
+    # The headline is the last complete ladder: a partial run (subset replay, cancelled) never is.
+    full = [p for p in points if not p["partial"]]
+    latest = full[-1] if full else (points[-1] if points else None)
     # The headline goal is the next CCRL target the last ladder has not reached.
     if latest and latest.get("rating") is not None:
         done = [t for t in ccrl["targets"] if t["rating"] <= latest["rating"]]

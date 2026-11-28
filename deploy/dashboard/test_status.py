@@ -243,3 +243,31 @@ class BuildStatusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LadderCorrectionsTest(BuildStatusTest):
+    """28 Nov: a ladder row marked invalid but completed by a replay plots its rating_completed,
+    and the partial replay row never becomes the headline (it read ~3658 as a 3-anchor fit)."""
+    LADDER = [
+        {"rating": 3620.1, "ci": [3604.7, 3635.4], "games": 440, "logged_at": "20261126-063721",
+         "anchors": [{"anchor": f"a{i}", "ccrl": 3600, "games": 40, "score": 0.5} for i in range(11)]},
+        {"rating": 3720.5, "ci": [3706.1, 3735.0], "games": 440, "logged_at": "20261128-033134",
+         "invalid": "Koivisto forfeits", "rating_completed": 3640.5, "ci_completed": [3624.6, 3656.5],
+         "anchors": [{"anchor": f"a{i}", "ccrl": 3600, "games": 40, "score": 0.5} for i in range(11)]},
+        {"rating": 3658.0, "ci": [3630.0, 3686.0], "games": 120, "logged_at": "20261128-054750",
+         "partial": "Koivisto-only replay",
+         "anchors": [{"anchor": f"k{i}", "ccrl": 3600, "games": 40, "score": 0.5} for i in range(3)]},
+    ]
+
+    def routes(self):
+        r = super().routes()
+        r["/tests/ladder-log.jsonl"] = "\n".join(json.dumps(x) for x in self.LADDER)
+        return r
+
+    def test_completed_rating_and_partial_headline(self):
+        s, _, _ = self.build()
+        self.assertEqual(s["strength"]["measured"]["rating"], 3640.5)
+        self.assertEqual(s["strength"]["measured"]["ci"], [3624.6, 3656.5])
+        ratings = [(p["rating"], p["partial"]) for p in s["ladder"]]
+        self.assertNotIn(3720.5, [r for r, _ in ratings])
+        self.assertIn((3658.0, True), ratings)
